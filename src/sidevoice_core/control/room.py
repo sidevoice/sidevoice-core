@@ -161,6 +161,8 @@ class RoomClient:
         self.voice = None          # the call flow driving this client's turns, when a pipeline owns it
         self.settings = None       # what this device configured; the room keeps no copy of its own
         self.audio_health = None   # the browser's last report about its audio output
+        self.feed_audio = None     # how microphone audio from another path (WebRTC) enters this call's pipeline
+        self.media_peer = None     # that other path, while it exists: closed with the call
         self.latency = CallLatency(self.id)
         # The same marks, said in OpenTelemetry. It reads this trace; it keeps no copy of it.
         self.telemetry = CallTelemetry(self.id, self.latency)
@@ -210,6 +212,7 @@ class RoomClient:
                     'last_gap_ms': getattr(self.mic, 'last_audio_gap_ms', 0),
                     'max_gap_ms': getattr(self.mic, 'max_audio_gap_ms', 0),
                     'gaps_over_250ms': getattr(self.mic, 'audio_gap_count', 0),
+                    'media': getattr(self.mic, 'media_path', None),
                 } if self.mic else {}) | (self.input_stats or {}) or None,
                 'mic_settings': self.mic_settings,
                 'transcription': self.transcription,

@@ -494,6 +494,13 @@ class CallPipeline:
         async def turn_stopped(aggregator, strategy, message):
             voice.turn_stopped()
 
+    async def feed(self, pcm, sample_rate=16000):
+        """Microphone PCM from somewhere other than the transport's own frames (a WebRTC track): into the
+        same input, the same detector, the same turn — the pipeline never knows the path."""
+        from pipecat.frames.frames import InputAudioRawFrame
+        await self.transport.input().push_audio_frame(
+            InputAudioRawFrame(audio=pcm, sample_rate=sample_rate, num_channels=1))
+
     async def run(self):
         await self.runner.run()
 

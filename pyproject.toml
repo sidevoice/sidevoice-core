@@ -14,6 +14,8 @@ dependencies = [
     "pipecat-ai[websocket,silero]==1.10.0",
     "uvicorn==0.53.0",
     "python-socketio==5.17.0",
+    # The microphone over WebRTC (server/webrtc.py): aiortc, and PyAV with it for resampling.
+    "aiortc==1.15.0",
     "scipy==1.18.1",
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.44.0",

@@ -87,6 +87,7 @@ async def run_call(room, transport, serializer, *, settings, config, choice, hel
                 call.transcription.get('model'), choice['reason'], mic.turn_end_mode)
 
     await pipeline.serve(call, voice)
+    call.feed_audio = pipeline.feed   # a second path for the microphone, when the client negotiates one
     sender = asyncio.create_task(deliver())
 
     @transport.event_handler('on_client_connected')
@@ -139,3 +140,6 @@ async def run_call(room, transport, serializer, *, settings, config, choice, hel
         voice.close()
         call.disconnect()
         sender.cancel()
+        if call.media_peer is not None:
+            # Whatever else carried this call's microphone ends with the call.
+            await call.media_peer.close()

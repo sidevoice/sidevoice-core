@@ -36,7 +36,14 @@ src/sidevoice_core/
   per call. Domain refusals are `refusal.Refusal(status, detail)`, never an HTTP exception.
 - **server** — `create_app()`: the client REST surface (`/api/presentation/*`), the call socket
   (`/api/presentation/ws`) and the connector link (`/api/connectors/link`, Socket.IO, namespace
-  `/connectors`) the machine's connector uses exactly as it used to use a room's.
+  `/connectors`) the machine's connector uses exactly as it used to use a room's; the rendezvous with
+  the hosted room (`rendezvous.py`: the node dials the room, or accepts a room that dials it, and
+  serves the relayed requests by making them to itself); the microphone over WebRTC
+  (`webrtc.py`: `rtc/config`, `rtc/offer`, aiortc, the track fed into the same pipeline input).
+  The contract for all of it is rubasace/sidevoice `docs/RENDEZVOUS.md`.
+
+`sidevoice-core --data-dir D --port P --room-credential F --idle-exit S` is how the connector starts
+it; `D/core.json` (0600) says where it listens and with which credential the connector links.
 
 Neither `pipeline` nor `control` imports a web framework; `tests/test_boundaries.py` enforces both
 rules by importing every module in a fresh interpreter and by reading every import statement.

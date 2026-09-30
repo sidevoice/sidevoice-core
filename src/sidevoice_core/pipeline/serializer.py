@@ -1,5 +1,10 @@
 """Wire format between a client and its call: binary frames carry microphone PCM up,
-text frames carry JSON app messages both ways. No audio flows down; the browser synthesizes."""
+text frames carry JSON app messages both ways. No audio flows down; the browser synthesizes.
+
+The microphone may also arrive another way — a WebRTC track, when the client negotiated one — and the
+client says which with `voice-media` (`socket` or `webrtc`). This serializer owns that switch because
+it owns the socket's frames: while the client says `webrtc`, PCM on the socket is not audio any more
+(it still proves the client is there), so one voice can never be heard twice."""
 import json
 import time
 
@@ -26,6 +31,20 @@ class BrowserFrameSerializer(FrameSerializer):
         self.last_audio_at = None
         self.last_audio_gap_ms = self.max_audio_gap_ms = 0
         self.audio_gap_count = 0
+        self.media_path = 'socket'   # where this client's microphone comes from, as the client last said
+
+    def heard(self, size, now=None):
+        """Microphone audio arrived, by whatever path: the evidence of life and the gap statistics."""
+        now = self.last_frame_at = time.monotonic() if now is None else now
+        if self.last_audio_at is not None:
+            gap_ms = max(0, round((now - self.last_audio_at) * 1000))
+            self.last_audio_gap_ms = gap_ms
+            self.max_audio_gap_ms = max(self.max_audio_gap_ms, gap_ms)
+            if gap_ms > 250:
+                self.audio_gap_count += 1
+        self.last_audio_at = now
+        self.audio_frames += 1
+        self.audio_bytes += size
 
     async def serialize(self, frame: Frame):
         if isinstance(frame, (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)):
@@ -35,26 +54,22 @@ class BrowserFrameSerializer(FrameSerializer):
     async def deserialize(self, data):
         self.last_frame_at = time.monotonic()
         if isinstance(data, (bytes, bytearray)):
-            now = self.last_frame_at
-            if self.last_audio_at is not None:
-                gap_ms = max(0, round((now - self.last_audio_at) * 1000))
-                self.last_audio_gap_ms = gap_ms
-                self.max_audio_gap_ms = max(self.max_audio_gap_ms, gap_ms)
-                if gap_ms > 250:
-                    self.audio_gap_count += 1
-            self.last_audio_at = now
             usable = len(data) - len(data) % (2 * self.channels)
-            if not usable:
+            if not usable or self.media_path != 'socket':
                 return None
-            self.audio_frames += 1
-            self.audio_bytes += usable
+            self.heard(usable, self.last_frame_at)
             return InputAudioRawFrame(audio=bytes(data[:usable]), sample_rate=self.sample_rate,
                                       num_channels=self.channels)
         try:
             message = json.loads(data)
         except ValueError:
             return None
-        return InputTransportMessageFrame(message=message) if isinstance(message, dict) else None
+        if not isinstance(message, dict):
+            return None
+        if message.get('type') == 'voice-media' and isinstance(message.get('data'), dict):
+            if message['data'].get('path') in {'socket', 'webrtc'}:
+                self.media_path = message['data']['path']
+        return InputTransportMessageFrame(message=message)
 
 
 def session_message(session_id, serializer):

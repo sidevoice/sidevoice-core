@@ -21,6 +21,7 @@ from ..pipeline import transcription
 from ..pipeline.serializer import BrowserFrameSerializer
 from ..runtime import data_dir
 from .presentation import mount_presentation, require_same_origin
+from .webrtc import mount_webrtc
 
 HELLO_TIMEOUT = 10.0
 
@@ -138,6 +139,7 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None):
     mount_presentation(app, room)
     mount_connector_link(app, room, **(link_options or {}))
     mount_browser_call(app, room, config)
+    mount_webrtc(app, room)
     mount_rendezvous(app, room, rendezvous)
     instrument(app)
     return app
