@@ -21,6 +21,7 @@ from ..pipeline import transcription
 from ..pipeline.serializer import BrowserFrameSerializer
 from ..runtime import data_dir
 from .devices import DEVICE_KEY, DeviceAuth, call_subprotocol, mount_devices
+from .models import mount_models
 from .presentation import mount_presentation, require_same_origin
 from .webrtc import mount_webrtc
 
@@ -226,6 +227,7 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None, de
     # With no OTEL_EXPORTER_OTLP_ENDPOINT this starts nothing at all.
     configure_telemetry(environ=config)
     mount_presentation(app, room)
+    mount_models(app)
     mount_connector_link(app, room, **(link_options or {}))
     mount_browser_call(app, room, config)
     mount_webrtc(app, room)

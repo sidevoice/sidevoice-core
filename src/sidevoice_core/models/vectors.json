@@ -1,0 +1,1070 @@
+{
+  "about": "Shared vectors for offers(catalog, capabilities, place) (sidevoice_core.models.offers). Each vector names the catalogue it runs against: 'shipped' is catalog.json beside this file, 'fixture' is the one below, which exercises the rules the shipped catalogue cannot yet. An 'error' vector must be refused.",
+  "fixture": {
+    "version": 2,
+    "engines": [
+      {
+        "id": "native-a",
+        "runs": "native",
+        "families": [
+          "stt-family"
+        ],
+        "formats": [
+          "onnx"
+        ],
+        "packages": [
+          {
+            "os": "linux",
+            "arch": "x86_64",
+            "requires": [
+              "cuda"
+            ],
+            "accelerators": [
+              "cuda",
+              "cpu"
+            ],
+            "download": {
+              "url": "https://example.org/a-linux-cuda.tar.bz2",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 300,
+              "archive": "tar.bz2",
+              "root": "a-linux-cuda"
+            }
+          },
+          {
+            "os": "linux",
+            "arch": "x86_64",
+            "accelerators": [
+              "cpu"
+            ],
+            "download": {
+              "url": "https://example.org/a-linux.tar.bz2",
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "size": 100,
+              "archive": "tar.bz2",
+              "root": "a-linux"
+            }
+          },
+          {
+            "os": "macos",
+            "arch": "aarch64",
+            "accelerators": [
+              "cpu",
+              "coreml"
+            ],
+            "download": {
+              "url": "https://example.org/a-macos.tar.bz2",
+              "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "size": 50,
+              "archive": "tar.bz2",
+              "root": "a-macos"
+            }
+          },
+          {
+            "os": "ios",
+            "bundled": true,
+            "accelerators": [
+              "coreml",
+              "cpu"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "native-b",
+        "runs": "native",
+        "families": [
+          "stt-family"
+        ],
+        "formats": [
+          "mlx"
+        ],
+        "packages": [
+          {
+            "os": "macos",
+            "arch": "aarch64",
+            "accelerators": [
+              "metal"
+            ],
+            "download": {
+              "url": "https://example.org/b-macos.tar.bz2",
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "size": 70,
+              "archive": "tar.bz2",
+              "root": "b-macos"
+            }
+          }
+        ]
+      },
+      {
+        "id": "page-a",
+        "runs": "page",
+        "families": [
+          "stt-family",
+          "tts-family"
+        ],
+        "formats": [
+          "onnx"
+        ],
+        "accelerators": [
+          "webgpu",
+          "wasm"
+        ]
+      },
+      {
+        "id": "page-b",
+        "runs": "page",
+        "families": [
+          "stt-family"
+        ],
+        "formats": [
+          "onnx"
+        ],
+        "accelerators": [
+          "wasm"
+        ]
+      }
+    ],
+    "ranking": {
+      "default": [
+        "native-b",
+        "native-a",
+        "page-a"
+      ]
+    },
+    "families": {
+      "stt-family": {
+        "task": "stt",
+        "options": []
+      },
+      "tts-family": {
+        "task": "tts",
+        "options": [
+          {
+            "id": "voice",
+            "kind": "voice",
+            "from": "model.voices"
+          }
+        ]
+      }
+    },
+    "providers": [
+      {
+        "id": "cloud",
+        "tasks": [
+          "stt"
+        ],
+        "key": true,
+        "stt": {
+          "models": "remote"
+        }
+      }
+    ],
+    "models": [
+      {
+        "id": "plain",
+        "family": "stt-family",
+        "builds": [
+          {
+            "engine": "native-a",
+            "format": "onnx",
+            "download": {
+              "url": "https://example.org/plain-a.tar.bz2",
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "size": 1000,
+              "archive": "tar.bz2",
+              "root": "plain-a"
+            }
+          },
+          {
+            "engine": "native-b",
+            "format": "mlx",
+            "download": {
+              "url": "https://example.org/plain-b.tar.bz2",
+              "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "size": 2000,
+              "archive": "tar.bz2",
+              "root": "plain-b"
+            }
+          }
+        ]
+      },
+      {
+        "id": "ranked",
+        "family": "stt-family",
+        "builds": [
+          {
+            "engine": "native-b",
+            "format": "mlx",
+            "download": {
+              "url": "https://example.org/ranked-b.tar.bz2",
+              "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "size": 2000,
+              "archive": "tar.bz2",
+              "root": "ranked-b"
+            }
+          },
+          {
+            "engine": "native-a",
+            "format": "onnx",
+            "download": {
+              "url": "https://example.org/ranked-a.tar.bz2",
+              "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+              "size": 1000,
+              "archive": "tar.bz2",
+              "root": "ranked-a"
+            },
+            "rank": {
+              "macos-aarch64": 1
+            }
+          }
+        ]
+      },
+      {
+        "id": "big",
+        "family": "stt-family",
+        "requires": {
+          "memory_mb": 4000
+        },
+        "builds": [
+          {
+            "engine": "native-a",
+            "format": "onnx",
+            "download": {
+              "url": "https://example.org/big-a.tar.bz2",
+              "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+              "size": 5000,
+              "archive": "tar.bz2",
+              "root": "big-a"
+            },
+            "accelerators": [
+              "cpu"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "page-only",
+        "family": "stt-family",
+        "builds": [
+          {
+            "engine": "page-b",
+            "format": "onnx",
+            "config": {}
+          },
+          {
+            "engine": "page-a",
+            "format": "onnx",
+            "accelerators": [
+              "webgpu"
+            ],
+            "needs": [
+              "webgpu-f16"
+            ],
+            "config": {}
+          }
+        ]
+      },
+      {
+        "id": "speaker",
+        "family": "tts-family",
+        "voices": [
+          {
+            "id": "v1",
+            "language": "es",
+            "sid": 0
+          }
+        ],
+        "builds": [
+          {
+            "engine": "page-a",
+            "format": "onnx",
+            "config": {}
+          }
+        ]
+      }
+    ]
+  },
+  "vectors": [
+    {
+      "name": "An Apple Silicon Mac in the desktop app: every model natively, on the CPU first (Core ML measured slower), never a page build",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "native",
+        "os": "macos",
+        "arch": "aarch64",
+        "has": [
+          "cpu",
+          "coreml",
+          "metal",
+          "mlx"
+        ]
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "whisper-tiny",
+          "task": "stt",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 124978059,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "whisper-base",
+          "task": "stt",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 216330580,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "whisper-small",
+          "task": "stt",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 648160916,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "whisper-large-v3-turbo",
+          "task": "stt",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 572563405,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "kokoro-82m-v1.0",
+          "task": "tts",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 141076292,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "The same Mac as a host: the same answer, the place does not change the rules",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "native",
+        "os": "macos",
+        "arch": "aarch64",
+        "has": [
+          "cpu",
+          "coreml",
+          "metal",
+          "mlx"
+        ]
+      },
+      "place": "host",
+      "offers": [
+        {
+          "model": "whisper-tiny",
+          "task": "stt",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 124978059,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "whisper-base",
+          "task": "stt",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 216330580,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "whisper-small",
+          "task": "stt",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 648160916,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "whisper-large-v3-turbo",
+          "task": "stt",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 572563405,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "kokoro-82m-v1.0",
+          "task": "tts",
+          "engine": "sherpa-onnx",
+          "accelerator": "cpu",
+          "download_size": 141076292,
+          "reason": "sherpa-onnx (cpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "sherpa-onnx",
+              "accelerator": "coreml"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "An Intel Mac in the desktop app: no native package, and no page builds in a native runtime (D5)",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "native",
+        "os": "macos",
+        "arch": "x86_64",
+        "has": [
+          "cpu",
+          "coreml"
+        ]
+      },
+      "place": "device",
+      "offers": []
+    },
+    {
+      "name": "A Linux host: nothing on the host yet",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "native",
+        "os": "linux",
+        "arch": "x86_64",
+        "has": [
+          "cpu"
+        ]
+      },
+      "place": "host",
+      "offers": []
+    },
+    {
+      "name": "A page with WebAssembly only: the models with a WebAssembly build",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "page",
+        "has": [
+          "wasm"
+        ]
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "whisper-tiny",
+          "task": "stt",
+          "engine": "transformers-js",
+          "accelerator": "wasm",
+          "download_size": 0,
+          "reason": "transformers-js (wasm): the only build that runs here",
+          "alternatives": []
+        },
+        {
+          "model": "whisper-base",
+          "task": "stt",
+          "engine": "transformers-js",
+          "accelerator": "wasm",
+          "download_size": 0,
+          "reason": "transformers-js (wasm): the only build that runs here",
+          "alternatives": []
+        },
+        {
+          "model": "kokoro-82m-v1.0",
+          "task": "tts",
+          "engine": "transformers-js",
+          "accelerator": "wasm",
+          "download_size": 0,
+          "reason": "transformers-js (wasm): the only build that runs here",
+          "alternatives": []
+        }
+      ]
+    },
+    {
+      "name": "A page with WebGPU but no shader-f16: everything but large v3 turbo, WebGPU first",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "page",
+        "has": [
+          "webgpu",
+          "wasm"
+        ]
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "whisper-tiny",
+          "task": "stt",
+          "engine": "transformers-js",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "transformers-js (webgpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "transformers-js",
+              "accelerator": "wasm"
+            }
+          ]
+        },
+        {
+          "model": "whisper-base",
+          "task": "stt",
+          "engine": "transformers-js",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "transformers-js (webgpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "transformers-js",
+              "accelerator": "wasm"
+            }
+          ]
+        },
+        {
+          "model": "whisper-small",
+          "task": "stt",
+          "engine": "transformers-js",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "transformers-js (webgpu): the only build that runs here",
+          "alternatives": []
+        },
+        {
+          "model": "kokoro-82m-v1.0",
+          "task": "tts",
+          "engine": "transformers-js",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "transformers-js (webgpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "transformers-js",
+              "accelerator": "wasm"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "A page with WebGPU and shader-f16: every model",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "page",
+        "has": [
+          "webgpu",
+          "webgpu-f16",
+          "wasm"
+        ]
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "whisper-tiny",
+          "task": "stt",
+          "engine": "transformers-js",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "transformers-js (webgpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "transformers-js",
+              "accelerator": "wasm"
+            }
+          ]
+        },
+        {
+          "model": "whisper-base",
+          "task": "stt",
+          "engine": "transformers-js",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "transformers-js (webgpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "transformers-js",
+              "accelerator": "wasm"
+            }
+          ]
+        },
+        {
+          "model": "whisper-small",
+          "task": "stt",
+          "engine": "transformers-js",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "transformers-js (webgpu): the only build that runs here",
+          "alternatives": []
+        },
+        {
+          "model": "whisper-large-v3-turbo",
+          "task": "stt",
+          "engine": "transformers-js",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "transformers-js (webgpu): the only build that runs here",
+          "alternatives": []
+        },
+        {
+          "model": "kokoro-82m-v1.0",
+          "task": "tts",
+          "engine": "transformers-js",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "transformers-js (webgpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "transformers-js",
+              "accelerator": "wasm"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "A page with nothing usable: nothing",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "page",
+        "has": []
+      },
+      "place": "device",
+      "offers": []
+    },
+    {
+      "name": "A provider place: its models are the provider's to list",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "native",
+        "os": "linux",
+        "arch": "x86_64",
+        "has": [
+          "cpu"
+        ]
+      },
+      "place": "openai",
+      "offers": []
+    },
+    {
+      "name": "An unknown place is an error",
+      "catalog": "shipped",
+      "capabilities": {
+        "runs": "page",
+        "has": [
+          "wasm"
+        ]
+      },
+      "place": "nowhere",
+      "error": "unknown place"
+    },
+    {
+      "name": "Default engine order, a per-platform rank that overrides it, and a build limited to one accelerator",
+      "catalog": "fixture",
+      "capabilities": {
+        "runs": "native",
+        "os": "macos",
+        "arch": "aarch64",
+        "has": [
+          "cpu",
+          "coreml",
+          "metal",
+          "mlx"
+        ],
+        "memory_mb": 16000
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "plain",
+          "task": "stt",
+          "engine": "native-b",
+          "accelerator": "metal",
+          "download_size": 2070,
+          "reason": "native-b (metal): first in the catalogue's engine order",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "cpu"
+            },
+            {
+              "engine": "native-a",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "ranked",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 1050,
+          "reason": "native-a (cpu): this model ranks it first on macos-aarch64",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "coreml"
+            },
+            {
+              "engine": "native-b",
+              "accelerator": "metal"
+            }
+          ]
+        },
+        {
+          "model": "big",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 5050,
+          "reason": "native-a (cpu): the only build that runs here",
+          "alternatives": []
+        }
+      ]
+    },
+    {
+      "name": "Memory the place reports and a model needs more of: that model is absent",
+      "catalog": "fixture",
+      "capabilities": {
+        "runs": "native",
+        "os": "macos",
+        "arch": "aarch64",
+        "has": [
+          "cpu",
+          "coreml",
+          "metal",
+          "mlx"
+        ],
+        "memory_mb": 2000
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "plain",
+          "task": "stt",
+          "engine": "native-b",
+          "accelerator": "metal",
+          "download_size": 2070,
+          "reason": "native-b (metal): first in the catalogue's engine order",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "cpu"
+            },
+            {
+              "engine": "native-a",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "ranked",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 1050,
+          "reason": "native-a (cpu): this model ranks it first on macos-aarch64",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "coreml"
+            },
+            {
+              "engine": "native-b",
+              "accelerator": "metal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "A package that requires CUDA, on a machine that has it",
+      "catalog": "fixture",
+      "capabilities": {
+        "runs": "native",
+        "os": "linux",
+        "arch": "x86_64",
+        "has": [
+          "cpu",
+          "cuda"
+        ]
+      },
+      "place": "host",
+      "offers": [
+        {
+          "model": "plain",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cuda",
+          "download_size": 1300,
+          "reason": "native-a (cuda): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "cpu"
+            }
+          ]
+        },
+        {
+          "model": "ranked",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cuda",
+          "download_size": 1300,
+          "reason": "native-a (cuda): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "cpu"
+            }
+          ]
+        },
+        {
+          "model": "big",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 5300,
+          "reason": "native-a (cpu): the only build that runs here",
+          "alternatives": []
+        }
+      ]
+    },
+    {
+      "name": "The same machine without CUDA gets the CPU package",
+      "catalog": "fixture",
+      "capabilities": {
+        "runs": "native",
+        "os": "linux",
+        "arch": "x86_64",
+        "has": [
+          "cpu"
+        ]
+      },
+      "place": "host",
+      "offers": [
+        {
+          "model": "plain",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 1100,
+          "reason": "native-a (cpu): the only build that runs here",
+          "alternatives": []
+        },
+        {
+          "model": "ranked",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 1100,
+          "reason": "native-a (cpu): the only build that runs here",
+          "alternatives": []
+        },
+        {
+          "model": "big",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 5100,
+          "reason": "native-a (cpu): the only build that runs here",
+          "alternatives": []
+        }
+      ]
+    },
+    {
+      "name": "A bundled engine on a phone: only the model is downloaded",
+      "catalog": "fixture",
+      "capabilities": {
+        "runs": "native",
+        "os": "ios",
+        "arch": "aarch64",
+        "has": [
+          "cpu",
+          "coreml"
+        ]
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "plain",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "coreml",
+          "download_size": 1000,
+          "reason": "native-a (coreml): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "cpu"
+            }
+          ]
+        },
+        {
+          "model": "ranked",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "coreml",
+          "download_size": 1000,
+          "reason": "native-a (coreml): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "cpu"
+            }
+          ]
+        },
+        {
+          "model": "big",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 5000,
+          "reason": "native-a (cpu): the only build that runs here",
+          "alternatives": []
+        }
+      ]
+    },
+    {
+      "name": "A page with WebGPU but no shader-f16: a build that needs it does not fit",
+      "catalog": "fixture",
+      "capabilities": {
+        "runs": "page",
+        "has": [
+          "webgpu",
+          "wasm"
+        ]
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "page-only",
+          "task": "stt",
+          "engine": "page-b",
+          "accelerator": "wasm",
+          "download_size": 0,
+          "reason": "page-b (wasm): the only build that runs here",
+          "alternatives": []
+        },
+        {
+          "model": "speaker",
+          "task": "tts",
+          "engine": "page-a",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "page-a (webgpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "page-a",
+              "accelerator": "wasm"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "A page with WebGPU and shader-f16: the ranked engine first, an unranked one behind it",
+      "catalog": "fixture",
+      "capabilities": {
+        "runs": "page",
+        "has": [
+          "webgpu",
+          "webgpu-f16",
+          "wasm"
+        ]
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "page-only",
+          "task": "stt",
+          "engine": "page-a",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "page-a (webgpu): first in the catalogue's engine order",
+          "alternatives": [
+            {
+              "engine": "page-b",
+              "accelerator": "wasm"
+            }
+          ]
+        },
+        {
+          "model": "speaker",
+          "task": "tts",
+          "engine": "page-a",
+          "accelerator": "webgpu",
+          "download_size": 0,
+          "reason": "page-a (webgpu): the only build that runs here",
+          "alternatives": [
+            {
+              "engine": "page-a",
+              "accelerator": "wasm"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "A provider of this catalogue",
+      "catalog": "fixture",
+      "capabilities": {
+        "runs": "page",
+        "has": [
+          "wasm"
+        ]
+      },
+      "place": "cloud",
+      "offers": []
+    }
+  ]
+}
