@@ -131,6 +131,24 @@ def mount_connector_socketio(app, control):
     async def input_read(sid, data):
         await control.read(await speaker(sid), data or {})
 
+    @server.on('device.pairing_code', namespace=NAMESPACE)
+    async def device_pairing_code(sid, data):
+        """A code for the person to pair a device with this node (`voice_pair_device`, `sidevoice
+        pair-device`): the connector asks only because the person did. Answered `{code, payload,
+        expires_in}`, or `{error}` when this node cannot issue one."""
+        devices = getattr(app.state, 'devices', None)
+        if not await speaker(sid):
+            return {'error': 'This connection speaks for no connector.'}
+        if devices is None:
+            return {'error': 'This core does not pair devices.'}
+        try:
+            issued = devices.issue_code()
+        except (OSError, ValueError) as error:
+            logger.warning('Could not issue a device pairing code: {}', error)
+            return {'error': f'Could not issue a pairing code: {error}'}
+        logger.info('A device pairing code was issued, valid {}s', issued['expires_in'])
+        return issued
+
     app.mount(PATH, socketio.ASGIApp(server, socketio_path=''))
     return server
 

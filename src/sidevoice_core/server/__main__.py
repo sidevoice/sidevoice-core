@@ -72,6 +72,9 @@ async def serve(arguments):
     # The link with the room needs this node's own address to relay to, known once it listens.
     rendezvous = Rendezvous(arguments.room_credential, None)
     app = create_app(room, rendezvous=rendezvous)
+    # The node's identity exists from its first start, and one that cannot be read stops it here, loudly:
+    # every paired device pins it, so it is never replaced behind anyone's back.
+    app.state.devices.store.identity
     server = uvicorn.Server(uvicorn.Config(app, host=arguments.host, port=arguments.port, log_level='info'))
     ready = Path(arguments.ready_file) if arguments.ready_file else data / 'core.json'
     serving = asyncio.create_task(server.serve())
@@ -87,6 +90,7 @@ async def serve(arguments):
                             'connector_id': connector_id, 'token': token})
         logger.info('Sidevoice core {} listening on 127.0.0.1:{} (data in {})', version(), port, data)
         rendezvous.base = f'http://127.0.0.1:{port}'
+        app.state.devices.listen_url = rendezvous.base   # the first of a pairing code's `urls`
         await rendezvous.start()
         watcher = asyncio.create_task(watch_idle(room, server, arguments.idle_exit)) if arguments.idle_exit else None
         await serving

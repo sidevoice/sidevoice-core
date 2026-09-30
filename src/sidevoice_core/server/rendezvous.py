@@ -12,10 +12,13 @@ the two is Socket.IO and either side may open it (rubasace/sidevoice `docs/RENDE
 Whichever side opened it, the room then asks the same things: `relay.http` (a browser's request) and
 `relay.open` / `relay.data` / `relay.close` (a browser's call socket). `Relay` serves them by making the
 very same request to this node on loopback: the relay adds no second implementation of any endpoint,
-and a relayed browser is a browser like any other to everything behind it.
+and a relayed browser is a browser like any other to everything behind it — its device token included
+(`docs/DEVICE_PAIRING.md`): the room checks none, it passes `authorization` and the socket's offered
+subprotocols through, and this node checks them end to end.
 """
 import asyncio
 import json
+import re
 import secrets
 import socket
 from pathlib import Path
@@ -28,7 +31,14 @@ PATH = '/api/connectors/link'      # on the room: the path its proxy already exe
 NAMESPACE = '/nodes'
 DIAL_PATH = '/api/rendezvous/link'  # on this node, for a room that dials it
 DIAL_NAMESPACE = '/room'
-RELAYED = '/api/presentation'
+RELAYED = ('/api/presentation', '/api/device')
+CALL_SOCKET = '/api/presentation/ws'
+# A subprotocol is an HTTP token (RFC 6455 §4.1): nothing else may reach the loopback handshake's header.
+SUBPROTOCOL = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}$")
+
+
+def relayed(path):
+    return any(path == prefix or path.startswith(prefix + '/') for prefix in RELAYED)
 
 
 def private_network(hostname):
@@ -38,6 +48,14 @@ def private_network(hostname):
     if hostname in {'127.0.0.1', 'localhost', '::1', '[::1]'}:
         return True
     return bool(re.fullmatch(r'[a-z0-9-]+\.[a-z0-9-]+\.svc(\.[a-z0-9.-]+)?', hostname or '', re.I))
+
+
+def public_origin(value):
+    """A room's public URL as its welcome says it, if it is one: http(s), with a host."""
+    if not isinstance(value, str) or len(value) > 2048:
+        return None
+    parts = urlsplit(value.strip())
+    return value.strip().rstrip('/') if parts.scheme in {'http', 'https'} and parts.netloc else None
 
 
 def read_pairing(path):
@@ -71,7 +89,8 @@ class Relay:
 
     def headers(self, told):
         told = told if isinstance(told, dict) else {}
-        kept = {name: str(told[name]) for name in ('content-type', 'accept') if told.get(name)}
+        # `authorization` is the page's device token: the node checks it, the room only carries it.
+        kept = {name: str(told[name]) for name in ('content-type', 'accept', 'authorization') if told.get(name)}
         # The room checked the browser's origin against its own before relaying. Here the request comes
         # from this node's own origin, which is what it now is; an endpoint that insists on an Origin
         # (the credential forms) still sees one only when the browser sent one.
@@ -82,7 +101,7 @@ class Relay:
     async def http(self, data):
         data = data if isinstance(data, dict) else {}
         path, method = str(data.get('path') or ''), str(data.get('method') or 'GET').upper()
-        if not path.startswith(RELAYED) or '..' in path or method not in {'GET', 'POST', 'PUT', 'DELETE', 'PATCH'}:
+        if not relayed(path) or '..' in path or method not in {'GET', 'POST', 'PUT', 'DELETE', 'PATCH'}:
             return {'status': 404, 'headers': {'content-type': 'application/json'},
                     'body': json.dumps({'detail': 'Not relayed.'}).encode()}
         query = data.get('query') if isinstance(data.get('query'), str) else ''
@@ -99,12 +118,16 @@ class Relay:
         import aiohttp
         data = data if isinstance(data, dict) else {}
         channel, path = data.get('channel'), str(data.get('path') or '')
-        if not isinstance(channel, str) or not channel or path != RELAYED + '/ws' or channel in self.channels:
+        if not isinstance(channel, str) or not channel or path != CALL_SOCKET or channel in self.channels:
             return {'ok': False, 'status': 404, 'detail': 'Not relayed.'}
         query = data.get('query') if isinstance(data.get('query'), str) else ''
+        # What the browser offered (`sidevoice` and its device token), offered again on loopback.
+        offered = data.get('protocols') if isinstance(data.get('protocols'), list) else []
+        protocols = [name for name in offered if isinstance(name, str) and SUBPROTOCOL.match(name)][:8]
         url = 'ws' + self.base[4:] + path + ('?' + query if query else '')
         try:
-            ws = await self.session().ws_connect(url, headers={'origin': self.base}, max_msg_size=0, autoping=True)
+            ws = await self.session().ws_connect(url, headers={'origin': self.base}, protocols=protocols,
+                                                 max_msg_size=0, autoping=True)
         except aiohttp.WSServerHandshakeError as error:
             return {'ok': False, 'status': error.status, 'detail': error.message}
         except Exception as error:
@@ -205,6 +228,7 @@ class Rendezvous:
         self.dial_server = None   # the Socket.IO server a dialling room reaches, once mounted
         self.dialled = set()      # its connections that proved to be this machine's room
         self.woken = None         # set by `poke` to look at the pairing file before the next poll
+        self.public_url = None    # the room's public origin, as its welcome on the current link said it
 
     # ----- what the connector hears -----
 
@@ -218,6 +242,17 @@ class Rendezvous:
                 await self.on_state(dict(state))
             except Exception as error:
                 logger.warning('Could not report the rendezvous state: {}', error)
+
+    def room_for_devices(self):
+        """The room a device can reach this node through, for a pairing code's `rv`: the room's own public
+        origin when its welcome said one, else the pairing's origin; and this node's id there. None unpaired."""
+        pairing = read_pairing(self.pairing_path) if self.pairing_path else None
+        if not pairing:
+            return None
+        # The welcome was said on a link opened with `self.pairing`; a file rewritten since names another room.
+        linked = self.pairing is not None and (self.pairing['origin'], self.pairing['connector_id']) == (
+            pairing['origin'], pairing['connector_id'])
+        return {'url': (self.public_url if linked else None) or pairing['origin'], 'node': pairing['connector_id']}
 
     # ----- outbound -----
 
@@ -234,6 +269,7 @@ class Rendezvous:
     async def hang_up(self):
         """Every link with the room goes, whoever opened it: the pairing it was opened with is over."""
         client, self.client = self.client, None
+        self.public_url = None
         if client is not None:
             try:
                 await client.shutdown()   # disconnects, or stops the library's own reconnection attempts
@@ -309,6 +345,8 @@ class Rendezvous:
 
         @client.on('node.welcome', namespace=NAMESPACE)
         async def welcome(data):
+            if self.client is None or self.client is client:
+                self.public_url = public_origin((data or {}).get('public_url') if isinstance(data, dict) else None)
             await self.report(connected=True, via='outbound', error=None, refused=None)
             logger.info('Linked with the room at {} (outbound)', origin)
 

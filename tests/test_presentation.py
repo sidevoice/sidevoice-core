@@ -489,7 +489,7 @@ class RoomSurfaceTests(IsolatedAsyncioTestCase):
 
     def app(self):
         from sidevoice_core.server.app import create_app
-        return create_app()
+        return create_app(device_auth=False)
 
     async def test_no_schema_is_published(self):
         from starlette.testclient import TestClient
@@ -594,7 +594,7 @@ class OwnHostsTests(IsolatedAsyncioTestCase):
         from starlette.websockets import WebSocketDisconnect
         from sidevoice_core.server.app import create_app
         rebound = {'Host': 'rebind.attacker.example:8768', 'Origin': 'http://rebind.attacker.example:8768'}
-        with TestClient(create_app(), base_url='http://127.0.0.1:8768') as client:
+        with TestClient(create_app(device_auth=False), base_url='http://127.0.0.1:8768') as client:
             self.assertEqual(client.get('/api/presentation/admission').status_code, 200)
             for path in ('/api/presentation/history', '/api/connectors', '/api/presentation/admission'):
                 self.assertEqual(client.get(path, headers=rebound).status_code, 421, path)
@@ -606,5 +606,5 @@ class OwnHostsTests(IsolatedAsyncioTestCase):
             # History read from another origin, with a Host of its own, is the same origin check as the rest.
             self.assertEqual(client.get('/api/presentation/history', headers={'Origin': 'http://evil.example'}).status_code, 403)
         with patch.dict(os.environ, {'SIDEVOICE_ALLOWED_HOSTS': 'node.tailnet.example'}):
-            with TestClient(create_app(), base_url='http://node.tailnet.example:8768') as client:
+            with TestClient(create_app(device_auth=False), base_url='http://node.tailnet.example:8768') as client:
                 self.assertEqual(client.get('/api/presentation/admission').status_code, 200, 'a node someone made reachable')

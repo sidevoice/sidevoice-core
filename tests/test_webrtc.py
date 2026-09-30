@@ -83,7 +83,7 @@ class WebRTCTest(unittest.IsolatedAsyncioTestCase):
         # Host candidates only: the test stays off the network, and both peers are on this machine.
         self.environment = patch.dict(os.environ, {'SIDEVOICE_STUN_URLS': ''})
         self.environment.start()
-        app = create_app(self.room, config={'VOICE_BROWSER_HEARTBEAT_SECONDS': '0'})
+        app = create_app(self.room, config={'VOICE_BROWSER_HEARTBEAT_SECONDS': '0'}, device_auth=False)
         self.server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=self.port, log_level='warning'))
         self.task = asyncio.create_task(self.server.serve())
         await until(lambda: self.server.started)

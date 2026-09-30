@@ -38,10 +38,10 @@ async def until(check, timeout=10.0, every=0.02):
 class StandInRoom:
     """The hosted room's link, as much of it as a node sees: `/api/connectors/link`, namespace `/nodes`."""
 
-    def __init__(self, refuse=None):
+    def __init__(self, refuse=None, public_url=None):
         self.server = socketio.AsyncServer(async_mode='asgi', namespaces=['/nodes'])
         self.auth, self.sid, self.frames, self.closed = None, None, [], []
-        self.refuse, self.connections = refuse, 0
+        self.refuse, self.connections, self.public_url = refuse, 0, public_url
         s = self.server
 
         @s.event(namespace='/nodes')
@@ -51,7 +51,8 @@ class StandInRoom:
             if self.refuse:
                 raise socketio.exceptions.ConnectionRefusedError(self.refuse)
             self.sid = sid
-            await s.emit('node.welcome', {'protocol': PROTOCOL}, to=sid, namespace='/nodes')
+            welcome = {'protocol': PROTOCOL, **({'public_url': self.public_url} if self.public_url else {})}
+            await s.emit('node.welcome', welcome, to=sid, namespace='/nodes')
 
         @s.on('relay.data', namespace='/nodes')
         async def data(sid, payload):
@@ -70,12 +71,14 @@ class StandInRoom:
 
 class NodeTest(unittest.IsolatedAsyncioTestCase):
     room_refuses = None
+    room_public_url = None
+    device_auth = False   # what the relay carries is the subject here; device tokens are test_device_pairing's
 
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
         self.room_port, self.node_port = free_port(), free_port()
-        self.room = StandInRoom(self.room_refuses)
+        self.room = StandInRoom(self.room_refuses, self.room_public_url)
         self.room_server = uvicorn.Server(uvicorn.Config(socketio.ASGIApp(self.room.server, socketio_path='/api/connectors/link'),
                                                          host='127.0.0.1', port=self.room_port, log_level='warning'))
         self.room_task = asyncio.create_task(self.room_server.serve())
@@ -85,7 +88,9 @@ class NodeTest(unittest.IsolatedAsyncioTestCase):
         self.node_room = Room(RoomHistory(root / 'core' / 'room-state.json'))
         self.states = []
         self.rendezvous = Rendezvous(self.pairing, f'http://127.0.0.1:{self.node_port}', poll=0.1)
-        app = create_app(self.node_room, config={'VOICE_BROWSER_HEARTBEAT_SECONDS': '0'}, rendezvous=self.rendezvous)
+        self.app = app = create_app(self.node_room, config={'VOICE_BROWSER_HEARTBEAT_SECONDS': '0', 'SIDEVOICE_CORE_DATA_DIR': str(root / 'core')},
+                                    rendezvous=self.rendezvous, device_auth=self.device_auth)
+        app.state.devices.listen_url = f'http://127.0.0.1:{self.node_port}'
         original = self.rendezvous.on_state
 
         async def recorded(state):

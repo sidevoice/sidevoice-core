@@ -20,6 +20,7 @@ from ..control.room import Room
 from ..pipeline import transcription
 from ..pipeline.serializer import BrowserFrameSerializer
 from ..runtime import data_dir
+from .devices import DeviceAuth, call_subprotocol, mount_devices
 from .presentation import mount_presentation, require_same_origin
 from .webrtc import mount_webrtc
 
@@ -99,7 +100,9 @@ def mount_browser_call(app, room, config=None):
         except HTTPException:
             await websocket.close(code=1008)  # Policy violation: not this room's own page.
             return
-        await websocket.accept()
+        # A page offers `sidevoice` beside its device token (browsers cannot set headers on a socket), and a
+        # browser that offered subprotocols refuses an answer that names none.
+        await websocket.accept(subprotocol=call_subprotocol(websocket.scope))
         await browser_call(room, websocket, config)
 
 
@@ -166,7 +169,7 @@ class CrossOrigin:
                 if headers.get(b'access-control-request-private-network') == b'true' else []
             await send({'type': 'http.response.start', 'status': 204, 'headers': allow + extra + [
                 (b'access-control-allow-methods', b'GET, POST, PUT, PATCH, DELETE'),
-                (b'access-control-allow-headers', b'content-type, accept'),
+                (b'access-control-allow-headers', b'content-type, accept, authorization'),
                 (b'access-control-max-age', b'600')]})
             await send({'type': 'http.response.body', 'body': b''})
             return
@@ -191,9 +194,12 @@ def instrument(app):
     return app
 
 
-def create_app(room=None, *, config=None, link_options=None, rendezvous=None):
+def create_app(room=None, *, config=None, link_options=None, rendezvous=None, device_auth=True):
     """The whole node. `room` defaults to one whose durable state lives in the node's data directory;
-    `rendezvous` is this node's link with the hosted room, when it has one (`server.__main__` makes it)."""
+    `rendezvous` is this node's link with the hosted room, when it has one (`server.__main__` makes it).
+
+    `device_auth=False` is for tests only: a running node always requires a paired device's token
+    (docs/DEVICE_PAIRING.md), and nothing in its environment can turn that off."""
     from fastapi import FastAPI
     from ..control.telemetry import configure as configure_telemetry
     from .connector_link import mount_connector_link
@@ -215,8 +221,11 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None):
     mount_connector_link(app, room, **(link_options or {}))
     mount_browser_call(app, room, config)
     mount_webrtc(app, room)
+    devices = mount_devices(app, room, rendezvous, config)
     mount_rendezvous(app, room, rendezvous)
     instrument(app)
+    if device_auth:
+        app.add_middleware(DeviceAuth, devices=devices)   # inside CrossOrigin: preflights answered, a 401 readable
     app.add_middleware(CrossOrigin)
     app.add_middleware(OwnHostsOnly)   # added last, so it runs first: a Host this node is not is refused before anything
     return app
@@ -263,6 +272,7 @@ def mount_rendezvous(app, room, rendezvous):
         pairing = read_pairing(rendezvous.pairing_path) if rendezvous and rendezvous.pairing_path else None
         told = (room.control.identity if room.control else None) or {}
         return {'kind': 'node', 'id': pairing and pairing['connector_id'], 'host': told.get('host'),
+                'fingerprint': app.state.devices.store.identity.fingerprint,
                 'room': rendezvous.state if rendezvous else None}
 
     if rendezvous is None:

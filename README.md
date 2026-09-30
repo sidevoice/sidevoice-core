@@ -39,8 +39,11 @@ src/sidevoice_core/
   `/connectors`) the machine's connector uses exactly as it used to use a room's; the rendezvous with
   the hosted room (`rendezvous.py`: the node dials the room, or accepts a room that dials it, and
   serves the relayed requests by making them to itself); the microphone over WebRTC
-  (`webrtc.py`: `rtc/config`, `rtc/offer`, aiortc, the track fed into the same pipeline input).
-  The contract for all of it is rubasace/sidevoice `docs/RENDEZVOUS.md`.
+  (`webrtc.py`: `rtc/config`, `rtc/offer`, aiortc, the track fed into the same pipeline input);
+  device pairing (`devices.py`, logic in `control/devices.py`): every route but a few requires a
+  paired device's token, the connector asks for a code with `device.pairing_code`, and the node
+  proves its P-256 identity to the clients that pinned it.
+  The contract for all of it is rubasace/sidevoice `docs/RENDEZVOUS.md` and `docs/DEVICE_PAIRING.md`.
 
 `sidevoice-core --data-dir D --port P --room-credential F --idle-exit S` is how the connector starts
 it; `D/core.json` (0600) says where it listens and with which credential the connector links.

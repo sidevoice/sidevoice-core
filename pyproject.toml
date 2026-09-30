@@ -17,6 +17,8 @@ dependencies = [
     # The microphone over WebRTC (server/webrtc.py): aiortc, and PyAV with it for resampling.
     "aiortc==1.15.0",
     "scipy==1.18.1",
+    # Device pairing (control/devices.py): the node's ECDSA P-256 identity and its signatures.
+    "cryptography==50.0.1",
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.44.0",
     "opentelemetry-instrumentation-fastapi==0.65b0",

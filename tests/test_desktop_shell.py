@@ -40,7 +40,8 @@ class DesktopShellTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.room = Room(RoomHistory(Path(self.temp.name) / 'room-state.json'))
-        self.app = create_app(self.room, config={'VOICE_BROWSER_HEARTBEAT_SECONDS': '0'})
+        self.app = create_app(self.room, config={'VOICE_BROWSER_HEARTBEAT_SECONDS': '0', 'SIDEVOICE_CORE_DATA_DIR': self.temp.name},
+                              device_auth=False)
 
     def client(self):
         return TestClient(self.app, base_url=BASE)
