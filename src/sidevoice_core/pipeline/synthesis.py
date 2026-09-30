@@ -1,29 +1,18 @@
-"""Speech-synthesis providers and their server-side credentials.
+"""Speech-synthesis providers.
 
 Kokoro is rendered by the client. ElevenLabs is deliberately invoked by
-this node: its key never reaches the browser, while the generated audio
-does. The account catalogue is fetched on demand so newly created, cloned, or
+this node with its integration's key (`integrations`): the key never
+reaches the browser, while the generated audio does. The account catalogue is fetched on demand so newly created, cloned, or
 workspace voices appear without a Sidevoice release.
 """
 import asyncio
 import base64
 import json
-import os
 import time
-from pathlib import Path
 from urllib.parse import quote
 
-from ..runtime import data_dir
+from . import integrations
 
-CREDENTIALS = None   # a fixed path overrides the default; see credentials_file()
-
-
-def credentials_file():
-    """Where this node keeps the key, read when asked: `CREDENTIALS` when set (a test, a deployment), else
-    the environment's file, else the node's data directory."""
-    if CREDENTIALS is not None:
-        return Path(CREDENTIALS)
-    return Path(os.getenv('VOICE_TTS_CREDENTIALS_FILE') or data_dir() / 'tts-credentials.json')
 ELEVENLABS_API = 'https://api.elevenlabs.io'
 
 FALLBACK_MODELS = [
@@ -31,65 +20,6 @@ FALLBACK_MODELS = [
     {'id': 'eleven_multilingual_v2', 'label': 'Eleven Multilingual v2', 'description': 'Calidad multilingüe'},
     {'id': 'eleven_v3', 'label': 'Eleven v3', 'description': 'More expressive'},
 ]
-
-
-def _read():
-    try:
-        data = json.loads(credentials_file().read_text(encoding='utf8'))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def stored_key():
-    value = _read().get('elevenlabs')
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-
-def environment_key(config=None):
-    source = config if config is not None else os.environ
-    value = (source.get('VOICE_ELEVENLABS_API_KEY') or '').strip()
-    return value or None
-
-
-def key(config=None):
-    return stored_key() or environment_key(config)
-
-
-def credential_state(config=None):
-    value = stored_key()
-    source = 'stored' if value else None
-    if not value:
-        value = environment_key(config)
-        source = 'environment' if value else None
-    return {'configured': bool(value), 'source': source,
-            'hint': ('…' + value[-4:]) if value else None}
-
-
-def save_key(value):
-    value = (value or '').strip()
-    if not value:
-        raise ValueError('The key is empty.')
-    stored = _read()
-    stored['elevenlabs'] = value
-    target = credentials_file()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix('.tmp')
-    temporary.write_text(json.dumps(stored), encoding='utf8')
-    temporary.chmod(0o600)
-    temporary.replace(target)
-
-
-def clear_key():
-    stored = _read()
-    if stored.pop('elevenlabs', None) is None:
-        return
-    target = credentials_file()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix('.tmp')
-    temporary.write_text(json.dumps(stored), encoding='utf8')
-    temporary.chmod(0o600)
-    temporary.replace(target)
 
 
 def _headers(value):
@@ -202,9 +132,8 @@ def _voice_entry(item):
 
 async def catalog(config=None):
     """Return account-aware models and voices, degrading gracefully while offline."""
-    state = credential_state(config)
-    result = {'configured': state['configured'], 'models': FALLBACK_MODELS, 'voices': [], 'error': None}
-    value = key(config)
+    value = integrations.key('elevenlabs', config)
+    result = {'configured': bool(value), 'models': FALLBACK_MODELS, 'voices': [], 'error': None}
     if not value:
         return result
     import aiohttp
@@ -223,7 +152,7 @@ async def catalog(config=None):
 
 async def synthesize(text, *, model, voice, speed, config=None, with_timestamps=False):
     """Generate one MP3 response through ElevenLabs without exposing its key."""
-    value = key(config)
+    value = integrations.key('elevenlabs', config)
     if not value:
         raise ValueError('Configura una clave de ElevenLabs antes de seleccionar esa voz.')
     if not voice:

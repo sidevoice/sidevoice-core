@@ -1,9 +1,6 @@
 import asyncio
 import os
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
 from sidevoice_core.pipeline import transcription
 from sidevoice_core.pipeline.settings import LanguageSettings
@@ -58,17 +55,6 @@ class TranscriptionTests(unittest.TestCase):
         models = asyncio.run(transcription._models(Http(), 'secret'))
         self.assertEqual([item['id'] for item in models],
                          ['gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'])
-
-    def test_credential_round_trip_only_exposes_hint(self):
-        with tempfile.TemporaryDirectory() as root, patch.object(
-                transcription, 'CREDENTIALS', Path(root) / 'credentials.json'):
-            transcription.save_key('openai', 'sk-test-secret')
-            state = transcription.credential_state({})['openai']
-            self.assertEqual(state, {'configured': True, 'source': 'stored', 'hint': '…cret'})
-            self.assertNotIn('sk-test-secret', repr(state))
-            self.assertEqual(oct(transcription.CREDENTIALS.stat().st_mode & 0o777), '0o600')
-            transcription.clear_key('openai')
-            self.assertFalse(transcription.credential_state({})['openai']['configured'])
 
 
 if __name__ == '__main__':

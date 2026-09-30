@@ -195,8 +195,8 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual((chosen['provider'], chosen['voice'], chosen['speed']), ('elevenlabs', 'una-voz', 1.1))
         self.assertEqual(list(self.hub.clients), [client.id], 'a voice change never opens a second session')
         # And a provider key is read where the audio is made, not where the pipeline was built.
-        from sidevoice_core.pipeline import synthesis
-        with patch.object(synthesis, 'key', return_value=None):
+        from sidevoice_core.pipeline import integrations, synthesis
+        with patch.object(integrations, 'key', return_value=None):
             with self.assertRaises(ValueError):
                 await synthesis.synthesize('Hola', model='eleven_flash_v2_5', voice='una-voz', speed=1.0)
         await self.leave(socket, task)
@@ -256,7 +256,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         socket = FakeWebSocket()
         choice = {'provider': 'openai', 'available': True, 'model': 'gpt-4o-transcribe', 'reason': 'explicit'}
         with patch('sidevoice_core.server.app.transcription.resolve', return_value=choice), \
-                patch('sidevoice_core.pipeline.transcription.stored_key', return_value='sk-test-not-used'):
+                patch('sidevoice_core.pipeline.integrations.stored_key', return_value='sk-test-not-used'):
             task, client = await self.join(socket)
             self.assertEqual(client.stt.provider.kind, 'openai')
             self.assertEqual(client.stt.provider.model, 'gpt-4o-transcribe')
@@ -532,7 +532,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
 
         choice = {'provider': 'openai', 'available': True, 'model': 'gpt-4o-transcribe', 'reason': 'explicit'}
         with patch('sidevoice_core.server.app.transcription.resolve', return_value=choice), \
-                patch('sidevoice_core.pipeline.transcription.stored_key', return_value='sk-test-not-used'):
+                patch('sidevoice_core.pipeline.integrations.stored_key', return_value='sk-test-not-used'):
             new_task, new = await self.join(new_socket, {
                 'conversation': 'thread-a',
                 'settings': {'stt_provider': 'openai', 'stt_model': 'gpt-4o-transcribe',

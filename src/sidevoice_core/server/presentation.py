@@ -112,28 +112,54 @@ def mount_presentation(app, hub):
                    'providers': {'elevenlabs': eleven}}
         return catalog
 
-    @app.get('/api/presentation/synthesis')
-    async def synthesis_settings(request: Request):
-        require_same_origin(request)
-        from ..pipeline import synthesis
-        return {'credentials': synthesis.credential_state(), 'catalog': await synthesis.catalog()}
+    def owner(request):
+        from .devices import DEVICE_KEY, is_owner
+        return is_owner(request.scope.get(DEVICE_KEY))
 
-    @app.post('/api/presentation/synthesis/credential')
-    async def synthesis_credential(payload: dict, request: Request):
+    def writing_key(provider, request):
+        """Who may change a provider's key: a client's page, the owner, a provider this node knows."""
+        from ..pipeline import integrations
+        if provider not in integrations.PROVIDERS:
+            raise HTTPException(404, 'Proveedor desconocido.')
         if not request.headers.get('origin'):
             raise HTTPException(403, 'Save the key from the room, not from an external client.')
         require_same_origin(request)
-        from ..pipeline import synthesis
+        if not owner(request):
+            raise HTTPException(403, 'Solo quien es dueño de esta máquina configura sus integraciones.')
+
+    # Integrations (#64): one key per provider, the node's. Listed for every paired device, written by the owner.
+    @app.get('/api/presentation/integrations')
+    async def integrations_listing(request: Request):
+        require_same_origin(request)
+        from ..pipeline import integrations
+        return integrations.listing(owner(request))
+
+    @app.put('/api/presentation/integrations/{provider}')
+    async def integration_key(provider: str, payload: dict, request: Request):
+        """A new key is stored only once the provider has taken it: one it refuses is never stored, and the key
+        in place keeps working."""
+        writing_key(provider, request)
+        from ..pipeline import integrations, synthesis, transcription
+        key = payload.get('key')
+        if not isinstance(key, str) or not key.strip():
+            raise HTTPException(422, 'The key is empty.')
+        key = key.strip()
         try:
-            key = payload.get('key')
-            if key is None or not str(key).strip():
-                synthesis.clear_key()
+            if provider == 'elevenlabs':
+                await synthesis.verify(key)
             else:
-                await synthesis.verify(str(key).strip())
-                synthesis.save_key(str(key))
+                await transcription.verify(provider, key)
+            integrations.save_key(provider, key)
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
-        return {'credentials': synthesis.credential_state(), 'catalog': await synthesis.catalog()}
+        return integrations.listing(owner(request))
+
+    @app.delete('/api/presentation/integrations/{provider}')
+    async def integration_clear(provider: str, request: Request):
+        writing_key(provider, request)
+        from ..pipeline import integrations
+        integrations.clear_key(provider)
+        return integrations.listing(owner(request))
 
     @app.post('/api/presentation/synthesis/preview')
     async def synthesis_preview(payload: dict, request: Request):
@@ -151,8 +177,7 @@ def mount_presentation(app, hub):
     async def transcription_settings(request: Request):
         require_same_origin(request)
         from ..pipeline import transcription
-        return {'catalog': transcription.CATALOG,
-                'credentials': transcription.credential_state()}
+        return {'catalog': transcription.CATALOG}
 
     @app.get('/api/presentation/transcription/models')
     async def transcription_models(provider: str, request: Request):
@@ -162,26 +187,6 @@ def mount_presentation(app, hub):
             return await transcription.catalog(provider)
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
-
-    @app.post('/api/presentation/transcription/credential')
-    async def transcription_credential(payload: dict, request: Request):
-        if not request.headers.get('origin'):
-            raise HTTPException(403, 'Save the key from the room, not from an external client.')
-        require_same_origin(request)
-        from ..pipeline import transcription
-        provider = payload.get('provider')
-        if provider not in transcription.PROVIDERS:
-            raise HTTPException(400, 'Proveedor desconocido.')
-        key = payload.get('key')
-        try:
-            if key is None or not str(key).strip():
-                transcription.clear_key(provider)
-            else:
-                await transcription.verify(provider, str(key).strip())
-                transcription.save_key(provider, str(key))
-        except ValueError as error:
-            raise HTTPException(422, str(error)) from error
-        return {'credentials': transcription.credential_state()}
 
     @app.get('/api/presentation/languages')
     async def languages():

@@ -68,7 +68,7 @@ class VoiceResolutionTest(unittest.TestCase):
 
 class NativeElevenLabsSpeedTest(unittest.IsolatedAsyncioTestCase):
     async def test_speed_is_sent_to_synthesis_with_provider_limits(self):
-        from sidevoice_core.pipeline import synthesis
+        from sidevoice_core.pipeline import integrations, synthesis
         requests = []
 
         class Response:
@@ -88,7 +88,7 @@ class NativeElevenLabsSpeedTest(unittest.IsolatedAsyncioTestCase):
                 requests.append(kwargs['json'])
                 return Response()
 
-        with patch.object(synthesis, 'key', return_value='test-only'), patch.object(
+        with patch.object(integrations, 'key', return_value='test-only'), patch.object(
                 __import__("aiohttp"), "ClientSession", return_value=Client()):
             for requested, effective in [(0.85, 0.85), (1.15, 1.15), (2, 1.2), (0.5, 0.7)]:
                 audio = await synthesis.synthesize('Hola', model='eleven_flash_v2_5',
