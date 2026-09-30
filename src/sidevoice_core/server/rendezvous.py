@@ -202,6 +202,8 @@ class Rendezvous:
         self.relay = None
         self.task = None
         self.pairing = None
+        self.dial_server = None   # the Socket.IO server a dialling room reaches, once mounted
+        self.dialled = set()      # its connections that proved to be this machine's room
 
     # ----- what the connector hears -----
 
@@ -229,15 +231,21 @@ class Rendezvous:
         await self.hang_up()
 
     async def hang_up(self):
+        """Every link with the room goes, whoever opened it: the pairing it was opened with is over."""
         client, self.client = self.client, None
         if client is not None:
             try:
-                await client.disconnect()
+                await client.shutdown()   # disconnects, or stops the library's own reconnection attempts
             except Exception:
                 pass
         if self.relay is not None:
             await self.relay.shutdown()
             self.relay = None
+        for sid in list(self.dialled):
+            try:
+                await self.dial_server.disconnect(sid, namespace=DIAL_NAMESPACE)
+            except Exception:
+                pass
 
     async def run(self):
         """Keep one link to the paired room while there is a pairing; follow the file when it changes."""
@@ -251,7 +259,9 @@ class Rendezvous:
                 await self.hang_up()
                 self.pairing = pairing
                 await self.report(room=pairing and pairing['origin'], connected=False, via=None, error=None, refused=None)
-            if pairing and self.client is None and not self.state['refused']:
+            # While the room keeps a link it dialled, this node does not dial out: the room keeps one link per
+            # node, newest wins, and two would take turns replacing each other.
+            if pairing and self.client is None and not self.state['refused'] and self.state['via'] != 'dial':
                 if await self.dial_room(pairing):
                     delay = self.RETRY_FIRST
                 else:
@@ -273,7 +283,15 @@ class Rendezvous:
 
         @client.on('connect_error', namespace=NAMESPACE)
         async def connect_error(data):
-            refused['reason'] = data.get('message') if isinstance(data, dict) else str(data or '')
+            # The room's own refusal arrives as `{message}`; a room that could not be reached at all is a
+            # plain string from the library ("Connection error") and is worth trying again.
+            reason = data.get('message') if isinstance(data, dict) else None
+            refused['reason'] = reason
+            if self.client is client and reason:
+                # Refused while coming back (the pairing was revoked, the room moved on a protocol while this
+                # link was down): the library would ask for ever; the room has answered, so stop and say so.
+                await self.report(connected=False, refused=reason, error=None)
+                asyncio.create_task(self.hang_up())
 
         @client.on('node.welcome', namespace=NAMESPACE)
         async def welcome(data):
@@ -281,10 +299,15 @@ class Rendezvous:
             logger.info('Linked with the room at {} (outbound)', origin)
 
         @client.on('disconnect', namespace=NAMESPACE)
-        async def disconnect(*_):
+        async def disconnect(reason=None, *_):
             await relay.shutdown()
-            if self.client is client:
-                await self.report(connected=False, error='The link with the room dropped; it comes back on its own.')
+            if self.client is not client:
+                return
+            if reason == socketio.AsyncClient.reason.SERVER_DISCONNECT:
+                # The room let this link go (a newer one for this node won, or it is shutting down): the library
+                # does not come back from that by itself, so the next look dials again.
+                self.client = self.relay = None
+            await self.report(connected=False, error='The link with the room dropped; it comes back on its own.')
 
         @client.on('node.revoked', namespace=NAMESPACE)
         async def revoked(data):
@@ -302,7 +325,7 @@ class Rendezvous:
         except Exception as error:
             await relay.shutdown()
             reason = refused.get('reason')
-            if reason and reason not in {'One or more namespaces failed to connect'}:
+            if reason:
                 # The room's own words: it will not have this machine, and asking again will not change that.
                 await self.report(connected=False, refused=reason, error=None)
             else:
@@ -328,7 +351,7 @@ class Rendezvous:
         dialled; for everybody else this route answers nothing but refusals."""
         import socketio
         from socketio.exceptions import ConnectionRefusedError
-        server = socketio.AsyncServer(async_mode='asgi', namespaces=[DIAL_NAMESPACE], cors_allowed_origins=[])
+        server = self.dial_server = socketio.AsyncServer(async_mode='asgi', namespaces=[DIAL_NAMESPACE], cors_allowed_origins=[])
         relays = {}
 
         @server.event(namespace=DIAL_NAMESPACE)
@@ -340,10 +363,12 @@ class Rendezvous:
                 raise ConnectionRefusedError('This node is not paired with the room that is dialling it.')
             relay = Relay(self.base, lambda event, data: server.emit(event, data, to=sid, namespace=DIAL_NAMESPACE))
             relays[sid] = relay
+            self.dialled.add(sid)
             asyncio.create_task(self.greet(server, sid, pairing))
 
         @server.event(namespace=DIAL_NAMESPACE)
         async def disconnect(sid, reason=None):
+            self.dialled.discard(sid)
             relay = relays.pop(sid, None)
             if relay is not None:
                 await relay.shutdown()

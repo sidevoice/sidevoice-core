@@ -158,9 +158,11 @@ class WebRTCTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.snapshot()['mic']['media'], 'webrtc')
         self.assertGreater(client.media_peer.frames, 100, 'the audio came from the track')
         # Hanging up closes the peer connection with the call.
+        peer = client.media_peer
         await ws.close()
-        await until(lambda: browser.connectionState in {'closed', 'failed', 'disconnected'} or not self.room.clients, timeout=15)
         await until(lambda: not self.room.clients, timeout=15)
+        await until(lambda: peer.pc.connectionState == 'closed', timeout=15)
+        self.assertIsNone(client.media_peer)
 
 
 class MediaPathTests(unittest.TestCase):

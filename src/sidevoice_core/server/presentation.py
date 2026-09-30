@@ -78,7 +78,8 @@ def mount_presentation(app, hub):
         return client if client and client.connected else None
 
     @app.get('/api/presentation/history')
-    async def history(thread_id: str | None = None, session_id: str | None = None):
+    async def history(request: Request, thread_id: str | None = None, session_id: str | None = None):
+        require_same_origin(request)
         messages = hub.journal.history(thread_id)
         # Asked by a browser in the call, each reply also says whether that browser can hear it again (#100).
         client = client_for(session_id) if session_id else None
@@ -201,11 +202,15 @@ def mount_presentation(app, hub):
         current = client.target if client else {}
         entries = hub.control.participants() if hub.control else [{**b, 'connected': False} for b in hub.journal.bindings()]
         reach = hub.control.reachability if hub.control else (lambda b: {'state': 'offline', 'detail': None})
-        # A conversation runs on a machine; the row says which, by the name the machine gave when it paired.
+        # A conversation runs on a machine; the row says which, by the name its connector gave. The id is the
+        # one the room knows this machine by — its pairing — so the page can match the row to its machines
+        # list; the connector's local credential id means nothing outside this node.
         hosts = {c['id']: c.get('host') for c in hub.journal.paired_connectors()}
+        rendezvous = getattr(app.state, 'rendezvous', None)
+        paired = (rendezvous.pairing or {}).get('connector_id') if rendezvous else None
         return [{'thread_id': b['thread'], 'title': b.get('title') or ('Conversation ' + b['thread'][:8]),
                  'harness': b.get('harness'), 'available': b['connected'],
-                 'machine': {'id': b.get('connector'), 'host': hosts.get(b.get('connector'))},
+                 'machine': {'id': paired or b.get('connector'), 'host': hosts.get(b.get('connector'))},
                  'capabilities': b.get('capabilities'),
                  # What it thinks with, as its harness records it; absent while no harness has said.
                  'engine': b.get('engine'),

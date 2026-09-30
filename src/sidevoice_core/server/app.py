@@ -103,6 +103,45 @@ def mount_browser_call(app, room, config=None):
         await browser_call(room, websocket, config)
 
 
+LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1'}
+
+
+def allowed_hosts():
+    """The names this node answers to besides loopback: `SIDEVOICE_ALLOWED_HOSTS` (comma-separated), for a
+    node someone made reachable, and the hosts of the origins it already allows."""
+    from urllib.parse import urlsplit
+    from .presentation import allowed_origins
+    named = {host.strip().lower() for host in os.getenv('SIDEVOICE_ALLOWED_HOSTS', '').split(',') if host.strip()}
+    return LOOPBACK_HOSTS | named | {urlsplit(origin).hostname for origin in allowed_origins() if urlsplit(origin).hostname}
+
+
+class OwnHostsOnly:
+    """Every request and socket must name this node by a name it answers to.
+
+    The node's surface has no login: it is this machine's, on loopback. What loopback alone does not stop
+    is a web page the person visits rebinding its own domain to 127.0.0.1 — the browser then sends the
+    page's own name as the Host and as the Origin, and the origin check, which compares the two, agrees.
+    Refusing any Host that is not loopback (or configured) closes that door for every route, the mounted
+    connector and rendezvous links included."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] in {'http', 'websocket'}:
+            host = dict(scope.get('headers') or []).get(b'host', b'').decode('latin-1').strip().lower()
+            name = host[1:host.index(']')] if host.startswith('[') and ']' in host else host.rsplit(':', 1)[0] if host.count(':') == 1 else host
+            if name not in allowed_hosts():
+                if scope['type'] == 'websocket':
+                    await send({'type': 'websocket.close', 'code': 1008})
+                    return
+                await send({'type': 'http.response.start', 'status': 421,
+                            'headers': [(b'content-type', b'application/json')]})
+                await send({'type': 'http.response.body', 'body': b'{"detail": "This node answers to its own name only."}'})
+                return
+        await self.app(scope, receive, send)
+
+
 def instrument(app):
     """FastAPI's own server spans, so a request to the node is in the same trace as the turn."""
     from ..control.telemetry import telemetry
@@ -142,6 +181,7 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None):
     mount_webrtc(app, room)
     mount_rendezvous(app, room, rendezvous)
     instrument(app)
+    app.add_middleware(OwnHostsOnly)
     return app
 
 

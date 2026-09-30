@@ -41,13 +41,15 @@ class StandInRoom:
     def __init__(self, refuse=None):
         self.server = socketio.AsyncServer(async_mode='asgi', namespaces=['/nodes'])
         self.auth, self.sid, self.frames, self.closed = None, None, [], []
+        self.refuse, self.connections = refuse, 0
         s = self.server
 
         @s.event(namespace='/nodes')
         async def connect(sid, environ, auth):
             self.auth = auth
-            if refuse:
-                raise socketio.exceptions.ConnectionRefusedError(refuse)
+            self.connections += 1
+            if self.refuse:
+                raise socketio.exceptions.ConnectionRefusedError(self.refuse)
             self.sid = sid
             await s.emit('node.welcome', {'protocol': PROTOCOL}, to=sid, namespace='/nodes')
 
@@ -165,6 +167,44 @@ class OutboundTests(NodeTest):
             await connector.disconnect()
 
 
+class LinkLifeTests(NodeTest):
+    async def test_a_link_the_room_let_go_is_dialled_again(self):
+        # The room keeps one link per node and lets the older go; the library does not come back from that.
+        first = await until(lambda: self.room.sid)
+        await self.room.server.disconnect(first, namespace='/nodes')
+        await until(lambda: self.room.sid != first and self.room.connections >= 2, timeout=15)
+        await until(lambda: self.rendezvous.state['connected'])
+
+    async def test_a_refusal_met_while_coming_back_is_reported_and_not_asked_again(self):
+        await until(lambda: self.rendezvous.state['connected'])
+        # The room goes away; while it is away the machine is revoked; it comes back refusing it.
+        self.room_server.should_exit = True
+        await self.room_task
+        self.room.refuse = 'The room revoked this machine\'s pairing.'
+        self.room_server = uvicorn.Server(uvicorn.Config(socketio.ASGIApp(self.room.server, socketio_path='/api/connectors/link'),
+                                                         host='127.0.0.1', port=self.room_port, log_level='warning'))
+        self.room_task = asyncio.create_task(self.room_server.serve())
+        await until(lambda: self.rendezvous.state['refused'], timeout=30)
+        self.assertEqual(self.rendezvous.state['refused'], self.room.refuse)
+        tried = self.room.connections
+        await asyncio.sleep(1.5)
+        self.assertEqual(self.room.connections, tried, 'no retry against a refusal')
+
+
+class UnreachableRoomTests(NodeTest):
+    async def test_a_room_that_is_not_there_yet_is_waited_for_not_taken_as_a_refusal(self):
+        await until(lambda: self.rendezvous.state['connected'])
+        self.room_server.should_exit = True
+        await self.room_task
+        await until(lambda: not self.rendezvous.state['connected'], timeout=15)
+        await asyncio.sleep(1.5)
+        self.assertIsNone(self.rendezvous.state['refused'], 'unreachable is not refused')
+        self.room_server = uvicorn.Server(uvicorn.Config(socketio.ASGIApp(self.room.server, socketio_path='/api/connectors/link'),
+                                                         host='127.0.0.1', port=self.room_port, log_level='warning'))
+        self.room_task = asyncio.create_task(self.room_server.serve())
+        await until(lambda: self.rendezvous.state['connected'], timeout=30)
+
+
 class RefusedTests(NodeTest):
     room_refuses = 'The room revoked this machine\'s pairing.'
 
@@ -208,6 +248,10 @@ class DialTests(NodeTest):
             answer = await room.call('relay.http', {'method': 'GET', 'path': '/api/presentation/admission', 'query': '',
                                                     'headers': {}, 'body': None}, namespace='/room', timeout=10)
             self.assertEqual(answer['status'], 200)
+            # Paired again elsewhere: the link the old room dialled belongs to the old pairing and goes.
+            self.pairing.write_text(json.dumps({'url': f'http://127.0.0.1:{self.room_port}', 'connector_id': 'machine-9',
+                                                'token': 'other'}))
+            await until(lambda: not room.connected, timeout=15)
         finally:
             await room.disconnect()
 

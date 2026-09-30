@@ -493,7 +493,7 @@ class RoomSurfaceTests(IsolatedAsyncioTestCase):
 
     async def test_no_schema_is_published(self):
         from starlette.testclient import TestClient
-        with TestClient(self.app()) as client:
+        with TestClient(self.app(), base_url='http://127.0.0.1:8768') as client:
             for path in ('/docs', '/redoc', '/openapi.json'):
                 self.assertEqual(client.get(path).status_code, 404,
                                  f'{path} would publish a map of every endpoint to anyone who asks')
@@ -582,3 +582,29 @@ def mounted():
     app = FastAPI()
     mount_presentation(app, hub)
     return app, hub
+
+
+class OwnHostsTests(IsolatedAsyncioTestCase):
+    """A page on another domain rebound to 127.0.0.1 sends its own name as Host and Origin: refused."""
+
+    async def test_only_loopback_or_configured_names_reach_the_node(self):
+        import os
+        from unittest.mock import patch
+        from starlette.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+        from sidevoice_core.server.app import create_app
+        rebound = {'Host': 'rebind.attacker.example:8768', 'Origin': 'http://rebind.attacker.example:8768'}
+        with TestClient(create_app(), base_url='http://127.0.0.1:8768') as client:
+            self.assertEqual(client.get('/api/presentation/admission').status_code, 200)
+            for path in ('/api/presentation/history', '/api/connectors', '/api/presentation/admission'):
+                self.assertEqual(client.get(path, headers=rebound).status_code, 421, path)
+            self.assertEqual(client.post('/api/presentation/transcription/credential', headers=rebound,
+                                         json={'provider': 'openai', 'key': None}).status_code, 421)
+            with self.assertRaises(WebSocketDisconnect):
+                with client.websocket_connect('/api/presentation/ws', headers=rebound) as ws:
+                    ws.receive_text()
+            # History read from another origin, with a Host of its own, is the same origin check as the rest.
+            self.assertEqual(client.get('/api/presentation/history', headers={'Origin': 'http://evil.example'}).status_code, 403)
+        with patch.dict(os.environ, {'SIDEVOICE_ALLOWED_HOSTS': 'node.tailnet.example'}):
+            with TestClient(create_app(), base_url='http://node.tailnet.example:8768') as client:
+                self.assertEqual(client.get('/api/presentation/admission').status_code, 200, 'a node someone made reachable')

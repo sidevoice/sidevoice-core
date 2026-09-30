@@ -37,7 +37,8 @@ class CallPort(Protocol):
 
     The control plane's `RoomClient` is the implementation; a test's fake is another. Attributes
     are read and written by the turn flow (`VoiceCall`); methods are called by it and by the two
-    processors that watch the output (`PresentationGate`, `PresentationPlayback`).
+    processors that watch the output (`PresentationGate`, `PresentationPlayback`). `latency` and
+    `telemetry` are the call's own measurement objects, used through the methods named beside them.
     """
     id: str
     connected: bool
@@ -46,6 +47,19 @@ class CallPort(Protocol):
     turn_revision: int
     cancelled_turn: int | None
     error: str | None
+    # Written by VoiceCall when it takes the call: what this call is made of, for the room to show.
+    stt: object
+    voice: object
+    settings: object
+    transcription: dict
+    mic_settings: dict
+    input_stats: dict
+    audio_grace_seconds: float
+    on_browser_event: object     # callable(message): something for this client to hear
+    on_input_receipt: object     # callable(data): a receipt for this client's input
+    tts: object                  # read by PresentationGate: `select_language(language)` when it has one
+    latency: object              # .input(thread_id, revision, metrics)
+    telemetry: object            # .turn_context(...), .audio_event(...), .turn_finished(...)
 
     def user_started(self): ...
     async def finish_user_turn(self): ...
@@ -211,17 +225,18 @@ class VoiceCall:
             health = data.get('health') if isinstance(data.get('health'), dict) else {}
             # The browser that reports a stuck output is usually reloaded seconds later: the call keeps the
             # report where it outlives this browser.
-            self.call.report_audio_health({'reason': str(data.get('reason') or '')[:40], 'at': time.time(),
+            reported = {'reason': str(data.get('reason') or '')[:40], 'at': time.time(),
                                            **{key: health.get(key) for key in ('context', 'clock', 'output', 'element', 'playing', 'stalls', 'resuming', 'rate', 'buffer_rate')},
-                                           'events': [event for event in (health.get('events') or []) if isinstance(event, dict)][-24:]})
+                                           'events': [event for event in (health.get('events') or []) if isinstance(event, dict)][-24:]}
+            self.call.report_audio_health(reported)
             # The same moments, on the call's own span: one trace, not a second channel.
-            self.call.telemetry.audio_event(self.call.audio_health['reason'], {
-                'sidevoice.audio_output': self.call.audio_health.get('output'),
-                'sidevoice.audio_context': self.call.audio_health.get('context'),
-                'sidevoice.stalls': self.call.audio_health.get('stalls')})
-            logger.info('Call {}: audio output {} · {} · clock {} · stalls {} · {}', self.call.id[:8], self.call.audio_health['reason'],
-                        self.call.audio_health.get('context'), self.call.audio_health.get('clock'), self.call.audio_health.get('stalls'),
-                        ' | '.join(f"{e.get('kind')}{(' ' + str(e.get('detail'))) if e.get('detail') else ''}" for e in self.call.audio_health['events'][-8:]))
+            self.call.telemetry.audio_event(reported['reason'], {
+                'sidevoice.audio_output': reported.get('output'),
+                'sidevoice.audio_context': reported.get('context'),
+                'sidevoice.stalls': reported.get('stalls')})
+            logger.info('Call {}: audio output {} · {} · clock {} · stalls {} · {}', self.call.id[:8], reported['reason'],
+                        reported.get('context'), reported.get('clock'), reported.get('stalls'),
+                        ' | '.join(f"{e.get('kind')}{(' ' + str(e.get('detail'))) if e.get('detail') else ''}" for e in reported['events'][-8:]))
             return
         if message['type'] == 'voice-settings':
             from .settings import settings_from

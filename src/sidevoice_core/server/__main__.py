@@ -100,7 +100,8 @@ def main(argv=None):
     from ..runtime import data_dir
     parser = argparse.ArgumentParser(prog='sidevoice-core',
                                      description="Sidevoice core: this node's conversations and one voice pipeline per call.")
-    parser.add_argument('--host', default='127.0.0.1')
+    parser.add_argument('--host', default=os.environ.get('SIDEVOICE_CORE_HOST') or '127.0.0.1',
+                        help='where to listen (default loopback; a node the room dials needs a reachable address and SIDEVOICE_ALLOWED_HOSTS)')
     parser.add_argument('--port', type=int, default=int(os.environ.get('SIDEVOICE_CORE_PORT') or DEFAULT_PORT),
                         help=f'loopback port (default {DEFAULT_PORT}; 0 picks a free one)')
     parser.add_argument('--data-dir', default=str(data_dir()))

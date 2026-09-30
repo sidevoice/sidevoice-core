@@ -87,5 +87,32 @@ class ImportDirectionTest(unittest.TestCase):
         self.assertEqual(forbidden(imports_in(path), ('sidevoice_core',) + WEB_FRAMEWORKS), [])
 
 
+class CallPortTest(unittest.TestCase):
+    """The pipeline needs from a call what CallPort names, and nothing else: an object with exactly those
+    attributes and methods serves the turn flow's messages without an AttributeError."""
+
+    def test_an_object_with_exactly_the_port_serves_the_turn_flow(self):
+        import typing
+        from types import SimpleNamespace
+        from sidevoice_core.pipeline.call import CallPort, VoiceCall
+        from sidevoice_core.pipeline.settings import LanguageSettings, MicSettings
+        names = set(typing.get_type_hints(CallPort)) | {name for name in vars(CallPort) if not name.startswith('_')}
+        told = []
+        recorder = SimpleNamespace(audio_event=lambda *a, **k: told.append(a), turn_context=lambda *a, **k: told.append(a),
+                                   input=lambda *a, **k: None, turn_finished=lambda *a, **k: None)
+        call = SimpleNamespace(**{name: None for name in names})
+        call.id, call.telemetry, call.latency = 'call-1', recorder, recorder
+        call.report_audio_health = lambda health: told.append(health)
+        call.report_client_error = lambda data: told.append(data)
+        transcriber = SimpleNamespace(on_message=None)
+        voice = VoiceCall(call, transcriber, told.append, settings=LanguageSettings(), mic=MicSettings(),
+                          choice={'provider': 'browser', 'model': 'm', 'reason': 'explicit'})
+        voice.browser_message({'type': 'voice-audio-health', 'data': {'session_id': 'call-1', 'reason': 'stall', 'health': {}}})
+        voice.browser_message({'type': 'voice-turn-trace', 'data': {'session_id': 'call-1', 'thread_id': 't', 'revision': 1}})
+        voice.browser_message({'type': 'voice-client-error', 'data': {'session_id': 'call-1', 'message': 'x'}})
+        self.assertEqual(len(told), 4)
+        self.assertEqual(set(vars(call)) - names, set(), 'nothing outside the port was written or needed')
+
+
 if __name__ == '__main__':
     unittest.main()
