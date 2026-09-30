@@ -1,0 +1,8 @@
+{"models":[{"id":"kokoro","label":"Kokoro · 82M"}],"languages":[
+{"id":"es","label":"Español","espeak":"es","voices":[["ef_dora","Dora"],["em_alex","Alex"],["em_santa","Santa"]],"sample":"Hola. Esta es una prueba de voz. Podemos conversar y seguir pensando juntos."},
+{"id":"en","label":"English","espeak":"en-us","voices":[["af_heart","Heart · US"],["af_bella","Bella · US"],["bf_emma","Emma · UK"],["bm_george","George · UK"]],"sample":"Hello. This is a voice preview. We can talk and keep thinking together."},
+{"id":"fr","label":"Français","espeak":"fr-fr","voices":[["ff_siwis","Siwis"]],"sample":"Bonjour. Ceci est un essai de voix. Nous pouvons discuter et réfléchir ensemble."},
+{"id":"it","label":"Italiano","espeak":"it","voices":[["if_sara","Sara"],["im_nicola","Nicola"]],"sample":"Ciao. Questa è una prova della voce. Possiamo parlare e continuare a pensare insieme."},
+{"id":"pt","label":"Português · Brasil","espeak":"pt-br","voices":[["pf_dora","Dora"],["pm_alex","Alex"],["pm_santa","Santa"]],"sample":"Olá. Este é um teste de voz. Podemos conversar e continuar pensando juntos."},
+{"id":"hi","label":"हिन्दी · Hindi","espeak":"hi","voices":[["hf_alpha","Alpha"],["hf_beta","Beta"],["hm_omega","Omega"],["hm_psi","Psi"]],"sample":"नमस्ते। यह आवाज़ का एक परीक्षण है। हम बात कर सकते हैं और एक साथ सोच सकते हैं।"}
+],"unavailable":[{"id":"ja","label":"日本語 · Japonés","reason":"Pendiente de integrar la pronunciación en el navegador"},{"id":"zh","label":"中文 · Chino mandarín","reason":"Pendiente de integrar la pronunciación en el navegador"}]}
