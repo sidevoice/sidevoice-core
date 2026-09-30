@@ -11,8 +11,8 @@ import wave
 
 import numpy as np
 
-from sidevoice.speech_filter import SegmentSpeechGate, unreliable_transcription
-from sidevoice.transcribers import Transcript, TurnTranscriber
+from sidevoice_core.pipeline.speech_filter import SegmentSpeechGate, unreliable_transcription
+from sidevoice_core.pipeline.transcribers import Transcript, TurnTranscriber
 
 
 class FakeProvider:
@@ -72,7 +72,7 @@ class SpeechFilterTests(unittest.TestCase):
                 self.assertTrue(self.gate.assess(audio).accepted, command)
 
     def test_isolated_scripts_rejected_but_mentions_preserved(self):
-        from sidevoice.speech_filter import isolated_foreign_script
+        from sidevoice_core.pipeline.speech_filter import isolated_foreign_script
         for text in ['咳咳', 'うん', 'لنهاية.', '「東京」']:
             self.assertTrue(isolated_foreign_script(text), text)
         for text in ['¿Qué significa 咳咳?', 'Translate 東京 please', 'No', 'Sí',
@@ -99,7 +99,7 @@ class SpeechFilterTests(unittest.TestCase):
             text='Una frase poco fiable', logprobs=[{'logprob': -3}])) )
 
     def test_diagnostics_record_evidence_without_audio_or_text(self):
-        from sidevoice.speech_filter import SpeechEvidence
+        from sidevoice_core.pipeline.speech_filter import SpeechEvidence
         async def run():
             gate = SimpleNamespace(assess=lambda audio: SpeechEvidence(True, 'speech', 128, .8))
             service = turn_transcriber(FakeProvider(Transcript('Sorry', confidence=-4)), speech_gate=gate)
@@ -126,7 +126,7 @@ class SpeechFilterTests(unittest.TestCase):
         async def run():
             provider = FakeProvider(Transcript('Hola, sigo hablando'))
             service = turn_transcriber(provider, speech_gate=SimpleNamespace(
-                assess=lambda audio: __import__('sidevoice.speech_filter', fromlist=['SpeechEvidence']).SpeechEvidence(True, 'speech', 500, .95)))
+                assess=lambda audio: __import__('sidevoice_core.pipeline.speech_filter', fromlist=['SpeechEvidence']).SpeechEvidence(True, 'speech', 500, .95)))
             first = np.full(1600, 1000, dtype='<i2').tobytes()
             second = np.full(1600, 2000, dtype='<i2').tobytes()
 
@@ -154,7 +154,7 @@ class SpeechFilterTests(unittest.TestCase):
         async def run():
             provider = FakeProvider(Transcript('Corte'))
             service = turn_transcriber(provider, speech_gate=SimpleNamespace(
-                assess=lambda audio: __import__('sidevoice.speech_filter', fromlist=['SpeechEvidence']).SpeechEvidence(True, 'speech', 500, .95)))
+                assess=lambda audio: __import__('sidevoice_core.pipeline.speech_filter', fromlist=['SpeechEvidence']).SpeechEvidence(True, 'speech', 500, .95)))
             await service._handle_user_started_speaking(None)
             service._audio_buffer.extend(np.full(1600, 500, dtype='<i2').tobytes())
             result = await service.transcribe_turn()

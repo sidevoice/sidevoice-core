@@ -78,6 +78,6 @@ class SynthesisCache:
 
 
 async def _render(choice, text):
-    from . import synthesis
+    from ..pipeline import synthesis
     return await synthesis.synthesize(text, model=choice['model'], voice=choice['voice'],
                                       speed=choice['speed'], with_timestamps=True)

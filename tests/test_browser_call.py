@@ -67,12 +67,12 @@ TIMER_HELLO = PATIENT_HELLO  # kept while older tests still name it
 
 class BrowserCallTest(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        from sidevoice.room import Room
-        from sidevoice.room_history import RoomHistory
+        from sidevoice_core.control.room import Room
+        from sidevoice_core.control.history import RoomHistory
         self.temp = tempfile.TemporaryDirectory()
         self.hub = Room(RoomHistory(Path(self.temp.name) / 'history.sqlite3'))
         self.hub.journal.register_binding('connector-a', harness='claude', thread='thread-a', title='A')
-        self.patches = [patch('sidevoice.app.hub', self.hub)]
+        self.patches = []
         for active in self.patches: active.start()
 
     async def asyncTearDown(self):
@@ -96,8 +96,8 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
             {'label': 'rtvi-ai', 'type': 'client-ready', 'id': 'x', 'data': data if data is not None else TIMER_HELLO})})
 
     async def join(self, socket, hello=None):
-        from sidevoice.app import browser_call
-        task = asyncio.create_task(browser_call(socket))
+        from sidevoice_core.server.app import browser_call
+        task = asyncio.create_task(browser_call(self.hub, socket))
 
         async def hang_up():
             # A failed assertion must still end the call the way a browser does, or the runner outlives the test.
@@ -146,8 +146,8 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.hub.clients, {})
 
     async def test_smart_turn_is_the_default_and_builds_the_analyzer(self):
-        from sidevoice.app import turn_stop_strategy
-        from sidevoice.language_settings import LanguageSettings, MicSettings, mic_settings
+        from sidevoice_core.pipeline.call import turn_stop_strategy
+        from sidevoice_core.pipeline.settings import LanguageSettings, MicSettings, mic_settings
         from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import TurnAnalyzerUserTurnStopStrategy
         from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import SpeechTimeoutUserTurnStopStrategy
         mic, problem = mic_settings(LanguageSettings(), {})
@@ -157,7 +157,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertIsInstance(strategy, TurnAnalyzerUserTurnStopStrategy)
         self.assertFalse(strategy.wait_for_transcript)
         self.assertEqual(strategy._turn_analyzer.params.stop_secs, 3.0)
-        from sidevoice.app import vad_analyzer
+        from sidevoice_core.pipeline.call import vad_analyzer
         self.assertEqual(vad_analyzer(mic, {}).params.stop_secs, 0.9)
         self.assertEqual(vad_analyzer(mic, {}).params.start_secs, 0.4)
         self.assertEqual(vad_analyzer(mic_settings(LanguageSettings(), {'vad_start_secs': 0.05})[0], {}).params.start_secs, 0.4,
@@ -187,7 +187,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertIn('device settings were not valid', (await self.received(socket, 'error'))['data']['message'])
         # A voice or an engine is resolved per utterance out of these settings, so the change lands on
         # the next reply over this very socket: no second pipeline, and nothing to reconnect.
-        from sidevoice.language_settings import resolve_voice
+        from sidevoice_core.pipeline.settings import resolve_voice
         self.assertEqual(resolve_voice(client.settings, 'es')['voice'], 'ef_dora')
         client.voice.browser_message({'type': 'voice-settings', 'data': {'session_id': client.id, 'settings': {
             'default_model': 'eleven_flash_v2_5', 'default_voice': 'una-voz', 'spanish_voice': 'inherit', 'tts_speed': 1.1}}})
@@ -195,7 +195,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual((chosen['provider'], chosen['voice'], chosen['speed']), ('elevenlabs', 'una-voz', 1.1))
         self.assertEqual(list(self.hub.clients), [client.id], 'a voice change never opens a second session')
         # And a provider key is read where the audio is made, not where the pipeline was built.
-        from sidevoice import synthesis
+        from sidevoice_core.pipeline import synthesis
         with patch.object(synthesis, 'key', return_value=None):
             with self.assertRaises(ValueError):
                 await synthesis.synthesize('Hola', model='eleven_flash_v2_5', voice='una-voz', speed=1.0)
@@ -255,19 +255,19 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
     async def test_openai_provider_is_built_from_the_saved_key(self):
         socket = FakeWebSocket()
         choice = {'provider': 'openai', 'available': True, 'model': 'gpt-4o-transcribe', 'reason': 'explicit'}
-        with patch('sidevoice.app.transcription.resolve', return_value=choice), \
-                patch('sidevoice.transcription.stored_key', return_value='sk-test-not-used'):
+        with patch('sidevoice_core.server.app.transcription.resolve', return_value=choice), \
+                patch('sidevoice_core.pipeline.transcription.stored_key', return_value='sk-test-not-used'):
             task, client = await self.join(socket)
             self.assertEqual(client.stt.provider.kind, 'openai')
             self.assertEqual(client.stt.provider.model, 'gpt-4o-transcribe')
             await self.leave(socket, task)
 
     async def test_openai_without_key_fails_before_accepting_audio(self):
-        from sidevoice.app import browser_call
+        from sidevoice_core.server.app import browser_call
         socket = FakeWebSocket()
         choice = {'provider': 'openai', 'available': False, 'model': 'gpt-4o-transcribe'}
-        with patch('sidevoice.app.transcription.resolve', return_value=choice):
-            await browser_call(socket)
+        with patch('sidevoice_core.server.app.transcription.resolve', return_value=choice):
+            await browser_call(self.hub, socket)
         error = json.loads(socket.sent.get_nowait())
         self.assertEqual(error['type'], 'error')
         self.assertIn('clave de API', error['data']['message'])
@@ -276,9 +276,9 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
     # ----- what a turn does, whatever closed it -----
 
     def voice(self, results, session_id='s1', offline=()):
-        from sidevoice.app import VoiceCall
-        from sidevoice.room import RoomClient
-        from sidevoice.language_settings import LanguageSettings, MicSettings
+        from sidevoice_core.pipeline.call import VoiceCall
+        from sidevoice_core.control.room import RoomClient
+        from sidevoice_core.pipeline.settings import LanguageSettings, MicSettings
         sent = []
         client = RoomClient(session_id, self.hub)
         client.connected = True
@@ -290,8 +290,8 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
 
     async def test_the_session_message_and_the_snapshot_say_which_build_the_room_serves(self):
         from unittest.mock import patch as patch_
-        from sidevoice.browser_socket import session_message, BrowserFrameSerializer
-        with patch_('sidevoice.paths.build_info', return_value={'version': '9.9.9', 'web_build': 'abc123'}):
+        from sidevoice_core.pipeline.serializer import session_message, BrowserFrameSerializer
+        with patch_('sidevoice_core.runtime.build_info', return_value={'version': '9.9.9', 'web_build': 'abc123'}):
             message = session_message('call-1', BrowserFrameSerializer())
             self.assertEqual(message['data']['room'], {'version': '9.9.9', 'web_build': 'abc123'})
             self.assertEqual(self.hub.snapshot()['room']['web_build'], 'abc123')
@@ -328,7 +328,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(len(self.hub.snapshot()['room']['client_errors']), 1)
 
     async def test_a_finished_turn_is_transcribed_once_and_delivered(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([Transcript('Hola desde el navegador', metrics={'audio_ms': 850, 'recognition_ms': 120})])
         voice.turn_started()
         # Starting to speak also cancels this browser's own pending audio, like everyone else's.
@@ -360,7 +360,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(client.transcription['model'], 'onnx-community/whisper-small')
 
     async def test_empty_failed_or_cancelled_turns_are_not_delivered(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([Transcript(''), RuntimeError('worker died'), Transcript('Descarta esto')])
         for expectation in ('empty', 'failed', 'cancelled'):
             del sent[:]
@@ -377,7 +377,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertIn('worker died', client.error)
 
     async def test_a_turn_cut_while_the_user_kept_going_joins_the_next_one(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         async def slow():
             await asyncio.sleep(0.05)
             return Transcript('Pero bueno,')
@@ -398,7 +398,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
     async def test_switching_conversation_mid_turn_delivers_what_was_said_to_the_one_it_was_said_to(self):
         # Seen on 2026-09-26: words spoken to one conversation arrived at the next one selected (#93).
         from unittest.mock import AsyncMock
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([Transcript('Esto era para A.'), Transcript('Y esto para B.')])
         client.worker = AsyncMock()
         voice.turn_started()
@@ -416,7 +416,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertFalse(client.speaking)
 
     async def test_a_turn_waiting_for_a_breath_is_not_joined_to_a_turn_spoken_to_another_conversation(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([Transcript('Lo de A.'), Transcript('Lo de B.')])
         voice.merge_window = 0.2
         voice.turn_started()
@@ -437,7 +437,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
     async def test_the_bar_to_open_a_turn_rises_while_this_browser_is_playing_a_reply(self):
         # The room answered itself on 2026-09-20: its own voice out of the phone's speaker opened a turn,
         # cut the reply that was still playing and came back as a message with the room's own words.
-        from sidevoice.app import SPEAKING_MIN_VOLUME
+        from sidevoice_core.pipeline.call import SPEAKING_MIN_VOLUME
         voice, client, sent = self.voice([])
         changes = []
         voice.vad = type('FakeVAD', (), {'set_params': lambda _self, params: changes.append(params.min_volume)})()
@@ -451,7 +451,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
     async def test_a_finished_turn_waits_a_moment_in_case_the_pause_was_a_breath(self):
         # Asked for in the room on 2026-09-20: the detector will sometimes end a turn mid-sentence, and two
         # halves of one thought arriving as two messages is worse than answering a moment later.
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([Transcript('Lo que te quería decir'), Transcript('es que esto va junto.')])
         voice.merge_window = 0.2
         voice.turn_started()
@@ -465,7 +465,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual([r['text'] for r in rows], ['Lo que te quería decir es que esto va junto.'])
 
     async def test_a_turn_nobody_resumes_is_delivered_once_the_window_closes(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([Transcript('Esto va solo.')])
         voice.merge_window = 0.1
         voice.turn_started()
@@ -473,7 +473,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual([r['text'] for r in self.hub.journal.history('thread-a')], ['Esto va solo.'])
 
     async def test_held_text_survives_a_noise_turn_but_not_an_explicit_cancel(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         async def slow():
             await asyncio.sleep(0.05)
             return Transcript('Sigo aquí')
@@ -531,8 +531,8 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(old.mic_settings['smart_turn_min_silence'], 1.3, 'this device asked for calm')
 
         choice = {'provider': 'openai', 'available': True, 'model': 'gpt-4o-transcribe', 'reason': 'explicit'}
-        with patch('sidevoice.app.transcription.resolve', return_value=choice), \
-                patch('sidevoice.transcription.stored_key', return_value='sk-test-not-used'):
+        with patch('sidevoice_core.server.app.transcription.resolve', return_value=choice), \
+                patch('sidevoice_core.pipeline.transcription.stored_key', return_value='sk-test-not-used'):
             new_task, new = await self.join(new_socket, {
                 'conversation': 'thread-a',
                 'settings': {'stt_provider': 'openai', 'stt_model': 'gpt-4o-transcribe',
@@ -564,16 +564,16 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         await self.leave(new_socket, new_task)
 
     async def test_a_swap_that_would_overflow_the_room_is_refused_and_the_call_it_came_from_survives(self):
-        from sidevoice.app import browser_call
+        from sidevoice_core.server.app import browser_call
         joined = []
         for _ in range(self.hub.max_clients):
             socket = FakeWebSocket()
             joined.append((socket, *await self.join(socket)))
         # The room filled up after the check that precedes the hello: the join itself must refuse.
         refused = FakeWebSocket()
-        with patch('sidevoice.app.room_is_full', return_value=False):
+        with patch('sidevoice_core.server.app.room_is_full', return_value=False):
             self.hello(refused)
-            await browser_call(refused)
+            await browser_call(self.hub, refused)
         error = await self.received(refused, 'error')
         self.assertIn('maximum number of browsers', error['data']['message'])
         self.assertEqual(refused.application_state, WebSocketState.DISCONNECTED)
@@ -596,7 +596,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         return task
 
     async def test_audio_captured_offline_becomes_one_message_and_never_a_turn(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([], offline=[Transcript('Esto lo dije sin sala')])
         pcm, spoken_at = b'\x10\x00' * 16000, int(time.time() * 1000) - 9000
         self.assertIsNotNone(await self.catchup(voice, pcm, at=spoken_at))
@@ -619,14 +619,14 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertIsNone(voice.catchup, 'the audio is dropped the moment it has been recognised')
 
     async def test_a_gap_that_held_no_words_produces_nothing_at_all(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([], offline=[Transcript('  ')])
         await self.catchup(voice, b'\x00\x00' * 8000)
         self.assertEqual(sent, [], 'silence is not a message, and not an incident either')
         self.assertEqual(self.hub.journal.history('thread-a'), [])
 
     async def test_a_buffer_that_overflowed_says_so_instead_of_shortening_in_silence(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([], offline=[Transcript('…y por eso te lo cuento')])
         await self.catchup(voice, b'\x10\x00' * 32000, truncated=True)
         turn = next(m for m in sent if m['type'] == 'voice-catchup-turn')
@@ -647,7 +647,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.hub.journal.history('thread-a'), [])
 
     async def test_more_audio_than_any_gap_could_hold_is_refused_and_said_so(self):
-        from sidevoice.app import CATCHUP_MAX_SECONDS
+        from sidevoice_core.pipeline.call import CATCHUP_MAX_SECONDS
         voice, client, sent = self.voice([], offline=[])
         for index in range(CATCHUP_MAX_SECONDS + 5):
             voice.browser_message({'type': 'voice-catchup', 'data': {
@@ -658,8 +658,8 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(voice.transcriber.offline_audio, [])
 
     async def test_a_browser_clock_that_makes_no_sense_leaves_the_room_s_own(self):
-        from sidevoice.app import catchup_time
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.call import catchup_time
+        from sidevoice_core.pipeline.transcribers import Transcript
         now = time.time() * 1000
         self.assertIsNone(catchup_time(0))
         self.assertIsNone(catchup_time(now + 600_000))
@@ -678,7 +678,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertFalse([m for m in sent if m['type'] == 'voice-catchup-turn'])
 
     async def test_a_catch_up_and_a_live_turn_are_two_messages_and_neither_takes_the_other_s_place(self):
-        from sidevoice.transcribers import Transcript
+        from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([Transcript('Y ahora esto')], offline=[Transcript('Lo de antes')])
         voice.turn_started()
         catch_up = self.catchup(voice, b'\x10\x00' * 8000)
@@ -698,13 +698,13 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(voice.transcriber.offline_audio, [])
 
     async def test_a_browser_over_the_limit_is_refused_without_disturbing_the_room(self):
-        from sidevoice.app import browser_call
+        from sidevoice_core.server.app import browser_call
         joined = []
         for _ in range(self.hub.max_clients):
             socket = FakeWebSocket()
             joined.append((socket, *await self.join(socket)))
         refused = FakeWebSocket()
-        await browser_call(refused)
+        await browser_call(self.hub, refused)
         error = await self.received(refused, 'error')
         self.assertIn('maximum number of browsers', error['data']['message'])
         # The frame names the reason as well as saying it, so a page whose proxy kept the sentence
@@ -749,11 +749,11 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
     # ----- what this browser never heard, when it comes back (#52) -----
 
     async def test_the_hello_names_this_tab_s_earlier_sessions_and_the_room_plays_back_what_it_missed(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         from unittest.mock import patch as patch_
         first = FakeWebSocket()
         first_task, first_client = await self.join(first)
-        with patch_('sidevoice.language_settings.resolve_voice',
+        with patch_('sidevoice_core.pipeline.settings.resolve_voice',
                     return_value={'provider': 'kokoro', 'model': 'kokoro', 'voice': 'ef_dora',
                                   'speed': 1.0, 'language': 'es', 'device': 'auto'}):
             await self.hub.publish(Speech(thread_id='thread-a', session_id=first_client.id, revision=0,
@@ -780,12 +780,12 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         await self.leave(second, second_task)
 
     async def test_a_device_that_turned_the_catch_up_off_is_played_nothing_and_a_hello_declares_only_strings(self):
-        from sidevoice.app import prior_sessions, MAX_PRIOR_SESSIONS
-        from sidevoice.presentation import Speech
+        from sidevoice_core.pipeline.call import prior_sessions, MAX_PRIOR_SESSIONS
+        from sidevoice_core.control.room import Speech
         from unittest.mock import patch as patch_
         first = FakeWebSocket()
         first_task, first_client = await self.join(first)
-        with patch_('sidevoice.language_settings.resolve_voice',
+        with patch_('sidevoice_core.pipeline.settings.resolve_voice',
                     return_value={'provider': 'kokoro', 'model': 'kokoro', 'voice': 'ef_dora',
                                   'speed': 1.0, 'language': 'es', 'device': 'auto'}):
             await self.hub.publish(Speech(thread_id='thread-a', session_id=first_client.id, revision=0,

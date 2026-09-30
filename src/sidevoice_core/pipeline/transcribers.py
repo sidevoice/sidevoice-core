@@ -53,8 +53,8 @@ class OpenAITranscriber:
                           confidence=transcription_confidence(response))
 
 
-class BrowserTranscriber:
-    """The browser keeps its Whisper; the room hands it each finished turn and waits for the text."""
+class ClientTranscriber:
+    """The client keeps its Whisper; the call hands it each finished turn and waits for the text."""
     kind = 'browser'
     TIMEOUT = 90.0
 

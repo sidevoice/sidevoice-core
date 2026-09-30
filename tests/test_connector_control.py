@@ -3,8 +3,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from sidevoice.room_history import RoomHistory
-from sidevoice.connector_control import ConnectorControl, ConnectorPeer, PROTOCOL
+from sidevoice_core.control.history import RoomHistory
+from sidevoice_core.control.connectors import ConnectorControl, ConnectorPeer, PROTOCOL
 
 
 class FakePeer(ConnectorPeer):
@@ -115,27 +115,6 @@ class ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         await self.control.engine(self.connector_id, {'binding_id': 'someone-elses', 'engine': {'model': 'gpt-5.6-terra'}})
         self.assertEqual(self.journal.binding(registered['binding_id'])['engine'], {'model': 'claude-fable-5-1'})
 
-    async def test_revoking_a_machine_stops_it_serving_now_and_tells_it_why(self):
-        # Taking a pairing away is not a note for the machine's next connection: the conversations it
-        # carried lose their voice at once, the way they do when the room closes a channel.
-        peer = await self.attach()
-        first, second = await self.join('thread-a'), await self.join('thread-b')
-
-        lost = await self.control.revoke(self.connector_id)
-
-        self.assertEqual(sorted(record['thread'] for record in lost), ['thread-a', 'thread-b'])
-        self.assertFalse(self.control.is_live(first['binding_id']))
-        self.assertFalse(self.control.is_live(second['binding_id']))
-        self.assertEqual(self.journal.bindings(), [], 'nothing of that machine is still bound')
-        self.assertEqual(self.control.peers, {}, 'and nothing is still reachable through it')
-        self.assertTrue(peer.disconnected)
-        said = dict((event, data) for event, data in peer.sent)
-        self.assertEqual([data['reason'] for event, data in peer.sent if event == 'binding.close'],
-                         ['connector_revoked', 'connector_revoked'])
-        self.assertIn('Emparejar máquina', said['connector.revoked']['reason'],
-                      'a connector told why stops asking, instead of reading a closed socket')
-        self.assertEqual(self.journal.connector_credential(self.connector_id, self.token), 'revoked')
-
     async def test_a_machine_says_who_it_is_at_pairing_and_again_on_every_connection(self):
         journal = RoomHistory(Path(self.temp.name) / 'identity.json')
         connector_id, token = journal.redeem_pairing_code(
@@ -169,7 +148,7 @@ class ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.journal.authenticate_connector(*first))
 
     async def test_pairings_survive_a_restart_but_the_journal_does_not(self):
-        from sidevoice.room_history import RoomHistory
+        from sidevoice_core.control.history import RoomHistory
         self.queue_input('thread-x', 'Said before the restart')
         restarted = RoomHistory(self.journal.path)
         self.assertTrue(restarted.authenticate_connector(self.connector_id, self.token))
@@ -179,7 +158,7 @@ class ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_legacy_database_is_imported_once_for_its_pairings(self):
         import sqlite3
-        from sidevoice.room_history import RoomHistory
+        from sidevoice_core.control.history import RoomHistory
         root = Path(self.temp.name) / 'legacy'
         root.mkdir()
         db = sqlite3.connect(root / 'room-history.sqlite3')
@@ -353,7 +332,7 @@ class ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         """A machine that drops and comes back loses nothing: that is what the outbox is for. But an hour
         later the same sentence is not something to answer, and the room says it gave up rather than
         handing it over as if it had just been said."""
-        from sidevoice import room_history
+        from sidevoice_core.control import history as room_history
         binding = self.journal.register_binding(self.connector_id, harness='claude', thread='sess-1')
         peer = await self.attach()
         self.control.live[binding['id']] = self.connector_id
@@ -400,109 +379,3 @@ class ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             if not any(entry[2] and not entry[2].done() for entry in self.control.inflight.values()):
                 return
         raise AssertionError('a delivery never settled')
-
-
-class PairingCodeSurfaceTests(unittest.IsolatedAsyncioTestCase):
-    """The code is shown to the person in the room, never handed to whoever can reach the address."""
-
-    async def test_a_pairing_code_is_only_given_to_the_room_page(self):
-        from fastapi import FastAPI
-        from starlette.testclient import TestClient
-        from sidevoice.connector_control import mount_connector_control
-        app = FastAPI()
-        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
-        mount_connector_control(app, FakeHub(RoomHistory(Path(temp.name) / 'room.sqlite3')), heartbeat_seconds=5)
-        with TestClient(app) as client:
-            from_a_client = client.post('/api/connectors/pairing-code')
-            self.assertEqual(from_a_client.status_code, 403, 'a command line reaching the address is not someone in the room')
-            from_elsewhere = client.post('/api/connectors/pairing-code', headers={'Origin': 'http://evil.example'})
-            self.assertEqual(from_elsewhere.status_code, 403)
-            from_the_room = client.post('/api/connectors/pairing-code', headers={'Origin': 'http://testserver'})
-            self.assertEqual(from_the_room.status_code, 200)
-            # Sixty bits in an alphabet that survives being read aloud: no I, L, O or U, three groups of four.
-            self.assertRegex(from_the_room.json()['code'], r'^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$')
-            # Redeeming needs no browser: that step is the machine's, with the code the person carried to it.
-            # Redeemed as a person would type or dictate it: lower case, no dashes, a look-alike letter.
-            spoken = from_the_room.json()['code'].replace('-', ' ').lower().replace('0', 'o', 1)
-            redeemed = client.post('/api/connectors/pair', json={'code': spoken, 'host': 'laptop'})
-            self.assertEqual(redeemed.status_code, 200)
-            self.assertIn('token', redeemed.json())
-            self.assertEqual(redeemed.json()['protocol'], PROTOCOL)
-            # The room's own page can list what is paired, and see that this one is not connected yet.
-            listed = client.get('/api/connectors', headers={'Origin': 'http://testserver'})
-            self.assertEqual(listed.status_code, 200, listed.text)
-            self.assertEqual([(c['host'], c['connected']) for c in listed.json()['connectors']], [('laptop', False)])
-
-    async def test_guessing_codes_locks_redemption_for_the_whole_room(self):
-        from fastapi import FastAPI
-        from starlette.testclient import TestClient
-        from sidevoice.connector_control import mount_connector_control
-        app = FastAPI()
-        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
-        journal = RoomHistory(Path(temp.name) / 'room.sqlite3')
-        mount_connector_control(app, FakeHub(journal), heartbeat_seconds=5, redemption_limit={'failures': 3, 'window': 600})
-        with TestClient(app) as client:
-            real = client.post('/api/connectors/pairing-code', headers={'Origin': 'http://testserver'}).json()['code']
-            for _ in range(3):
-                self.assertEqual(client.post('/api/connectors/pair', json={'code': 'NOPE-NOPE-NOPE'}).status_code, 403)
-            # The fourth wrong one, and even the right one, are refused for the window: a guesser learns nothing.
-            locked = client.post('/api/connectors/pair', json={'code': 'NOPE-NOPE-NOPE'})
-            self.assertEqual(locked.status_code, 429)
-            self.assertTrue(int(locked.headers['Retry-After']) > 0)
-            self.assertEqual(client.post('/api/connectors/pair', json={'code': real}).status_code, 429)
-            self.assertIsNotNone(journal.pairing_codes.get(RoomHistory.normalise_pairing_code(real)), 'the real code was not spent by the lockout')
-
-class RevocationSurfaceTests(unittest.IsolatedAsyncioTestCase):
-    """Taking a machine's pairing away: the person in the room does it, and nobody else can."""
-
-    def room(self):
-        from fastapi import FastAPI
-        from starlette.testclient import TestClient
-        from sidevoice.connector_control import mount_connector_control
-        app = FastAPI()
-        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
-        journal = RoomHistory(Path(temp.name) / 'room-state.json')
-        control = mount_connector_control(app, FakeHub(journal), heartbeat_seconds=5)
-        return TestClient(app), journal, control
-
-    def machine(self, client, **identity):
-        code = client.post('/api/connectors/pairing-code', headers={'Origin': 'http://testserver'}).json()['code']
-        paired = client.post('/api/connectors/pair', json={'code': code, **identity})
-        self.assertEqual(paired.status_code, 200, paired.text)
-        return paired.json()['connector_id']
-
-    async def test_only_the_room_page_revokes_and_a_second_time_takes_the_row_away(self):
-        client, journal, control = self.room()
-        with client:
-            connector_id = self.machine(client, host='laptop')
-            peer = FakePeer()
-            await control.attach(connector_id, peer)
-
-            self.assertEqual(client.delete(f'/api/connectors/{connector_id}').status_code, 403,
-                             'reaching the address is not being in the room')
-            self.assertEqual(client.delete(f'/api/connectors/{connector_id}',
-                                           headers={'Origin': 'http://evil.example'}).status_code, 403)
-
-            revoked = client.delete(f'/api/connectors/{connector_id}', headers={'Origin': 'http://testserver'})
-            self.assertEqual(revoked.status_code, 200, revoked.text)
-            self.assertEqual(revoked.json()['status'], 'revoked')
-            self.assertTrue(peer.disconnected, 'the live machine stops serving now, not on its next connection')
-            listed = client.get('/api/connectors', headers={'Origin': 'http://testserver'}).json()['connectors']
-            self.assertEqual([(row['host'], row['revoked'], row['connected']) for row in listed], [('laptop', 1, False)],
-                             'it stays listed as revoked, so nobody wonders why that machine went quiet')
-
-            removed = client.delete(f'/api/connectors/{connector_id}', headers={'Origin': 'http://testserver'})
-            self.assertEqual(removed.json()['status'], 'removed')
-            self.assertEqual(client.get('/api/connectors', headers={'Origin': 'http://testserver'}).json()['connectors'], [])
-            self.assertEqual(client.delete(f'/api/connectors/{connector_id}',
-                                           headers={'Origin': 'http://testserver'}).status_code, 404)
-
-    async def test_the_list_carries_what_each_machine_said_about_itself(self):
-        client, journal, control = self.room()
-        with client:
-            self.machine(client, host='macbook-pro', platform='darwin arm64', version='0.4.3',
-                         harnesses=['claude', 'codex'])
-            row, = client.get('/api/connectors', headers={'Origin': 'http://testserver'}).json()['connectors']
-            self.assertEqual((row['host'], row['platform'], row['version'], row['harnesses']),
-                             ('macbook-pro', 'darwin arm64', '0.4.3', ['claude', 'codex']),
-                             'a row reads as a machine, not as a UUID')

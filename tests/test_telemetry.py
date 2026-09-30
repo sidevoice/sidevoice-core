@@ -8,9 +8,9 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from sidevoice import telemetry as module
-from sidevoice.latency import CallLatency
-from sidevoice.telemetry import ATTRIBUTES, CallTelemetry, STAGES, attributes, telemetry
+from sidevoice_core.control import telemetry as module
+from sidevoice_core.control.latency import CallLatency
+from sidevoice_core.control.telemetry import ATTRIBUTES, CallTelemetry, STAGES, attributes, telemetry
 
 # A browser's root span for one turn, as the traceparent frame carries it.
 TRACEPARENT = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
@@ -85,8 +85,8 @@ class ConfigurationTest(unittest.TestCase):
         import sys
         from pathlib import Path
         probe = ('import sys;'
-                 'import sidevoice.room, sidevoice.connector_control;'
-                 'from sidevoice.telemetry import configure, telemetry;'
+                 'import sidevoice_core.control.room, sidevoice_core.control.connectors;'
+                 'from sidevoice_core.control.telemetry import configure, telemetry;'
                  'configure(environ={});'
                  "print(telemetry.enabled, telemetry.tracer, telemetry._tracer_provider, telemetry._meter_provider,"
                  " sorted(m for m in sys.modules if m.startswith('opentelemetry')))")
@@ -135,10 +135,12 @@ class ContractTest(unittest.TestCase):
     """
 
     def contract(self, name):
+        import os
         from pathlib import Path
-        source = Path(__file__).resolve().parents[3] / 'packages' / 'protocol' / 'src' / 'index.ts'
+        # The protocol package lives in rubasace/sidevoice: SIDEVOICE_REPOSITORY names that checkout.
+        source = Path(os.environ.get('SIDEVOICE_REPOSITORY') or '/nonexistent') / 'packages' / 'protocol' / 'src' / 'index.ts'
         if not source.exists():
-            self.skipTest('the protocol package is not checked out next to the room')
+            self.skipTest('SIDEVOICE_REPOSITORY does not name a rubasace/sidevoice checkout')
         body = source.read_text().split('export const ' + name + ' = [', 1)
         self.assertEqual(len(body), 2, name + ' is not declared in the protocol package')
         return re.findall(r'"([^"]+)"', body[1].split(']', 1)[0])
@@ -259,7 +261,7 @@ class MetricsTest(TelemetryHarness):
         self.assertEqual(set(telemetry.histograms), set(STAGES))
 
     def test_a_turn_that_interrupted_nothing_is_not_counted_as_a_cancellation(self):
-        from sidevoice.room import Room, RoomClient, Utterance
+        from sidevoice_core.control.room import Room, RoomClient, Utterance
         hub = Room(MagicMock())
         call = RoomClient('s', hub, worker=AsyncMock())
         call.connected = True
@@ -284,8 +286,8 @@ class PrivacyTest(TelemetryHarness):
     """The one test that must never be relaxed: a span of this room carries no content."""
 
     async def _one_call(self):
-        from sidevoice.presentation import Speech
-        from sidevoice.room import Room, RoomClient
+        from sidevoice_core.control.room import Speech
+        from sidevoice_core.control.room import Room, RoomClient
         hub = Room(MagicMock())
         hub.journal.put.return_value = {}
         hub.journal.binding_for_thread.return_value = None
@@ -306,9 +308,9 @@ class PrivacyTest(TelemetryHarness):
         choice = {'provider': 'elevenlabs', 'model': 'test', 'voice': 'test', 'speed': 1}
         audio = {'mime_type': 'audio/mpeg', 'audio_base64': 'YQ==',
                  'timings_ms': {'request_to_complete_ms': 800}}
-        with patch('sidevoice.language_settings.load_settings'), \
-                patch('sidevoice.language_settings.resolve_voice', return_value=choice), \
-                patch('sidevoice.synthesis.synthesize', new=AsyncMock(return_value=audio)):
+        with patch('sidevoice_core.pipeline.settings.load_settings'), \
+                patch('sidevoice_core.pipeline.settings.resolve_voice', return_value=choice), \
+                patch('sidevoice_core.pipeline.synthesis.synthesize', new=AsyncMock(return_value=audio)):
             await hub.publish(Speech(thread_id='a', session_id='s', revision=1,
                                      text=SECRETS[1], utterance_id='u'))
         call.telemetry.audio_event('stall', {'sidevoice.audio_output': 'element'})
@@ -337,71 +339,3 @@ class PrivacyTest(TelemetryHarness):
         self.assertNotIn(SECRETS[0], str([span.name for span in spans]))
 
 
-class TelemetryEndpointTest(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        telemetry.shutdown()
-        self.addCleanup(telemetry.shutdown)
-
-    async def routes(self):
-        from fastapi import FastAPI
-        from sidevoice.telemetry import mount_telemetry
-        app = FastAPI()
-        mount_telemetry(app)
-        return {route.path + ':' + sorted(route.methods - {'HEAD'})[0]: route.endpoint
-                for route in app.routes if hasattr(route, 'endpoint')}
-
-    @staticmethod
-    def request(body=b'{}'):
-        from starlette.requests import Request
-        scope = {'type': 'http', 'method': 'POST', 'path': '/api/telemetry',
-                 'headers': [(b'content-type', b'application/json')],
-                 'server': ('localhost', 80), 'scheme': 'http'}
-
-        async def receive():
-            return {'type': 'http.request', 'body': body, 'more_body': False}
-
-        return Request(scope, receive)
-
-    async def test_an_unconfigured_room_advertises_nothing_and_drops_what_it_is_sent(self):
-        module.configure(environ={})
-        routes = await self.routes()
-        self.assertEqual(await routes['/api/telemetry:GET'](), {'enabled': False})
-        with patch('aiohttp.ClientSession') as session:
-            response = await routes['/api/telemetry:POST'](self.request(b'{"resourceSpans":[]}'))
-        self.assertEqual(response.status_code, 204)
-        session.assert_not_called()
-
-    async def test_a_configured_room_forwards_the_browser_batch_unread(self):
-        module.configure(endpoint='http://collector:4318', span_exporter=InMemorySpanExporter(),
-                         metric_reader=InMemoryMetricReader())
-        routes = await self.routes()
-        self.assertEqual(await routes['/api/telemetry:GET'](), {'enabled': True})
-        posted = {}
-
-        class Response:
-            status = 200
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *error):
-                return False
-
-        class Session(Response):
-            def post(self, url, data=None, headers=None):
-                posted.update(url=url, data=data, headers=headers)
-                return Response()
-
-        with patch('aiohttp.ClientSession', return_value=Session()):
-            response = await routes['/api/telemetry:POST'](self.request(b'{"resourceSpans":[1]}'))
-        self.assertEqual(response.status_code, 204)
-        self.assertEqual(posted['url'], 'http://collector:4318/v1/traces')
-        self.assertEqual(posted['data'], b'{"resourceSpans":[1]}')
-
-    async def test_an_oversized_batch_is_refused_before_anything_is_read(self):
-        from fastapi import HTTPException
-        module.configure(endpoint='http://collector:4318', span_exporter=InMemorySpanExporter(),
-                         metric_reader=InMemoryMetricReader())
-        routes = await self.routes()
-        with self.assertRaises(HTTPException):
-            await routes['/api/telemetry:POST'](self.request(b'x' * (module.MAX_TELEMETRY_BODY + 1)))

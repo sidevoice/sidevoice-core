@@ -1,5 +1,5 @@
 import unittest
-from sidevoice.latency import CallLatency
+from sidevoice_core.control.latency import CallLatency
 
 
 class LatencyTest(unittest.TestCase):
@@ -100,8 +100,8 @@ class LatencyTest(unittest.TestCase):
 class LatencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
     async def test_original_revision_survives_playback_epoch_remapping(self):
         from unittest.mock import AsyncMock, MagicMock, patch
-        from sidevoice.presentation import Speech
-        from sidevoice.room import Room, RoomClient
+        from sidevoice_core.control.room import Speech
+        from sidevoice_core.control.room import Room, RoomClient
         hub = Room(MagicMock())
         hub.journal.put.return_value = {}
         hub.journal.binding_for_thread.return_value = None
@@ -118,8 +118,8 @@ class LatencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
         choice = {'provider': 'elevenlabs', 'model': 'test', 'voice': 'test', 'speed': 1}
         audio = {'mime_type': 'audio/mpeg', 'audio_base64': 'YQ==',
                  'timings_ms': {'request_to_first_chunk_ms': 10, 'request_to_complete_ms': 20}}
-        with patch('sidevoice.language_settings.load_settings'), patch('sidevoice.language_settings.resolve_voice', return_value=choice), patch(
-                'sidevoice.synthesis.synthesize', new=AsyncMock(return_value=audio)):
+        with patch('sidevoice_core.pipeline.settings.load_settings'), patch('sidevoice_core.pipeline.settings.resolve_voice', return_value=choice), patch(
+                'sidevoice_core.pipeline.synthesis.synthesize', new=AsyncMock(return_value=audio)):
             await hub.publish(Speech(thread_id='a', session_id='s', revision=1, text='test reply', utterance_id='u'))
         sent = next(event['data'] for event in events if event['type'] == 'voice-speech-audio')
         self.assertEqual(sent['revision'], 2)
@@ -133,8 +133,8 @@ class LatencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock, MagicMock, patch
         from fastapi import FastAPI, HTTPException
         from starlette.requests import Request
-        from sidevoice.presentation import mount_presentation
-        from sidevoice.room import Room, RoomClient, Utterance
+        from sidevoice_core.server.presentation import mount_presentation
+        from sidevoice_core.control.room import Room, RoomClient, Utterance
         hub = Room(MagicMock())
         call = RoomClient('s', hub, worker=AsyncMock())
         call.connected = True
@@ -149,8 +149,8 @@ class LatencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
         app = FastAPI()
         request = Request({'type': 'http', 'method': 'POST', 'path': '/', 'headers': [],
                            'server': ('localhost', 80), 'scheme': 'http'})
-        with patch('sidevoice.presentation.hub', hub):
-            mount_presentation(app)
+        if True:
+            mount_presentation(app, hub)
             routes = {route.path: route.endpoint for route in app.routes if hasattr(route, 'endpoint')}
             receipt = {'session_id': 'old', 'revision': 2, 'utterance_id': 'u',
                        'status': 'playing', 'timings_ms': {'audio_received_to_playback_scheduled_ms': 25}}

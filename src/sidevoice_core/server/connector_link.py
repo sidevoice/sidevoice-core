@@ -1,7 +1,8 @@
-"""The connector link: Socket.IO at `/api/connectors/link`, namespace `/connectors`.
+"""This machine's connector link: Socket.IO at `/api/connectors/link`, namespace `/connectors`.
 
-One `AsyncServer` mounted on the room's own FastAPI app, translating events into
-`ConnectorControl` calls. Everything this module does not contain is the point of it:
+The connector links to its node's core exactly as it used to link to a room: same path, same
+events, same acknowledgements. One `AsyncServer` mounted on the node's FastAPI app, translating
+events into `ConnectorControl` calls. Everything this module does not contain is the point of it:
 acknowledgements, keepalive, reconnection with backoff and multiplexing are the library's,
 and the room no longer maintains a protocol to get them.
 
@@ -16,7 +17,10 @@ from loguru import logger
 # person at the other end to pair again.
 from socketio.exceptions import ConnectionRefusedError, TimeoutError as AcknowledgementTimeout
 
-from .connector_control import REVOKED_REASON, ConnectorPeer, HEARTBEAT_MISSES, PROTOCOL
+from ..control.connectors import ConnectorControl, ConnectorPeer, HEARTBEAT_MISSES, PROTOCOL
+
+REFUSED_REASON = ('This connector\'s credential is not this core\'s: the core writes a fresh one when it '
+                  'starts, and the connector reads it from the core\'s ready file. Restart the connector.')
 
 # The route names the capability, not the transport: a machine reaches the room's connector link
 # here whatever carries it, so a change of transport moves no Ingress and no credential.
@@ -76,16 +80,11 @@ def mount_connector_socketio(app, control):
         # A machine says who it is on every connection, not only when it was paired: the room keeps
         # the latest, so the page shows what is true now rather than what was true months ago.
         if not control.journal.authenticate_connector(connector_id, token, credential):
-            # A pairing the person took away is not a credential nobody recognises, and saying so is
-            # the difference between "pair this machine again" and "somebody revoked it on purpose".
-            raise ConnectionRefusedError(
-                REVOKED_REASON if control.journal.connector_credential(connector_id, token) == 'revoked' else
-                'This machine is not paired with the room, or its credential is no longer valid: '
-                'pair it again with the code the room shows under "Emparejar máquina" (Pair a machine).')
+            raise ConnectionRefusedError(REFUSED_REASON)
         if credential.get('protocol') != PROTOCOL:
             raise ConnectionRefusedError(
-                f'This connector speaks protocol {credential.get("protocol")!r} and the room speaks '
-                f'{PROTOCOL}: update the connector and pair this machine again.')
+                f'This connector speaks protocol {credential.get("protocol")!r} and this core speaks '
+                f'{PROTOCOL}: update the connector.')
         peer = SocketIOPeer(server, sid)
         await server.save_session(sid, {'connector_id': connector_id, 'peer': peer}, namespace=NAMESPACE)
         await control.attach(connector_id, peer)
@@ -129,3 +128,34 @@ def mount_connector_socketio(app, control):
 
     app.mount(PATH, socketio.ASGIApp(server, socketio_path=''))
     return server
+
+
+def mount_connector_link(app, room, **options):
+    """The control plane for this machine's connector, started and stopped with the app, and the
+    link that carries it. Returns the control plane."""
+    from contextlib import asynccontextmanager
+    control = ConnectorControl(room.journal, room, **options)
+    room.control = control
+    previous_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def control_lifespan(application):
+        async with previous_lifespan(application) as state:
+            await control.start()
+            try:
+                yield state
+            finally:
+                await control.stop()
+    app.router.lifespan_context = control_lifespan
+    app.state.connector_link = mount_connector_socketio(app, control)
+
+    from fastapi import Request
+    from .presentation import require_same_origin
+
+    @app.get('/api/connectors')
+    async def connectors(request: Request):
+        require_same_origin(request)
+        return {'connectors': [{**c, 'connected': c['id'] in control.peers} for c in room.journal.paired_connectors()],
+                'bindings': control.participants()}
+
+    return control

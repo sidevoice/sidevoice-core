@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import patch
-from sidevoice import language_settings
+from sidevoice_core.pipeline import settings as language_settings
 
 class PreferencesTest(unittest.TestCase):
     def test_the_room_keeps_no_settings_and_a_device_brings_its_own(self):
@@ -59,7 +59,7 @@ class VoiceResolutionTest(unittest.TestCase):
 
 class NativeElevenLabsSpeedTest(unittest.IsolatedAsyncioTestCase):
     async def test_speed_is_sent_to_synthesis_with_provider_limits(self):
-        from sidevoice import synthesis
+        from sidevoice_core.pipeline import synthesis
         requests = []
 
         class Response:
@@ -80,7 +80,7 @@ class NativeElevenLabsSpeedTest(unittest.IsolatedAsyncioTestCase):
                 return Response()
 
         with patch.object(synthesis, 'key', return_value='test-only'), patch.object(
-                synthesis.aiohttp, 'ClientSession', return_value=Client()):
+                __import__("aiohttp"), "ClientSession", return_value=Client()):
             for requested, effective in [(0.85, 0.85), (1.15, 1.15), (2, 1.2), (0.5, 0.7)]:
                 audio = await synthesis.synthesize('Hola', model='eleven_flash_v2_5',
                                                    voice='test-voice', speed=requested)
@@ -95,7 +95,7 @@ class NativeElevenLabsSpeedTest(unittest.IsolatedAsyncioTestCase):
 
 class ElevenLabsVoiceCatalogTest(unittest.TestCase):
     def test_primary_language_wins_over_multilingual_previews(self):
-        from sidevoice import synthesis
+        from sidevoice_core.pipeline import synthesis
         voice = synthesis._voice_entry({
             'voice_id': 'spanish-voice',
             'name': 'Lucia',
@@ -108,7 +108,7 @@ class ElevenLabsVoiceCatalogTest(unittest.TestCase):
         self.assertEqual(voice['description'], 'premade')
 
     def test_verified_languages_are_a_fallback_when_primary_is_missing(self):
-        from sidevoice import synthesis
+        from sidevoice_core.pipeline import synthesis
         voice = synthesis._voice_entry({
             'voice_id': 'multilingual-voice',
             'name': 'Polyglot',
@@ -121,7 +121,7 @@ class ElevenLabsVoiceCatalogTest(unittest.TestCase):
 
 class CloudTranscriptionSettingsTests(unittest.TestCase):
     def test_openai_transcription_does_not_fail_validation_on_a_meaningless_local_device(self):
-        from sidevoice.language_settings import settings_from
+        from sidevoice_core.pipeline.settings import settings_from
         settings, problem = settings_from({'stt_provider': 'openai', 'stt_model': 'gpt-4o-transcribe', 'stt_device': ''})
         self.assertIsNone(problem)
         self.assertEqual((settings.stt_provider, settings.stt_device), ('openai', 'auto'))

@@ -1,13 +1,19 @@
-"""Speech-to-text catalogue for browser-local and OpenAI cloud transcription."""
+"""Speech-to-text catalogue: the client transcribes (its own Whisper), or OpenAI from this node."""
 import json
 import os
 import re
 from pathlib import Path
-from .paths import RUNTIME_ROOT
+from ..runtime import data_dir
 
-import aiohttp
+CREDENTIALS = None   # a fixed path overrides the default; see credentials_file()
 
-CREDENTIALS = Path(os.getenv('VOICE_STT_CREDENTIALS_FILE', str(RUNTIME_ROOT / 'stt-credentials.json')))
+
+def credentials_file():
+    """Where this node keeps the key, read when asked: `CREDENTIALS` when set (a test, a deployment), else
+    the environment's file, else the node's data directory."""
+    if CREDENTIALS is not None:
+        return Path(CREDENTIALS)
+    return Path(os.getenv('VOICE_STT_CREDENTIALS_FILE') or data_dir() / 'stt-credentials.json')
 
 BROWSER_MODELS = [
     {'id': 'onnx-community/whisper-tiny', 'label': 'Whisper tiny',
@@ -41,7 +47,7 @@ PROVIDERS = {item['id']: item for item in CATALOG['providers']}
 
 def _read():
     try:
-        stored = json.loads(CREDENTIALS.read_text())
+        stored = json.loads(credentials_file().read_text())
         return stored if isinstance(stored, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -66,22 +72,24 @@ def save_key(provider, key):
         raise ValueError('The key is empty')
     stored = _read()
     stored[provider] = key
-    CREDENTIALS.parent.mkdir(parents=True, exist_ok=True)
-    temporary = CREDENTIALS.with_suffix('.tmp')
+    target = credentials_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix('.tmp')
     temporary.write_text(json.dumps(stored), encoding='utf8')
     temporary.chmod(0o600)
-    temporary.replace(CREDENTIALS)
+    temporary.replace(target)
 
 
 def clear_key(provider):
     stored = _read()
     if stored.pop(provider, None) is None:
         return
-    CREDENTIALS.parent.mkdir(parents=True, exist_ok=True)
-    temporary = CREDENTIALS.with_suffix('.tmp')
+    target = credentials_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix('.tmp')
     temporary.write_text(json.dumps(stored), encoding='utf8')
     temporary.chmod(0o600)
-    temporary.replace(CREDENTIALS)
+    temporary.replace(target)
 
 
 def credential_state(config=None):
@@ -130,8 +138,8 @@ def build(settings, choice, *, config=None, send=None, session_id=None):
     if choice['provider'] == 'browser':
         if send is None or not session_id:
             raise ValueError('Browser transcription needs its own connection.')
-        from .transcribers import BrowserTranscriber
-        return BrowserTranscriber(send, session_id, language=language)
+        from .transcribers import ClientTranscriber
+        return ClientTranscriber(send, session_id, language=language)
     key = stored_key('openai') or environment_key(config)
     if not key:
         raise ValueError('OpenAI necesita una clave de API antes de conectar.')
@@ -142,6 +150,7 @@ def build(settings, choice, *, config=None, send=None, session_id=None):
 async def verify(provider, key):
     if provider != 'openai':
         return
+    import aiohttp
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
             async with http.get(OPENAI_API + '/v1/models',
@@ -185,6 +194,7 @@ async def catalog(provider, config=None):
     result = {'provider': provider, 'configured': bool(value), 'models': [], 'error': None}
     if not value:
         return result
+    import aiohttp
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as http:
             result['models'] = await _models(http, value)

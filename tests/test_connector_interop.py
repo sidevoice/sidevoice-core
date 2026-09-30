@@ -28,12 +28,13 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
-from sidevoice.connector_control import mount_connector_control
-from sidevoice.room_history import RoomHistory
+from sidevoice_core.server.connector_link import mount_connector_link
+from sidevoice_core.control.history import RoomHistory
 from test_connector_control import FakeHub
 
-REPOSITORY = Path(__file__).resolve().parents[3]
-PACKAGE = REPOSITORY / 'packages' / 'connector'
+# The connector lives in rubasace/sidevoice (`packages/connector`), not here: SIDEVOICE_REPOSITORY
+# names that checkout (with its node_modules installed). Without it these skip.
+PACKAGE = Path(os.environ.get('SIDEVOICE_REPOSITORY') or '/nonexistent') / 'packages' / 'connector'
 NODE = shutil.which('node')
 DELIVERIES = 5          # enough for a median that is not one sample's bad luck
 
@@ -142,7 +143,7 @@ class Room:
         await asyncio.wait_for(self.task, timeout=20)
 
 
-@unittest.skipIf(NODE is None, 'node is not on PATH')
+@unittest.skipIf(NODE is None or not (PACKAGE / 'connector.mjs').exists(), 'node, or a rubasace/sidevoice checkout (SIDEVOICE_REPOSITORY), is not here')
 class ConnectorInteropTests(unittest.IsolatedAsyncioTestCase):
     maxDiff = None
 
@@ -172,7 +173,7 @@ class ConnectorInteropTests(unittest.IsolatedAsyncioTestCase):
         journal = RoomHistory(root / 'room.json')
         hub = FakeHub(journal)
         app = FastAPI()
-        control = mount_connector_control(app, hub, heartbeat_seconds=5)
+        control = mount_connector_link(app, hub, heartbeat_seconds=5)
         connector_id, token = journal.redeem_pairing_code(journal.create_pairing_code())
 
         # Every delivery is timed from the room putting it on the wire to the connector's answer.
@@ -321,7 +322,7 @@ class ConnectorInteropTests(unittest.IsolatedAsyncioTestCase):
 
         journal = RoomHistory(Path(temp.name) / 'room.json')
         app = FastAPI()
-        mount_connector_control(app, FakeHub(journal), heartbeat_seconds=5)
+        mount_connector_link(app, FakeHub(journal), heartbeat_seconds=5)
         connector_id, _ = journal.redeem_pairing_code(journal.create_pairing_code())
         port = free_port()
         room = Room(app, port)

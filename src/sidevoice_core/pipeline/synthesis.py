@@ -1,7 +1,7 @@
 """Speech-synthesis providers and their server-side credentials.
 
-Kokoro remains a browser-only provider. ElevenLabs is deliberately invoked by
-the room server: its key never reaches the browser, while the generated audio
+Kokoro is rendered by the client. ElevenLabs is deliberately invoked by
+this node: its key never reaches the browser, while the generated audio
 does. The account catalogue is fetched on demand so newly created, cloned, or
 workspace voices appear without a Sidevoice release.
 """
@@ -13,10 +13,17 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
-import aiohttp
-from .paths import RUNTIME_ROOT
+from ..runtime import data_dir
 
-CREDENTIALS = Path(os.getenv('VOICE_TTS_CREDENTIALS_FILE', str(RUNTIME_ROOT / 'tts-credentials.json')))
+CREDENTIALS = None   # a fixed path overrides the default; see credentials_file()
+
+
+def credentials_file():
+    """Where this node keeps the key, read when asked: `CREDENTIALS` when set (a test, a deployment), else
+    the environment's file, else the node's data directory."""
+    if CREDENTIALS is not None:
+        return Path(CREDENTIALS)
+    return Path(os.getenv('VOICE_TTS_CREDENTIALS_FILE') or data_dir() / 'tts-credentials.json')
 ELEVENLABS_API = 'https://api.elevenlabs.io'
 
 FALLBACK_MODELS = [
@@ -28,7 +35,7 @@ FALLBACK_MODELS = [
 
 def _read():
     try:
-        data = json.loads(CREDENTIALS.read_text(encoding='utf8'))
+        data = json.loads(credentials_file().read_text(encoding='utf8'))
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -65,22 +72,24 @@ def save_key(value):
         raise ValueError('The key is empty.')
     stored = _read()
     stored['elevenlabs'] = value
-    CREDENTIALS.parent.mkdir(parents=True, exist_ok=True)
-    temporary = CREDENTIALS.with_suffix('.tmp')
+    target = credentials_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix('.tmp')
     temporary.write_text(json.dumps(stored), encoding='utf8')
     temporary.chmod(0o600)
-    temporary.replace(CREDENTIALS)
+    temporary.replace(target)
 
 
 def clear_key():
     stored = _read()
     if stored.pop('elevenlabs', None) is None:
         return
-    CREDENTIALS.parent.mkdir(parents=True, exist_ok=True)
-    temporary = CREDENTIALS.with_suffix('.tmp')
+    target = credentials_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix('.tmp')
     temporary.write_text(json.dumps(stored), encoding='utf8')
     temporary.chmod(0o600)
-    temporary.replace(CREDENTIALS)
+    temporary.replace(target)
 
 
 def _headers(value):
@@ -101,6 +110,7 @@ async def verify(value):
     models and account voices is required for Sidevoice's model picker and its
     custom-voice picker, and performs no synthesis.
     """
+    import aiohttp
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
             await _models(http, value)
@@ -197,6 +207,7 @@ async def catalog(config=None):
     value = key(config)
     if not value:
         return result
+    import aiohttp
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as http:
             models, voices = await asyncio.gather(_models(http, value), _voices(http, value))
@@ -223,6 +234,7 @@ async def synthesize(text, *, model, voice, speed, config=None, with_timestamps=
     url = ELEVENLABS_API + '/v1/text-to-speech/' + quote(voice, safe='') + endpoint + '?output_format=mp3_44100_128'
     started = time.monotonic()
     timings = {}
+    import aiohttp
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as http:
             async with http.post(url, headers={**_headers(value), 'Content-Type': 'application/json'}, json=body) as response:

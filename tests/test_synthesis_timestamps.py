@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from sidevoice import synthesis
+from sidevoice_core.pipeline import synthesis
 
 
 class SynthesisTimestampsTest(unittest.IsolatedAsyncioTestCase):
@@ -30,7 +30,7 @@ class SynthesisTimestampsTest(unittest.IsolatedAsyncioTestCase):
                 return response
 
         with patch.object(synthesis, 'key', return_value='test-only'), patch.object(
-                synthesis.aiohttp, 'ClientSession', return_value=Client()):
+                __import__("aiohttp"), "ClientSession", return_value=Client()):
             result = await synthesis.synthesize('Hola', model='test-model', voice='voice/id',
                                                 speed=1.2, with_timestamps=True)
         return result, requests

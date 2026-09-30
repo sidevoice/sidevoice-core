@@ -1,4 +1,4 @@
-"""The room: one shared conversation, many browsers connected to it at once.
+"""The room: one node's conversations, many clients connected to them at once.
 
 Room state is what everyone in the room shares — which conversation is selected,
 the durable journal, the assistant's utterances and any audio the room paid a
@@ -17,12 +17,14 @@ import time
 import uuid
 from collections import deque
 
-from fastapi import HTTPException
 from pipecat.frames.frames import InterruptionFrame
+from pydantic import BaseModel, Field
 
+from ..pipeline.frames import PresentationBoundary, PresentationSpeech
+from .. import runtime
 from .publication import PublicationClient, publication_decision
 from .latency import CallLatency
-from .pipeline_frames import PresentationBoundary, PresentationSpeech
+from .refusal import Refusal
 from .synthesis_cache import SynthesisCache
 from .telemetry import CallTelemetry
 
@@ -63,6 +65,16 @@ def browser_limit(environ=None):
 RANK = {'disconnected': 1, 'failed': 2, 'interrupted': 3, 'queued': 4,
         'waiting_for_turn': 5, 'waiting_for_pause': 5, 'synthesizing': 6,
         'playing': 7, 'playback_finished': 8}
+
+
+class Speech(BaseModel):
+    """One reply an agent publishes, as the room accepts it from any door (a connector, the HTTP route)."""
+    thread_id: str
+    session_id: str
+    revision: int = Field(ge=0)
+    text: str = Field(min_length=1, max_length=6000)
+    utterance_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    language: str | None = Field(default=None, pattern=r'^(es|en|fr|it|pt|hi)$')
 
 
 class Utterance:
@@ -203,6 +215,17 @@ class RoomClient:
                 'transcription': self.transcription,
                 'audio_health': self.audio_health,
                 'speech_filter': getattr(self.stt, 'filter_stats', {})}
+
+    # ----- what this browser reports about itself, kept where it outlives it -----
+
+    def report_client_error(self, data):
+        if self.room is not None:
+            self.room.client_errors.append(client_error_report(data, self.id))
+
+    def report_audio_health(self, health):
+        self.audio_health = health
+        if self.room is not None:
+            self.room.audio_reports.append({'session_id': self.id, **health})
 
     # ----- input this browser produced -----
 
@@ -455,7 +478,7 @@ class RoomClient:
 
     async def play_in_browser(self, utterance, rev):
         """Hand this browser the reply to play. Kokoro it renders; a paid engine the room did."""
-        from .language_settings import load_settings, resolve_voice
+        from ..pipeline.settings import load_settings, resolve_voice
         uid = utterance.id
         choice = resolve_voice(self.settings or load_settings(), utterance.language)
         self.transition(uid, 'synthesizing')
@@ -492,7 +515,7 @@ class RoomClient:
                 audio, fresh = await self.room.shared_audio(utterance, choice)
             except ValueError as error:
                 self.fail_active()
-                raise HTTPException(502, str(error)) from error
+                raise Refusal(502, str(error)) from error
             original = self.room.utterances.get(utterance.replay_of) if utterance.replay_of else utterance
             if original is not None:
                 original.rendered = True
@@ -523,11 +546,6 @@ def client_error_report(data, session_id=None):
             'stack': str(data.get('stack') or '')[:2000],
             'component': str(data.get('component') or '')[:1000],
             'build': str(data.get('build') or '')[:40]}
-
-
-def _build_info():
-    from .paths import build_info
-    return build_info()
 
 
 class Room:
@@ -717,7 +735,7 @@ class Room:
         one thing in it at a time — and being an ordinary entry in that queue is what makes a new turn
         cancel the lot, through the same halt that interrupts anything else.
         """
-        from .language_settings import load_settings, resolve_voice
+        from ..pipeline.settings import load_settings, resolve_voice
         queued, skipped = [], []
         for original in self.missed_replies(client, seconds=seconds, sessions=sessions):
             try:
@@ -754,7 +772,7 @@ class Room:
         """Which replies this browser could hear again right now: the ones whose audio the room holds.
         Nothing is rendered for a repetition — not a paid render twice, not a browser render the room never
         saw (that changes when the browser is one more provider, #94). A bubble offers it only for these."""
-        from .language_settings import load_settings, resolve_voice
+        from ..pipeline.settings import load_settings, resolve_voice
         rows = set()
         for utterance in self.utterances.values():
             if utterance.replay_of or not utterance.row_id:
@@ -772,17 +790,17 @@ class Room:
 
         Only from the audio the room holds: nothing is rendered or bought again. It goes to the head of this
         browser's queue, after what is playing."""
-        from .language_settings import load_settings, resolve_voice
+        from ..pipeline.settings import load_settings, resolve_voice
         original = next((u for u in reversed(list(self.utterances.values()))
                          if u.row_id == row_id and not u.replay_of), None)
         if original is None or original.thread_id != client.target.get('thread_id'):
-            raise HTTPException(404, 'La sala ya no tiene esa respuesta.')
+            raise Refusal(404, 'La sala ya no tiene esa respuesta.')
         try:
             choice = resolve_voice(client.settings or load_settings(), original.language)
         except ValueError:
             choice = {'provider': 'kokoro'}
         if choice['provider'] == 'kokoro' or self.stored_audio(original, choice) is None:
-            raise HTTPException(410, 'La sala ya no tiene el audio de esa respuesta.')
+            raise Refusal(410, 'La sala ya no tiene el audio de esa respuesta.')
         echo = Utterance(original.id + ':again:' + uuid.uuid4().hex[:8], original.text, language=original.language,
                          thread_id=original.thread_id, revision=client.revision, row_id=original.row_id, at=original.at)
         echo.replay_of = original.id
@@ -804,23 +822,23 @@ class Room:
         previous = self.utterances.get(utterance_id)
         if previous:
             if (previous.text, previous.revision, previous.language) != (text, revision, language):
-                raise HTTPException(409, 'utterance_id ya usado con otro contenido.')
+                raise Refusal(409, 'utterance_id ya usado con otro contenido.')
             return previous.result(session_id)
         if session_id not in self.sessions:
-            raise HTTPException(409, 'The call changed; this reply belongs to another session.')
+            raise Refusal(409, 'The call changed; this reply belongs to another session.')
         asker = self.clients.get(session_id)
         if not asker or not asker.connected or asker.switching:
-            raise HTTPException(409, 'No call is connected; no audio is kept for later.')
+            raise Refusal(409, 'No call is connected; no audio is kept for later.')
         if revision != asker.revision:
-            raise HTTPException(409, 'Stale reply: the user has already started another turn.')
+            raise Refusal(409, 'Stale reply: the user has already started another turn.')
         thread_id = thread_id or asker.target.get('thread_id')
         listeners = self.audience(thread_id)
         if asker not in listeners:
-            raise HTTPException(409, 'That browser is no longer on that conversation.')
+            raise Refusal(409, 'That browser is no longer on that conversation.')
         if asker.speaking and not wait_for_quiet:
-            raise HTTPException(409, 'The user is speaking. Wait for their message before replying.')
+            raise Refusal(409, 'The user is speaking. Wait for their message before replying.')
         if len(self.utterances) >= self.MAX_UTTERANCES or any(len(c.pending) >= self.MAX_PENDING for c in listeners):
-            raise HTTPException(429, 'Cola o historial de locuciones lleno.')
+            raise Refusal(429, 'Cola o historial de locuciones lleno.')
         utterance = Utterance(utterance_id, text, language=language, thread_id=thread_id, revision=revision,
                               row_id=row_id or (session_id + ':voice:' + utterance_id))
         for client in listeners:
@@ -882,7 +900,7 @@ class Room:
             result = await self.speak(payload.text, payload.utterance_id, payload.session_id,
                                       decision.revision, payload.language,
                                       wait_for_quiet=decision.wait_for_quiet, thread_id=payload.thread_id, row_id=row_id)
-        except HTTPException as error:
+        except Refusal as error:
             if error.status_code not in {409, 429}:
                 raise
             reason = 'expired_audio_turn' if error.status_code == 409 else 'queue_full'
@@ -898,15 +916,15 @@ class Room:
         previous = self.journal.get(row_id)
         if previous:
             if previous['text'] != text or previous['thread'] != thread_id:
-                raise HTTPException(409, 'That identifier already belongs to another message.')
+                raise Refusal(409, 'That identifier already belongs to another message.')
             return {'accepted': True, 'id': row_id, 'revision': previous['revision']}
         client = self.clients.get(session_id)
         if (not client or not client.connected
                 or client.target.get('thread_id') != thread_id
                 or client.target.get('binding_id') != binding_id):
-            raise HTTPException(409, 'The connection or conversation changed. The text was not sent.')
+            raise Refusal(409, 'The connection or conversation changed. The text was not sent.')
         if not text.strip():
-            raise HTTPException(422, 'Write a message.')
+            raise Refusal(422, 'Write a message.')
         # Typing is not barging in (#67): a text handed over while a reply plays leaves it playing, and the
         # replies already on their way stay current. Only a voice interrupts. The text rides this browser's
         # current epoch, so whatever answers it is as current as everything else.
@@ -959,24 +977,24 @@ class Room:
         """One browser chooses which conversation it talks to. No other browser moves."""
         client = self.clients.get(session_id)
         if not client or not client.connected:
-            raise HTTPException(409, 'That browser is not in the room.')
+            raise Refusal(409, 'That browser is not in the room.')
         async with self.activation_lock:
             current = client.target
             if current.get('thread_id') == thread_id and (not title or current.get('title') == title):
                 return {'status': 'already_active', 'binding': dict(current)}
             new = await self._retarget(client, {'thread_id': thread_id, 'title': title})
         # Coming back to a conversation is a return like any other: what was missed on it plays now (#73).
-        from .language_settings import load_settings
+        from ..pipeline.settings import load_settings
         await self.replay(client, seconds=(client.settings or load_settings()).replay_on_return_seconds)
         return {'status': 'activated', 'binding': new}
 
     async def deselect(self, session_id, binding_id):
         client = self.clients.get(session_id)
         if not client or not client.connected:
-            raise HTTPException(409, 'That browser is not in the room.')
+            raise Refusal(409, 'That browser is not in the room.')
         async with self.activation_lock:
             if binding_id != client.target.get('binding_id'):
-                raise HTTPException(409, 'The conversation changed. Refresh the room.')
+                raise Refusal(409, 'The conversation changed. Refresh the room.')
             return {'status': 'activated', 'binding': await self._retarget(client, {})}
 
     async def _retarget(self, client, target):
@@ -1025,7 +1043,7 @@ class Room:
                          'utterances': [u.snapshot() for u in self.utterances.values()],
                          'audio_reports': list(self.audio_reports)[-10:],
                          'client_errors': list(self.client_errors)[-10:],
-                         **_build_info()},
+                         **runtime.build_info()},
                 'clients': [c.identity() for c in self.clients.values()],
                 'call': client.snapshot() if client else None}
 

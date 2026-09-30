@@ -2,14 +2,14 @@ import asyncio
 import base64
 import unittest
 
-from sidevoice.transcribers import BrowserTranscriber, OpenAITranscriber, Transcript
+from sidevoice_core.pipeline.transcribers import ClientTranscriber, OpenAITranscriber, Transcript
 
 
-class BrowserTranscriberTests(unittest.TestCase):
+class ClientTranscriberTests(unittest.TestCase):
     def test_the_browser_gets_the_wav_and_its_answer_settles_the_request(self):
         async def run():
             sent = []
-            provider = BrowserTranscriber(sent.append, 'session-1', language='es')
+            provider = ClientTranscriber(sent.append, 'session-1', language='es')
             pending = asyncio.create_task(provider.transcribe(b'RIFFwav'))
             await asyncio.sleep(0)
             request = sent[0]
@@ -29,7 +29,7 @@ class BrowserTranscriberTests(unittest.TestCase):
     def test_a_browser_error_fails_the_turn_and_unrelated_messages_are_not_ours(self):
         async def run():
             sent = []
-            provider = BrowserTranscriber(sent.append, 'session-1')
+            provider = ClientTranscriber(sent.append, 'session-1')
             self.assertFalse(provider.receive({'type': 'voice-input-cancel', 'data': {}}))
             self.assertFalse(provider.receive('not a dict'))
             pending = asyncio.create_task(provider.transcribe(b'wav'))
@@ -42,7 +42,7 @@ class BrowserTranscriberTests(unittest.TestCase):
 
     def test_a_browser_that_never_answers_times_out_instead_of_holding_the_turn(self):
         async def run():
-            provider = BrowserTranscriber(lambda message: None, 'session-1', timeout=0.01)
+            provider = ClientTranscriber(lambda message: None, 'session-1', timeout=0.01)
             with self.assertRaises(asyncio.TimeoutError):
                 await provider.transcribe(b'wav')
             self.assertEqual(provider.pending, {})

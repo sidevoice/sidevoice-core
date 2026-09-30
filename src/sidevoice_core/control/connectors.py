@@ -1,7 +1,7 @@
-"""Control plane for outbound connectors: pairing, presence, delivery and speech intake.
+"""Control plane for this node's connector: presence, delivery and speech intake.
 
-It knows nothing about Claude, Codex or browser audio. A connector pairs once,
-authenticates each connection, registers a binding per conversation it serves,
+It knows nothing about Claude, Codex or browser audio. The connector authenticates each
+connection with the credential this core wrote for it, registers a binding per conversation it serves,
 receives the room's queued input for those bindings and returns exact-event
 acknowledgements; speech it publishes lands in the room like any other.
 The room's journal is the only delivery state; nothing here is a second outbox.
@@ -14,10 +14,9 @@ import json
 import re
 import time
 import uuid
-from fastapi import HTTPException, Request
 from loguru import logger
-from pydantic import BaseModel, Field
 
+from .refusal import Refusal
 from .telemetry import redelivered
 
 PROTOCOL = 2
@@ -64,45 +63,6 @@ class ConnectorPeer:
 
     async def disconnect(self):
         """A newer connection from the same connector won: let this one go."""
-
-
-class PairingRequest(BaseModel):
-    """The code, and what the machine says about itself. Everything but the code is the machine's own
-    description and is kept as given: the room never fills any of it in."""
-    code: str = Field(min_length=4, max_length=32)
-    host: str = Field(default='', max_length=200)
-    platform: str = Field(default='', max_length=60)
-    version: str = Field(default='', max_length=40)
-    harnesses: list[str] = Field(default_factory=list, max_length=8)
-
-
-REVOKED_REASON = ('The room revoked this machine\'s pairing: pair it again with the code the room shows '
-                  'under "Emparejar máquina" (Pair a machine).')
-
-
-class RedemptionLimit:
-    """How many wrong codes the room will hear before it stops listening for a while.
-
-    A pairing code is 60 bits and lives three minutes; what makes that a wall rather than a budget is
-    that guessing is cut off. The count is for the whole room, not per caller: behind a proxy a source
-    address is whatever the last hop says, and this room has one user, for whom a lockout means
-    waiting out the window rather than losing anything. A correct code is refused during the lockout
-    too — silently accepting it would tell a guesser which attempts were the right ones."""
-
-    def __init__(self, failures=10, window=600):
-        self.failures, self.window, self.recent = failures, window, []
-
-    def blocked(self, now=None):
-        now = now if now is not None else time.time()
-        self.recent = [at for at in self.recent if at > now - self.window]
-        return len(self.recent) >= self.failures
-
-    def failed(self, now=None):
-        self.recent.append(now if now is not None else time.time())
-
-    def retry_after(self, now=None):
-        now = now if now is not None else time.time()
-        return max(1, int(self.recent[0] + self.window - now)) if self.recent else 0
 
 
 class ConnectorControl:
@@ -348,38 +308,6 @@ class ConnectorControl:
             except Exception:
                 pass
 
-    async def revoke(self, connector_id):
-        """The person took this machine's pairing away from the room's page. It stops serving now, not
-        on its next connection: the conversations it carried lose their voice the way they do when the
-        room closes a channel, and the socket goes with the same reason its next handshake will get.
-
-        Returns the conversations that lost their voice, which is what the page shows the person."""
-        records = [binding for binding in self.journal.bindings() if binding['connector'] == connector_id]
-        self.journal.revoke_connector(connector_id)
-        for record in records:
-            self.live.pop(record['id'], None)
-            self.drop_inflight(record['id'])
-            self.hub.clear_conversation_working(record['thread'])
-        peer = self.peers.pop(connector_id, None)
-        if peer is not None:
-            for record in records:
-                try:
-                    await peer.send('binding.close', {'binding_id': record['id'], 'thread': record['thread'],
-                                                      'reason': 'connector_revoked'})
-                except Exception:
-                    pass
-            # Said before the socket goes, because after it there is nowhere to say it: a connector told
-            # why stops asking and tells its conversations, instead of reading "io server disconnect".
-            try:
-                await peer.send('connector.revoked', {'reason': REVOKED_REASON})
-            except Exception:
-                pass
-            try:
-                await peer.disconnect()
-            except Exception:
-                pass
-        return records
-
     async def unregister(self, connector_id, message):
         binding_id = message.get('binding_id')
         if self.live.get(binding_id) == connector_id:
@@ -396,7 +324,7 @@ class ConnectorControl:
         """Returns what acknowledges `speech.publish`. A refusal is that same answer with a status,
         not an error: the connector's outbox must be able to stop holding what the room will never
         take."""
-        from .presentation import Speech
+        from .room import Speech
         reply = {'event_id': message.get('event_id')}
         binding = self.journal.binding(message.get('binding_id'))
         if not binding or self.live.get(binding['id']) != connector_id:
@@ -406,73 +334,7 @@ class ConnectorControl:
                             revision=int(message.get('revision') or 0), text=str(message.get('text') or ''),
                             utterance_id=str(message.get('utterance_id') or uuid.uuid4()), language=message.get('language'))
             return {**reply, **await self.hub.publish(speech)}
-        except HTTPException as error:
+        except Refusal as error:
             return {**reply, 'status': 'rejected', 'error': str(error.detail)}
         except Exception as error:
             return {**reply, 'status': 'rejected', 'error': str(error) or type(error).__name__}
-
-def mount_connector_control(app, hub, **options):
-    redemption = options.pop('redemption_limit', {})
-    control = ConnectorControl(hub.journal, hub, **options)
-    hub.control = control
-    from contextlib import asynccontextmanager
-    previous_lifespan = app.router.lifespan_context
-
-    @asynccontextmanager
-    async def control_lifespan(application):
-        async with previous_lifespan(application) as state:
-            await control.start()
-            try:
-                yield state
-            finally:
-                await control.stop()
-    app.router.lifespan_context = control_lifespan
-
-    from .presentation import require_same_origin as browser_only, require_room_page
-    from .connector_socketio import mount_connector_socketio
-
-    mount_connector_socketio(app, control)
-
-    @app.post('/api/connectors/pairing-code')
-    async def pairing_code(request: Request):
-        # Only the page in the room asks for a code, and it shows it to the person: never a client.
-        require_room_page(request)
-        return {'code': hub.journal.create_pairing_code(), 'expires_in': hub.journal.PAIRING_TTL}
-
-    limit = RedemptionLimit(**redemption)
-
-    @app.post('/api/connectors/pair')
-    async def pair(payload: PairingRequest):
-        if limit.blocked():
-            raise HTTPException(429, 'Too many wrong codes; the room accepts no pairing for a few minutes.',
-                                headers={'Retry-After': str(limit.retry_after())})
-        credential = hub.journal.redeem_pairing_code(payload.code, payload.model_dump(exclude={'code'}))
-        if credential is None:
-            limit.failed()
-            raise HTTPException(403, 'Pairing code invalid or expired.')
-        return {'connector_id': credential[0], 'token': credential[1], 'protocol': PROTOCOL}
-
-    @app.get('/api/connectors')
-    async def connectors(request: Request):
-        browser_only(request)
-        return {'connectors': [{**c, 'connected': c['id'] in control.peers} for c in hub.journal.paired_connectors()],
-                'bindings': control.participants()}
-
-    @app.delete('/api/connectors/{connector_id}')
-    async def revoke_connector(connector_id: str, request: Request):
-        """Taking a machine's pairing away is the person's act, in the room, and nobody else's: the same
-        guard as the code that granted it. Asked once it revokes — the machine stops serving now and stays
-        listed as revoked, because a row that vanished would say nothing to whoever wonders why that
-        machine went quiet. Asked again, it takes the row away."""
-        require_room_page(request)
-        paired = {row['id']: row for row in hub.journal.paired_connectors()}
-        if connector_id not in paired:
-            raise HTTPException(404, 'This room has no paired machine with that identifier.')
-        if paired[connector_id]['revoked']:
-            hub.journal.forget_connector(connector_id)
-            return {'status': 'removed', 'connector_id': connector_id}
-        records = await control.revoke(connector_id)
-        return {'status': 'revoked', 'connector_id': connector_id,
-                'threads': [record['thread'] for record in records]}
-
-    return control

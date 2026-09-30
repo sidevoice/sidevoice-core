@@ -1,39 +1,39 @@
-"""The room's HTTP and pipeline surface. No LLM or task operator lives here.
+"""The node's HTTP surface for its clients: the room's state, its history, its settings catalogues.
 
-The room model itself is `room.py`; this module exposes it to the browser and to
-the connector control plane, and holds the pipeline processors that a client
-whose audio is rendered server-side needs.
+The room model is `sidevoice_core.control.room`; this module only exposes it. It serves no page:
+whoever serves the web interface (the hosted room, a desktop shell) points it here, directly or
+through a relay.
 """
 import os
 import re
 import uuid
 from urllib.parse import urlsplit
 
-from .room_history import RoomHistory
-from .paths import BROWSER_AUDIO_DIST, BROWSER_AUDIO_ROOT, RUNTIME_ROOT, WEB_DIST
-from .pipeline_frames import PresentationBoundary, PresentationSpeech
-from .room import Room, RoomClient, client_error_report  # noqa: F401 — RoomClient is re-exported for app.py
-from fastapi import HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from ..control.room import Speech, client_error_report
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
-from pipecat.frames.frames import LLMContextFrame, TTSAudioRawFrame, ErrorFrame
-from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
 THREAD_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,200}$')
 
 
+def allowed_origins():
+    """Origins other than this node's own whose pages may use it: the room's public origin, and any a
+    desktop shell or a relay is configured with (`SIDEVOICE_ALLOWED_ORIGINS`, comma-separated)."""
+    named = [os.getenv('VOICE_PUBLIC_ORIGIN', '')] + os.getenv('SIDEVOICE_ALLOWED_ORIGINS', '').split(',')
+    return {origin.strip().rstrip('/') for origin in named if origin.strip()}
+
+
 def require_same_origin(request):
-    """Browser-only endpoints: the Origin's host must be this room's host (scheme-agnostic, so a
-    TLS proxy in front is fine), or the configured public origin. Non-browser callers send no Origin."""
+    """Browser-only endpoints: the Origin's host must be this node's host (scheme-agnostic, so a
+    TLS proxy in front is fine), or a configured origin. Non-browser callers send no Origin."""
     origin = request.headers.get('origin')
     if not origin:
         return
-    public = os.getenv('VOICE_PUBLIC_ORIGIN', '').rstrip('/')
     try:
         origin_host = urlsplit(origin).netloc.lower()
     except ValueError:
         origin_host = ''
-    if (public and origin.rstrip('/') == public) or (origin_host and origin_host in {
+    if origin.rstrip('/') in allowed_origins() or (origin_host and origin_host in {
             request.headers.get('host', '').lower(), request.url.netloc.lower()}):
         return
     raise HTTPException(403, 'Use the room from its own address.')
@@ -50,66 +50,6 @@ def require_room_page(request):
     require_same_origin(request)
 
 
-class NoInference(FrameProcessor):
-    async def process_frame(self, frame, direction):
-        await super().process_frame(frame, direction)
-        if not isinstance(frame, LLMContextFrame):
-            await self.push_frame(frame, direction)
-
-
-class PresentationGate(FrameProcessor):
-    """Last epoch check before TTS; queued stale requests never synthesize."""
-    client = None
-
-    async def process_frame(self, frame, direction):
-        await super().process_frame(frame, direction)
-        if self.client and direction == FrameDirection.DOWNSTREAM:
-            if isinstance(frame, (PresentationSpeech, PresentationBoundary)):
-                if not self.client.is_current(frame.utterance_id, frame.revision):
-                    return
-                if isinstance(frame, PresentationSpeech):
-                    if hasattr(self.client.tts, 'select_language'):
-                        self.client.tts.select_language(frame.language)
-                    self.client.transition(frame.utterance_id, 'synthesizing')
-        if self.client and isinstance(frame, ErrorFrame):
-            self.client.fail_active()
-        await self.push_frame(frame, direction)
-
-
-class PresentationPlayback(FrameProcessor):
-    """Observe ordered transport output, never silence timeout or 'heard'."""
-    client = None
-    current = None
-
-    async def process_frame(self, frame, direction):
-        await super().process_frame(frame, direction)
-        if self.client and direction == FrameDirection.DOWNSTREAM:
-            if isinstance(frame, PresentationBoundary):
-                if not frame.end:
-                    self.current = (frame.utterance_id, frame.revision)
-                else:
-                    await self.client.playback_finished(frame.utterance_id, frame.revision)
-                    if self.current == (frame.utterance_id, frame.revision):
-                        self.current = None
-            elif isinstance(frame, TTSAudioRawFrame) and self.current:
-                uid, rev = self.current
-                if self.client.is_current(uid, rev):
-                    self.client.transition(uid, 'playing')
-        await self.push_frame(frame, direction)
-
-
-hub = Room(RoomHistory(RUNTIME_ROOT / 'room-state.json'))
-
-
-class Speech(BaseModel):
-    thread_id: str
-    session_id: str
-    revision: int = Field(ge=0)
-    text: str = Field(min_length=1, max_length=6000)
-    utterance_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    language: str | None = Field(default=None, pattern=r'^(es|en|fr|it|pt|hi)$')
-
-
 class TextMessage(BaseModel):
     text: str = Field(min_length=1, max_length=12000)
     session_id: str
@@ -118,8 +58,8 @@ class TextMessage(BaseModel):
     message_id: uuid.UUID
 
 
-def mount_presentation(app):
-    from .language_settings import load_settings
+def mount_presentation(app, hub):
+    from ..pipeline.settings import load_settings
     from contextlib import asynccontextmanager
     previous_lifespan = app.router.lifespan_context
     @asynccontextmanager
@@ -131,25 +71,6 @@ def mount_presentation(app):
             finally:
                 await hub.stop()
     app.router.lifespan_context = room_lifespan
-    from fastapi.staticfiles import StaticFiles
-
-    @app.middleware('http')
-    async def cache_policy(request: Request, call_next):
-        # The audio engine, the worklet and the page shell change with every deploy and carry no hash in
-        # their name: a browser must revalidate them every time. The hashed bundle may be kept for good.
-        response = await call_next(request)
-        path = request.url.path
-        if path.startswith('/voice/assets/'):
-            response.headers.setdefault('Cache-Control', 'public, max-age=31536000, immutable')
-        elif path.startswith('/voice-browser/') or path in {'/voice/', '/voice/mic_capture.js'}:
-            response.headers['Cache-Control'] = 'no-cache'
-        return response
-
-    if BROWSER_AUDIO_DIST.exists():
-        app.mount('/voice-browser', StaticFiles(directory=BROWSER_AUDIO_DIST, html=True), name='voice-browser')
-    web_assets = WEB_DIST / 'assets'
-    if web_assets.exists():
-        app.mount('/voice/assets', StaticFiles(directory=web_assets), name='voice-assets')
 
     def client_for(session_id):
         """Every browser-scoped endpoint resolves its own client, and never anyone else's."""
@@ -169,8 +90,8 @@ def mount_presentation(app):
     @app.get('/api/presentation/voice-catalog')
     async def voice_catalog(request: Request):
         require_same_origin(request)
-        from .language_settings import CATALOG
-        from . import synthesis
+        from ..pipeline.settings import CATALOG
+        from ..pipeline import synthesis
         eleven = await synthesis.catalog()
         catalog = {**CATALOG,
                    'models': [{**item, 'provider': 'kokoro'} for item in CATALOG['models']]
@@ -181,7 +102,7 @@ def mount_presentation(app):
     @app.get('/api/presentation/synthesis')
     async def synthesis_settings(request: Request):
         require_same_origin(request)
-        from . import synthesis
+        from ..pipeline import synthesis
         return {'credentials': synthesis.credential_state(), 'catalog': await synthesis.catalog()}
 
     @app.post('/api/presentation/synthesis/credential')
@@ -189,7 +110,7 @@ def mount_presentation(app):
         if not request.headers.get('origin'):
             raise HTTPException(403, 'Save the key from the room, not from an external client.')
         require_same_origin(request)
-        from . import synthesis
+        from ..pipeline import synthesis
         try:
             key = payload.get('key')
             if key is None or not str(key).strip():
@@ -204,7 +125,7 @@ def mount_presentation(app):
     @app.post('/api/presentation/synthesis/preview')
     async def synthesis_preview(payload: dict, request: Request):
         require_same_origin(request)
-        from . import synthesis
+        from ..pipeline import synthesis
         try:
             return await synthesis.synthesize(str(payload.get('text') or ''),
                                              model=str(payload.get('model') or ''),
@@ -216,14 +137,14 @@ def mount_presentation(app):
     @app.get('/api/presentation/transcription')
     async def transcription_settings(request: Request):
         require_same_origin(request)
-        from . import transcription
+        from ..pipeline import transcription
         return {'catalog': transcription.CATALOG,
                 'credentials': transcription.credential_state()}
 
     @app.get('/api/presentation/transcription/models')
     async def transcription_models(provider: str, request: Request):
         require_same_origin(request)
-        from . import transcription
+        from ..pipeline import transcription
         try:
             return await transcription.catalog(provider)
         except ValueError as error:
@@ -234,7 +155,7 @@ def mount_presentation(app):
         if not request.headers.get('origin'):
             raise HTTPException(403, 'Save the key from the room, not from an external client.')
         require_same_origin(request)
-        from . import transcription
+        from ..pipeline import transcription
         provider = payload.get('provider')
         if provider not in transcription.PROVIDERS:
             raise HTTPException(400, 'Proveedor desconocido.')
@@ -253,52 +174,6 @@ def mount_presentation(app):
     async def languages():
         # Defaults only: each device keeps its own settings and brings them when it connects.
         return load_settings().model_dump()
-
-    # While the interface is being worked on, the room can serve it from Vite instead of from dist, so a
-    # change reaches the phone without anyone reloading: set VOICE_WEB_DEV_SERVER to the dev server's base
-    # URL. Everything else about the room is unchanged, and unset (the normal case) costs nothing.
-    # Vite's own hot-reload socket does not come through here — the page is told where to find it — because
-    # proxying a websocket to gain a development convenience is not worth the code it would take.
-    dev_server = (os.getenv('VOICE_WEB_DEV_SERVER') or '').strip().rstrip('/')
-
-    async def from_dev_server(request: Request, path: str):
-        import httpx
-        url = dev_server + path
-        async with httpx.AsyncClient(timeout=20) as client:
-            try:
-                answer = await client.get(url, params=request.query_params,
-                                          headers={'accept': request.headers.get('accept', '*/*')})
-            except httpx.HTTPError as error:
-                raise HTTPException(502, f'El servidor de desarrollo no responde ({error}).') from error
-        headers = {name: value for name, value in answer.headers.items()
-                   if name.lower() in {'content-type', 'cache-control', 'etag', 'sourcemap', 'x-sourcemap'}}
-        return Response(content=answer.content, status_code=answer.status_code, headers=headers)
-
-    if dev_server:
-        for prefix in ('/@vite', '/@id', '/@fs', '/src', '/node_modules', '/.vite'):
-            @app.get(prefix + '/{path:path}', include_in_schema=False)
-            async def dev_asset(path: str, request: Request, prefix=prefix):
-                return await from_dev_server(request, prefix + '/' + path)
-
-    @app.get('/voice/', include_in_schema=False)
-    async def view(request: Request):
-        if dev_server:
-            return await from_dev_server(request, '/voice/')
-        index = WEB_DIST / 'index.html'
-        if not index.exists():
-            raise HTTPException(503, 'Construye la interfaz con npm run build.')
-        return FileResponse(index)
-
-    if dev_server:
-        @app.get('/voice/{path:path}', include_in_schema=False)
-        async def dev_page_asset(path: str, request: Request):
-            if path == 'mic_capture.js':
-                return FileResponse(BROWSER_AUDIO_ROOT / 'mic_capture.js', media_type='text/javascript')
-            return await from_dev_server(request, '/voice/' + path)
-
-    @app.get('/voice/mic_capture.js', include_in_schema=False)
-    async def mic_capture():
-        return FileResponse(BROWSER_AUDIO_ROOT / 'mic_capture.js', media_type='text/javascript')
 
     @app.get('/api/presentation')
     async def state(session_id: str | None = None):

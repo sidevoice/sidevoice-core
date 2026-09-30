@@ -16,9 +16,10 @@ import socketio
 import uvicorn
 from fastapi import FastAPI
 
-from sidevoice.connector_control import PROTOCOL, mount_connector_control
-from sidevoice.connector_socketio import NAMESPACE, PATH
-from sidevoice.room_history import RoomHistory
+from sidevoice_core.control.connectors import PROTOCOL
+from sidevoice_core.server.connector_link import mount_connector_link
+from sidevoice_core.server.connector_link import NAMESPACE, PATH
+from sidevoice_core.control.history import RoomHistory
 from test_connector_control import FakeHub
 
 
@@ -45,7 +46,7 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.hub = FakeHub(self.journal)
         app = FastAPI()
         # A keepalive budget shorter than the suite, so a room that stops answering is noticed here.
-        self.control = mount_connector_control(app, self.hub, heartbeat_seconds=0.2, ack_timeout=1)
+        self.control = mount_connector_link(app, self.hub, heartbeat_seconds=0.2, ack_timeout=1)
         self.connector_id, self.token = self.journal.redeem_pairing_code(self.journal.create_pairing_code())
         self.port = free_port()
         self.server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=self.port, log_level='error'))
@@ -91,21 +92,9 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_credential_the_room_does_not_know_is_refused_with_what_to_do_about_it(self):
         with self.assertRaises(socketio.exceptions.ConnectionError) as refusal:
             await self.connect(token='not-the-token')
-        self.assertIn('Emparejar máquina', self.reason(refusal.exception),
-                      'the message says where the code comes from, and reaches the client')
+        self.assertIn('Restart the connector', self.reason(refusal.exception),
+                      'the message says what to do about it, and reaches the client')
         self.assertEqual(self.control.peers, {}, 'a refused credential never reaches an event')
-
-    async def test_a_pairing_taken_away_from_the_room_is_refused_saying_so(self):
-        # Not "we do not know you": the person revoked it on purpose, and the machine's conversations
-        # must be able to say which of the two happened.
-        client, _ = await self.connect()
-        await self.control.revoke(self.connector_id)
-        await until(lambda: not client.connected)
-        with self.assertRaises(socketio.exceptions.ConnectionError) as refusal:
-            await self.connect()
-        self.assertIn('revoked', self.reason(refusal.exception))
-        self.assertIn('Emparejar máquina', self.reason(refusal.exception), 'and says how to come back')
-        self.assertEqual(self.control.peers, {})
 
     async def test_the_handshake_carries_what_the_machine_says_about_itself(self):
         await self.connect(host='macbook-pro', platform='darwin arm64', version='0.5.0',
@@ -114,11 +103,11 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((row['host'], row['platform'], row['version'], row['harnesses']),
                          ('macbook-pro', 'darwin arm64', '0.5.0', ['claude', 'codex']))
 
-    async def test_a_connector_from_before_this_version_is_told_to_pair_again(self):
+    async def test_a_connector_from_before_this_version_is_told_to_update(self):
         with self.assertRaises(socketio.exceptions.ConnectionError) as refusal:
             await self.connect(protocol=PROTOCOL - 1)
         self.assertIn(str(PROTOCOL), self.reason(refusal.exception))
-        self.assertIn('pair this machine again', self.reason(refusal.exception).lower())
+        self.assertIn('update the connector', self.reason(refusal.exception).lower())
         self.assertEqual(self.control.peers, {})
 
     async def test_every_event_a_connector_sends_reaches_the_control_plane(self):

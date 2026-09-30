@@ -1,4 +1,4 @@
-"""Wire format between the room page and its call: binary frames carry microphone PCM up,
+"""Wire format between a client and its call: binary frames carry microphone PCM up,
 text frames carry JSON app messages both ways. No audio flows down; the browser synthesizes."""
 import json
 import time
@@ -59,7 +59,7 @@ class BrowserFrameSerializer(FrameSerializer):
 
 def session_message(session_id, serializer):
     """First text frame of a call: the id the room minted, the PCM format it expects, and what the room is."""
-    from .paths import build_info
+    from ..runtime import build_info
     return {'type': 'voice-session', 'data': {'session_id': session_id,
                                               'sample_rate': serializer.sample_rate,
                                               'channels': serializer.channels,

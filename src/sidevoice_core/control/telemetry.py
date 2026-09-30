@@ -53,9 +53,7 @@ ATTRIBUTES = frozenset({
 # to smuggle a payload through.
 MAX_VALUE = 200
 
-DEFAULT_SERVICE_NAME = 'sidevoice-room'
-# Whatever the browser posts to /api/telemetry is forwarded unread; this is the ceiling.
-MAX_TELEMETRY_BODY = 1_048_576
+DEFAULT_SERVICE_NAME = 'sidevoice-core'
 
 # One reference pair, taken once. Marks are monotonic (they are durations' clock and must
 # stay so); spans need wall time. Converting through a single reference keeps every span of
@@ -127,12 +125,11 @@ class Telemetry:
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-        from .paths import build_info
+        from ..runtime import build_info
         info = build_info()
         resource = Resource.create({
             'service.name': environ.get('OTEL_SERVICE_NAME') or DEFAULT_SERVICE_NAME,
             'service.version': info.get('version') or 'dev',
-            'sidevoice.web_build': info.get('web_build') or 'unknown',
         })
         if span_exporter is None:
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -208,18 +205,6 @@ telemetry = Telemetry()
 
 def configure(**options):
     return telemetry.configure(**options)
-
-
-def instrument(app):
-    """FastAPI's own server spans, so a request to the room is in the same trace as the turn."""
-    if not telemetry.enabled:
-        return app
-    try:
-        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-        FastAPIInstrumentor.instrument_app(app)
-    except Exception as error:  # pragma: no cover - instrumentation is a nicety, never a requirement
-        logger.warning('FastAPI instrumentation unavailable: {}', error)
-    return app
 
 
 class CallTelemetry:
@@ -396,49 +381,3 @@ class CallTelemetry:
 def redelivered(thread_id=None, harness=None):
     """An input the room is handing to a harness again. Module level: the journal has no browser."""
     telemetry.count('redeliveries', {'sidevoice.thread_id': thread_id, 'sidevoice.harness': harness})
-
-
-async def forward(body, content_type):
-    """Hand the browser's OTLP batch to the collector, unread, or drop it when there is none.
-
-    The browser talks to the room and to nothing else; the room is the only thing that knows
-    where the traces go. With no endpoint configured nothing is sent, nothing is parsed and
-    nothing fails — the browser is told so in advance and does not even build the batch.
-    """
-    if not telemetry.enabled or not telemetry.endpoint:
-        return False
-    import aiohttp
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
-            async with http.post(telemetry.endpoint + '/v1/traces', data=body,
-                                 headers={'Content-Type': content_type or 'application/json'}) as response:
-                if response.status >= 400:
-                    logger.warning('Telemetry collector refused a browser batch: {}', response.status)
-                return response.status < 400
-    except Exception as error:
-        logger.warning('Telemetry collector unreachable: {}', error)
-        return False
-
-
-def mount_telemetry(app):
-    """The browser's only telemetry address. It never learns the collector's."""
-    from fastapi import HTTPException, Request, Response
-
-    from .presentation import require_same_origin
-
-    @app.get('/api/telemetry')
-    async def telemetry_state():
-        # The page asks before loading anything: with no collector it loads no SDK at all.
-        return {'enabled': bool(telemetry.enabled and telemetry.endpoint)}
-
-    @app.post('/api/telemetry')
-    async def telemetry_batch(request: Request):
-        require_same_origin(request)
-        body = await request.body()
-        if len(body) > MAX_TELEMETRY_BODY:
-            raise HTTPException(413, 'Telemetry batch too large.')
-        await forward(body, request.headers.get('content-type'))
-        # Accepted or dropped, the browser is told the same thing: this is not its problem.
-        return Response(status_code=204)
-
-    return app

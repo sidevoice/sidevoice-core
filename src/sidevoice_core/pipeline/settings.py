@@ -4,11 +4,12 @@ Every browser stores its own configuration and sends it when it connects; the
 server validates it, uses it for that call, and forgets it with the call.
 """
 import json
+from importlib.resources import files
 from typing import ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from .paths import BROWSER_AUDIO_ROOT
 
-CATALOG = json.loads((BROWSER_AUDIO_ROOT / 'catalog.json').read_text())
+# The voice catalogue is this package's data, its one owner: the browser's build copies it, never the reverse.
+CATALOG = json.loads(files(__package__).joinpath('catalog.json').read_text(encoding='utf8'))
 LANGUAGES = {item['id']: item for item in CATALOG['languages']}
 VOICES = {v[0] for item in LANGUAGES.values() for v in item['voices']}
 LOCAL_MODELS = {'kokoro'}

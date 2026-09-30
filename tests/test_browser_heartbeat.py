@@ -1,7 +1,7 @@
 import asyncio
 from unittest import IsolatedAsyncioTestCase
 
-from sidevoice.browser_heartbeat import HEARTBEAT_MISSES, HEARTBEAT_SECONDS, heartbeat_settings, watch
+from sidevoice_core.pipeline.heartbeat import HEARTBEAT_MISSES, HEARTBEAT_SECONDS, heartbeat_settings, watch
 
 
 class HeartbeatSettingsTest(IsolatedAsyncioTestCase):

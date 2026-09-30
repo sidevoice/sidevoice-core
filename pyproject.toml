@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sidevoice-core"
+version = "0.1.0"
+description = "Sidevoice's core: a node's conversations and one voice pipeline per call."
+requires-python = ">=3.12"
+license = "MIT"
+# Pinned, like the room these came from. No PyTorch anywhere: Silero and smart-turn v3 run on
+# onnxruntime, which pipecat-ai itself depends on.
+dependencies = [
+    "pipecat-ai[websocket,silero]==1.10.0",
+    "uvicorn==0.53.0",
+    "python-socketio==5.17.0",
+    "scipy==1.18.1",
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-exporter-otlp-proto-http==1.44.0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio"]
+
+[project.scripts]
+sidevoice-core = "sidevoice_core.server.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sidevoice_core = ["pipeline/catalog.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

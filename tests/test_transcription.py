@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sidevoice import transcription
-from sidevoice.language_settings import LanguageSettings
+from sidevoice_core.pipeline import transcription
+from sidevoice_core.pipeline.settings import LanguageSettings
 
 
 class TranscriptionTests(unittest.TestCase):

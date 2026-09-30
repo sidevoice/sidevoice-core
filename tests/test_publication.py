@@ -1,7 +1,7 @@
 """Publication is a policy over facts; no sockets or event sequence required."""
 import unittest
 from dataclasses import replace
-from sidevoice.publication import PublicationClient, publication_decision
+from sidevoice_core.control.publication import PublicationClient, publication_decision
 
 
 class PublicationRules(unittest.TestCase):

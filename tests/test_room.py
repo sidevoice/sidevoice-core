@@ -10,12 +10,12 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
-from fastapi import HTTPException
+from sidevoice_core.control.refusal import Refusal
 
-from sidevoice.presentation import Speech
-from sidevoice.room import Room, RoomClient
-from sidevoice.room_history import RoomHistory
-from sidevoice.synthesis_cache import SynthesisCache
+from sidevoice_core.control.room import Speech
+from sidevoice_core.control.room import Room, RoomClient
+from sidevoice_core.control.history import RoomHistory
+from sidevoice_core.control.synthesis_cache import SynthesisCache
 
 KOKORO = {'provider': 'kokoro', 'model': 'kokoro', 'voice': 'ef_dora', 'speed': 1.0, 'language': 'es'}
 ELEVEN = {'provider': 'elevenlabs', 'model': 'eleven_v3', 'voice': 'una-voz', 'speed': 1.0, 'language': 'es'}
@@ -30,7 +30,7 @@ class RoomFixture(IsolatedAsyncioTestCase):
         self.renders = []
         self.hub = Room(RoomHistory(self.path('history.sqlite3')), SynthesisCache(renderer=self.render))
         self.voice = KOKORO
-        voices = patch('sidevoice.language_settings.resolve_voice', side_effect=lambda *a, **k: dict(self.voice))
+        voices = patch('sidevoice_core.pipeline.settings.resolve_voice', side_effect=lambda *a, **k: dict(self.voice))
         voices.start()
         self.addCleanup(voices.stop)
 
@@ -113,7 +113,7 @@ class MultiClientRoomTests(RoomFixture):
         self.assertNotEqual(first.heard[-1]['type'], 'voice-cancel')
         self.assertEqual(self.hub.utterances['stale'].clients['one']['status'], 'synthesizing')
         self.assertEqual(self.hub.utterances['stale'].clients['two']['status'], 'waiting_for_turn')
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             await self.hub.speak('Respuesta de un turno viejo', 'late', second.id, 0)
 
     async def test_a_reply_held_behind_another_reply_is_not_waiting_for_anybodys_turn(self):
@@ -170,7 +170,7 @@ class MultiClientRoomTests(RoomFixture):
         # Once the room no longer has the audio, there is no button and no repetition.
         self.hub.assets.entries.clear()
         self.assertNotIn('one:voice:said', self.hub.replayable_rows(client))
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             await self.hub.replay_one(client, 'one:voice:said')
         # A reply rendered in the browser never reached the room: nothing to repeat from.
         self.voice = KOKORO
@@ -245,7 +245,7 @@ class MultiClientRoomTests(RoomFixture):
         self.assertEqual(len({row['id'] for row in rows}), 2)
 
     async def test_the_outbox_delivers_each_participant_exactly_once_in_order(self):
-        from sidevoice.connector_control import ConnectorControl
+        from sidevoice_core.control.connectors import ConnectorControl
         from test_connector_control import FakePeer
         control = ConnectorControl(self.hub.journal, self.hub)
         self.addCleanup(lambda: [control.drop_inflight(b) for b in list(control.inflight)])
@@ -307,7 +307,7 @@ class MultiClientRoomTests(RoomFixture):
         self.assertTrue(second.speaking)
         row = self.hub.journal.get(result['id'])
         self.assertEqual((row['session'], row['text']), ('one', 'Escribo yo'))
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             # Nobody may send text as a browser that is not theirs.
             await self.hub.send_text('Suplantando', 'nadie', 'task',
                                      first.target['binding_id'], 'msg-2')
@@ -398,7 +398,7 @@ class MultiClientRoomTests(RoomFixture):
         self.assertEqual(str(refused.exception), full['message'], 'and the socket refuses with that same one')
 
     async def test_how_many_browsers_a_room_carries_is_the_machine_s_to_say(self):
-        from sidevoice.room import MAX_BROWSERS, browser_limit
+        from sidevoice_core.control.room import MAX_BROWSERS, browser_limit
         self.assertEqual(browser_limit({}), MAX_BROWSERS)
         self.assertEqual(browser_limit({'VOICE_MAX_BROWSERS': '3'}), 3)
         self.assertEqual(browser_limit({'VOICE_MAX_BROWSERS': 'unas cuantas'}), MAX_BROWSERS,
@@ -591,7 +591,7 @@ class PerBrowserSelectionTests(IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.hub = Room(RoomHistory(Path(self.temp.name) / 'history.sqlite3'), SynthesisCache(renderer=self.render))
-        voices = patch('sidevoice.language_settings.resolve_voice', side_effect=lambda *a, **k: dict(KOKORO))
+        voices = patch('sidevoice_core.pipeline.settings.resolve_voice', side_effect=lambda *a, **k: dict(KOKORO))
         voices.start(); self.addCleanup(voices.stop)
         for thread, title in (('a', 'Conversación A'), ('b', 'Conversación B')):
             self.hub.journal.register_binding('conn', harness='claude', thread=thread, title=title)
@@ -639,7 +639,7 @@ class PerBrowserSelectionTests(IsolatedAsyncioTestCase):
         one.user_started(); one.speaking = False; one.enqueue_input('Para A')
         two.user_started(); two.speaking = False; two.enqueue_input('Para B')
         self.assertEqual([(row['session'], row['thread']) for row in self.hub.journal.pending()], [('one', 'a'), ('two', 'b')])
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             await self.hub.send_text('Ajeno', 'one', 'b', two.target['binding_id'], 'm-1')
         result = await self.hub.send_text('Escrito para A', 'one', 'a', one.target['binding_id'], 'm-2')
         self.assertEqual(result['revision'], one.revision)
@@ -658,7 +658,7 @@ class PerBrowserSelectionTests(IsolatedAsyncioTestCase):
     async def test_deselecting_needs_the_browsers_current_binding_and_touches_only_that_browser(self):
         one, two = self.browser('one'), self.browser('two')
         await self.hub.select('one', 'a'); await self.hub.select('two', 'a')
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             await self.hub.deselect('one', two.target['binding_id'])
         await self.hub.deselect('one', one.target['binding_id'])
         self.assertIsNone(self.hub.snapshot('one')['binding'])
@@ -857,7 +857,7 @@ class ReplyAfterTheBrowserChangedTests(IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.hub = Room(RoomHistory(Path(self.temp.name) / 'history.sqlite3'), SynthesisCache(renderer=self.render))
-        voices = patch('sidevoice.language_settings.resolve_voice', side_effect=lambda *a, **k: dict(KOKORO))
+        voices = patch('sidevoice_core.pipeline.settings.resolve_voice', side_effect=lambda *a, **k: dict(KOKORO))
         voices.start(); self.addCleanup(voices.stop)
         self.hub.journal.register_binding('conn', harness='claude', thread='a', title='A')
 

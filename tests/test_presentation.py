@@ -1,11 +1,12 @@
 import asyncio
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
-from fastapi import HTTPException
+from sidevoice_core.control.refusal import Refusal
 from pipecat.frames.frames import BotStoppedSpeakingFrame, TTSAudioRawFrame
 from pipecat.processors.frame_processor import FrameDirection
-from sidevoice.presentation import PresentationBoundary, PresentationPlayback, PresentationGate, PresentationSpeech
-from sidevoice.room import Room, RoomClient
+from sidevoice_core.pipeline.frames import PresentationBoundary, PresentationSpeech
+from sidevoice_core.pipeline.processors import PresentationPlayback, PresentationGate
+from sidevoice_core.control.room import Room, RoomClient
 
 
 def room_with(target=None, journal=None):
@@ -36,7 +37,7 @@ class PresentationTests(IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'queued')
         self.assertEqual(await c.room.speak('Hola', 'u', 'call', 0), result)
         c.worker.queue_frames.assert_awaited_once()
-        with self.assertRaises(HTTPException) as e:
+        with self.assertRaises(Refusal) as e:
             await c.room.speak('Otro', 'u', 'call', 0)
         self.assertEqual(e.exception.status_code, 409)
 
@@ -44,7 +45,7 @@ class PresentationTests(IsolatedAsyncioTestCase):
         c = self.call()
         await c.room.speak('Hola', 'u', 'call', 0)
         c.user_started(); c.speaking = False
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             await c.room.speak('Respuesta antigua', 'v', 'call', 0)
         self.assertEqual(c.snapshot()['utterances'][0]['status'], 'interrupted')
         await c.playback_finished('u', 0)
@@ -57,7 +58,7 @@ class PresentationTests(IsolatedAsyncioTestCase):
         c.disconnect()
         self.assertEqual(c.snapshot()['utterances'][0]['status'], 'disconnected')
         fresh = self.call('new-call')
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             await fresh.room.speak('Hola', 'u', 'call', 0)
         fresh.worker.queue_frames.assert_not_awaited()
 
@@ -65,7 +66,7 @@ class PresentationTests(IsolatedAsyncioTestCase):
         c = self.call()
         for connected, speaking in [(False, False), (True, True)]:
             c.connected, c.speaking = connected, speaking
-            with self.assertRaises(HTTPException):
+            with self.assertRaises(Refusal):
                 await c.room.speak('Hola', 'new', 'call', 0)
         c.worker.queue_frames.assert_not_awaited()
 
@@ -120,7 +121,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         from pathlib import Path
         self.temp = tempfile.TemporaryDirectory()
         # Test the default browser provider, never the live room's preferences or paid API.
-        from sidevoice.room_history import RoomHistory
+        from sidevoice_core.control.history import RoomHistory
         self.hub = Room(RoomHistory(Path(self.temp.name) / 'history.sqlite3'))
         self.c = joined(self.hub, 'same-webrtc')
 
@@ -160,7 +161,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         # open is the rest of what the person says, and that is B's.
         self.c.enqueue_input('Y esto ya para B')
         self.assertEqual(self.hub.journal.pending()[0]['thread'], 'b')
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             await self.hub.speak('Respuesta vieja', 'stale', self.c.id, previous)
         self.c.user_started(); self.c.speaking = False
         self.c.enqueue_input('Nueva para B')
@@ -202,7 +203,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.assertIsNone(c.active)
 
     async def test_background_reply_is_kept_as_text_and_replayed_on_return_to_its_conversation(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         await self.hub.select(self.c.id, 'a')
         revision = self.c.revision
         await self.hub.select(self.c.id, 'b')
@@ -225,7 +226,7 @@ class RoomTests(IsolatedAsyncioTestCase):
     async def test_pending_inputs_keep_their_original_destination_after_disconnect(self):
         import json
         from pathlib import Path
-        from sidevoice.room_history import RoomHistory
+        from sidevoice_core.control.history import RoomHistory
         await self.hub.select(self.c.id, 'a')
         self.c.user_started()
         original_revision, original_target = self.c.turn_revision, dict(self.c.turn_target)
@@ -255,7 +256,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.assertNotEqual(rows[0]['id'], rows[1]['id'])
 
     async def test_outbox_delivers_original_target_without_a_connected_call(self):
-        from sidevoice.connector_control import ConnectorControl
+        from sidevoice_core.control.connectors import ConnectorControl
         from test_connector_control import FakePeer
         control = ConnectorControl(self.hub.journal, self.hub)
         self.addCleanup(lambda: [control.drop_inflight(b) for b in list(control.inflight)])
@@ -281,16 +282,16 @@ class RoomTests(IsolatedAsyncioTestCase):
     async def test_app_lifespan_starts_and_stops_durable_delivery(self):
         from contextlib import asynccontextmanager
         from fastapi import FastAPI
-        from sidevoice.presentation import mount_presentation
-        from sidevoice.connector_control import mount_connector_control
+        from sidevoice_core.server.presentation import mount_presentation
+        from sidevoice_core.server.connector_link import mount_connector_link
         events = []
         @asynccontextmanager
         async def existing_lifespan(app):
             events.append('start'); yield {'existing': True}; events.append('stop')
         app = FastAPI(lifespan=existing_lifespan)
-        with patch('sidevoice.presentation.hub', self.hub):
-            mount_presentation(app)
-            control = mount_connector_control(app, self.hub)
+        if True:
+            mount_presentation(app, self.hub)
+            control = mount_connector_link(app, self.hub)
             async with app.router.lifespan_context(app):
                 self.assertIs(self.hub.control, control)
                 self.assertIsNotNone(control.pump_task)
@@ -299,7 +300,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.assertEqual(events, ['start', 'stop'])
 
     async def test_reply_waits_until_user_finishes_and_uses_application_playback_epoch(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         await self.hub.select(self.c.id, 'a')
         self.c.user_started(); self.c.speaking = False
         original = self.c.revision
@@ -319,7 +320,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.c.utterances['waiting'].revision, self.c.revision)
 
     async def test_waiting_reply_cut_by_a_focus_change_is_replayed_on_return(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         await self.hub.select(self.c.id, 'a')
         self.c.user_started()
         payload = Speech(thread_id='a',text='Pendiente',session_id=self.c.id,
@@ -336,7 +337,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.c.worker.queue_frames.call_args.args[0][1].text, 'Pendiente')
 
     async def test_already_playing_interrupted_reply_is_never_replayed(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         await self.hub.select(self.c.id, 'a')
         payload = Speech(thread_id='a',text='Sonando',session_id=self.c.id,
                          revision=self.c.revision,utterance_id='playing')
@@ -349,7 +350,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.c.worker.queue_frames.assert_awaited_once()
 
     async def test_browser_waiting_reply_dispatches_only_after_turn_end(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         await self.hub.select(self.c.id, 'a')
         events=[];self.c.on_browser_event=events.append
         self.c.user_started();events.clear()
@@ -364,7 +365,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.hub.journal.history('a')[0]['status'], 'synthesizing')
 
     async def test_browser_preparing_audio_survives_another_user_turn(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         await self.hub.select(self.c.id, 'a')
         events=[];self.c.on_browser_event=events.append
         payload=Speech(thread_id='a',text='Todavía preparándose',session_id=self.c.id,
@@ -381,7 +382,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]['data']['revision'],self.c.revision)
 
     async def test_late_browser_cancellation_of_started_audio_prevents_replay(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         await self.hub.select(self.c.id, 'a')
         self.c.on_browser_event=lambda event:None
         payload=Speech(thread_id='a',text='Ya había sonado',session_id=self.c.id,
@@ -418,15 +419,15 @@ class RoomTests(IsolatedAsyncioTestCase):
         original=self.c.target['binding_id']
         args=('Para A',self.c.id,'a',original,'one')
         await self.hub.send_text(*args)
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             await self.hub.send_text('Otro texto',self.c.id,'a',original,'one')
         await self.hub.select(self.c.id, 'b')
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(Refusal):
             await self.hub.send_text('A antiguo',self.c.id,'a',original,'two')
         self.assertEqual(len(self.hub.journal.pending()),1)
 
     async def test_quiet_grace_waits_and_restarts_after_another_intervention(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         await self.hub.select(self.c.id, 'a')
         events=[];self.c.on_browser_event=events.append
         self.c.audio_grace_seconds=.08
@@ -449,7 +450,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.c.disconnect()
 
     async def test_close_channel_removes_the_binding_and_drops_waiting_input(self):
-        from sidevoice.presentation import Speech
+        from sidevoice_core.control.room import Speech
         record = self.hub.journal.register_binding('conn-1', harness='test', thread='a')
         await self.hub.select(self.c.id, 'a')
         self.c.user_started()
@@ -487,17 +488,12 @@ class RoomSurfaceTests(IsolatedAsyncioTestCase):
     """What the room answers to, and what it refuses to describe."""
 
     def app(self):
-        from sidevoice.app import create_app
+        from sidevoice_core.server.app import create_app
         return create_app()
 
-    async def test_the_root_leads_to_the_room_and_no_schema_is_published(self):
+    async def test_no_schema_is_published(self):
         from starlette.testclient import TestClient
         with TestClient(self.app()) as client:
-            for path in ('/', '/voice'):
-                answer = client.get(path, follow_redirects=False)
-                self.assertIn(answer.status_code, (307, 308, 302))
-                self.assertEqual(answer.headers['location'], '/voice/',
-                                 'arriving at the room address is arriving at the room')
             for path in ('/docs', '/redoc', '/openapi.json'):
                 self.assertEqual(client.get(path).status_code, 404,
                                  f'{path} would publish a map of every endpoint to anyone who asks')
@@ -507,10 +503,8 @@ class ClientErrorBeaconTests(IsolatedAsyncioTestCase):
     async def test_a_page_with_no_call_can_still_tell_the_room_why_it_went_blank(self):
         from fastapi import FastAPI
         from starlette.testclient import TestClient
-        import sidevoice.presentation as presentation
-        app = FastAPI()
-        presentation.mount_presentation(app)
-        before = len(presentation.hub.client_errors)
+        app, hub = mounted()
+        before = len(hub.client_errors)
         with TestClient(app) as client:
             answer = client.post('/api/presentation/client-error',
                                  json={'kind': 'uncaught', 'message': 'name.trim is not a function',
@@ -518,36 +512,11 @@ class ClientErrorBeaconTests(IsolatedAsyncioTestCase):
                                  headers={'Origin': 'http://testserver'})
             self.assertEqual(answer.status_code, 200)
             self.assertEqual(answer.json(), {'status': 'recorded'})
-        kept = list(presentation.hub.client_errors)[-1]
-        self.assertEqual(len(presentation.hub.client_errors), before + 1)
+        kept = list(hub.client_errors)[-1]
+        self.assertEqual(len(hub.client_errors), before + 1)
         self.assertEqual((kept['kind'], kept['message'], kept['build']),
                          ('uncaught', 'name.trim is not a function', 'mu8y5e4k'))
         self.assertIsNone(kept['session_id'], 'a beacon comes from a page that has no call')
-
-
-class CachePolicyTests(IsolatedAsyncioTestCase):
-    async def test_the_audio_engine_and_page_shell_are_never_cached_while_hashed_assets_are_immutable(self):
-        import tempfile
-        from pathlib import Path
-        from fastapi import FastAPI
-        from starlette.testclient import TestClient
-        from unittest.mock import patch
-        import sidevoice.presentation as presentation
-        with tempfile.TemporaryDirectory() as directory:
-            browser, assets = Path(directory) / 'browser', Path(directory) / 'assets'
-            browser.mkdir(); assets.mkdir()
-            (browser / 'room-client.js').write_text('// engine')
-            (assets / 'index-abc123.js').write_text('// bundle')
-            with patch.object(presentation, 'BROWSER_AUDIO_DIST', browser), patch.object(presentation, 'WEB_DIST', Path(directory)):
-                app = FastAPI()
-                presentation.mount_presentation(app)
-                with TestClient(app) as client:
-                    engine = client.get('/voice-browser/room-client.js?v=abc')
-                    self.assertEqual(engine.status_code, 200)
-                    self.assertEqual(engine.headers['cache-control'], 'no-cache')
-                    bundle = client.get('/voice/assets/index-abc123.js')
-                    self.assertEqual(bundle.status_code, 200)
-                    self.assertEqual(bundle.headers['cache-control'], 'public, max-age=31536000, immutable')
 
 
 class ParticipantEngineTests(IsolatedAsyncioTestCase):
@@ -556,10 +525,8 @@ class ParticipantEngineTests(IsolatedAsyncioTestCase):
     async def test_a_participant_says_what_it_thinks_with_and_observation_replaces_the_launch_line(self):
         from fastapi import FastAPI
         from starlette.testclient import TestClient
-        import sidevoice.presentation as presentation
-        app = FastAPI()
-        presentation.mount_presentation(app)
-        journal = presentation.hub.journal
+        app, hub = mounted()
+        journal = hub.journal
         binding = journal.register_binding('c-1', harness='claude', thread='sess-engine', title='Trabajo',
                                            engine={'model': 'claude-opus-5'})
         self.addCleanup(journal.deactivate_binding, 'c-1', binding['id'])
@@ -589,16 +556,29 @@ class AdmissionEndpointTests(IsolatedAsyncioTestCase):
     async def test_the_room_says_over_http_whether_it_would_take_one_more_browser(self):
         from fastapi import FastAPI
         from starlette.testclient import TestClient
-        import sidevoice.presentation as presentation
-        app = FastAPI()
-        presentation.mount_presentation(app)
+        app, hub = mounted()
         answer = TestClient(app).get('/api/presentation/admission')
         self.assertEqual(answer.status_code, 200)
-        self.assertEqual(answer.json(), presentation.hub.admission())
+        self.assertEqual(answer.json(), hub.admission())
         self.assertTrue(answer.json()['admitted'], 'an empty room takes one more')
         # The page reads this exactly when its socket closed saying nothing: the answer has to name
         # the reason, not only describe the room.
-        with patch.object(presentation.hub, 'max_clients', 0):
+        with patch.object(hub, 'max_clients', 0):
             refused = TestClient(app).get('/api/presentation/admission').json()
         self.assertEqual((refused['admitted'], refused['reason']), (False, 'room_is_full'))
-        self.assertEqual(refused['message'], presentation.hub.FULL_MESSAGE)
+        self.assertEqual(refused['message'], hub.FULL_MESSAGE)
+
+
+def mounted():
+    """A node's REST surface around a room of its own, the way `create_app` assembles it."""
+    import tempfile
+    from pathlib import Path
+    from fastapi import FastAPI
+    from sidevoice_core.control.history import RoomHistory
+    from sidevoice_core.control.room import Room
+    from sidevoice_core.server.presentation import mount_presentation
+    temp = tempfile.mkdtemp()
+    hub = Room(RoomHistory(Path(temp) / 'room-state.json'))
+    app = FastAPI()
+    mount_presentation(app, hub)
+    return app, hub
