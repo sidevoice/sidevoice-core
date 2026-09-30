@@ -191,7 +191,8 @@ class NodeSurfaceTests(unittest.TestCase):
                          ('DELETE', '/api/device/devices/nobody', None), ('GET', '/api/presentation/history', None),
                          ('GET', '/api/presentation/integrations', None),
                          ('PUT', '/api/presentation/integrations/openai', {'key': 'sk-guessed'}),
-                         ('DELETE', '/api/presentation/integrations/openai', None)]
+                         ('DELETE', '/api/presentation/integrations/openai', None),
+                         ('GET', '/api/models/catalog', None)]
             for method, path, body in protected:
                 with self.subTest(path=path):
                     for headers in ({}, auth('not-a-token'), {'Authorization': f'Basic {token}'}, {'Authorization': 'Bearer'}):
@@ -208,6 +209,7 @@ class NodeSurfaceTests(unittest.TestCase):
                              'past the token: no connector here to pair with')
             self.assertEqual(client.get('/api/presentation/rtc/config', headers=auth(token)).status_code, 200)
             self.assertEqual(client.get('/api/device/devices', headers={'authorization': f'bearer {token}'}).status_code, 200)
+            self.assertEqual(client.get('/api/models/catalog', headers=auth(token)).status_code, 200)
             # Open: what this is, the redemption, the identity proof, preflights, the connector's own link.
             what = client.get('/api/rendezvous')
             self.assertEqual(what.status_code, 200)

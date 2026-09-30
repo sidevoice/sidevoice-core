@@ -76,7 +76,8 @@ class ImportDirectionTest(unittest.TestCase):
 
     def test_no_import_statement_crosses_the_line_even_inside_a_function(self):
         rules = {'pipeline': ('sidevoice_core.control', 'sidevoice_core.server') + WEB_FRAMEWORKS,
-                 'control': ('sidevoice_core.server',) + WEB_FRAMEWORKS}
+                 'control': ('sidevoice_core.server',) + WEB_FRAMEWORKS,
+                 'models': ('sidevoice_core.control', 'sidevoice_core.server', 'sidevoice_core.pipeline') + WEB_FRAMEWORKS}
         for half, prefixes in rules.items():
             for path in sorted((PACKAGE / half).glob('*.py')):
                 with self.subTest(file=str(path.relative_to(PACKAGE))):
