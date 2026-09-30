@@ -338,3 +338,30 @@ class ConnectorControl:
             return {**reply, 'status': 'rejected', 'error': str(error.detail)}
         except Exception as error:
             return {**reply, 'status': 'rejected', 'error': str(error) or type(error).__name__}
+
+
+def local_credential(journal, path):
+    """The credential this machine's connector links with: minted by this core, kept in a file only
+    this user can read, and reused while the journal still knows it.
+
+    Pairing is a person's act because a room and a machine are two parties. The connector and its own
+    node's core are one user's process tree on one machine, so the proof is the file's ownership, not
+    a code read from one terminal into another (LOCAL_MODE_PLAN D2, taken as recommended). The journal
+    keeps it as a paired connector like any other, so participants still read as this machine.
+    """
+    import os
+    from pathlib import Path
+    path = Path(path)
+    try:
+        saved = json.loads(path.read_text(encoding='utf8'))
+        if journal.connector_credential(saved.get('connector_id'), saved.get('token')) == 'paired':
+            return saved['connector_id'], saved['token']
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    connector_id, token = journal.redeem_pairing_code(journal.create_pairing_code())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps({'connector_id': connector_id, 'token': token}), encoding='utf8')
+    os.chmod(temporary, 0o600)
+    temporary.replace(path)
+    return connector_id, token
