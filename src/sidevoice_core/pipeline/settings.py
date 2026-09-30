@@ -24,24 +24,24 @@ class LanguageVoice(BaseModel):
 
 class LanguageSettings(BaseModel):
     model_config = ConfigDict(extra='ignore')
-    ui_language: Literal['es', 'en'] = 'es'
+    ui_language: Literal['es', 'en'] = 'en'
     tts_execution: Literal['browser'] = 'browser'
     # 'native': the client's own engine (the desktop app's), outside the page; the node only carries the choice.
     tts_device: Literal['auto', 'webgpu', 'wasm', 'native'] = 'auto'
     default_model: str = Field(default='kokoro', min_length=1, max_length=120)
     spanish_model: str = Field(default='inherit', min_length=1, max_length=120)
     english_model: str = Field(default='inherit', min_length=1, max_length=120)
-    default_voice: str = 'ef_dora'
+    default_voice: str = 'af_heart'
     language_overrides: dict[str, LanguageVoice] = Field(default_factory=dict)
     # Small local Whisper models flip languages on mixed speech; detection is opt-in.
-    stt_language: Literal['auto', 'es', 'en', 'fr', 'it', 'pt', 'hi'] = 'es'
+    stt_language: Literal['auto', 'es', 'en', 'fr', 'it', 'pt', 'hi'] = 'en'
     stt_context: str = ''
     stt_provider: Literal['browser', 'openai'] = 'browser'
     stt_device: Literal['auto', 'webgpu', 'wasm', 'native'] = 'auto'
     stt_model: str = Field(default='onnx-community/whisper-tiny', min_length=1, max_length=120)
     spanish_voice: Literal['inherit', 'ef_dora', 'em_alex', 'em_santa'] = 'ef_dora'
     english_voice: Literal['inherit', 'af_heart', 'af_bella', 'bf_emma', 'bm_george'] = 'af_heart'
-    default_tts_language: Literal['es', 'en', 'fr', 'it', 'pt', 'hi'] = 'es'
+    default_tts_language: Literal['es', 'en', 'fr', 'it', 'pt', 'hi'] = 'en'
     tts_speed: float = Field(default=1.0, ge=0.5, le=2.0)
     audio_grace_seconds: float = Field(default=1.0, ge=0, le=10)
     # How far back a browser that comes back is played what it never heard (0 is off). This is a

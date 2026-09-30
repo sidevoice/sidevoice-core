@@ -27,6 +27,15 @@ class PreferencesTest(unittest.TestCase):
         self.assertEqual(language_settings.settings_from(None), (language_settings.LanguageSettings(), None))
         self.assertEqual(language_settings.settings_from({}), (language_settings.LanguageSettings(), None))
 
+    def test_a_device_that_sent_nothing_gets_english(self):
+        # The node cannot know the person's system; the device sends its own language, and English is the fallback.
+        settings = language_settings.LanguageSettings()
+        self.assertEqual((settings.ui_language, settings.stt_language, settings.default_tts_language, settings.default_voice),
+                         ('en', 'en', 'en', 'af_heart'))
+        self.assertEqual(language_settings.resolve_voice(settings)['voice'], 'af_heart')
+        # Speaking Spanish still takes a Spanish voice.
+        self.assertEqual(language_settings.resolve_voice(settings, 'es')['voice'], 'ef_dora')
+
     def test_default_turn_silence_is_two_and_a_half_seconds(self):
         settings = language_settings.LanguageSettings()
         self.assertEqual(settings.user_speech_timeout, 2.5)
