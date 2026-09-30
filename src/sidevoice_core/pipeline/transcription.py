@@ -15,19 +15,21 @@ def credentials_file():
         return Path(CREDENTIALS)
     return Path(os.getenv('VOICE_STT_CREDENTIALS_FILE') or data_dir() / 'stt-credentials.json')
 
+# 'native': the same model run by the client's own engine outside the page (the desktop app, which downloads it
+# once); a client offers it only when it has such an engine.
 BROWSER_MODELS = [
     {'id': 'onnx-community/whisper-tiny', 'label': 'Whisper tiny',
      'description': 'Fastest and lightest; recommended for conversation and mobile.',
-     'devices': ['webgpu', 'wasm']},
+     'devices': ['webgpu', 'wasm', 'native']},
     {'id': 'onnx-community/whisper-base', 'label': 'Whisper base',
      'description': 'More accurate, with a larger download and more latency.',
-     'devices': ['webgpu', 'wasm']},
+     'devices': ['webgpu', 'wasm', 'native']},
     {'id': 'onnx-community/whisper-small', 'label': 'Whisper small',
      'description': 'Mejor calidad multilingüe. Aproximadamente 285 MiB en Q4; requiere WebGPU.',
-     'devices': ['webgpu']},
+     'devices': ['webgpu', 'native']},
     {'id': 'onnx-community/whisper-large-v3-turbo', 'label': 'Whisper large v3 turbo',
      'description': 'Best local quality available. About 538 MiB quantised; needs WebGPU with fp16.',
-     'devices': ['webgpu']},
+     'devices': ['webgpu', 'native']},
 ]
 OPENAI_API = 'https://api.openai.com'
 DEFAULT_OPENAI_MODEL = 'gpt-4o-transcribe'

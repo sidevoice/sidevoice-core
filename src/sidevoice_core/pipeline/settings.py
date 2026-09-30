@@ -26,7 +26,8 @@ class LanguageSettings(BaseModel):
     model_config = ConfigDict(extra='ignore')
     ui_language: Literal['es', 'en'] = 'es'
     tts_execution: Literal['browser'] = 'browser'
-    tts_device: Literal['auto', 'webgpu', 'wasm'] = 'auto'
+    # 'native': the client's own engine (the desktop app's), outside the page; the node only carries the choice.
+    tts_device: Literal['auto', 'webgpu', 'wasm', 'native'] = 'auto'
     default_model: str = Field(default='kokoro', min_length=1, max_length=120)
     spanish_model: str = Field(default='inherit', min_length=1, max_length=120)
     english_model: str = Field(default='inherit', min_length=1, max_length=120)
@@ -36,7 +37,7 @@ class LanguageSettings(BaseModel):
     stt_language: Literal['auto', 'es', 'en', 'fr', 'it', 'pt', 'hi'] = 'es'
     stt_context: str = ''
     stt_provider: Literal['browser', 'openai'] = 'browser'
-    stt_device: Literal['auto', 'webgpu', 'wasm'] = 'auto'
+    stt_device: Literal['auto', 'webgpu', 'wasm', 'native'] = 'auto'
     stt_model: str = Field(default='onnx-community/whisper-tiny', min_length=1, max_length=120)
     spanish_voice: Literal['inherit', 'ef_dora', 'em_alex', 'em_santa'] = 'ef_dora'
     english_voice: Literal['inherit', 'af_heart', 'af_bella', 'bf_emma', 'bm_george'] = 'af_heart'
@@ -95,7 +96,7 @@ def settings_from(data):
         return LanguageSettings(), None
     # With OpenAI transcription the local runtime fields mean nothing; a page whose device select was hidden
     # sent '' for stt_device (2026-09-19) and lost every setting to the defaults, and its turns with them.
-    if data.get('stt_provider') == 'openai' and data.get('stt_device') not in ('auto', 'webgpu', 'wasm'):
+    if data.get('stt_provider') == 'openai' and data.get('stt_device') not in ('auto', 'webgpu', 'wasm', 'native'):
         data = {**data, 'stt_device': 'auto'}
     try:
         return LanguageSettings.model_validate(data), None

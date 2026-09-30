@@ -19,7 +19,8 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(providers['openai']['models'], [])
         self.assertEqual(providers['openai']['models_source'], 'remote')
         for model in providers['browser']['models']:
-            self.assertTrue(set(model['devices']) <= {'webgpu', 'wasm'})
+            self.assertTrue(set(model['devices']) <= {'webgpu', 'wasm', 'native'})
+            self.assertIn('native', model['devices'], 'a desktop app can run every browser model natively')
             self.assertTrue(model['devices'])
             self.assertTrue(model['description'])
 
@@ -72,3 +73,17 @@ class TranscriptionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NativeDeviceTests(unittest.TestCase):
+    """'native' is the client's own engine (the desktop app's): the node accepts it as a device choice."""
+
+    def test_settings_and_the_reported_runtime_accept_native(self):
+        from sidevoice_core.pipeline.call import browser_runtime
+        from sidevoice_core.pipeline.settings import settings_from
+        settings, problem = settings_from({'stt_provider': 'browser', 'stt_device': 'native', 'tts_device': 'native'})
+        self.assertIsNone(problem)
+        self.assertEqual((settings.stt_device, settings.tts_device), ('native', 'native'))
+        self.assertEqual(browser_runtime({'model': 'onnx-community/whisper-small', 'device': 'native'})['device'], 'native')
+        with self.assertRaises(ValueError):
+            browser_runtime({'model': 'onnx-community/whisper-small', 'device': 'cuda'})

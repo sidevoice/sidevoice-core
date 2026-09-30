@@ -111,7 +111,7 @@ def browser_runtime(data):
         return None
     model, device = data.get('model'), data.get('device')
     models = {item['id'] for item in transcription.PROVIDERS['browser']['models']}
-    if model not in models or device not in {'webgpu', 'wasm'}:
+    if model not in models or device not in {'webgpu', 'wasm', 'native'}:
         raise ValueError('Unsupported browser transcription engine.')
     return {'model': model, 'device': device}
 
