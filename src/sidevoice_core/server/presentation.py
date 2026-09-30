@@ -23,6 +23,18 @@ def allowed_origins():
     return {origin.strip().rstrip('/') for origin in named if origin.strip()}
 
 
+# A desktop shell's own pages: sidevoice-desktop bundles the web interface and Tauri serves it from these
+# origins (macOS and Linux; Windows). No web page can carry them, only an app installed on this machine — and
+# anything installed here already reaches loopback with no Origin at all, which this node accepts. So they are
+# accepted like the configured origins, without anyone having to name them.
+DESKTOP_ORIGINS = frozenset({'tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost'})
+
+
+def page_origins():
+    """Every origin other than this node's own whose pages may use it: configured, and a desktop shell's."""
+    return allowed_origins() | DESKTOP_ORIGINS
+
+
 def require_same_origin(request):
     """Browser-only endpoints: the Origin's host must be this node's host (scheme-agnostic, so a
     TLS proxy in front is fine), or a configured origin. Non-browser callers send no Origin."""
@@ -33,7 +45,7 @@ def require_same_origin(request):
         origin_host = urlsplit(origin).netloc.lower()
     except ValueError:
         origin_host = ''
-    if origin.rstrip('/') in allowed_origins() or (origin_host and origin_host in {
+    if origin.rstrip('/') in page_origins() or (origin_host and origin_host in {
             request.headers.get('host', '').lower(), request.url.netloc.lower()}):
         return
     raise HTTPException(403, 'Use the room from its own address.')

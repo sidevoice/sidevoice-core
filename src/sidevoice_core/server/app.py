@@ -142,6 +142,42 @@ class OwnHostsOnly:
         await self.app(scope, receive, send)
 
 
+class CrossOrigin:
+    """CORS for the pages this node accepts from another origin (`page_origins`): a desktop shell's bundled
+    interface, a configured room. A page on this node's own origin needs none, and an origin not accepted
+    gets no header at all — its browser then refuses the answer, and the origin check refuses the request.
+    Preflights are answered here; Chromium-based webviews also ask for the private network (the node is
+    loopback), which the same origins are granted."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        from .presentation import page_origins
+        if scope['type'] != 'http':
+            return await self.app(scope, receive, send)
+        headers = dict(scope.get('headers') or [])
+        origin = headers.get(b'origin', b'').decode('latin-1').rstrip('/')
+        if not origin or origin not in page_origins():
+            return await self.app(scope, receive, send)
+        allow = [(b'access-control-allow-origin', origin.encode('latin-1')), (b'vary', b'Origin')]
+        if scope['method'] == 'OPTIONS' and b'access-control-request-method' in headers:
+            extra = [(b'access-control-allow-private-network', b'true')] \
+                if headers.get(b'access-control-request-private-network') == b'true' else []
+            await send({'type': 'http.response.start', 'status': 204, 'headers': allow + extra + [
+                (b'access-control-allow-methods', b'GET, POST, PUT, PATCH, DELETE'),
+                (b'access-control-allow-headers', b'content-type, accept'),
+                (b'access-control-max-age', b'600')]})
+            await send({'type': 'http.response.body', 'body': b''})
+            return
+
+        async def answered(message):
+            if message['type'] == 'http.response.start':
+                message = {**message, 'headers': [*(message.get('headers') or []), *allow]}
+            await send(message)
+        await self.app(scope, receive, answered)
+
+
 def instrument(app):
     """FastAPI's own server spans, so a request to the node is in the same trace as the turn."""
     from ..control.telemetry import telemetry
@@ -181,7 +217,8 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None):
     mount_webrtc(app, room)
     mount_rendezvous(app, room, rendezvous)
     instrument(app)
-    app.add_middleware(OwnHostsOnly)
+    app.add_middleware(CrossOrigin)
+    app.add_middleware(OwnHostsOnly)   # added last, so it runs first: a Host this node is not is refused before anything
     return app
 
 
@@ -191,6 +228,35 @@ def mount_rendezvous(app, room, rendezvous):
     from contextlib import asynccontextmanager
     from .rendezvous import read_pairing
     app.state.rendezvous = rendezvous
+
+    from fastapi import Request
+    from pydantic import BaseModel, Field
+    from .presentation import require_room_page
+
+    class PairWithRoom(BaseModel):
+        room: str = Field(min_length=1, max_length=2048)
+        code: str = Field(min_length=1, max_length=64)
+
+    @app.post('/api/rendezvous/pair')
+    async def pair_with_room(request: Request, body: PairWithRoom):
+        """Pair this machine with a room, from a page talking to this node directly (a desktop shell): the
+        same act as the connector's `voice_pair`, with the code the person read from that room. Pairing is
+        the connector's to do — it owns `credentials.json` — so it is asked to; the rendezvous then follows
+        the new pairing on its own. Only from a page (an Origin this node accepts), never a bare script."""
+        require_room_page(request)
+        peers = list(room.control.peers.values()) if room.control else []
+        if not peers:
+            raise Refusal(503, 'El conector de esta máquina no está conectado a su núcleo: no hay quien empareje.')
+        try:
+            answer = await peers[-1].request('pair.request', {'room': body.room.strip(), 'code': body.code.strip()}, timeout=25)
+        except TimeoutError:
+            raise Refusal(504, 'El conector no respondió a tiempo al emparejamiento.')
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get('ok'):
+            raise Refusal(400, answer.get('detail') or 'El emparejamiento falló.')
+        if rendezvous is not None:
+            rendezvous.poke()
+        return {'ok': True, 'room': answer.get('origin'), 'connector_id': answer.get('connector_id')}
 
     @app.get('/api/rendezvous')
     async def what_this_is():

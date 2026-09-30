@@ -204,6 +204,7 @@ class Rendezvous:
         self.pairing = None
         self.dial_server = None   # the Socket.IO server a dialling room reaches, once mounted
         self.dialled = set()      # its connections that proved to be this machine's room
+        self.woken = None         # set by `poke` to look at the pairing file before the next poll
 
     # ----- what the connector hears -----
 
@@ -247,6 +248,19 @@ class Rendezvous:
             except Exception:
                 pass
 
+    def poke(self):
+        """Look at the pairing file now rather than at the next poll: it was just rewritten."""
+        if self.woken is not None:
+            self.woken.set()
+
+    async def nap(self, seconds):
+        self.woken = self.woken or asyncio.Event()
+        try:
+            await asyncio.wait_for(self.woken.wait(), seconds)
+        except asyncio.TimeoutError:
+            pass
+        self.woken.clear()
+
     async def run(self):
         """Keep one link to the paired room while there is a pairing; follow the file when it changes."""
         delay, seen = self.RETRY_FIRST, object()   # nothing seen yet: the first look always reports
@@ -265,10 +279,10 @@ class Rendezvous:
                 if await self.dial_room(pairing):
                     delay = self.RETRY_FIRST
                 else:
-                    await asyncio.sleep(delay)
+                    await self.nap(delay)
                     delay = min(delay * 2, self.RETRY_MAX)
                     continue
-            await asyncio.sleep(self.poll)
+            await self.nap(self.poll)
 
     async def dial_room(self, pairing):
         import socketio
