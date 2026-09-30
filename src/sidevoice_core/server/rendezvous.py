@@ -41,6 +41,25 @@ def relayed(path):
     return any(path == prefix or path.startswith(prefix + '/') for prefix in RELAYED)
 
 
+def relayable(base, path):
+    """Whether a relayed path stays under what is relayed once the HTTP client has read it: yarl decodes
+    percent-escapes and collapses dot segments, so `/api/device/%2e%2e/connectors/link` would reach the connector
+    link. Every decoding of the path, and the path the request will really go to, must be relayed."""
+    from urllib.parse import unquote
+    from yarl import URL
+    seen, current = set(), path
+    while current not in seen:
+        seen.add(current)
+        if not relayed(current) or '..' in current or '\\' in current:
+            return False
+        current = unquote(current)
+    try:
+        final = URL(base + path).path
+    except ValueError:
+        return False
+    return relayed(final)
+
+
 def private_network(hostname):
     """Where a credential may travel in clear: loopback and a Kubernetes service name, the same rule the
     connector applies (`pair.mjs`). Anything else needs TLS."""
@@ -101,7 +120,7 @@ class Relay:
     async def http(self, data):
         data = data if isinstance(data, dict) else {}
         path, method = str(data.get('path') or ''), str(data.get('method') or 'GET').upper()
-        if not relayed(path) or '..' in path or method not in {'GET', 'POST', 'PUT', 'DELETE', 'PATCH'}:
+        if not relayable(self.base, path) or method not in {'GET', 'POST', 'PUT', 'DELETE', 'PATCH'}:
             return {'status': 404, 'headers': {'content-type': 'application/json'},
                     'body': json.dumps({'detail': 'Not relayed.'}).encode()}
         query = data.get('query') if isinstance(data.get('query'), str) else ''

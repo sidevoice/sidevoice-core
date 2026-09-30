@@ -89,6 +89,25 @@ class DevicePairing:
     def __init__(self, store, room, rendezvous, config):
         self.store, self.room, self.rendezvous, self.config = store, room, rendezvous, config
         self.listen_url = None   # the node's own address, once it listens (`server.__main__`)
+        self.calls = {}          # device id -> the call sockets it has open
+
+    def call_opened(self, device_id, websocket):
+        if device_id:
+            self.calls.setdefault(device_id, set()).add(websocket)
+
+    def call_closed(self, device_id, websocket):
+        if device_id and device_id in self.calls:
+            self.calls[device_id].discard(websocket)
+            if not self.calls[device_id]:
+                del self.calls[device_id]
+
+    async def end_calls(self, device_id):
+        """A revoked device's open calls end at once, with the same close as a refused token."""
+        for websocket in list(self.calls.pop(device_id, ())):
+            try:
+                await websocket.close(code=UNPAIRED_CLOSE, reason=UNPAIRED_REASON)
+            except Exception:
+                pass
 
     def host(self):
         told = (self.room.control.identity if self.room.control else None) or {}
@@ -152,6 +171,9 @@ def mount_devices(app, room, rendezvous, config):
         require_same_origin(request)
         if not devices.store.registry.revoke(device_id):
             raise HTTPException(404, 'Ese dispositivo no está emparejado con esta máquina.')
+        # Its token is refused from now on; a call it already has open ends now too (a revoked laptop must not
+        # keep speaking and listening until it happens to disconnect).
+        await devices.end_calls(device_id)
         return {'ok': True}
 
     return devices

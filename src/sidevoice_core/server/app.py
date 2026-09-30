@@ -20,7 +20,7 @@ from ..control.room import Room
 from ..pipeline import transcription
 from ..pipeline.serializer import BrowserFrameSerializer
 from ..runtime import data_dir
-from .devices import DeviceAuth, call_subprotocol, mount_devices
+from .devices import DEVICE_KEY, DeviceAuth, call_subprotocol, mount_devices
 from .presentation import mount_presentation, require_same_origin
 from .webrtc import mount_webrtc
 
@@ -103,7 +103,15 @@ def mount_browser_call(app, room, config=None):
         # A page offers `sidevoice` beside its device token (browsers cannot set headers on a socket), and a
         # browser that offered subprotocols refuses an answer that names none.
         await websocket.accept(subprotocol=call_subprotocol(websocket.scope))
-        await browser_call(room, websocket, config)
+        devices = getattr(websocket.app.state, 'devices', None)
+        device = websocket.scope.get(DEVICE_KEY)
+        if devices:
+            devices.call_opened(device, websocket)
+        try:
+            await browser_call(room, websocket, config)
+        finally:
+            if devices:
+                devices.call_closed(device, websocket)
 
 
 LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1'}

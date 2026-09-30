@@ -271,6 +271,18 @@ class NodeSurfaceTests(unittest.TestCase):
         self.assertEqual(NodeDevices(self.data).registry.devices, {}, 'and a restart does not bring them back')
 
 
+    def test_revoking_a_device_ends_the_call_it_has_open(self):
+        with self.client() as client:
+            laptop, phone = self.paired(client, 'Portátil robado'), self.paired(client, 'El móvil')
+            with client.websocket_connect(SOCKET, subprotocols=['sidevoice', f"sidevoice.token.{laptop['token']}"]) as ws:
+                gone = client.delete(f"/api/device/devices/{laptop['device_id']}", headers=auth(phone['token']))
+                self.assertEqual(gone.status_code, 200)
+                with self.assertRaises(WebSocketDisconnect) as closed:
+                    ws.receive_text()
+                self.assertEqual(closed.exception.code, 4401, 'a revoked device stops speaking and listening now')
+            self.assertEqual(self.devices.calls, {}, 'nothing is kept of the ended call')
+
+
 class LinkedNodeTest(NodeTest):
     """A node with device auth on, linked with a stand-in room, and this machine's connector linked to it."""
     device_auth = True
@@ -353,6 +365,15 @@ class RelayTests(LinkedNodeTest):
         self.assertEqual([d['current'] for d in json.loads(listed['body'])['devices']], [True])
         self.assertEqual((await relayed('/api/connectors', {'authorization': f'Bearer {token}'}))['status'], 404,
                          'still only the client surface is relayed')
+
+    async def test_encoded_dot_segments_do_not_leave_the_relayed_surface(self):
+        await until(lambda: self.room.sid)
+        for path in ('/api/device/%2e%2e/connectors/link/', '/api/device/%252e%252e/connectors/link/',
+                     '/api/device/%2e%2e/%2e%2e/api/rendezvous', '/api/presentation/%2E%2E%2Fconnectors', '/api/device/..%2f..%2fapi'):
+            with self.subTest(path=path):
+                answer = await self.room.ask('relay.http', {'method': 'GET', 'path': path, 'query': 'EIO=4&transport=polling',
+                                                            'headers': {'accept': 'application/json'}, 'body': None})
+                self.assertEqual(answer['status'], 404, 'only the client surface is relayed, however it is spelled')
 
     async def test_a_relayed_call_socket_offers_the_token_and_without_it_is_closed_4401(self):
         await until(lambda: self.room.sid)
