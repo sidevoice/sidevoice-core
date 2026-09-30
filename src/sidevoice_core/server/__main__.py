@@ -68,7 +68,10 @@ async def serve(arguments):
     os.environ['SIDEVOICE_CORE_DATA_DIR'] = str(data)
     room = Room(RoomHistory(data / 'room-state.json'))
     connector_id, token = local_credential(room.journal, data / 'connector-credential.json')
-    app = create_app(room)
+    from .rendezvous import Rendezvous
+    # The link with the room needs this node's own address to relay to, known once it listens.
+    rendezvous = Rendezvous(arguments.room_credential, None)
+    app = create_app(room, rendezvous=rendezvous)
     server = uvicorn.Server(uvicorn.Config(app, host=arguments.host, port=arguments.port, log_level='info'))
     ready = Path(arguments.ready_file) if arguments.ready_file else data / 'core.json'
     serving = asyncio.create_task(server.serve())
@@ -83,6 +86,8 @@ async def serve(arguments):
                             'version': version(), 'protocol': PROTOCOL,
                             'connector_id': connector_id, 'token': token})
         logger.info('Sidevoice core {} listening on 127.0.0.1:{} (data in {})', version(), port, data)
+        rendezvous.base = f'http://127.0.0.1:{port}'
+        await rendezvous.start()
         watcher = asyncio.create_task(watch_idle(room, server, arguments.idle_exit)) if arguments.idle_exit else None
         await serving
         if watcher:
@@ -100,6 +105,8 @@ def main(argv=None):
                         help=f'loopback port (default {DEFAULT_PORT}; 0 picks a free one)')
     parser.add_argument('--data-dir', default=str(data_dir()))
     parser.add_argument('--ready-file', default=None, help='where to say it is listening (default <data-dir>/core.json)')
+    parser.add_argument('--room-credential', default=os.environ.get('SIDEVOICE_ROOM_CREDENTIAL'),
+                        help="the machine's pairing with a room (the connector's credentials.json); none: no room")
     parser.add_argument('--idle-exit', type=float,
                         default=float(os.environ.get('SIDEVOICE_CORE_IDLE_SECONDS') or DEFAULT_IDLE_SECONDS),
                         help='seconds with no connector and no call before exiting (0: never)')

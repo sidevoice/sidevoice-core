@@ -191,8 +191,9 @@ class ConnectorInteropTests(unittest.IsolatedAsyncioTestCase):
         room = Room(app, port)
         await room.start()
 
-        (data / 'credentials.json').write_text(json.dumps({
-            'url': f'http://127.0.0.1:{port}', 'connector_id': connector_id, 'token': token, 'protocol': 2}))
+        # This app stands in for the core the connector would start: named whole, it is linked to, not supervised.
+        core = {'SIDEVOICE_URL': f'http://127.0.0.1:{port}', 'SIDEVOICE_CONNECTOR_ID': connector_id,
+                'SIDEVOICE_CONNECTOR_TOKEN': token}
 
         inbox = await Inbox(str(data / 'inbox.sock')).start()
         transcript = claude / 'projects' / '-home-someone-project' / 'sess-claude.jsonl'
@@ -202,7 +203,7 @@ class ConnectorInteropTests(unittest.IsolatedAsyncioTestCase):
 
         connector = await asyncio.create_subprocess_exec(
             NODE, *SHAPES[shape],
-            env={**os.environ, 'SIDEVOICE_DATA_DIR': str(data), 'SIDEVOICE_CONNECTOR_IDLE_MS': '120000',
+            env={**os.environ, 'SIDEVOICE_DATA_DIR': str(data), 'SIDEVOICE_CONNECTOR_IDLE_MS': '120000', **core,
                  'CLAUDE_CONFIG_DIR': str(claude), 'SIDEVOICE_WORK_POLL_MS': '30',
                  'SIDEVOICE_WORK_ANNOUNCE_MS': '5000'},
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -329,11 +330,11 @@ class ConnectorInteropTests(unittest.IsolatedAsyncioTestCase):
         await room.start()
         self.addAsyncCleanup(room.stop)
 
-        (data / 'credentials.json').write_text(json.dumps({
-            'url': f'http://127.0.0.1:{port}', 'connector_id': connector_id, 'token': 'not-the-token'}))
         connector = await asyncio.create_subprocess_exec(
             NODE, *SHAPES['source'],
-            env={**os.environ, 'SIDEVOICE_DATA_DIR': str(data), 'SIDEVOICE_CONNECTOR_IDLE_MS': '120000'},
+            env={**os.environ, 'SIDEVOICE_DATA_DIR': str(data), 'SIDEVOICE_CONNECTOR_IDLE_MS': '120000',
+                 'SIDEVOICE_URL': f'http://127.0.0.1:{port}', 'SIDEVOICE_CONNECTOR_ID': connector_id,
+                 'SIDEVOICE_CONNECTOR_TOKEN': 'not-the-token'},
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
 
         async def finish():

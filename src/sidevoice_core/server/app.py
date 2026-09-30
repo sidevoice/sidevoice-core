@@ -115,8 +115,9 @@ def instrument(app):
     return app
 
 
-def create_app(room=None, *, config=None, link_options=None):
-    """The whole node. `room` defaults to one whose durable state lives in the node's data directory."""
+def create_app(room=None, *, config=None, link_options=None, rendezvous=None):
+    """The whole node. `room` defaults to one whose durable state lives in the node's data directory;
+    `rendezvous` is this node's link with the hosted room, when it has one (`server.__main__` makes it)."""
     from fastapi import FastAPI
     from ..control.telemetry import configure as configure_telemetry
     from .connector_link import mount_connector_link
@@ -137,5 +138,37 @@ def create_app(room=None, *, config=None, link_options=None):
     mount_presentation(app, room)
     mount_connector_link(app, room, **(link_options or {}))
     mount_browser_call(app, room, config)
+    mount_rendezvous(app, room, rendezvous)
     instrument(app)
     return app
+
+
+def mount_rendezvous(app, room, rendezvous):
+    """What this node is, for a page or a shell deciding where it is (`GET /api/rendezvous`), and — when
+    it has one — its link with the hosted room, started and stopped with the app."""
+    from contextlib import asynccontextmanager
+    from .rendezvous import read_pairing
+    app.state.rendezvous = rendezvous
+
+    @app.get('/api/rendezvous')
+    async def what_this_is():
+        pairing = read_pairing(rendezvous.pairing_path) if rendezvous and rendezvous.pairing_path else None
+        told = (room.control.identity if room.control else None) or {}
+        return {'kind': 'node', 'id': pairing and pairing['connector_id'], 'host': told.get('host'),
+                'room': rendezvous.state if rendezvous else None}
+
+    if rendezvous is None:
+        return
+    rendezvous.control = room.control
+    rendezvous.on_state = room.control.rendezvous_changed
+    rendezvous.mount_dial(app)
+    previous_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def rendezvous_lifespan(application):
+        async with previous_lifespan(application) as state:
+            try:
+                yield state
+            finally:
+                await rendezvous.stop()
+    app.router.lifespan_context = rendezvous_lifespan

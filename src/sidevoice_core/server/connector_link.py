@@ -85,10 +85,15 @@ def mount_connector_socketio(app, control):
             raise ConnectionRefusedError(
                 f'This connector speaks protocol {credential.get("protocol")!r} and this core speaks '
                 f'{PROTOCOL}: update the connector.')
+        # What the machine says about itself is what the room lists this node as.
+        control.identity = {key: credential[key] for key in ('host', 'platform', 'version', 'harnesses')
+                            if credential.get(key)}
         peer = SocketIOPeer(server, sid)
         await server.save_session(sid, {'connector_id': connector_id, 'peer': peer}, namespace=NAMESPACE)
         await control.attach(connector_id, peer)
         await server.emit('connector.welcome', {'protocol': PROTOCOL}, to=sid, namespace=NAMESPACE)
+        if control.rendezvous is not None:
+            await server.emit('node.rendezvous', control.rendezvous, to=sid, namespace=NAMESPACE)
         logger.info('Connector {} connected from {} (version {})', connector_id,
                     credential.get('host') or 'an unnamed host', credential.get('version') or 'unknown')
 

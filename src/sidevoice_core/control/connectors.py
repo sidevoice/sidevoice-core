@@ -73,6 +73,8 @@ class ConnectorControl:
         self.inflight = {}   # binding_id -> (event_id, started_at, task): one delivery at a time per binding
         self.heartbeat_seconds, self.ack_timeout = heartbeat_seconds, ack_timeout
         self.pump_task = None
+        self.identity = None     # what this machine's connector last said about it, for the room to list
+        self.rendezvous = None   # what this node's link with the room is doing, for its connector to report
 
     async def start(self):
         self.pump_task = asyncio.create_task(self.pump())
@@ -93,6 +95,17 @@ class ConnectorControl:
         self.peers[connector_id] = peer
         if previous is not None and previous is not peer:
             await previous.disconnect()
+
+    async def rendezvous_changed(self, state):
+        """The link with the room came up, went down or was refused: every connector hears it, because
+        whether the room is reachable is what its conversations are told, and a refusal (a revoked
+        pairing) is what makes it let them go."""
+        self.rendezvous = state
+        for peer in list(self.peers.values()):
+            try:
+                await peer.send('node.rendezvous', state)
+            except Exception:
+                pass
 
     def detach(self, connector_id, peer):
         """That connection is gone. Its bindings stop being live, none of them is working any more —
