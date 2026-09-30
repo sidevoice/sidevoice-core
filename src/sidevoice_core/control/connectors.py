@@ -38,11 +38,28 @@ def engine_of(value):
     return kept or None
 
 
-def harness_capabilities(value):
-    """Normalize the wire declaration. Missing and invalid values stay unknown, never false."""
+ROUTES = ('cursor-editor-bridge', 'cursor-editor-view', 'cursor-cli-persist', 'cursor-cli')
+
+
+def route_of(value):
+    """How a conversation's harness is reached, when its connector says so and it is a route this room knows
+    how to name; anything else is absent, and the browser simply shows the harness."""
+    return value if value in ROUTES else None
+
+
+def harness_capabilities(value, experimental=None):
+    """Normalize the wire declaration. Missing and invalid values stay unknown, never false. A supported
+    capability the harness reaches by a route it does not offer (typing into a terminal, driving a view) is
+    listed under `experimental`, so the person is told; the key is absent when there is none."""
     declared = value if isinstance(value, dict) else {}
-    return {name: declared.get(name) if declared.get(name) in CAPABILITY_STATES else 'unknown'
-            for name in HARNESS_CAPABILITIES}
+    normalized = {name: declared.get(name) if declared.get(name) in CAPABILITY_STATES else 'unknown'
+                  for name in HARNESS_CAPABILITIES}
+    marked = experimental if experimental is not None else declared.get('experimental')
+    marked = [name for name in HARNESS_CAPABILITIES
+              if isinstance(marked, list) and name in marked and normalized[name] == 'supported']
+    if marked:
+        normalized['experimental'] = marked
+    return normalized
 
 
 class ConnectorPeer:
@@ -152,6 +169,11 @@ class ConnectorControl:
             return {'state': 'holding',
                     'detail': inbound.get('reason') or 'Su harness retiene lo que enviamos en vez de entregarlo.',
                     'remedy': inbound.get('remedy')}
+        capabilities = binding.get('capabilities')
+        if isinstance(capabilities, dict) and capabilities.get('deliver') == 'unsupported':
+            return {'state': 'holding',
+                    'detail': 'Esta conversación no puede recibir lo que dices: su harness no ofrece forma de '
+                              'entregarle mensajes. Te habla, y tú le escribes en ella.'}
         return {'state': 'listening', 'detail': None}
 
     # ----- delivery: the room's outbox drains through live bindings -----
@@ -241,6 +263,10 @@ class ConnectorControl:
                 # anyone knows. Retrying would duplicate without ever learning more.
                 self.journal.update(event_id, 'unconfirmed', message.get('detail'))
                 self.hub.delivery_status(event_id, 'unconfirmed')
+            elif status == 'unsupported':
+                # The harness declared it cannot take input (the Cursor CLI): no retry will change that.
+                self.journal.update(event_id, 'not_sent', 'unsupported')
+                self.hub.delivery_status(event_id, 'not_sent')
             else:
                 self.journal.defer(event_id)
                 self.hub.delivery_status(event_id, 'pending')
@@ -299,8 +325,8 @@ class ConnectorControl:
         binding = self.journal.register_binding(connector_id, harness=str(message.get('harness') or 'unknown')[:40],
                                                 thread=thread, title=(message.get('title') or None) and str(message['title'])[:200],
                                                 binding_id=message.get('binding_id'), inbound=inbound,
-                                                capabilities=harness_capabilities(message.get('capabilities')),
-                                                engine=engine_of(message.get('engine')))
+                                                capabilities=harness_capabilities(message.get('capabilities'), message.get('experimental')),
+                                                engine=engine_of(message.get('engine')), route=route_of(message.get('route')))
         self.live[binding['id']] = connector_id
         self.hub.clear_conversation_working(binding['thread'])
         # A conversation joining the room selects itself for nobody: which conversation a browser

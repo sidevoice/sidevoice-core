@@ -226,6 +226,8 @@ def mount_presentation(app, hub):
                  'capabilities': b.get('capabilities'),
                  # What it thinks with, as its harness records it; absent while no harness has said.
                  'engine': b.get('engine'),
+                 # How its harness is reached (Cursor: editor card, CLI under persist, CLI listening only).
+                 'route': b.get('route'),
                  'reach': reach(b),
                  'selected': b['thread'] == current.get('thread_id')} for b in entries]
 

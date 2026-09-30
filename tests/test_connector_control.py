@@ -238,6 +238,23 @@ class ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertIsNone(self.journal.binding(participant['id']).get('inbound'))
 
+    async def test_experimental_capabilities_are_kept_and_a_conversation_that_cannot_receive_says_so(self):
+        await self.join('chat-1', harness='cursor', capabilities={'deliver': 'supported', 'working': 'supported'}, experimental=['deliver', 'working', 'inspectInbound'])
+        participant = self.control.participants()[0]
+        self.assertEqual(participant['capabilities']['experimental'], ['deliver', 'working'], 'only supported ones can be experimental')
+        self.assertEqual(self.control.reachability({**participant, 'connected': True})['state'], 'listening')
+        await self.join('chat-2', harness='cursor', capabilities={'deliver': 'unsupported'})
+        listen_only = next(p for p in self.control.participants() if p['thread'] == 'chat-2')
+        self.assertNotIn('experimental', listen_only['capabilities'])
+        self.assertIsNone(listen_only.get('route'), 'no route said, none kept')
+        await self.join('chat-3', harness='cursor', capabilities={'deliver': 'supported'}, route='cursor-editor-view')
+        await self.join('chat-4', harness='cursor', route='something-else')
+        routes = {p['thread']: p.get('route') for p in self.control.participants()}
+        self.assertEqual((routes['chat-3'], routes['chat-4']), ('cursor-editor-view', None), 'only routes the room can name')
+        reach = self.control.reachability({**listen_only, 'connected': True})
+        self.assertEqual(reach['state'], 'holding')
+        self.assertIn('no puede recibir', reach['detail'])
+
     async def test_an_unknown_binding_id_from_its_connector_is_a_fresh_registration(self):
         binding = self.journal.register_binding(self.connector_id, harness='claude', thread='sess-1', binding_id='gone-after-restart')
         self.assertNotEqual(binding['id'], 'gone-after-restart')
@@ -257,6 +274,17 @@ class ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.control.register(self.connector_id, {'client_ref': 'r3', 'harness': 'claude', 'thread': 'bad thread!'})
         self.assertEqual(self.journal.binding_for_thread('sess-1')['id'], registered['binding_id'])
+
+    async def test_a_harness_that_cannot_take_input_ends_the_message_not_sent_without_retrying(self):
+        binding = self.journal.register_binding(self.connector_id, harness='cursor', thread='chat-1')
+        peer = await self.attach()
+        self.control.live[binding['id']] = self.connector_id
+        row = self.queue_input('chat-1', 'hola', 'm1')
+        await self.control.tick(); await peer.until_asked(1)
+        await self.control.acknowledge(self.connector_id, row['id'], {'status': 'unsupported', 'error': 'cursor offers no way in'})
+        self.assertEqual(self.journal.get(row['id'])['status'], 'not_sent')
+        await self.control.tick(now=time.time() + 1000)
+        self.assertEqual(len(peer.asked), 1, 'never asked again')
 
     async def test_delivery_is_one_at_a_time_acknowledged_by_owner_and_retried_on_failure(self):
         binding = self.journal.register_binding(self.connector_id, harness='claude', thread='sess-1')
