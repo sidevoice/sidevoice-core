@@ -28,7 +28,9 @@ src/sidevoice_core/
   transcription provider, the output-side processors), `call.VoiceCall` (the turn flow: open the
   epoch, transcribe once, merge a breath, hold a resumed sentence, deliver in order), and the
   providers: the client transcribes (`transcribers.ClientTranscriber`) or OpenAI from here;
-  the client synthesizes (Kokoro) or ElevenLabs from here (`synthesis`). What it needs from the
+  the client synthesizes (Kokoro) or ElevenLabs from here (`synthesis`). The keys those providers
+  are called with are the node's integrations (`integrations`): one per provider, in one 0600 file,
+  written by the owner from any client and never read back. What it needs from the
   call it serves is one protocol, `call.CallPort`. **It never imports the control plane.**
 - **control** — `room.Room` / `room.RoomClient` (shared room state vs one listener's state, see
   rubasace/sidevoice `docs/MULTI_CLIENT_ROOM.md`), the journal (`history`), the delivery pump and
@@ -59,8 +61,10 @@ uv venv --python 3.12 && uv pip install -e '.[test]'
 sidevoice-core --port 8767          # or: python -m sidevoice_core.server
 ```
 
-Data (provider keys, the journal's durable state) lives in `SIDEVOICE_CORE_DATA_DIR`, else
-`VOICE_RUNTIME_ROOT`, else `~/.sidevoice/core`. Tests that need a rubasace/sidevoice checkout
+Data (provider keys in `integrations.json`, the journal's durable state) lives in
+`SIDEVOICE_CORE_DATA_DIR`, else `VOICE_RUNTIME_ROOT`, else `~/.sidevoice/core`. A key can also come
+from the environment (`VOICE_STT_API_KEY` for OpenAI, `VOICE_ELEVENLABS_API_KEY` for ElevenLabs), which is
+how a headless host is configured; one saved from a client wins over it. Tests that need a rubasace/sidevoice checkout
 (the real connector, the protocol package) run when `SIDEVOICE_REPOSITORY` names one and skip
 otherwise.
 

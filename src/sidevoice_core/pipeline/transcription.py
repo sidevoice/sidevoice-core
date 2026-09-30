@@ -1,19 +1,7 @@
 """Speech-to-text catalogue: the client transcribes (its own Whisper), or OpenAI from this node."""
-import json
-import os
 import re
-from pathlib import Path
-from ..runtime import data_dir
 
-CREDENTIALS = None   # a fixed path overrides the default; see credentials_file()
-
-
-def credentials_file():
-    """Where this node keeps the key, read when asked: `CREDENTIALS` when set (a test, a deployment), else
-    the environment's file, else the node's data directory."""
-    if CREDENTIALS is not None:
-        return Path(CREDENTIALS)
-    return Path(os.getenv('VOICE_STT_CREDENTIALS_FILE') or data_dir() / 'stt-credentials.json')
+from . import integrations
 
 # 'native': the same model run by the client's own engine outside the page (the desktop app, which downloads it
 # once); a client offers it only when it has such an engine.
@@ -47,68 +35,6 @@ CATALOG = {
 PROVIDERS = {item['id']: item for item in CATALOG['providers']}
 
 
-def _read():
-    try:
-        stored = json.loads(credentials_file().read_text())
-        return stored if isinstance(stored, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def stored_key(provider):
-    value = _read().get(provider)
-    return value if isinstance(value, str) and value.strip() else None
-
-
-def environment_key(config=None):
-    source = config if config is not None else os.environ
-    value = (source.get('VOICE_STT_API_KEY') or '').strip()
-    return value or None
-
-
-def save_key(provider, key):
-    if provider not in PROVIDERS or not PROVIDERS[provider]['needs_key']:
-        raise ValueError('Ese proveedor no usa clave')
-    key = (key or '').strip()
-    if not key:
-        raise ValueError('The key is empty')
-    stored = _read()
-    stored[provider] = key
-    target = credentials_file()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix('.tmp')
-    temporary.write_text(json.dumps(stored), encoding='utf8')
-    temporary.chmod(0o600)
-    temporary.replace(target)
-
-
-def clear_key(provider):
-    stored = _read()
-    if stored.pop(provider, None) is None:
-        return
-    target = credentials_file()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix('.tmp')
-    temporary.write_text(json.dumps(stored), encoding='utf8')
-    temporary.chmod(0o600)
-    temporary.replace(target)
-
-
-def credential_state(config=None):
-    state = {}
-    for provider in PROVIDERS.values():
-        if not provider['needs_key']:
-            continue
-        key = stored_key(provider['id'])
-        source = 'stored' if key else None
-        if not key and provider['id'] == 'openai':
-            key = environment_key(config)
-            source = 'environment' if key else None
-        state[provider['id']] = {'configured': bool(key), 'source': source,
-                                 'hint': ('…' + key[-4:]) if key else None}
-    return state
-
-
 def resolve(settings, config=None):
     provider = getattr(settings, 'stt_provider', 'browser') or 'browser'
     if provider not in PROVIDERS:
@@ -127,7 +53,7 @@ def resolve(settings, config=None):
                 'engine': 'Transformers.js · Whisper', 'location': 'browser',
                 'device': getattr(settings, 'stt_device', 'auto'),
                 'compute_type': 'fp32 (WebGPU) / q8 (WASM)'}
-    key = stored_key('openai') or environment_key(config)
+    key = integrations.key('openai', config)
     return {'provider': provider, 'model': model,
             'reason': 'explicit' if key else 'missing_key',
             'engine': 'OpenAI API', 'location': 'remote', 'device': 'cloud',
@@ -142,7 +68,7 @@ def build(settings, choice, *, config=None, send=None, session_id=None):
             raise ValueError('Browser transcription needs its own connection.')
         from .transcribers import ClientTranscriber
         return ClientTranscriber(send, session_id, language=language)
-    key = stored_key('openai') or environment_key(config)
+    key = integrations.key('openai', config)
     if not key:
         raise ValueError('OpenAI necesita una clave de API antes de conectar.')
     from .transcribers import OpenAITranscriber
@@ -192,7 +118,7 @@ async def catalog(provider, config=None):
     """Load a provider model catalogue only when its picker is selected."""
     if provider != 'openai':
         raise ValueError('Proveedor desconocido.')
-    value = stored_key(provider) or environment_key(config)
+    value = integrations.key(provider, config)
     result = {'provider': provider, 'configured': bool(value), 'models': [], 'error': None}
     if not value:
         return result

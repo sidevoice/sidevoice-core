@@ -27,6 +27,14 @@ UNPAIRED_REASON = 'Dispositivo no emparejado con esta máquina.'   # a close rea
 REFUSED_SECRET = 'Ese código no vale: no existe, ya se usó o ha caducado. Pide uno nuevo en la máquina.'
 
 
+def is_owner(device_id):
+    """Whether this device may configure the node itself — its integrations' keys, for now (#64).
+
+    Every paired device is the owner's today: the node has no guests yet. When it does, this is the one place
+    that tells them apart; everything that is the owner's alone asks here."""
+    return True
+
+
 def call_subprotocol(scope):
     """The subprotocol a call socket is accepted with: `sidevoice` when the client offered it (a browser that
     offers subprotocols refuses an answer naming none), else none."""

@@ -126,10 +126,9 @@ class OutboundTests(NodeTest):
         refused = await self.room.ask('relay.http', {'method': 'GET', 'path': '/api/connectors', 'query': '',
                                                      'headers': {}, 'body': None})
         self.assertEqual(refused['status'], 404, 'only the client surface is relayed, never the connector\'s')
-        # A credential form insists on an Origin: a relayed page's is carried as this node's own.
-        form = await self.room.ask('relay.http', {'method': 'POST', 'path': '/api/presentation/transcription/credential',
-                                                  'query': '', 'headers': {'content-type': 'application/json', 'origin': 'https://room.example'},
-                                                  'body': json.dumps({'provider': 'openai', 'key': None}).encode()})
+        # Changing a key insists on an Origin: a relayed page's is carried as this node's own.
+        form = await self.room.ask('relay.http', {'method': 'DELETE', 'path': '/api/presentation/integrations/openai',
+                                                  'query': '', 'headers': {'origin': 'https://room.example'}, 'body': None})
         self.assertEqual(form['status'], 200, form['body'])
 
     async def test_a_relayed_call_socket_is_a_call_like_any_other(self):

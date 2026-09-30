@@ -188,7 +188,10 @@ class NodeSurfaceTests(unittest.TestCase):
             protected = [('GET', '/api/presentation/admission', None), ('GET', '/api/connectors', None),
                          ('POST', '/api/rendezvous/pair', {'room': 'https://room.example', 'code': 'ABCD'}),
                          ('GET', '/api/presentation/rtc/config', None), ('GET', '/api/device/devices', None),
-                         ('DELETE', '/api/device/devices/nobody', None), ('GET', '/api/presentation/history', None)]
+                         ('DELETE', '/api/device/devices/nobody', None), ('GET', '/api/presentation/history', None),
+                         ('GET', '/api/presentation/integrations', None),
+                         ('PUT', '/api/presentation/integrations/openai', {'key': 'sk-guessed'}),
+                         ('DELETE', '/api/presentation/integrations/openai', None)]
             for method, path, body in protected:
                 with self.subTest(path=path):
                     for headers in ({}, auth('not-a-token'), {'Authorization': f'Basic {token}'}, {'Authorization': 'Bearer'}):

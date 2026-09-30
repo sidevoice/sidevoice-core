@@ -598,8 +598,7 @@ class OwnHostsTests(IsolatedAsyncioTestCase):
             self.assertEqual(client.get('/api/presentation/admission').status_code, 200)
             for path in ('/api/presentation/history', '/api/connectors', '/api/presentation/admission'):
                 self.assertEqual(client.get(path, headers=rebound).status_code, 421, path)
-            self.assertEqual(client.post('/api/presentation/transcription/credential', headers=rebound,
-                                         json={'provider': 'openai', 'key': None}).status_code, 421)
+            self.assertEqual(client.delete('/api/presentation/integrations/openai', headers=rebound).status_code, 421)
             with self.assertRaises(WebSocketDisconnect):
                 with client.websocket_connect('/api/presentation/ws', headers=rebound) as ws:
                     ws.receive_text()
