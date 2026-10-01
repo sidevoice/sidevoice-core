@@ -204,6 +204,10 @@
             "dtype": {
               "webgpu": "fp32",
               "wasm": "q8"
+            },
+            "sizes": {
+              "webgpu": 154228322,
+              "wasm": 43613734
             }
           }
         }
@@ -243,6 +247,10 @@
             "dtype": {
               "webgpu": "fp32",
               "wasm": "q8"
+            },
+            "sizes": {
+              "webgpu": 293759168,
+              "wasm": 79664191
             }
           }
         }
@@ -284,6 +292,9 @@
             "revision": "36050c46d777d46dc4b5f43f6d90574fc38f8732",
             "dtype": {
               "webgpu": "q4"
+            },
+            "sizes": {
+              "webgpu": 302101039
             }
           }
         }
@@ -328,6 +339,9 @@
             "revision": "360ebcde2559d60bb474678be3c1de9ef347d01a",
             "dtype": {
               "webgpu": "q4f16"
+            },
+            "sizes": {
+              "webgpu": 566248124
             }
           }
         }
@@ -463,6 +477,10 @@
             "dtype": {
               "webgpu": "fp32",
               "wasm": "q8"
+            },
+            "sizes": {
+              "webgpu": 325535886,
+              "wasm": 92364770
             }
           }
         }

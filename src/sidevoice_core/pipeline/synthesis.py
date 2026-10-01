@@ -22,6 +22,17 @@ FALLBACK_MODELS = [
 ]
 
 
+class ProviderAnswered(ValueError):
+    """The provider answered with an error status: `status` says which (401/403: it refused the key)."""
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.status = status
+
+
+class ProviderUnreachable(ValueError):
+    """The provider could not be asked at all: a network failure or a timeout."""
+
+
 def _headers(value):
     return {'xi-api-key': value, 'Accept': 'application/json'}
 
@@ -150,8 +161,9 @@ async def catalog(config=None):
     return result
 
 
-async def synthesize(text, *, model, voice, speed, config=None, with_timestamps=False):
-    """Generate one MP3 response through ElevenLabs without exposing its key."""
+async def synthesize(text, *, model, voice, speed, config=None, with_timestamps=False, output_format='mp3_44100_128'):
+    """Generate one response through ElevenLabs without exposing its key: MP3 unless `output_format` asks for
+    another of ElevenLabs' formats (a model check asks for `pcm_16000`, which it can measure)."""
     value = integrations.key('elevenlabs', config)
     if not value:
         raise ValueError('Configura una clave de ElevenLabs antes de seleccionar esa voz.')
@@ -160,7 +172,7 @@ async def synthesize(text, *, model, voice, speed, config=None, with_timestamps=
     body = {'text': text, 'model_id': model,
             'voice_settings': {'speed': max(0.7, min(1.2, float(speed)))}}
     endpoint = '/with-timestamps' if with_timestamps else '/stream'
-    url = ELEVENLABS_API + '/v1/text-to-speech/' + quote(voice, safe='') + endpoint + '?output_format=mp3_44100_128'
+    url = ELEVENLABS_API + '/v1/text-to-speech/' + quote(voice, safe='') + endpoint + '?output_format=' + quote(output_format, safe='_')
     started = time.monotonic()
     timings = {}
     import aiohttp
@@ -169,7 +181,7 @@ async def synthesize(text, *, model, voice, speed, config=None, with_timestamps=
             async with http.post(url, headers={**_headers(value), 'Content-Type': 'application/json'}, json=body) as response:
                 timings['request_to_headers_ms'] = (time.monotonic() - started) * 1000
                 if response.status >= 400:
-                    raise ValueError(_failure(response))
+                    raise ProviderAnswered(_failure(response), response.status)
                 chunks = []
                 async for chunk in response.content.iter_any():
                     if chunk:
@@ -181,7 +193,7 @@ async def synthesize(text, *, model, voice, speed, config=None, with_timestamps=
     except ValueError:
         raise
     except Exception as error:
-        raise ValueError('No se pudo generar audio con ElevenLabs: ' + type(error).__name__) from error
+        raise ProviderUnreachable('No se pudo generar audio con ElevenLabs: ' + type(error).__name__) from error
     alignment = None
     if with_timestamps:
         try:
@@ -195,5 +207,6 @@ async def synthesize(text, *, model, voice, speed, config=None, with_timestamps=
             raise ValueError('ElevenLabs returned an invalid audio response.') from error
     if not audio:
         raise ValueError('ElevenLabs returned no audio.')
-    return {'mime_type': 'audio/mpeg', 'audio_base64': base64.b64encode(audio).decode('ascii'),
+    mime_type = 'audio/mpeg' if output_format.startswith('mp3') else 'audio/pcm' if output_format.startswith('pcm') else 'application/octet-stream'
+    return {'mime_type': mime_type, 'audio_base64': base64.b64encode(audio).decode('ascii'),
             'timings_ms': timings, 'alignment': alignment}

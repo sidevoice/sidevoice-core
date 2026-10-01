@@ -230,7 +230,8 @@ class NodeSurfaceTests(unittest.TestCase):
                          ('GET', '/api/presentation/integrations', None),
                          ('PUT', '/api/presentation/integrations/openai', {'key': 'sk-guessed'}),
                          ('DELETE', '/api/presentation/integrations/openai', None),
-                         ('GET', '/api/models/catalog', None)]
+                         ('GET', '/api/models/catalog', None),
+                         ('POST', '/api/models/check', {'stage': 'stt', 'place': 'openai', 'model': 'whisper-1'})]
             for method, path, body in protected:
                 with self.subTest(path=path):
                     for headers in ({}, auth('not-a-token'), {'Authorization': f'Basic {token}'}, {'Authorization': 'Bearer'}):
