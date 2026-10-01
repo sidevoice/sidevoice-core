@@ -14,7 +14,8 @@ Shape (version 2):
   and each task names the options it takes, like a family.
 - `models`: what a person picks. Each has one build per engine it runs on: the format, what to download (a
   native engine's files), the engine's own configuration, and optionally the `accelerators` it is limited to
-  and the capabilities it `needs` beyond them.
+  and the capabilities it `needs` beyond them. A page build's configuration says, per accelerator, the
+  precision it loads (`dtype`) and the bytes that downloads (`sizes`): what a page asks consent for.
 """
 import json
 from functools import cache

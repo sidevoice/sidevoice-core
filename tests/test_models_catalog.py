@@ -149,6 +149,20 @@ class OtherListsAgreeTest(unittest.TestCase):
                          next(option for option in whisper if option['id'] == 'language')['default'])
 
 
+class PageBuildTest(unittest.TestCase):
+    def test_every_page_build_says_what_it_downloads_on_each_accelerator(self):
+        """What a page asks consent for before it downloads a model (#124 §6 step 1): one size per accelerator,
+        since each loads its own precision of the model."""
+        for item in load()['models']:
+            for entry in item['builds']:
+                if entry['engine'] != 'transformers-js':
+                    continue
+                with self.subTest(model=item['id']):
+                    config = entry['config']
+                    self.assertEqual(set(config['sizes']), set(config['dtype']))
+                    self.assertTrue(all(isinstance(size, int) and size > 0 for size in config['sizes'].values()))
+
+
 class EndpointTest(unittest.TestCase):
     def test_the_node_serves_the_file_as_shipped(self):
         app = create_app(device_auth=False)

@@ -1,0 +1,21 @@
+{
+ "version": 1,
+ "source": "The clips were spoken by Kokoro 82M v1.0 (Apache-2.0; voices em_alex and af_heart) from the phrases below, then made 16 kHz mono 16-bit PCM: the same words a voice check speaks.",
+ "fallback": "en",
+ "stt": {
+  "comfort_ms": 2000,
+  "max_word_error": 0.5,
+  "clips": {
+   "es": {"file": "stt-es.wav", "text": "Hola. Esto es una prueba de transcripción para comprobar que el modelo entiende lo que digo."},
+   "en": {"file": "stt-en.wav", "text": "Hello. This is a transcription test to check that the model understands what I am saying."}
+  }
+ },
+ "tts": {
+  "min_rms": 0.005,
+  "seconds": [1.5, 20],
+  "phrases": {
+   "es": "Hola. Esto es una prueba de transcripción para comprobar que el modelo entiende lo que digo.",
+   "en": "Hello. This is a transcription test to check that the model understands what I am saying."
+  }
+ }
+}
