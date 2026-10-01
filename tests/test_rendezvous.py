@@ -2,6 +2,7 @@
 pairing, serves the room's relayed requests by making them to itself, carries a call socket both ways,
 reports the link to its connector, and accepts a room that dials it only with the right key."""
 import asyncio
+import functools
 import json
 import socket
 import tempfile
@@ -48,6 +49,9 @@ def link_client(case, path):
     """A Socket.IO client that reaches a node through its local socket (`connect(LOCAL, …)`), let go with `case`."""
     session = through(path)
     client = socketio.AsyncClient(reconnection=False, http_session=session)
+    # The namespace's handshake gets ten seconds, not the library's one: a loaded machine is not a refusal (a
+    # refusal still fails at once).
+    client.connect = functools.partial(client.connect, wait_timeout=10)
     case.addAsyncCleanup(session.close)
     case.addAsyncCleanup(client.disconnect)
     return client
