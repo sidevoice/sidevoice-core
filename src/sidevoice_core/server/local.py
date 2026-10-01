@@ -50,16 +50,27 @@ def marked(app):
     return local_app
 
 
+def from_a_page(scope):
+    """Whether a page sent this: browsers always say their Origin on what the socket serves (a fetch that is not a
+    GET, every socket), native callers — the app's own code, the connector — never do."""
+    return any(name == b'origin' for name, _ in scope.get('headers') or ())
+
+
 class LocalOnly:
     """What is served only on the socket does not exist anywhere else: over TCP, and so through a room's relay
     (which makes its requests to this node over TCP), it gets the answer an unknown route gets — 404, or a socket
-    closed before its handshake. Sits inside `OwnHostsOnly` and outside everything else, device auth included."""
+    closed before its handshake. Sits inside `OwnHostsOnly` and outside everything else, device auth included.
+
+    Nor does it exist for a page that reaches the socket through the desktop app's proxy: the proxy refuses those
+    paths itself, and anything carrying an Origin is refused here too, so the app's page never pairs, unpairs or
+    links on its own."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope['type'] in {'http', 'websocket'} and not is_local(scope) and local_only(scope_path(scope)):
+        if scope['type'] in {'http', 'websocket'} and local_only(scope_path(scope)) \
+                and (not is_local(scope) or from_a_page(scope)):
             if scope['type'] == 'websocket':
                 await send({'type': 'websocket.close', 'code': 1000})
                 return

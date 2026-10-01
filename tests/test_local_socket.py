@@ -126,6 +126,18 @@ class LocalSocketTests(NodeTest):
         with self.assertRaises(aiohttp.WSServerHandshakeError):
             await self.tcp_http.ws_connect(self.tcp + '/api/connectors/link/?EIO=4&transport=websocket')
 
+    async def test_a_page_reaching_the_socket_gets_none_of_it(self):
+        # What the desktop app's proxy forwards always carries the page's Origin; native callers never send one.
+        for method, path in LOCAL_PATHS:
+            with self.subTest(path=path):
+                status, _ = await self.via_socket(method, path, headers={'Origin': 'tauri://localhost'},
+                                                  json={'name': 'x'} if method == 'POST' else None)
+                self.assertEqual(status, 404)
+        self.assertEqual(self.app.state.devices.store.registry.listing(), [], 'nothing was paired')
+        with self.assertRaises(aiohttp.WSServerHandshakeError):
+            await self.local_http.ws_connect('ws://localhost/api/connectors/link/?EIO=4&transport=websocket',
+                                             headers={'Origin': 'tauri://localhost'})
+
     async def test_the_connector_links_through_the_socket_and_not_over_tcp(self):
         connector_id, token = self.node_room.journal.redeem_pairing_code(self.node_room.journal.create_pairing_code())
         credential = {'connector_id': connector_id, 'token': token, 'protocol': CONNECTOR_PROTOCOL, 'host': 'this-laptop'}
