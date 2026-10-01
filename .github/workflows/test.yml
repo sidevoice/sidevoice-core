@@ -37,6 +37,52 @@ jobs:
       - run: uv pip install --python .venv/bin/python -e '.[test]'
       # Tests that need the connector or web checkout skip here.
       - run: .venv/bin/python -m pytest -q -p no:warnings
+      # The local socket's boundary is the OS user, and a test suite runs as one: here a second user, on a real core,
+      # can neither open local.sock (nor read core.json) nor reach the connector link or the local routes over TCP.
+      # The core's directory sits under a parent anyone may enter, so 0700/0600 are the only things in the way.
+      - name: A second OS user cannot use the local socket nor link over TCP
+        run: |
+          set -euo pipefail
+          install -d -m 0755 /tmp/sidevoice-ci
+          .venv/bin/python -m sidevoice_core.server --port 8768 --data-dir /tmp/sidevoice-ci/core --idle-exit 0 \
+            --launch-id ci > /tmp/sidevoice-ci.log 2>&1 &
+          CORE=$!
+          for _ in $(seq 1 120); do [ -f /tmp/sidevoice-ci/core/core.json ] && break; sleep 0.5; done
+          ls -la /tmp/sidevoice-ci/core
+          curl -sf --unix-socket /tmp/sidevoice-ci/core/local.sock http://localhost/api/local/health; echo
+          sudo useradd --create-home sidevoice-other
+          (cd /tmp && sudo -u sidevoice-other python3 -) <<'EOF'
+          import errno, socket, urllib.error, urllib.request
+
+          probe = socket.socket(socket.AF_UNIX)
+          try:
+              probe.connect('/tmp/sidevoice-ci/core/local.sock')
+          except PermissionError as error:
+              assert error.errno == errno.EACCES, error
+              print('local.sock: EACCES')
+          else:
+              raise SystemExit('a second user opened local.sock')
+          try:
+              open('/tmp/sidevoice-ci/core/core.json').read()
+          except PermissionError:
+              print('core.json: EACCES')
+          else:
+              raise SystemExit('a second user read core.json')
+          for method, path in [('GET', '/api/connectors/link/?EIO=4&transport=polling'), ('GET', '/api/local/health'),
+                               ('POST', '/api/device/local/pair'), ('DELETE', '/api/device/local')]:
+              request = urllib.request.Request('http://127.0.0.1:8768' + path, method=method, data=b'{}' if method == 'POST' else None,
+                                               headers={'content-type': 'application/json'})
+              try:
+                  urllib.request.urlopen(request, timeout=10)
+              except urllib.error.HTTPError as error:
+                  assert error.code == 404, (path, error.code)
+                  print(f'{method} {path} over TCP: 404')
+              else:
+                  raise SystemExit(f'{method} {path} answered a second user over TCP')
+          EOF
+          kill "$CORE"
+          wait "$CORE"
+          test ! -e /tmp/sidevoice-ci/core/local.sock
 
   package:
     name: Wheel, sdist, model catalogue and vectors
