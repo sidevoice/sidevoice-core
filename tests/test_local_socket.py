@@ -40,7 +40,9 @@ class LocalSocketTests(NodeTest):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.local_http = through(self.socket_path)
-        self.tcp_http = aiohttp.ClientSession()
+        # A connection per request: what these check is the node's answer, never whether a pooled connection the
+        # node may be closing at that moment (keep-alive) is still there.
+        self.tcp_http = aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True))
         self.addAsyncCleanup(self.local_http.close)
         self.addAsyncCleanup(self.tcp_http.close)
         self.tcp = f'http://127.0.0.1:{self.node_port}'

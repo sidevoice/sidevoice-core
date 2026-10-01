@@ -158,9 +158,18 @@ async def started(server, serving, what):
         await asyncio.sleep(0.02)
 
 
+def directories(paths):
+    """`paths` as the directories they are: two spellings of one directory (an alias through a link above it) are
+    one directory, locked once — a second lock on it through another descriptor would be refused by the first."""
+    seen = {}
+    for path in paths:
+        found = os.stat(path)
+        seen.setdefault((found.st_dev, found.st_ino), path)
+    return list(seen.values())
+
+
 async def serve(arguments):
-    data = Path(arguments.data_dir)
-    socket_path = Path(arguments.socket).absolute() if arguments.socket else data.absolute() / SOCKET_NAME
+    data, socket_path = Path(arguments.data_dir), Path(arguments.socket)
     for directory in dict.fromkeys((data, socket_path.parent)):
         private_directory(directory)
     import uvicorn
@@ -173,18 +182,16 @@ async def serve(arguments):
     from .app import create_app
     from .local import LocalListener, LocalSocket
     from .rendezvous import Rendezvous
-    held = []
-    for directory in dict.fromkeys((data, socket_path.parent)):
-        descriptor = claim(directory)
-        if descriptor is None:
-            for other in held:
-                os.close(other)
-            raise StartFailure('bind', 'bind.port-in-use', f'Another core is serving {socket_path}: it holds '
-                               f'{Path(directory) / LOCK_FILE}.')
-        held.append(descriptor)
     ready = Path(arguments.ready_file) if arguments.ready_file else data / 'core.json'
-    tcp = local = listener = local_serving = None
+    held = []
+    tcp = local = server = listener = serving = local_serving = watcher = None
     try:
+        for directory in directories((data, socket_path.parent)):
+            descriptor = claim(directory)
+            if descriptor is None:
+                raise StartFailure('bind', 'bind.port-in-use', f'Another core is serving {socket_path}: it holds '
+                                   f'{Path(directory) / LOCK_FILE}.')
+            held.append(descriptor)
         # Everything below reads the data directory from the environment when it needs it (the provider
         # keys included), so it is said once, here, where the process is assembled.
         os.environ['SIDEVOICE_CORE_DATA_DIR'] = str(data)
@@ -236,14 +243,18 @@ async def serve(arguments):
         await rendezvous.start()
         watcher = asyncio.create_task(watch_idle(app, server, arguments.idle_exit)) if arguments.idle_exit else None
         await serving
-        if watcher:
-            watcher.cancel()
     finally:
-        # However the start or the run ended: the socket and the ready file go, then the hold on the directory.
-        if listener is not None:
-            listener.should_exit = True
-        if local_serving is not None:
-            await asyncio.gather(local_serving, return_exceptions=True)
+        # However the start or the run ended, in this order: both servers stop and are awaited — the TCP one runs
+        # the app's lifespan, which ends in full rather than being cancelled under the event loop's teardown — then
+        # the socket and the ready file go, and only then the hold on the directory: no other core can start while
+        # this one is still unwinding.
+        if watcher is not None:
+            watcher.cancel()
+        for running in (listener, server):
+            if running is not None:
+                running.should_exit = True
+        await asyncio.gather(*(task for task in (watcher, local_serving, serving) if task is not None),
+                             return_exceptions=True)
         if tcp is not None:
             tcp.close()
         if local is not None:
@@ -291,7 +302,10 @@ def self_test():
     return 0
 
 
-def main(argv=None):
+def options(argv=None):
+    """The command line, with every path made absolute lexically — no link followed or resolved — once, here: the
+    directory checked is the directory locked, written into and reported into, however it was spelled (relative,
+    a trailing `/`, `/.`, `//`)."""
     from ..runtime import data_dir
     parser = argparse.ArgumentParser(prog='sidevoice-core',
                                      description="Sidevoice core: this node's conversations and one voice pipeline per call.")
@@ -313,6 +327,13 @@ def main(argv=None):
     parser.add_argument('--self-test', action='store_true',
                         help='import everything serving needs, print one JSON line, and exit (0: ok)')
     arguments = parser.parse_args(argv)
+    arguments.data_dir = os.path.abspath(arguments.data_dir)
+    arguments.socket = os.path.abspath(arguments.socket or os.path.join(arguments.data_dir, SOCKET_NAME))
+    return arguments
+
+
+def main(argv=None):
+    arguments = options(argv)
     if arguments.self_test:
         return self_test()
     try:

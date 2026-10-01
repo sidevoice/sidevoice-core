@@ -2,6 +2,7 @@
 machine's connector link through its local socket with the credential in that file, leaves once nothing
 uses it, and — when it cannot start — says why in a file its supervisor reads."""
 import asyncio
+import errno
 import fcntl
 import json
 import os
@@ -15,10 +16,14 @@ import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import socketio
 
 from sidevoice_core.control.connectors import PROTOCOL
+from sidevoice_core.control.room import Room
+from sidevoice_core.server import __main__ as core
+from sidevoice_core.server.local import LocalListener
 from test_rendezvous import LOCAL, link_client, through
 
 
@@ -48,12 +53,14 @@ def shadowing(root, module):
     return {**os.environ, 'PYTHONPATH': os.pathsep.join(filter(None, [str(package.parent), os.environ.get('PYTHONPATH')]))}
 
 
-# Fails the n-th listen() on a TCP socket with EADDRINUSE, as a rival bound to the same port and listening first
-# would: (1) the core's own bind, (2) uvicorn starting its server on that socket, after the app's lifespan began.
+# Fails the n-th listen() on a TCP (or Unix) socket with EADDRINUSE, as a rival bound to the same address and
+# listening first would: (1) the core's own bind, (2) uvicorn starting its server on that socket, after the app's
+# lifespan began.
 FAIL_LISTEN = """import errno, os, socket
 fail, calls, listen = int(os.environ['SIDEVOICE_TEST_FAIL_LISTEN']), [0], socket.socket.listen
+families = (socket.AF_UNIX,) if os.environ['SIDEVOICE_TEST_FAIL_FAMILY'] == 'unix' else (socket.AF_INET, socket.AF_INET6)
 def failing(self, *args):
-    if self.family in (socket.AF_INET, socket.AF_INET6):
+    if self.family in families:
         calls[0] += 1
         if calls[0] == fail:
             raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
@@ -62,12 +69,13 @@ socket.socket.listen = failing
 """
 
 
-def failing_listen(root, which):
-    """An environment whose interpreter fails the `which`-th TCP listen() (`sitecustomize`, first on the path)."""
+def failing_listen(root, which, family='inet'):
+    """An environment whose interpreter fails the `which`-th listen() of `family` (`sitecustomize`, first on the
+    path)."""
     site = Path(root) / 'site'
     site.mkdir()
     (site / 'sitecustomize.py').write_text(FAIL_LISTEN)
-    return {**os.environ, 'SIDEVOICE_TEST_FAIL_LISTEN': str(which),
+    return {**os.environ, 'SIDEVOICE_TEST_FAIL_LISTEN': str(which), 'SIDEVOICE_TEST_FAIL_FAMILY': family,
             'PYTHONPATH': os.pathsep.join(filter(None, [str(site), os.environ.get('PYTHONPATH')]))}
 
 
@@ -177,6 +185,36 @@ class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
                 await ws.close()
             await until(lambda: process.poll() is not None, timeout=20)
 
+    async def test_a_relative_data_directory_is_one_directory(self):
+        """Relative, its socket's directory (absolute) is the same directory: locked once, so the core starts."""
+        with tempfile.TemporaryDirectory() as root:
+            process = subprocess.Popen([sys.executable, '-m', 'sidevoice_core.server', '--port', '0', '--data-dir',
+                                        'relative-core', '--idle-exit', '0'], cwd=root,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            self.addCleanup(lambda: process.poll() is None and process.kill())
+            data = Path(root) / 'relative-core'
+            facts = await until(lambda: ready(data / 'core.json') or process.poll() is not None)
+            self.assertIsNone(process.poll(), process.stderr.read() if process.poll() is not None else '')
+            self.assertEqual(facts['socket'], str(data / 'local.sock'))
+            client, welcome = await self.link(facts)
+            self.assertEqual(welcome, {'protocol': PROTOCOL})
+            process.terminate()
+            self.assertEqual(process.wait(20), 0)
+
+    async def test_a_socket_named_through_an_alias_of_the_data_directory(self):
+        """The socket's directory spelled through a link above it is still the data directory: one lock."""
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / 'core'
+            (Path(root) / 'alias').symlink_to(root)
+            aliased = Path(root) / 'alias' / 'core' / 'local.sock'
+            process = self.start(data, '0', '--socket', str(aliased))
+            facts = await until(lambda: ready(data / 'core.json') or process.poll() is not None)
+            self.assertIsNone(process.poll(), process.stderr.read() if process.poll() is not None else '')
+            self.assertEqual(facts['socket'], str(aliased))
+            self.assertTrue((data / 'local.sock').is_socket(), 'one directory, two spellings')
+            async with through(aliased) as http, http.get(LOCAL + '/api/local/health') as answer:
+                self.assertEqual((await answer.json())['pid'], process.pid)
+
     async def test_overlapping_starts_leave_exactly_one_core(self):
         """Two starters at once on one data directory: whichever order their steps interleave in, one serves and
         the other says the socket is taken — never two cores, never one socket replacing another's."""
@@ -263,18 +301,33 @@ class StartFailureTest(unittest.TestCase):
                 self.assertIn('127.0.0.1:0', report['message'])
                 self.assertFalse((data / 'local.sock').exists(), 'no socket left behind')
 
-    def test_a_data_directory_that_is_a_link_is_not_written_through(self):
+    def test_a_socket_taken_when_uvicorn_listens_on_it(self):
+        """The late Unix-socket case: after the TCP server and the app's lifespan started. The lifespan ends in
+        full — nothing is cancelled under the event loop's teardown — and nothing this start bound is left."""
         with tempfile.TemporaryDirectory() as root:
-            elsewhere = Path(root) / 'elsewhere'
-            elsewhere.mkdir(mode=0o700)
-            (elsewhere / 'core-failure.json').write_text('somebody else\'s')
             data = Path(root) / 'core'
-            data.symlink_to(elsewhere)
-            result = self.run_core(data)
-            self.assertEqual(result.returncode, 1)
-            self.assertIn('identity.unsafe-directory', result.stderr, 'the cause is in the log')
-            self.assertEqual((elsewhere / 'core-failure.json').read_text(), 'somebody else\'s', 'untouched')
-            self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ['core-failure.json'], 'nothing else either')
+            result = self.run_core(data, env=failing_listen(root, 2, 'unix'))
+            report = self.failure(data, result, 'bind', 'bind.port-in-use')
+            self.assertIn(str(data / 'local.sock'), report['message'])
+            self.assertFalse((data / 'local.sock').exists())
+            self.assertNotIn('CancelledError', result.stderr)
+            self.assertIn('Application shutdown complete', result.stderr)
+
+    def test_a_data_directory_that_is_a_link_is_not_written_through(self):
+        """However the link is spelled on the command line: as given, or with a trailing `/`, `/.` or `//` — which
+        a path lookup would follow through to its target."""
+        for suffix in ('', '/', '/.', '//'):
+            with self.subTest(spelling=f'core{suffix}'), tempfile.TemporaryDirectory() as root:
+                elsewhere = Path(root) / 'elsewhere'
+                elsewhere.mkdir(mode=0o700)
+                (elsewhere / 'core-failure.json').write_text('somebody else\'s')
+                data = Path(root) / 'core'
+                data.symlink_to(elsewhere)
+                result = self.run_core(str(data) + suffix)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('identity.unsafe-directory', result.stderr, 'the cause is in the log')
+                self.assertEqual((elsewhere / 'core-failure.json').read_text(), 'somebody else\'s', 'untouched')
+                self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ['core-failure.json'], 'nothing else either')
 
     def test_a_directory_other_users_may_enter(self):
         with tempfile.TemporaryDirectory() as root:
@@ -341,6 +394,71 @@ class SelfTestTest(unittest.TestCase):
             said = json.loads(result.stdout)
             self.assertEqual((said['ok'], said['key']), (False, 'import.missing-module'))
             self.assertIn('aiortc', said['message'])
+
+
+
+class ServeLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    """`serve()` itself, where a start that fails late is unwound: the app's lifespan ends in full while this core
+    still holds its directory, then the socket and ready file go, then the lock — and no task outlives it."""
+
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.data = Path(self.temp.name) / 'core'
+        for signum in (signal.SIGTERM, signal.SIGINT):   # serve() installs its own
+            self.addCleanup(signal.signal, signum, signal.getsignal(signum))
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def lock(self):
+        """Whether another core could take this directory now: a lock of its own, on its own descriptor."""
+        descriptor = os.open(self.data / 'core.lock', os.O_RDWR)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 'held'
+        finally:
+            os.close(descriptor)
+        return 'free'
+
+    async def failing_start(self, failure, *patches):
+        """`serve()` failing as `patches` make it; what the lock was at the lifespan's last step, and after."""
+        seen = []
+        last_step = Room.stop
+
+        async def stopping(room):
+            seen.append(self.lock())
+            await last_step(room)
+            seen.append(self.lock())
+        with patch.object(Room, 'stop', stopping):
+            for each in patches:
+                each.start()
+            try:
+                with self.assertRaises(failure) as raised:
+                    await core.serve(core.options(['--port', '0', '--data-dir', str(self.data), '--idle-exit', '0']))
+            finally:
+                for each in patches:
+                    each.stop()
+        self.assertEqual(seen, ['held', 'held'], 'the lifespan ran to its end, and the directory was held throughout')
+        self.assertEqual(self.lock(), 'free', 'then let go')
+        self.assertFalse((self.data / 'local.sock').exists())
+        self.assertFalse((self.data / 'core.json').exists())
+        self.assertEqual([task for task in asyncio.all_tasks() if task is not asyncio.current_task()], [],
+                         'no task outlives serve()')
+        return raised.exception
+
+    async def test_the_socket_failing_at_uvicorn_s_listen(self):
+        async def taken(listener, sockets=None):
+            raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
+        failure = await self.failing_start(core.StartFailure, patch.object(LocalListener, 'startup', taken))
+        self.assertEqual((failure.step, failure.key), ('bind', 'bind.port-in-use'))
+        self.assertIn(str(self.data / 'local.sock'), failure.message)
+
+    async def test_the_ready_file_failing_to_be_written(self):
+        failure = await self.failing_start(OSError, patch.object(core, 'write_ready', side_effect=OSError(
+            errno.ENOSPC, os.strerror(errno.ENOSPC))))
+        self.assertEqual(failure.errno, errno.ENOSPC)
 
 
 if __name__ == '__main__':
