@@ -1,94 +1,122 @@
+<!-- Header: .github/assets/readme-header*.svg, from the Sidevoice brand's banner. Badges: shieldcn
+     (https://shieldcn.dev), each a light/dark pair so the row follows the reader's GitHub theme. -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/readme-header-on-dark.svg" />
+  <img alt="Sidevoice — Give your coding agent a voice. Keep the conversation." src=".github/assets/readme-header.svg" width="750" />
+</picture>
+
+<p>
+  <a href="https://github.com/sidevoice/sidevoice-core/actions/workflows/test.yml"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/github/ci/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&workflow=test.yml&branch=main&mode=dark" /><img alt="CI status" src="https://shieldcn.dev/github/ci/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&workflow=test.yml&branch=main&mode=light" /></picture></a>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/python-3.12+.svg?variant=secondary&size=sm&logo=python&mode=dark" /><img alt="requires Python 3.12 or newer" src="https://shieldcn.dev/badge/python-3.12+.svg?variant=secondary&size=sm&logo=python&mode=light" /></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/status-beta.svg?variant=secondary&size=sm&mode=dark" /><img alt="status: beta" src="https://shieldcn.dev/badge/status-beta.svg?variant=secondary&size=sm&mode=light" /></picture>
+</p>
+
 # sidevoice-core
 
-Sidevoice lets you talk with your coding agents instead of reading them: you speak, the agent hears you as a
-message in its conversation, and its answers come back as speech. **sidevoice-core** is the part that runs on the
-machine where the agents run (the **node**): it holds that machine's conversations, runs one voice pipeline per
-call (voice activity, turn detection, transcription, speech), and decides which devices may use it.
+Reading your coding agent's plans, diffs and summaries all day is tiring. **Sidevoice** turns the conversation you
+already have with your agent into a voice call. The agent keeps its context and keeps writing as usual; it also
+speaks its replies, and you answer by voice and can interrupt it — from the sofa or on a walk, not only at your desk.
 
-It is started and supervised by that machine's Sidevoice connector. A device (the web page, the desktop app)
-talks to the node directly, or through a **room**: a hosted rendezvous and relay for nodes that are not reachable
-from where the device is.
+**sidevoice-core** is the part that runs on the machine where your agents run. It keeps that machine's
+conversations, runs one voice pipeline per call (voice activity, end of turn, transcription, speech), and decides
+which of your devices may use it.
 
-## Run it
+## How it fits
 
-Python 3.12, with [uv](https://docs.astral.sh/uv/):
+| Piece | Role |
+|---|---|
+| [sidevoice-connector](https://github.com/sidevoice/sidevoice-connector) | What you install on that machine. It gives your agents their voice tools and installs, starts and supervises this core. |
+| **sidevoice-core** (this repository) | The conversations and the voice pipeline, next to the agents. |
+| [sidevoice-desktop](https://github.com/sidevoice/sidevoice-desktop) | The app you call from. |
+| [sidevoice-web](https://github.com/sidevoice/sidevoice-web) | The call interface the app bundles; it can also be served as a static site. |
 
-```
+Your **machine** is the computer where your coding agents run; a **device** is what you call from (the desktop
+app, a browser). A device talks to the core directly once it is paired with it. You do not normally install the core yourself: the
+connector installs the version it was released with.
+
+## Status
+
+Beta. What works today:
+
+- Voice calls with your agent's conversation from paired devices: you speak, your words reach the conversation as
+  a message, and the agent's spoken replies come back.
+- Turn detection with Silero VAD and smart-turn v3 (or a fixed silence), on onnxruntime: no PyTorch.
+- Transcription and speech on the device (Whisper, Kokoro), or through OpenAI and ElevenLabs with your own key,
+  which stays on this machine.
+- Several devices in the same conversation, each with its own microphone and playback.
+- One-time pairing codes, per-device tokens and immediate revocation.
+
+Reaching your machine from outside your network needs a relay; that part is still being built.
+
+## Run it from source
+
+Python 3.12 and [uv](https://docs.astral.sh/uv/):
+
+```sh
 uv venv --python 3.12 && uv pip install -e '.[test]'
 .venv/bin/python -m pytest -q
-.venv/bin/sidevoice-core --port 8767          # or: python -m sidevoice_core.server
+.venv/bin/sidevoice-core            # listens on 127.0.0.1:8768
 ```
 
-It listens on loopback. `sidevoice-core --help` lists its options; the connector starts it as
-`sidevoice-core --data-dir D --port P --room-credential F --idle-exit S`, and `D/core.json` (mode 0600) then says
-where it listens and with which credential the connector links.
+`sidevoice-core --help` lists its options. The connector starts it as `sidevoice-core --data-dir D --port P`;
+`D/core.json` (mode 0600) then says where it listens and which credential the connector links with.
 
-No PyTorch: Silero VAD and smart-turn v3 run on onnxruntime.
+Two test modules run the real connector and the web client's catalogue code. They need a checkout of those
+repositories, named by `SIDEVOICE_REPOSITORY`, and skip without it.
 
 ## Configuration
 
-Data — provider keys in `integrations.json`, the paired devices, the node's identity key, the conversation
-journal — lives in `SIDEVOICE_CORE_DATA_DIR`, else `~/.sidevoice/core`. Every secret file there is written
-0600 from creation.
+Its data — provider keys, paired devices, the machine's identity key, the conversation journal — lives in
+`SIDEVOICE_CORE_DATA_DIR`, else `~/.sidevoice/core`. Every secret file there is created with mode 0600.
 
 | Variable | What it does |
 |---|---|
-| `VOICE_STT_API_KEY`, `VOICE_ELEVENLABS_API_KEY` | Provider keys for OpenAI transcription and ElevenLabs speech, for a headless host. A key saved from a paired device wins over them. |
-| `SIDEVOICE_PUBLIC_URLS` | Comma-separated addresses where devices can reach this node directly, put into pairing codes. Each must be `https://`; a plaintext one is left out of codes (see below). |
-| `SIDEVOICE_TRUSTED_CLUSTER_HOSTS` | Comma-separated hosts that may receive credentials over plaintext HTTP. Empty by default. See below. |
-| `SIDEVOICE_ALLOWED_HOSTS`, `SIDEVOICE_ALLOWED_ORIGINS` | Host names and page origins this node answers besides loopback, for a node someone made reachable. |
+| `VOICE_STT_API_KEY`, `VOICE_ELEVENLABS_API_KEY` | Provider keys for OpenAI transcription and ElevenLabs speech on a headless machine. A key saved from a paired device takes precedence. |
+| `SIDEVOICE_PUBLIC_URLS` | Comma-separated addresses where devices can reach this machine directly; they go into pairing codes. Each must be `https://` (see Security). |
+| `SIDEVOICE_TRUSTED_CLUSTER_HOSTS` | Hosts that may receive credentials over plain HTTP. Empty by default (see Security). |
+| `SIDEVOICE_ALLOWED_HOSTS`, `SIDEVOICE_ALLOWED_ORIGINS` | Host names and page origins to answer besides loopback, for a machine you made reachable. |
 | `SIDEVOICE_CORE_HOST`, `SIDEVOICE_CORE_PORT` | Where to listen (default `127.0.0.1:8768`). |
 
-## Security model
+## Security
 
-- **Devices.** Every route except discovery, the identity proof and redeeming a pairing code needs a device
-  token. A device gets one by redeeming a one-time code the node issues (valid ten minutes); the node keeps only
-  its hash, and revoking a device ends its open calls at once. Every paired device has the machine's full
-  authority: there are no roles.
+- **Devices.** Every route except discovery, the identity proof and redeeming a pairing code needs a device token.
+  A device gets one by redeeming a one-time code (valid ten minutes); the core keeps only its hash, and revoking a
+  device ends its open calls at once. Every paired device has the machine's full authority: there are no roles.
 - **Discovery** (`GET /api/rendezvous`, `GET /api/device/identity`) answers without a token and says only what
-  pairing needs: that this is a node, its fingerprint and public key, and a signature over the caller's nonce.
-  The machine's name is given only to a device that redeemed a code.
-- **Transport.** A pairing secret, device token or connector credential travels only over HTTPS, except to
-  loopback and to the hosts in `SIDEVOICE_TRUSTED_CLUSTER_HOSTS`. An entry starting with a dot is a suffix
-  (`.svc.cluster.local`), any other entry one exact host. Listing a host there states that the network between
-  this node and that host is yours (a Kubernetes cluster's pod network, say) and that whatever can read it may
-  read those credentials: a host name proves nothing about where it resolves, so none is trusted by its spelling.
-- **Relays are trusted.** A room relaying a device's traffic terminates TLS on both sides. It sees the pairing
-  secret redeemed through it, every device token, and all the traffic — conversations, voice, provider keys
-  saved from a device — and could use them. The node's signed identity proves which node answered; it encrypts
-  nothing. Use only a room you trust, or reach the node directly. End-to-end encryption between a device and the
-  node's pinned identity is planned and is not there yet.
+  pairing needs: that this is a Sidevoice machine, its fingerprint and public key, and a signature over the
+  caller's nonce. The machine's name is given only to a paired device.
+- **Transport.** A pairing secret, device token or connector credential travels only over HTTPS, except to loopback
+  and to the hosts in `SIDEVOICE_TRUSTED_CLUSTER_HOSTS`. An entry starting with a dot is a suffix
+  (`.svc.cluster.local`); any other entry is one exact host. Listing a host there states that the network to it is
+  yours (a Kubernetes cluster's pod network, say): whoever can read that network can read those credentials.
+- **Relays are trusted.** A relay between a device and this machine terminates TLS on both sides: it sees the pairing
+  secret redeemed through it, device tokens and all the traffic, including voice and any provider key saved from a
+  device. The machine's signed identity proves which machine answered; it encrypts nothing. Use only a relay you
+  trust, or reach the machine directly. End-to-end encryption to the machine's pinned identity is planned, not
+  there yet.
 
-## Shape
+Please report vulnerabilities privately through
+[GitHub's security advisories](https://github.com/sidevoice/sidevoice-core/security/advisories/new), not in an issue.
+
+## Layout
 
 ```
 src/sidevoice_core/
-  runtime.py     where the node keeps its files, what version it is — imports neither half
-  pipeline/      Pipecat, one instance per call, and the providers it can use
-  control/       the node's control plane: conversations, history, listeners, the connector link, devices
-  server/        the thin web surface (FastAPI + Socket.IO) that carries both
+  runtime.py     where the core keeps its files, which version it is
+  pipeline/      one Pipecat pipeline per call, and the speech providers
+  control/       conversations, history, listeners, the connector link, devices
+  server/        the web surface (FastAPI + Socket.IO) that carries both
 ```
 
-- **pipeline** — `call.CallPipeline` (transport in, Silero VAD, smart-turn v3 or a timer, one transcription
-  provider, the output-side processors), `call.VoiceCall` (the turn flow), and the providers: the client
-  transcribes or OpenAI does it from here; the client synthesizes (Kokoro) or ElevenLabs does it from here. The
-  keys those providers are called with are the node's integrations (`integrations`): one per provider, in one
-  0600 file, written from any paired device and never read back. What it needs from the call it serves is one
-  protocol, `call.CallPort`. **It never imports the control plane.**
-- **control** — the shared room state and each listener's (`room`), the journal (`history`), the delivery pump
-  and speech intake for the connector (`connectors`), device pairing (`devices`), and `calls.run_call`, which
-  creates one pipeline per call. Domain refusals are `refusal.Refusal(status, detail)`, never an HTTP exception.
-- **server** — `create_app()`: the client REST surface (`/api/presentation/*`), the call socket
-  (`/api/presentation/ws`), the connector link (`/api/connectors/link`, Socket.IO), the rendezvous with a room
-  (`rendezvous.py`: the node dials the room, or accepts a room that dials it, and serves the relayed requests by
-  making them to itself), the microphone over WebRTC (`webrtc.py`), device pairing (`devices.py`) and the
-  transport rule above (`transport.py`).
+`pipeline` never imports `control`, and neither imports a web framework; `tests/test_boundaries.py` enforces both.
 
-Neither `pipeline` nor `control` imports a web framework; `tests/test_boundaries.py` enforces both rules.
+## Contributing
 
-Two test modules exercise the real connector and the browser's catalogue code; they run when
-`SIDEVOICE_REPOSITORY` names a checkout of the connector and web source tree, and skip otherwise.
+Issues and pull requests are welcome. Read [`AGENTS.md`](AGENTS.md) first: it holds the rules for code, texts and
+tests, for people and coding agents alike. Pull request titles follow
+[Conventional Commits](https://www.conventionalcommits.org) (CI checks them) and become the squashed commit, from
+which release notes are written ([`RELEASING.md`](RELEASING.md)).
 
 ## Licence
 
-MIT — see [`LICENSE`](LICENSE).
+To be decided — [sidevoice/.github#11](https://github.com/sidevoice/.github/issues/11).
