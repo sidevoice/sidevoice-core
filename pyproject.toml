@@ -7,7 +7,7 @@ name = "sidevoice-core"
 version = "0.1.0"
 description = "Sidevoice's core: a node's conversations and one voice pipeline per call."
 requires-python = ">=3.12"
-license = "MIT"
+license = "Apache-2.0"
 # Pinned, like the room these came from. No PyTorch anywhere: Silero and smart-turn v3 run on
 # onnxruntime, which pipecat-ai itself depends on.
 dependencies = [
