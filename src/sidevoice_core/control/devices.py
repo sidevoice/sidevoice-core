@@ -10,7 +10,9 @@
   memory only: a code outlives neither its ten minutes nor this process.
 - **Devices**: a redeemed secret becomes a device token. Only its SHA-256 is kept (`devices.json`, 0600); a
   revoked device's token stops working at once, because authentication reads the in-memory table the file
-  is written from.
+  is written from. Each says how it was paired (`kind`): `code`, redeemed from a pairing code, or `local`, the
+  app on this same computer, paired over the local socket with no code (`server.local`). There is at most one
+  `local` device: pairing the app again replaces it.
 
 Everything here is plain data and a key: what carries it over HTTP is `server.devices`.
 """
@@ -166,7 +168,7 @@ class DeviceRegistry:
         self.path = Path(path)
         self.clock = clock
         self.secrets = OrderedDict()   # sha256(secret) -> expires (epoch seconds), oldest first
-        self.devices = {}              # id -> {'token_hash', 'name', 'created', 'last_seen'}
+        self.devices = {}              # id -> {'token_hash', 'name', 'kind', 'created', 'last_seen'}
         self.by_token = {}             # token_hash -> id
         self.load()
 
@@ -206,15 +208,31 @@ class DeviceRegistry:
         expires = self.secrets.pop(digest(secret), None)
         if expires is None or expires < self.clock():
             return None
+        return self.enrol(name, 'code')
+
+    def pair_local(self, name):
+        """(device_id, token, replaced ids) for this computer's own app. The `local` device it had, if any, is
+        revoked in the same write: one app, one local device, however many times it pairs again."""
+        replaced = [device_id for device_id, entry in self.devices.items() if entry.get('kind') == 'local']
+        return (*self.enrol(name, 'local', replacing=replaced), replaced)
+
+    def enrol(self, name, kind, *, replacing=()):
+        """A new device of `kind`, and the devices it replaces gone, both or neither: memory and disk say the same
+        thing, so a device the file does not hold is not paired and one it still holds is not revoked."""
         device_id, token, now = str(uuid.uuid4()), secrets.token_urlsafe(32), int(self.clock())
-        entry = {'token_hash': digest(token), 'name': clean_name(name), 'created': now, 'last_seen': now}
+        entry = {'token_hash': digest(token), 'name': clean_name(name), 'kind': kind, 'created': now, 'last_seen': now}
+        gone = {old: self.devices.pop(old) for old in replacing if old in self.devices}
+        for old in gone.values():
+            self.by_token.pop(old['token_hash'], None)
         self.devices[device_id] = entry
         self.by_token[entry['token_hash']] = device_id
         try:
             self.save()
         except BaseException:
-            # Memory and disk say the same thing: a device the file does not hold is not paired.
             del self.devices[device_id], self.by_token[entry['token_hash']]
+            for old_id, old in gone.items():
+                self.devices[old_id] = old
+                self.by_token[old['token_hash']] = old_id
             raise
         return device_id, token
 
@@ -235,8 +253,8 @@ class DeviceRegistry:
         return device_id
 
     def listing(self, current=None):
-        return [{'id': device_id, 'name': entry.get('name'), 'created': entry.get('created'),
-                 'last_seen': entry.get('last_seen'), 'current': device_id == current}
+        return [{'id': device_id, 'name': entry.get('name'), 'kind': entry.get('kind') or 'code',
+                 'created': entry.get('created'), 'last_seen': entry.get('last_seen'), 'current': device_id == current}
                 for device_id, entry in sorted(self.devices.items(), key=lambda item: item[1].get('created') or 0)]
 
     def revoke(self, device_id):
@@ -247,6 +265,15 @@ class DeviceRegistry:
         self.by_token.pop(entry['token_hash'], None)
         self.save()
         return True
+
+    def revoke_local(self):
+        """The ids of the `local` devices revoked (none, or this computer's app)."""
+        local = [device_id for device_id, entry in self.devices.items() if entry.get('kind') == 'local']
+        for device_id in local:
+            self.by_token.pop(self.devices.pop(device_id)['token_hash'], None)
+        if local:
+            self.save()
+        return local
 
 
 class NodeDevices:

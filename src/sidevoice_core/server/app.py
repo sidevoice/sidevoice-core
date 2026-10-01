@@ -2,7 +2,8 @@
 get this same thing. No LLM lives here, and no room logic either — this module only carries.
 
 What it carries: a client's call socket (`/api/presentation/ws`) into `control.calls.run_call`, the
-node's REST surface (`presentation.py`), and this machine's connector link (`connector_link.py`).
+node's REST surface (`presentation.py`), and — only for what comes through the local socket (`local.py`) — this
+machine's connector link (`connector_link.py`) and the app's own pairing.
 """
 import asyncio
 import json
@@ -19,8 +20,9 @@ from ..control.refusal import Refusal
 from ..control.room import Room
 from ..pipeline import transcription
 from ..pipeline.serializer import BrowserFrameSerializer
-from ..runtime import data_dir
+from ..runtime import API, data_dir
 from .devices import DEVICE_KEY, DeviceAuth, call_subprotocol, mount_devices
+from .local import LocalOnly, mount_local
 from .models import mount_models
 from .presentation import mount_presentation, require_same_origin
 from .webrtc import mount_webrtc
@@ -238,11 +240,13 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None, de
     mount_browser_call(app, room, config)
     mount_webrtc(app, room)
     devices = mount_devices(app, room, rendezvous, config)
+    mount_local(app, room)
     mount_rendezvous(app, room, rendezvous)
     instrument(app)
     if device_auth:
         app.add_middleware(DeviceAuth, devices=devices)   # inside CrossOrigin: preflights answered, a 401 readable
     app.add_middleware(CrossOrigin)
+    app.add_middleware(LocalOnly)      # with or without device auth, what only the socket serves is not on TCP
     app.add_middleware(OwnHostsOnly)   # added last, so it runs first: a Host this node is not is refused before anything
     return app
 
@@ -286,7 +290,8 @@ def mount_rendezvous(app, room, rendezvous):
     async def what_this_is():
         # Open to anyone who reaches this address: that it is a node, and which (the fingerprint a pairing pins).
         # Its host name, its id at a room and its room's state are no stranger's business.
-        return {'kind': 'node', 'fingerprint': app.state.devices.store.identity.fingerprint}
+        # `api` is the client surface's version, for a client build to compare with the range it speaks.
+        return {'kind': 'node', 'fingerprint': app.state.devices.store.identity.fingerprint, 'api': API}
 
     if rendezvous is None:
         return

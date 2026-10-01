@@ -1,11 +1,31 @@
-"""How this node writes a file that holds a secret. Imports nothing of the package.
+"""How this node writes a file that holds a secret, and checks the directory it keeps them in. Imports nothing
+of the package.
 
 Both halves keep one — the control plane its device tokens and its identity, the pipeline the provider keys
 it calls with — so the one way to write them sits below both, beside `runtime`, and knows neither.
 """
 import os
 import secrets
+import stat
 from pathlib import Path
+
+
+def unsafe_directory(path):
+    """Why `path` cannot hold this node's secrets, or None when it can: a directory itself (not a link to one),
+    owned by this user, that no group and no other user may enter. The connector creates it so; this checks what is
+    there rather than trusting that it was, since everything inside — the local socket, the connector's credential,
+    the node's key — is only as private as the directory around it."""
+    try:
+        found = os.lstat(path)
+    except OSError as error:
+        return f'{path} cannot be read ({error.strerror or type(error).__name__}).'
+    if not stat.S_ISDIR(found.st_mode):
+        return f'{path} is not a directory.'
+    if found.st_uid != os.getuid():
+        return f'{path} belongs to another user (uid {found.st_uid}).'
+    if stat.S_IMODE(found.st_mode) & 0o077:
+        return f'{path} is open to other users (mode {stat.S_IMODE(found.st_mode):04o}); it must be 0700.'
+    return None
 
 
 def write_private(path, text):

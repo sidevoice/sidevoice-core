@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 
 from loguru import logger
 
+from .local import local_only
 from .transport import credential_safe
 
 PROTOCOL = 3
@@ -40,7 +41,9 @@ NAMESPACE = '/nodes'
 DIAL_PATH = '/api/rendezvous/link'  # on this node, for a room that dials it
 DIAL_NAMESPACE = '/room'
 # The client surface, and only it: the room's page, device pairing, and the model catalogue a client resolves
-# its offers from. Never the connector's link nor this node's own rendezvous routes.
+# its offers from. Never the connector's link nor this node's own rendezvous routes, and never what only the local
+# socket serves (`server.local.LOCAL_ONLY`), even where it sits under a relayed prefix (`/api/device/local`): the
+# relay makes its requests over TCP, where those routes do not exist, and it refuses them by name besides.
 RELAYED = ('/api/presentation', '/api/device', '/api/models')
 CALL_SOCKET = '/api/presentation/ws'
 # A subprotocol is an HTTP token (RFC 6455 §4.1): nothing else may reach the loopback handshake's header.
@@ -48,7 +51,7 @@ SUBPROTOCOL = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}$")
 
 
 def relayed(path):
-    return any(path == prefix or path.startswith(prefix + '/') for prefix in RELAYED)
+    return any(path == prefix or path.startswith(prefix + '/') for prefix in RELAYED) and not local_only(path)
 
 
 def relayable(base, path):

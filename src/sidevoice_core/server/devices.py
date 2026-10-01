@@ -12,6 +12,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from ..control.devices import NodeDevices, valid_nonce
+from .local import is_local, local_only, scope_path
 from .transport import credential_safe
 
 SUBPROTOCOL = 'sidevoice'
@@ -20,10 +21,12 @@ UNPAIRED_CLOSE = 4401
 DEVICE_KEY = 'sidevoice.device'    # the scope key the authenticated device's id travels under
 
 # What needs no device token (the contract's table): what this node is, the redemption itself (it carries the
-# one-time secret), the identity proof (public), preflights, and the links that carry their own credentials.
+# one-time secret), the identity proof (public), preflights, and the room's dialling link (it carries its own key).
 # The open answers say no more than pairing needs: the node's key and fingerprint, never its host name or ids.
+# What only the local socket serves (`server.local`) is open too, and only there: reaching the socket is this OS
+# user's authority, which a token would add nothing to.
 OPEN_ROUTES = frozenset({('GET', '/api/rendezvous'), ('POST', '/api/device/pair'), ('GET', '/api/device/identity')})
-OPEN_MOUNTS = ('/api/connectors/link', '/api/rendezvous/link')
+OPEN_MOUNTS = ('/api/rendezvous/link',)
 
 UNPAIRED = 'Este dispositivo no está emparejado con esta máquina, o se revocó: empareja de nuevo.'
 UNPAIRED_REASON = 'Dispositivo no emparejado con esta máquina.'   # a close reason fits in 123 bytes
@@ -62,11 +65,10 @@ class DeviceAuth:
         kind = scope['type']
         if kind not in {'http', 'websocket'}:
             return await self.app(scope, receive, send)
-        path = scope.get('path') or ''
-        root = scope.get('root_path') or ''
-        if root and path.startswith(root):
-            path = path[len(root):]
+        path = scope_path(scope)
         if any(path == mount or path.startswith(mount + '/') for mount in OPEN_MOUNTS):
+            return await self.app(scope, receive, send)
+        if is_local(scope) and local_only(path):
             return await self.app(scope, receive, send)
         if kind == 'http' and (scope['method'] == 'OPTIONS' or (scope['method'], path) in OPEN_ROUTES):
             return await self.app(scope, receive, send)
