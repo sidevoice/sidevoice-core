@@ -1,6 +1,6 @@
 """The core as the connector starts it: a process that says where it listens in a file, lets this
 machine's connector link through its local socket with the credential in that file, leaves once nothing
-uses it, and — when it cannot start — says why in a file its supervisor reads."""
+uses it, and — when it cannot start — says why in a file, and by its exit status what the service manager does."""
 import asyncio
 import errno
 import fcntl
@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -79,6 +80,24 @@ def failing_listen(root, which, family='inet'):
             'PYTHONPATH': os.pathsep.join(filter(None, [str(site), os.environ.get('PYTHONPATH')]))}
 
 
+# A core that crashes right after saying it is ready: the first log line after the ready file is written raises.
+CRASH_AFTER_READY = """from loguru._logger import Logger
+info = Logger.info
+def crashing(self, message, *args, **kwargs):
+    if str(message).startswith('Sidevoice core {} listening'):
+        raise RuntimeError('crashed after ready')
+    return info(self, message, *args, **kwargs)
+Logger.info = crashing
+"""
+
+
+def crashing_after_ready(root):
+    site = Path(root) / 'crash-site'
+    site.mkdir()
+    (site / 'sitecustomize.py').write_text(CRASH_AFTER_READY)
+    return {**os.environ, 'PYTHONPATH': os.pathsep.join(filter(None, [str(site), os.environ.get('PYTHONPATH')]))}
+
+
 class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
     def start(self, data, idle='2', *extra, env=None):
         process = subprocess.Popen([sys.executable, '-m', 'sidevoice_core.server', '--port', '0',
@@ -130,7 +149,9 @@ class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
             again = self.start(data, '30')
             second = await until(lambda: ready(data / 'core.json'))
             self.assertEqual(second['pid'], again.pid)
-            self.assertIsNone(second['launch_id'], 'no supervisor named this launch')
+            self.assertEqual(str(uuid.UUID(second['launch_id'])), second['launch_id'], 'none was given: one is made up')
+            async with through(second['socket']) as http, http.get(LOCAL + '/api/local/health') as answer:
+                self.assertEqual((await answer.json())['launch_id'], second['launch_id'])
             self.assertEqual((second['connector_id'], second['token']), (facts['connector_id'], facts['token']))
             again.terminate()
             again.wait(10)
@@ -143,15 +164,48 @@ class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(socketio.exceptions.ConnectionError):
                 await self.link({**facts, 'token': 'guessed'})
 
-    async def test_a_supervisor_s_sigterm_is_a_clean_exit(self):
-        """Stopping the core leaves no file that says it is serving: not the ready file, not the socket."""
+    async def test_a_manager_s_sigterm_or_a_sigint_is_a_clean_exit(self):
+        """Exit 0, not restarted; and no file that says it is serving is left: not the ready file, not the socket."""
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signum.name), tempfile.TemporaryDirectory() as root:
+                data = Path(root) / 'core'
+                process = self.start(data, '0')
+                await until(lambda: ready(data / 'core.json'))
+                process.send_signal(signum)
+                self.assertEqual(process.wait(20), 0)
+                self.assertEqual(sorted(p.name for p in data.iterdir() if p.name in {'core.json', 'local.sock'}), [])
+
+    async def test_a_crash_after_ready_is_not_a_reported_failure_and_exits_non_zero(self):
+        """A core that did serve and then broke is the manager's to restart: no report, a non-zero status."""
         with tempfile.TemporaryDirectory() as root:
             data = Path(root) / 'core'
-            process = self.start(data, '0')
+            process = self.start(data, '0', env=crashing_after_ready(root))
+            self.assertNotEqual(process.wait(60), 0)
+            self.assertIn('crashed after ready', process.stderr.read(), 'what a crash prints is the manager\'s')
+            self.assertFalse((data / 'core-failure.json').exists())
+
+    async def test_a_start_clears_the_failure_report_a_previous_one_left(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / 'core'
+            data.mkdir(mode=0o700)
+            (data / 'core-failure.json').write_text(json.dumps({'key': 'identity.unreadable', 'launch_id': 'old'}))
+            self.start(data, '0')
             await until(lambda: ready(data / 'core.json'))
-            process.send_signal(signal.SIGTERM)
+            self.assertFalse((data / 'core-failure.json').exists(), 'the core clears its own; nothing else does')
+
+    async def test_the_core_writes_its_own_rotating_log_and_leaves_stdout_and_stderr_to_the_manager(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / 'core'
+            process = self.start(data, '0', '--launch-id', 'logged')
+            facts = await until(lambda: ready(data / 'core.json'))
+            log = Path(root) / 'core.log'
+            await until(lambda: log.exists() and 'listening on' in log.read_text())
+            self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+            self.assertIn('Application startup complete', log.read_text(), 'uvicorn\'s own lines too')
+            process.terminate()
             self.assertEqual(process.wait(20), 0)
-            self.assertEqual(sorted(p.name for p in data.iterdir() if p.name in {'core.json', 'local.sock'}), [])
+            self.assertEqual(process.stderr.read(), '', 'nothing on stderr when nothing crashed')
+            self.assertEqual(facts['launch_id'], 'logged')
 
     async def test_a_socket_a_dead_core_left_is_replaced(self):
         with tempfile.TemporaryDirectory() as root:
@@ -167,7 +221,7 @@ class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_a_call_still_waiting_for_its_first_message_keeps_the_core_up_and_is_counted(self):
-        """What a supervisor reads before restarting, and what idle exit waits for, is every call socket open —
+        """What an update reads before restarting, and what idle exit waits for, is every call socket open —
         from its acceptance, not from its first message."""
         with tempfile.TemporaryDirectory() as root:
             data = Path(root) / 'core'
@@ -228,10 +282,10 @@ class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
                 winner = next(r for r in rivals if r is not loser)
                 await asyncio.sleep(1)
                 self.assertIsNone(winner.poll(), 'the other one serves')
-                self.assertEqual(loser.returncode, 1)
+                self.assertEqual(loser.returncode, 75, 'tried again later by the manager')
                 self.assertEqual(facts['pid'], winner.pid)
                 report = json.loads((data / 'core-failure.json').read_text())
-                self.assertEqual((report['key'], report['step']), ('bind.port-in-use', 'bind'))
+                self.assertEqual((report['key'], report['step']), ('bind.core-running', 'bind'))
                 self.assertEqual(report['launch_id'], f'rival-{rivals.index(loser)}')
                 self.assertIn(str(data / 'local.sock'), report['message'], 'the socket is named')
                 async with through(data / 'local.sock') as http, http.get(LOCAL + '/api/local/health') as answer:
@@ -248,13 +302,15 @@ class StartFailureTest(unittest.TestCase):
                                '--idle-exit', '0', '--launch-id', 'launch-7', *extra],
                               capture_output=True, text=True, env=env, timeout=120)
 
-    def failure(self, data, result, step, key, *, ready_file=False):
-        self.assertEqual(result.returncode, 1, result.stderr[-2000:])
+    def failure(self, data, result, step, key, *, ready_file=False, status=0, launch_id='launch-7'):
+        """The report a failed start left. Exit 0 unless said otherwise: a failure that would repeat is not one for
+        the service manager to restart."""
+        self.assertEqual(result.returncode, status, result.stderr[-2000:])
         path = data / 'core-failure.json'
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         report = json.loads(path.read_text())
         self.assertEqual(set(report), {'launch_id', 'step', 'key', 'message', 'at'})
-        self.assertEqual((report['launch_id'], report['step'], report['key']), ('launch-7', step, key))
+        self.assertEqual((report['launch_id'], report['step'], report['key']), (launch_id, step, key))
         self.assertTrue(report['message'])
         self.assertEqual(datetime.fromisoformat(report['at']).utcoffset().total_seconds(), 0, 'UTC')
         self.assertIn(key, result.stderr, 'the log says it too')
@@ -279,6 +335,29 @@ class StartFailureTest(unittest.TestCase):
                 self.failure(data, self.run_core(data), 'identity', 'identity.unreadable')
                 self.assertEqual((data / 'node-identity.json').read_bytes(), content, 'never replaced')
 
+    def test_any_other_failure_before_ready_is_start_failed(self):
+        """Not one of the named reasons — here a ready file that cannot be written — is still a failed start: its
+        report with the exception's last line, and exit 0."""
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / 'core'
+            (Path(root) / 'a-file').write_text('')
+            result = self.run_core(data, '--ready-file', str(Path(root) / 'a-file' / 'core.json'))
+            report = self.failure(data, result, 'start', 'start.failed')
+            self.assertRegex(report['message'], r'^\w+Error: .*a-file', 'the exception\'s last line')
+            self.assertFalse((data / 'local.sock').exists())
+
+    def test_a_failure_without_a_launch_id_reports_the_one_made_up(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / 'core'
+            data.mkdir(mode=0o700)
+            (data / 'node-identity.json').write_text('not a key')
+            result = subprocess.run([sys.executable, '-m', 'sidevoice_core.server', '--port', '0', '--data-dir', str(data),
+                                     '--idle-exit', '0'], capture_output=True, text=True, timeout=120)
+            report = json.loads((data / 'core-failure.json').read_text())
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(str(uuid.UUID(report['launch_id'])), report['launch_id'])
+            self.assertIn(report['launch_id'], (Path(root) / 'core.log').read_text(), 'and the log says which')
+
     def test_a_directory_another_core_holds(self):
         """The lock is taken before anything is: a refused starter has written nothing but its report."""
         with tempfile.TemporaryDirectory() as root:
@@ -286,7 +365,7 @@ class StartFailureTest(unittest.TestCase):
             data.mkdir(mode=0o700)
             with open(data / 'core.lock', 'w') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                report = self.failure(data, self.run_core(data), 'bind', 'bind.port-in-use')
+                report = self.failure(data, self.run_core(data), 'bind', 'bind.core-running', status=75)
             self.assertIn(str((data / 'local.sock').absolute()), report['message'])
             self.assertEqual(sorted(p.name for p in data.iterdir()), ['core-failure.json', 'core.lock'])
 
@@ -310,8 +389,9 @@ class StartFailureTest(unittest.TestCase):
             report = self.failure(data, result, 'bind', 'bind.port-in-use')
             self.assertIn(str(data / 'local.sock'), report['message'])
             self.assertFalse((data / 'local.sock').exists())
-            self.assertNotIn('CancelledError', result.stderr)
-            self.assertIn('Application shutdown complete', result.stderr)
+            log = (Path(root) / 'core.log').read_text()
+            self.assertNotIn('CancelledError', result.stderr + log)
+            self.assertIn('Application shutdown complete', log)
 
     def test_a_data_directory_that_is_a_link_is_not_written_through(self):
         """However the link is spelled on the command line: as given, or with a trailing `/`, `/.` or `//` — which
@@ -324,7 +404,7 @@ class StartFailureTest(unittest.TestCase):
                 data = Path(root) / 'core'
                 data.symlink_to(elsewhere)
                 result = self.run_core(str(data) + suffix)
-                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.returncode, 0)
                 self.assertIn('identity.unsafe-directory', result.stderr, 'the cause is in the log')
                 self.assertEqual((elsewhere / 'core-failure.json').read_text(), 'somebody else\'s', 'untouched')
                 self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ['core-failure.json'], 'nothing else either')
@@ -356,7 +436,7 @@ class StartFailureTest(unittest.TestCase):
             while not ready(data / 'core.json') and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertEqual(ready(data / 'core.json')['pid'], first.pid)
-            self.failure(data, self.run_core(data), 'bind', 'bind.port-in-use', ready_file=True)
+            self.failure(data, self.run_core(data), 'bind', 'bind.core-running', ready_file=True, status=75)
             self.assertIsNone(first.poll(), 'the first core is untouched')
             self.assertEqual(ready(data / 'core.json')['pid'], first.pid, 'and so is the file that says it is serving')
             self.assertTrue((data / 'local.sock').exists())
@@ -395,6 +475,27 @@ class SelfTestTest(unittest.TestCase):
             self.assertEqual((said['ok'], said['key']), (False, 'import.missing-module'))
             self.assertIn('aiortc', said['message'])
 
+
+
+class LogTests(unittest.TestCase):
+    def test_the_log_rotates_at_five_megabytes_and_keeps_two(self):
+        """`log_to` as `main` sets it up, in a process of its own (it takes over the process's logging)."""
+        with tempfile.TemporaryDirectory() as root:
+            code = (f'from sidevoice_core.server.__main__ import log_to\nfrom loguru import logger\nimport logging\n'
+                    f'log_to({str(Path(root) / "core.log")!r})\n'
+                    f'for i in range(16000): logger.info("{{}} {{}}", i, "x" * 1000)\n'
+                    f'logging.getLogger("uvicorn.error").info("the standard library\'s too")\n')
+            result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=120)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
+            files = sorted(Path(root).iterdir())
+            self.assertEqual(len(files), 3, [f.name for f in files])
+            self.assertIn(Path(root) / 'core.log', files)
+            for file in files:
+                self.assertLessEqual(file.stat().st_size, 5_000_000 + 2000)
+                self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
+            current = (Path(root) / 'core.log').read_text()
+            self.assertIn('15999 ', current)
+            self.assertIn("uvicorn.error: the standard library's too", current)
 
 
 class ServeLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -456,9 +557,10 @@ class ServeLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(str(self.data / 'local.sock'), failure.message)
 
     async def test_the_ready_file_failing_to_be_written(self):
-        failure = await self.failing_start(OSError, patch.object(core, 'write_ready', side_effect=OSError(
+        failure = await self.failing_start(core.StartFailure, patch.object(core, 'write_ready', side_effect=OSError(
             errno.ENOSPC, os.strerror(errno.ENOSPC))))
-        self.assertEqual(failure.errno, errno.ENOSPC)
+        self.assertEqual((failure.step, failure.key, failure.status), ('start', 'start.failed', 0))
+        self.assertEqual(failure.message, f'OSError: [Errno {errno.ENOSPC}] {os.strerror(errno.ENOSPC)}')
 
 
 if __name__ == '__main__':

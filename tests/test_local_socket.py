@@ -77,7 +77,7 @@ class LocalSocketTests(NodeTest):
         self.assertEqual((health['launch_id'], health['pid'], health['api'], health['calls']), ('launch-42', os.getpid(), 1, 0))
         self.assertEqual((health['fingerprint'], health['public_key']), (identity.fingerprint, identity.public_key))
         self.assertEqual(health['host'], self.app.state.devices.host())
-        # A call in progress is counted: a supervisor waits for none before it restarts the core.
+        # A call in progress is counted: whoever restarts the core waits for none.
         ws = await self.call((await self.pair_local())['token'])
         await ws.send_str(HELLO)
         await until(lambda: self.node_room.clients, timeout=30)
@@ -86,7 +86,7 @@ class LocalSocketTests(NodeTest):
         await until(lambda: not self.node_room.clients, timeout=15)
 
     async def test_a_call_socket_counts_from_its_acceptance_to_its_close(self):
-        """Before its first message too: a supervisor that read `calls: 0` there would restart under a call."""
+        """Before its first message too: an update that read `calls: 0` there would restart under a call."""
         ws = await self.call((await self.pair_local())['token'])
         await until(lambda: self.app.state.devices.open_calls() == 1)
         self.assertEqual((await self.via_socket('GET', '/api/local/health'))[1]['calls'], 1, 'no hello sent')

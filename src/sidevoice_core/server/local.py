@@ -86,8 +86,8 @@ class LocalPair(BaseModel):
 
 
 def mount_local(app):
-    """The routes served only on the socket. `app.state.launch_id` is the launch a supervisor named
-    (`--launch-id`), so it can tell this core from one that answers on a socket it left behind."""
+    """The routes served only on the socket. `app.state.launch_id` is this launch (`--launch-id`, or one made
+    up), so a reader can tell this core from one that answered before it."""
     from ..runtime import API, version
     app.state.launch_id = None
 
@@ -166,7 +166,7 @@ class LocalListener(uvicorn.Server):
     stops when it does."""
 
     def __init__(self, app, node, *, log_level='info'):
-        super().__init__(uvicorn.Config(marked(app), lifespan='off', log_level=log_level))
+        super().__init__(uvicorn.Config(marked(app), lifespan='off', log_config=None, log_level=log_level))
         self.node = node
 
     @contextmanager
