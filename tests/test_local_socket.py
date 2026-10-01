@@ -2,6 +2,7 @@
 serves — the readiness probe, the app's own pairing and its undoing, the connector's link — and that none of it
 exists over TCP or through a room's relay; that pairing the app again replaces it, calls included; and that every
 other route on the socket still wants a device token."""
+import asyncio
 import errno
 import json
 import os
@@ -14,13 +15,15 @@ from unittest.mock import patch
 
 import aiohttp
 import socketio
+from aiortc import RTCPeerConnection, RTCSessionDescription
 
 from sidevoice_core.control.connectors import PROTOCOL as CONNECTOR_PROTOCOL
 from sidevoice_core.control.devices import DeviceRegistry
 from sidevoice_core.server.local import LocalSocket, local_only
 from sidevoice_core.server.rendezvous import relayable
 from sidevoice_core.storage import unsafe_directory
-from test_rendezvous import LOCAL, NodeTest, link_client, through, until
+from test_rendezvous import LOCAL, DialTests, NodeTest, link_client, through, until
+from test_webrtc import RecordedVoice
 
 LOCAL_PATHS = [('GET', '/api/local/health'), ('POST', '/api/device/local/pair'), ('DELETE', '/api/device/local'),
                ('GET', '/api/connectors/link/?EIO=4&transport=polling')]
@@ -89,6 +92,44 @@ class LocalSocketTests(NodeTest):
         await ws.close()
         await until(lambda: self.app.state.devices.open_calls() == 0)
         self.assertEqual((await self.via_socket('GET', '/api/local/health'))[1]['calls'], 0)
+
+    async def initialised_call(self, token):
+        """A call past its hello, in the room, with its microphone moved to WebRTC: what a revoked app must lose."""
+        ws = await self.call(token)
+        await ws.send_str(HELLO)
+        client = await until(lambda: next(iter(self.node_room.clients.values()), None), timeout=30)
+        await until(lambda: client.connected and client.feed_audio is not None, timeout=30)
+        browser = RTCPeerConnection()
+        self.addAsyncCleanup(browser.close)
+        browser.addTrack(RecordedVoice(b'\x00\x00' * 16000))
+        await browser.setLocalDescription(await browser.createOffer())
+        status, answer = await self.via_socket('POST', '/api/presentation/rtc/offer', headers=auth(token), json={
+            'session_id': client.id, 'sdp': browser.localDescription.sdp, 'type': 'offer'})
+        self.assertEqual(status, 200, answer)
+        await browser.setRemoteDescription(RTCSessionDescription(**answer))
+        await until(lambda: browser.connectionState == 'connected', timeout=20)
+        self.assertEqual((await self.via_socket('GET', '/api/local/health'))[1]['calls'], 1, 'media is not a second call')
+        return ws, client, client.media_peer
+
+    async def assert_ended(self, ws, client, peer):
+        message = await ws.receive(timeout=10)
+        while message.type == aiohttp.WSMsgType.TEXT:   # what the call was saying before it was ended
+            message = await ws.receive(timeout=10)
+        self.assertEqual((message.type, ws.close_code), (aiohttp.WSMsgType.CLOSE, 4401))
+        await until(lambda: not self.node_room.clients, timeout=15)
+        await until(lambda: peer.pc.connectionState == 'closed', timeout=15)
+        self.assertIsNone(client.media_peer, 'its media went with it')
+        await until(lambda: self.app.state.devices.open_calls() == 0)
+
+    async def test_replacing_or_removing_the_app_ends_a_call_in_progress_media_included(self):
+        with patch.dict(os.environ, {'SIDEVOICE_STUN_URLS': ''}):   # host candidates only: no network
+            first = await self.pair_local('first')
+            call = await self.initialised_call(first['token'])
+            await self.pair_local('second')
+            await self.assert_ended(*call)
+            second_call = await self.initialised_call((await self.pair_local('third'))['token'])
+            self.assertEqual(await self.via_socket('DELETE', '/api/device/local'), (200, {'ok': True, 'revoked': True}))
+            await self.assert_ended(*second_call)
 
     async def test_a_removal_that_could_not_be_written_is_still_there_to_finish(self):
         """A failed write leaves the app paired, in memory as on disk: the retry finds it, revokes it for good and
@@ -213,6 +254,41 @@ class LocalSocketTests(NodeTest):
                     self.assertEqual((answer['status'], json.loads(answer['body'])), (404, {'detail': 'Not relayed.'}),
                                      'refused by name, before any request is made')
         self.assertEqual(self.app.state.devices.store.registry.devices, {}, 'nothing was paired through the room')
+        await self.assert_the_link_is_not_relayed(self.room.ask)
+        # What sits beside them under the relayed prefix still is relayed.
+        self.assertTrue(relayable(self.tcp, '/api/device/pair'))
+        self.assertTrue(relayable(self.tcp, '/api/device/localhost'))
+
+    async def assert_the_link_is_not_relayed(self, ask):
+        """The connector link, exactly, and spelled other ways: neither its HTTP transport nor its socket."""
+        for path in ('/api/connectors/link', '/api/connectors/link/', '/api/device/%2e%2e/connectors/link/',
+                     '/api/presentation/../connectors/link/'):
+            for transport in ('polling', 'websocket'):
+                with self.subTest(path=path, transport=transport):
+                    answer = await ask('relay.http', {'method': 'GET', 'path': path, 'query': f'EIO=4&transport={transport}',
+                                                      'headers': {'accept': '*/*'}, 'body': None})
+                    self.assertEqual((answer['status'], json.loads(answer['body'])), (404, {'detail': 'Not relayed.'}))
+            with self.subTest(path=path, socket=True):
+                opened = await ask('relay.open', {'channel': f'link-{path}', 'path': path, 'query': 'EIO=4&transport=websocket',
+                                                  'protocols': []})
+                self.assertEqual((opened['ok'], opened['status']), (False, 404))
+        self.assertEqual(self.node_room.control.peers, {}, 'no connector linked through the room')
+
+    async def test_a_room_that_dials_in_relays_none_of_it_either(self):
+        room, hello = await DialTests.dial(self, 'the-dial-key')
+        self.addAsyncCleanup(room.disconnect)
+        await asyncio.wait_for(hello, 5)
+        await until(lambda: self.rendezvous.state['via'] == 'dial')
+
+        async def ask(event, data):
+            return await room.call(event, data, namespace='/room', timeout=10)
+        await self.assert_the_link_is_not_relayed(ask)
+        for path in ('/api/device/local/pair', '/api/local/health', '/api/device/%2e/local'):
+            with self.subTest(path=path):
+                answer = await ask('relay.http', {'method': 'POST', 'path': path, 'query': '', 'body': b'{}',
+                                                  'headers': {'content-type': 'application/json'}})
+                self.assertEqual(answer['status'], 404)
+        self.assertEqual(self.app.state.devices.store.registry.devices, {})
 
 
 class LocalSocketFileTests(unittest.TestCase):
