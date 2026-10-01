@@ -1,4 +1,4 @@
-"""The model catalogue (rubasace/sidevoice#124 §3–§4): the shipped file is sound, the validator refuses what
+"""The model catalogue (sidevoice/sidevoice-core#21): the shipped file is sound, the validator refuses what
 must never ship, the reference resolver passes the shared vectors, the catalogue agrees with the other lists
 this node still keeps, and the node serves it."""
 import copy
@@ -113,7 +113,7 @@ class OtherListsAgreeTest(unittest.TestCase):
 
     def test_the_voice_catalogue_names_no_models(self):
         """Which models exist is the model catalogue's alone: the voice catalogue keeps languages, their voices'
-        names and samples, and no model list of its own (review R12)."""
+        names and samples, and no model list of its own."""
         from sidevoice_core.pipeline.settings import CATALOG
         self.assertNotIn('models', CATALOG)
 
@@ -137,7 +137,7 @@ class OtherListsAgreeTest(unittest.TestCase):
     def test_openai_takes_whisper_s_language_and_a_context_the_device_does_not(self):
         """A device switching between its own Whisper and OpenAI keeps its language: the two schemas say the same
         about it. The context is OpenAI's alone: its prompt uses it, and no local Whisper path does, so the device's
-        schema does not offer a setting that would be accepted and discarded (review R09)."""
+        schema does not offer a setting that would be accepted and discarded."""
         catalog = load()
         whisper = catalog['families']['whisper']['options']
         openai = next(provider for provider in catalog['providers'] if provider['id'] == 'openai')['stt']['options']
@@ -151,7 +151,7 @@ class OtherListsAgreeTest(unittest.TestCase):
 
 class PageBuildTest(unittest.TestCase):
     def test_every_page_build_says_what_it_downloads_on_each_accelerator(self):
-        """What a page asks consent for before it downloads a model (#124 §6 step 1): one size per accelerator,
+        """What a page asks consent for before it downloads a model (sidevoice/sidevoice-core#21): one size per accelerator,
         since each loads its own precision of the model."""
         for item in load()['models']:
             for entry in item['builds']:

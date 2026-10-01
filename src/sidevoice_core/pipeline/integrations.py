@@ -1,4 +1,4 @@
-"""Integrations: this node's keys for the providers it calls, one per provider whatever it is used for (#64).
+"""Integrations: this node's keys for the providers it calls, one per provider whatever it is used for.
 
 A key is the node's, not a pane's and not a client's: any paired device writes it, the node keeps it
 and calls the provider with it, and no client ever reads it back — only whether there is one, where it came
@@ -120,8 +120,8 @@ def credential_state(provider, config=None):
 
 def listing(config=None):
     """The integrations as every paired device sees them: each provider, configured or not, where its key came
-    from and its last four characters — never the key. A paired device has the node's full authority (the
-    operator's decision, 2026-10-01: no owner and no guests), so there is no second, narrower listing."""
+    from and its last four characters — never the key. A paired device has the node's full authority (by
+    design: no owner and no guests), so there is no second, narrower listing."""
     rows = []
     for provider, meta in PROVIDERS.items():
         state = credential_state(provider, config)

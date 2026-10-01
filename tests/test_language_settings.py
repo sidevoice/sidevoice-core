@@ -45,7 +45,7 @@ class PreferencesTest(unittest.TestCase):
         self.assertIn('tts', problem)
         self.assertIn('speed', problem)
         self.assertEqual(settings.tts, default_stage('tts'), 'the whole stage, its valid voice with it')
-        # One refused stage no longer takes the rest with it: an iPhone on OpenAI stayed on OpenAI (#39).
+        # One refused stage no longer takes the rest with it: an iPhone on OpenAI stayed on OpenAI.
         self.assertEqual((settings.stt.place, settings.audio_grace_seconds), ('openai', 3))
         # A field outside the stages keeps its own fallback, alone.
         settings, problem = settings_from({'stt': {'place': 'openai', 'model': 'gpt-4o-transcribe'}, 'audio_grace_seconds': 99})
@@ -176,7 +176,7 @@ class OptionKindsTest(unittest.TestCase):
                 self.refused(stt, *openai, {'context': wrong})
 
     def test_a_local_whisper_takes_no_context_it_would_discard(self):
-        """Review R09: no local path gives Whisper a prompt, so the device's schema has no context, and one sent
+        """No local path gives Whisper a prompt, so the device's schema has no context, and one sent
         anyway is refused rather than saved and ignored."""
         self.refused(stt, options={'context': 'Sidevoice'})
 

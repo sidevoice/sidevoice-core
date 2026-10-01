@@ -97,7 +97,7 @@ async def run_call(room, transport, serializer, *, settings, config, choice, hel
         call.room.report_conversation_working(call)
         # A person coming back from a tunnel cannot read the transcript. What this browser never heard
         # through goes to it now, oldest first and ahead of anything new, for as long back as this
-        # device asked for (#52). Nothing is stored for it: the room already had every one of them.
+        # device asked for. Nothing is stored for it: the room already had every one of them.
         caught_up = await call.room.replay(call, seconds=settings.replay_on_return_seconds,
                                            sessions=returning)
         if caught_up['replayed'] or caught_up['skipped']:

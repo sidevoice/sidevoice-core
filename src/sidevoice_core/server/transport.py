@@ -5,8 +5,8 @@ exceptions: loopback, which never leaves the machine, and the hosts named in `SI
 
 `SIDEVOICE_TRUSTED_CLUSTER_HOSTS` is comma-separated. An entry starting with a dot is a suffix
 (`.svc.cluster.local` matches `room.voice.svc.cluster.local`); any other entry is one exact host name. It is
-empty by default. Naming a host there is the operator's statement that the network between this node and that
-host is theirs (a Kubernetes cluster's pod network, say) and that anyone on it may read what crosses it: a host
+empty by default. Naming a host there is a statement, by whoever deploys this node, that the network between this
+node and that host is theirs (a Kubernetes cluster's pod network, say) and that anyone on it may read what crosses it: a host
 name alone proves nothing about where it resolves or how the packets are routed, so no spelling is trusted by
 default.
 """

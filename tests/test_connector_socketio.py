@@ -214,7 +214,7 @@ def tearDownModule():
 
     Serving a room and opening sockets leaves thousands of objects that only the cyclic collector
     can reclaim. Left for the interpreter to schedule, that cost lands wherever the threshold
-    happens to fall — which is somebody else's test (#69). Reclaiming it at this boundary spends
+    happens to fall — which is somebody else's test. Reclaiming it at this boundary spends
     it on the tests that made the garbage.
     """
     gc.collect()

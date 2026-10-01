@@ -1,7 +1,7 @@
 """This node's side of the rendezvous: one link with the hosted room, and the relay it carries.
 
 The room no longer holds conversations; it joins a browser with the node that does. The link between
-the two is Socket.IO and either side may open it (rubasace/sidevoice `docs/RENDEZVOUS.md`):
+the two is Socket.IO and either side may open it:
 
 - **outbound**, the normal case — this machine is usually not reachable (a laptop, a pod): the core
   dials the room with the machine's pairing credential, the file `sidevoice pair` wrote;
@@ -13,7 +13,7 @@ Whichever side opened it, the room then asks the same things: `relay.http` (a br
 `relay.open` / `relay.data` / `relay.close` (a browser's call socket). `Relay` serves them by making the
 very same request to this node on loopback: the relay adds no second implementation of any endpoint,
 and a relayed browser is a browser like any other to everything behind it — its device token included
-(`docs/DEVICE_PAIRING.md`): the room checks none, it passes `authorization` and the socket's offered
+(`control.devices`): the room checks none, it passes `authorization` and the socket's offered
 subprotocols through, and this node checks them.
 
 The room is trusted. It terminates the browser's TLS and this node's, so it sees every device token, every

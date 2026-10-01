@@ -32,7 +32,7 @@ class PresentationTests(IsolatedAsyncioTestCase):
         c = self.call()
         # The stand-in worker never plays anything, so a speak that waited for playback would never
         # return. The timeout only guards against that hang; a tenth of a second also caught a full
-        # garbage collection over the suite's heap (#69).
+        # garbage collection over the suite's heap.
         result = await asyncio.wait_for(c.room.speak('Hola', 'u', 'call', 0), 5)
         self.assertEqual(result['status'], 'queued')
         self.assertEqual(await c.room.speak('Hola', 'u', 'call', 0), result)
@@ -157,7 +157,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.c.id, 'same-webrtc')
         self.assertIsInstance(self.c.worker.queue_frame.call_args.args[0], InterruptionFrame)
         self.assertEqual(self.c.utterances['old'].status, 'interrupted')
-        # What was said before the switch went to A when the switch closed it (#93); the turn still
+        # What was said before the switch went to A when the switch closed it; the turn still
         # open is the rest of what the person says, and that is B's.
         self.c.enqueue_input('Y esto ya para B')
         self.assertEqual(self.hub.journal.pending()[0]['thread'], 'b')
@@ -214,7 +214,7 @@ class RoomTests(IsolatedAsyncioTestCase):
         self.assertTrue(result['text_saved'])
         self.assertEqual(self.hub.journal.history('a')[0]['text'], 'Respuesta para A')
         self.c.worker.queue_frames.assert_not_awaited()
-        # Back on A, what was said there while this browser was elsewhere plays, once (#73).
+        # Back on A, what was said there while this browser was elsewhere plays, once.
         await self.hub.select(self.c.id, 'a')
         self.c.worker.queue_frames.assert_awaited_once()
         self.assertEqual(self.c.worker.queue_frames.call_args.args[0][1].text, 'Respuesta para A')
@@ -551,7 +551,7 @@ class ParticipantEngineTests(IsolatedAsyncioTestCase):
 
 
 class AdmissionEndpointTests(IsolatedAsyncioTestCase):
-    """The third way a refusal reaches the person, and the only one a proxy cannot spoil (#63)."""
+    """The third way a refusal reaches the person, and the only one a proxy cannot spoil."""
 
     async def test_the_room_says_over_http_whether_it_would_take_one_more_browser(self):
         from fastapi import FastAPI

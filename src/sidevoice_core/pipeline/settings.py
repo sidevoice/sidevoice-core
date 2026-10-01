@@ -35,7 +35,7 @@ MODEL_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$')
 TEXT_LIMIT = 1000        # a text option that names no `max` of its own
 VOICE_ID_LIMIT = 120     # a provider's voice id: the provider's to define, ours to bound
 
-# What a stage placed on the host is refused with until the host runs models (#124 phase 5). A key the client
+# What a stage placed on the host is refused with until the host runs models (sidevoice/sidevoice-core#21). A key the client
 # translates, and the sentence in English for one that does not know the key.
 HOST_UNAVAILABLE = {'key': 'place_host_unavailable', 'message': 'Running models on the host is not available yet.'}
 
@@ -232,7 +232,7 @@ def unavailable(settings, config=None):
     provider, an English sentence), or None when it can. Checked for every stage, at the hello and on every
     live change, so a stage that cannot work is refused before it is used instead of failing a reply later:
     the host runs no models yet; a provider needs its key on this node; a provider's voice needs at least one
-    voice chosen — its "automatic" is the client's to resolve into one before saving (review R02, R08)."""
+    voice chosen — its "automatic" is the client's to resolve into one before saving."""
     from . import integrations
     if on_host(settings):
         return dict(HOST_UNAVAILABLE)
@@ -264,7 +264,7 @@ def settings_from(data):
     except ValidationError as error:
         # One value this node cannot read — a device carrying settings from another version — used to throw
         # every setting away, the transcription provider with them, and an iPhone put back on browser Whisper
-        # never finished a turn (#39). Only what was refused falls back to its default; the rest stands. A stage
+        # never finished a turn. Only what was refused falls back to its default; the rest stands. A stage
         # is one setting: anything wrong in it puts the whole stage back to its default, never half of it.
         refused = {item['loc'][0] for item in error.errors() if item.get('loc')}
         reason = 'Some device settings were not valid and use their defaults: ' + '; '.join(

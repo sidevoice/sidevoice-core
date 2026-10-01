@@ -77,7 +77,7 @@ class CallPort(Protocol):
 # the last 30 s of it; this leaves room for that and refuses anything that is not a gap.
 CATCHUP_MAX_SECONDS = 35
 CATCHUP_SLICE_BYTES = 128 * 1024
-# How many earlier session ids of its own a page may name in its hello (#52). A reconnection mints a
+# How many earlier session ids of its own a page may name in its hello. A reconnection mints a
 # new client id, so this is how a tab says which entries in the journal were its own; naming one can
 # only take a reply out of the catch-up, never put somebody else's in.
 MAX_PRIOR_SESSIONS = 8
@@ -369,7 +369,7 @@ class VoiceCall:
         return task
 
     def close_turn(self):
-        """A conversation switch ends the turn being spoken (#93).
+        """A conversation switch ends the turn being spoken.
 
         What was said so far belongs to the conversation it was said to. Its audio is taken now, before
         the switch, so nothing spoken afterwards can join it, and it is delivered to that conversation

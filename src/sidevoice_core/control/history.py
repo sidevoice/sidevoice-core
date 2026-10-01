@@ -1,9 +1,9 @@
 """The room's journal, in memory, and the little that must outlive the process, in one small file.
 
 Nothing anyone says is written to disk by the room: transcripts, the outbox and
-the state of every spoken reply live only while the room runs (issue #1). What
+the state of every spoken reply live only while the room runs (sidevoice/sidevoice-connector#1). What
 survives a restart or a redeploy is what would otherwise have to be redone by
-hand: connector credentials, one pairing per machine (issue #12). Bindings are
+hand: connector credentials, one pairing per machine. Bindings are
 not kept: every connector re-registers its own on reconnect, and closing a
 conversation's voice from the room simply removes its binding.
 """
@@ -24,7 +24,7 @@ RETRY_BACKOFF = (2, 5, 15, 60)
 # How long the room keeps holding a message for a conversation that is not there. A connector that
 # drops and comes back inside this window loses nothing, which is what the outbox is for; past it the
 # sentence has stopped being something to answer and become something said long ago to somebody who
-# was not listening, so it is never delivered (#41).
+# was not listening, so it is never delivered.
 PENDING_TTL = int(os.environ.get('VOICE_INPUT_TTL_SECONDS') or 600)
 HISTORY_KEYS = ('seq', 'id', 'thread', 'role', 'text', 'name', 'session', 'revision', 'time', 'status',
                 'audio_reason', 'offline')
@@ -190,7 +190,7 @@ class RoomHistory:
     # Crockford's base32: 32 symbols, no I, L, O or U, so a code survives being read aloud, dictated to an
     # agent or typed from a phone. Twelve symbols are 60 bits — against a ten-minute window and the
     # redemption limit in connector_control, not a budget anyone can spend — shown as three groups of four.
-    # Three minutes of life: the operator cut it from ten (2026-09-22), since the code is used the moment it is shown.
+    # Three minutes of life, not ten: the code is used the moment it is shown.
     PAIRING_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
     PAIRING_LENGTH = 12
 

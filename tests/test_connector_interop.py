@@ -1,4 +1,4 @@
-"""The real connector against the real room, and the numbers PR #68 asked to be compared with.
+"""The real connector against the real room, and the numbers it is compared with.
 
 Everything else in either suite tests one side against a stand-in. This one starts the room on a
 loopback port, spawns the connector as the machine would, and drives it through the same local
@@ -32,8 +32,8 @@ from sidevoice_core.server.connector_link import mount_connector_link
 from sidevoice_core.control.history import RoomHistory
 from test_connector_control import FakeHub
 
-# The connector lives in rubasace/sidevoice (`packages/connector`), not here: SIDEVOICE_REPOSITORY
-# names that checkout (with its node_modules installed). Without it these skip.
+# The connector lives in the sidevoice-connector repository (`packages/connector`), not here:
+# SIDEVOICE_REPOSITORY names that checkout (with its node_modules installed). Without it these skip.
 PACKAGE = Path(os.environ.get('SIDEVOICE_REPOSITORY') or '/nonexistent') / 'packages' / 'connector'
 NODE = shutil.which('node')
 DELIVERIES = 5          # enough for a median that is not one sample's bad luck
@@ -143,7 +143,7 @@ class Room:
         await asyncio.wait_for(self.task, timeout=20)
 
 
-@unittest.skipIf(NODE is None or not (PACKAGE / 'connector.mjs').exists(), 'node, or a rubasace/sidevoice checkout (SIDEVOICE_REPOSITORY), is not here')
+@unittest.skipIf(NODE is None or not (PACKAGE / 'connector.mjs').exists(), 'node, or a sidevoice-connector checkout (SIDEVOICE_REPOSITORY), is not here')
 class ConnectorInteropTests(unittest.IsolatedAsyncioTestCase):
     maxDiff = None
 
@@ -395,7 +395,7 @@ def tearDownModule():
     the cyclic collector can reclaim, and a full collection over this suite's heap costs about a
     tenth of a second. Left for the interpreter to schedule, that cost lands wherever the threshold
     happens to fall — which is somebody else's test, and the reason this module used to make one of
-    them fail roughly two runs in three (#69). Reclaiming it at this boundary costs the same tenth
+    them fail roughly two runs in three. Reclaiming it at this boundary costs the same tenth
     of a second and spends it on the tests that made the garbage.
     """
     gc.collect()

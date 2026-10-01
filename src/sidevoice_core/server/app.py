@@ -214,7 +214,7 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None, de
     `rendezvous` is this node's link with the hosted room, when it has one (`server.__main__` makes it).
 
     `device_auth=False` is for tests only: a running node always requires a paired device's token
-    (docs/DEVICE_PAIRING.md), and nothing in its environment can turn that off."""
+    (`control.devices`), and nothing in its environment can turn that off."""
     from fastapi import FastAPI
     from ..control.telemetry import configure as configure_telemetry
     from .connector_link import mount_connector_link

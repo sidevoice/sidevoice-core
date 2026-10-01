@@ -1,4 +1,4 @@
-"""A model is checked before it takes effect (#124 §6, #90): the clips and phrases are this package's data, a
+"""A model is checked before it takes effect (sidevoice/sidevoice-core#21, sidevoice/sidevoice-core#13): the clips and phrases are this package's data, a
 verdict judges what came back, a provider's model is checked here with the node's key, and a failure is an
 answer that names its step and its reason — never an exception, never a stage saved."""
 import array
@@ -66,7 +66,7 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual((short['key'], short['seconds']), ('check_duration', 0.1))
 
     def test_audio_that_is_not_numbers_is_never_audible(self):
-        """Review R10: NaN or ±inf samples, or a rate that is not one, used to pass as loud enough."""
+        """NaN or ±inf samples, or a rate that is not one, used to pass as loud enough."""
         tone = [0.3 * math.sin(i / 10) for i in range(16000 * 5)]
         for value in (math.nan, math.inf, -math.inf):
             with self.subTest(value=value):
@@ -230,7 +230,7 @@ if __name__ == '__main__':
 
 
 class BudgetTest(unittest.IsolatedAsyncioTestCase):
-    """Review R08: checks of a paid provider are bounded however often an authorised device asks."""
+    """Checks of a paid provider are bounded however often an authorised device asks."""
 
     def setUp(self):
         from sidevoice_core.control.check_budget import CheckBudget

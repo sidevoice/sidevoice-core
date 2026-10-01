@@ -1,4 +1,4 @@
-"""Device pairing, the node's side (rubasace/sidevoice `docs/DEVICE_PAIRING.md`): the node's identity, the
+"""Device pairing, the node's side (`control.devices`, `server.devices`): the node's identity, the
 pairing code its connector asks for, redeeming it once, the token every route but a few requires (the call
 socket's in a subprotocol), the identity proof a client pins, the devices list and revoke, and the relay
 carrying all of it from the room end to end."""
@@ -196,7 +196,7 @@ class NodeSurfaceTests(unittest.TestCase):
         self.assertEqual(entry['name'], 'Mi portátil')
 
     def test_every_paired_device_has_the_node_s_full_authority_over_its_integrations(self):
-        """No owner and no guests (the operator, 2026-10-01): two genuinely paired devices — real tokens, device
+        """No owner and no guests, by design: two genuinely paired devices — real tokens, device
         auth on — each see every provider, keyed or not, and each may write and remove a key; without a token,
         nothing."""
         from unittest.mock import AsyncMock, patch

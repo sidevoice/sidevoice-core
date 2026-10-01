@@ -44,7 +44,7 @@ def _fit(build, engine, capabilities):
     has = set(capabilities.get('has', []))
     runs = capabilities.get('runs')
     if engine.get('runs') != runs:
-        return None   # a page engine only in a page, a native one only in a native runtime (D5)
+        return None   # a page engine only in a page, a native one only in a native runtime
     package = None
     if runs == 'native':
         package = _package(engine, capabilities)

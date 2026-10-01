@@ -131,7 +131,7 @@ class MultiClientRoomTests(RoomFixture):
         self.assertEqual(self.row('behind', 'one')['audio_reason'], 'previous_reply')
 
     async def test_a_reply_whose_ending_never_comes_back_does_not_hold_the_queue_for_ever(self):
-        # Seen live on 2026-09-20: a reply stayed "playing" with no receipt and two more waited behind it (#60).
+        # Seen live on 2026-09-20: a reply stayed "playing" with no receipt and two more waited behind it.
         client = self.browser('one')
         client.audio_grace_seconds = 0
         # The bound grows with the text: a word expires fast, a long reply is given its time.
@@ -280,7 +280,7 @@ class MultiClientRoomTests(RoomFixture):
         self.assertEqual(second.latency.turns, {})
 
     async def test_a_typed_message_does_not_cut_the_reply_that_is_playing(self):
-        # Asked for on 2026-09-21: pasting a text while a reply plays must not stop it (#67).
+        # Asked for on 2026-09-21: pasting a text while a reply plays must not stop it.
         client = self.browser('one')
         await self.reply(client, 'sounding', text='Te estoy contando algo')
         client.transition('sounding', 'playing')
@@ -302,7 +302,7 @@ class MultiClientRoomTests(RoomFixture):
         result = await self.hub.send_text('Escribo yo', first.id, 'task',
                                           first.target['binding_id'], 'msg-1')
         self.assertEqual(result['revision'], first.revision)
-        self.assertEqual(first.revision, 0, 'typing is not a new epoch: it interrupts nothing (#67)')
+        self.assertEqual(first.revision, 0, 'typing is not a new epoch: it interrupts nothing')
         self.assertEqual(second.turn_revision, microphone_turn)
         self.assertTrue(second.speaking)
         row = self.hub.journal.get(result['id'])
@@ -384,7 +384,7 @@ class MultiClientRoomTests(RoomFixture):
 
     async def test_the_room_says_whether_it_would_admit_a_browser_and_why_not(self):
         # A refusal travels in a frame and in a close code, and a proxy loses both: this is the answer
-        # the page that was refused asks for over plain HTTP (#63).
+        # the page that was refused asks for over plain HTTP.
         free = self.hub.admission()
         self.assertEqual((free['admitted'], free['reason'], free['message']), (True, None, None))
         self.assertEqual((free['clients'], free['max']), (len(self.hub.clients), self.hub.max_clients))
@@ -666,7 +666,7 @@ class PerBrowserSelectionTests(IsolatedAsyncioTestCase):
 
 
 class ReplayOnReturnTests(RoomFixture):
-    """What a browser is played when it comes back, and what it is never played again (#52).
+    """What a browser is played when it comes back, and what it is never played again.
 
     Driving through a tunnel drops the socket; the transcript keeps the text and a driver cannot read
     it. Everything here asks the same question: does the room offer exactly the replies *this* browser
@@ -781,7 +781,7 @@ class ReplayOnReturnTests(RoomFixture):
     async def test_a_reply_nobody_was_there_to_hear_waits_for_the_first_who_returns(self):
         # Published against a session this room no longer knows (a restart, a reload), with nobody on the
         # conversation: it used to be text for ever. It is a first delivery delayed, so it is kept and the
-        # returning browser hears it through the ordinary replay — rendered now, for the first time (#17).
+        # returning browser hears it through the ordinary replay — rendered now, for the first time.
         self.voice = ELEVEN
         result = await self.hub.publish(Speech(thread_id='task', session_id='ghost', revision=3,
                                                text='Llegó cuando no estabas', utterance_id='parked'))

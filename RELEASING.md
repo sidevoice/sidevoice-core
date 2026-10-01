@@ -2,7 +2,7 @@
 
 One version for the package, tagged `vX.Y.Z`. It lives in `pyproject.toml`; release-please moves it
 (`release-please-config.json`). Never edit it by hand. For the beta the core is distributed as GitHub Releases of
-this repository; PyPI comes with the public launch (#4).
+this repository; PyPI comes with the public launch (#8).
 
 ## What each act means
 
@@ -10,7 +10,7 @@ this repository; PyPI comes with the public launch (#4).
 |---|---|---|
 | Open / update a PR | anyone | The unit tests (Linux) and **PR title is a conventional commit**. Nothing is packaged. |
 | Squash-merge into `main` | reviewer | The PR title becomes the commit. `test` runs the tests and packages; when it is green, the `nightly` pre-release is replaced. release-please opens or updates the **release PR** ("chore(main): release X.Y.Z"). Nothing versioned is published. |
-| Merge the release PR | the operator | **This is the release.** release-please tags `vX.Y.Z` and creates a draft GitHub Release whose notes are that version's changelog; `test` runs from the tag, attaches the assets and publishes the Release. |
+| Merge the release PR | a maintainer | **This is the release.** release-please tags `vX.Y.Z` and creates a draft GitHub Release whose notes are that version's changelog; `test` runs from the tag, attaches the assets and publishes the Release. |
 
 Assets of a release:
 
@@ -64,10 +64,10 @@ Build artifacts on Actions runs are kept 7 days, for debugging only. Download fr
   the failed jobs of that `release-please` run (Actions). Nothing is published until every job passed.
 - A `nightly` run fails: the previous snapshot stays. The next green push replaces it.
 
-## What this needs from the repository settings (the operator's, `GITHUB-SETUP.md`)
+## What this needs from the repository settings
 
 - Settings → Actions → General → **Allow GitHub Actions to create and approve pull requests**: without it
-  release-please cannot open its PR (off as of 2026-10-01).
+  release-please cannot open its PR.
 - Squash merging, with the PR title as the commit message.
 - Required check **PR title is a conventional commit**. release-please's own PR gets it through a dispatched run
   (its pushes start no workflow by themselves).

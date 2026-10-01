@@ -287,7 +287,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.hub.clients, {})
 
     async def test_a_keyless_or_voiceless_voice_provider_is_refused_at_the_hello_not_at_its_first_reply(self):
-        """Review R08 and R02: every provider-backed stage is checked before the call exists — ElevenLabs voice
+        """Every provider-backed stage is checked before the call exists — ElevenLabs voice
         with no key on this node, and ElevenLabs with no voice chosen at all (the probe that previewed fine and
         then could not speak a reply)."""
         from sidevoice_core.server.app import browser_call
@@ -475,7 +475,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual([r['text'] for r in self.hub.journal.history('thread-a')][-1], 'Y esto va aparte.')
 
     async def test_switching_conversation_mid_turn_delivers_what_was_said_to_the_one_it_was_said_to(self):
-        # Seen on 2026-09-26: words spoken to one conversation arrived at the next one selected (#93).
+        # Seen on 2026-09-26: words spoken to one conversation arrived at the next one selected.
         from unittest.mock import AsyncMock
         from sidevoice_core.pipeline.transcribers import Transcript
         voice, client, sent = self.voice([Transcript('Esto era para A.'), Transcript('Y esto para B.')])
@@ -785,7 +785,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         error = await self.received(refused, 'error')
         self.assertIn('maximum number of browsers', error['data']['message'])
         # The frame names the reason as well as saying it, so a page whose proxy kept the sentence
-        # but lost the close code still knows which sentence of its own to show (#63).
+        # but lost the close code still knows which sentence of its own to show.
         self.assertEqual(error['data']['reason'], 'room_is_full')
         self.assertEqual(refused.application_state, WebSocketState.DISCONNECTED)
         self.assertEqual(len(self.hub.clients), self.hub.max_clients)
@@ -793,7 +793,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         for socket, task, _ in joined:
             await self.leave(socket, task)
 
-    # ----- a seat is held by a browser that answers, and by nobody else (#63) -----
+    # ----- a seat is held by a browser that answers, and by nobody else -----
 
     async def test_a_browser_that_stops_answering_loses_its_seat(self):
         # Behind a tunnel a closed tab never closes its socket: this is the room noticing on its own.
@@ -823,7 +823,7 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.hub.clients, {})
         self.assertFalse(client.connected)
 
-    # ----- what this browser never heard, when it comes back (#52) -----
+    # ----- what this browser never heard, when it comes back -----
 
     async def test_the_hello_names_this_tab_s_earlier_sessions_and_the_room_plays_back_what_it_missed(self):
         from sidevoice_core.control.room import Speech

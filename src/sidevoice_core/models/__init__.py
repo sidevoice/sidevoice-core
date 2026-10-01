@@ -1,4 +1,4 @@
-"""The model catalogue (rubasace/sidevoice#124, `docs/design/MODEL_FIRST_ENGINES.md` §3–§4): which models
+"""The model catalogue (sidevoice/sidevoice-core#21): which models
 exist, the engines each runs on, the options each family takes, and which of them a place can run.
 
 This package owns it. `catalog.json` is the one written by hand: clients that need it at build time carry

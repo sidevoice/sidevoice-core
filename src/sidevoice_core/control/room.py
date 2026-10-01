@@ -8,7 +8,7 @@ karaoke, its output device and its own latency trace.
 
 Starting to speak is room-wide, because it makes the agent's previous answer
 stale for everybody. Stopping the audio is local, because it only says what one
-listener wants to hear. See `docs/MULTI_CLIENT_ROOM.md`.
+listener wants to hear.
 """
 import asyncio
 import json
@@ -43,7 +43,7 @@ PARKABLE = {'session_changed', 'call_ended', 'focus_changed'}
 # worker already holds. One person with a laptop and a phone is two of these, and a device changing a
 # setting that needs another pipeline is two for a moment.
 #
-# Eight was never what went wrong: seats that were never given back were (#63). So the default does
+# Eight was never what went wrong: seats that were never given back were. So the default does
 # not move, and a machine with room to spare raises it with VOICE_MAX_BROWSERS.
 MAX_BROWSERS = 8
 
@@ -86,7 +86,7 @@ class Utterance:
         self.row_id = row_id
         self.at = time.time() if at is None else at   # when the room published it: what "recent enough" reads
         self.replay_of = None   # the reply this one repeats, when it is a catch-up rather than an answer
-        self.requested = False  # a repetition the person asked for from the bubble, not a catch-up (#100)
+        self.requested = False  # a repetition the person asked for from the bubble, not a catch-up
         self.parked = False     # published when nobody on its conversation was listening: never rendered, never heard
         self.first_render = False  # a catch-up of a parked reply: its render is a first purchase, not a repeat
         self.rendered = False   # a paid engine was asked for it: repeating it must never buy it again
@@ -141,7 +141,7 @@ class RoomClient:
         self.active = None
         self.quiet_until = 0
         self.dispatch_timer = None
-        self.playback_watch = None   # the bound on the reply this browser was handed (#60)
+        self.playback_watch = None   # the bound on the reply this browser was handed
         self.audio_grace_seconds = 1.0
         # Which conversation this browser talks to is this browser's own state (issue: the room
         # used to hold one selection for everyone). The room only routes.
@@ -416,7 +416,7 @@ class RoomClient:
 
     def _queue_behind_active(self):
         # Nobody is talking: what is still held waits for the reply ahead of it, not for anybody's turn,
-        # and saying otherwise tells the person to stop a voice nobody is using (#61).
+        # and saying otherwise tells the person to stop a voice nobody is using.
         if not self.active or self.room.speaking:
             return
         for uid in self.pending:
@@ -453,7 +453,7 @@ class RoomClient:
             self.fail_active()
             raise
 
-    # A reply handed to a browser is not waited on for ever (#60): a killed tab, a network gone mid-playback
+    # A reply handed to a browser is not waited on for ever: a killed tab, a network gone mid-playback
     # or a receipt lost in flight left the head of the queue "playing" and every later reply behind it. The
     # bound is generous and grows with the text — rendering in a slow browser included — and when it passes
     # without an ending receipt the reply is marked unconfirmed and the queue moves on.
@@ -556,7 +556,7 @@ class Room:
 
     # What a browser over the limit is refused with, written once. The socket says it in a frame and
     # in a close code, and the admission endpoint says it again to a page that received neither
-    # through its proxy (#63): three ways out, one sentence, and one name for the reason so a page
+    # through its proxy: three ways out, one sentence, and one name for the reason so a page
     # can say it in its own language when only the name survived the trip.
     FULL_MESSAGE = 'The room already has the maximum number of browsers connected.'
     MAX_UTTERANCES = 2048
@@ -719,7 +719,7 @@ class Room:
 
         def left(entry):
             # Cut because this browser moved to another conversation: it was not heard, and the bubble
-            # promises it again on return (#73), even if it had started.
+            # promises it again on return, even if it had started.
             return entry is not None and entry['reason'] == 'focus_changed' and entry['status'] != 'playback_finished'
 
         missed = [utterance for utterance in self.utterances.values()
@@ -774,7 +774,7 @@ class Room:
     def replayable_rows(self, client):
         """Which replies this browser could hear again right now: the ones whose audio the room holds.
         Nothing is rendered for a repetition — not a paid render twice, not a browser render the room never
-        saw (that changes when the browser is one more provider, #94). A bubble offers it only for these."""
+        saw (that changes when the browser is one more provider, sidevoice/sidevoice-core#14). A bubble offers it only for these."""
         from ..pipeline.settings import load_settings, resolve_voice
         rows = set()
         for utterance in self.utterances.values():
@@ -789,7 +789,7 @@ class Room:
         return rows
 
     async def replay_one(self, client, row_id):
-        """Play one reply again, on request, for this browser only (#100).
+        """Play one reply again, on request, for this browser only.
 
         Only from the audio the room holds: nothing is rendered or bought again. It goes to the head of this
         browser's queue, after what is playing."""
@@ -891,7 +891,7 @@ class Room:
             # Nobody on this conversation was listening — the asker's session is gone, the call ended, or the
             # person was looking at another conversation. That is a first delivery delayed, not a reply
             # answered: it is kept, unrendered and unheard, so the next browser that returns to this
-            # conversation gets it through the same replay as anything else it missed (#17, 2026-09-20).
+            # conversation gets it through the same replay as anything else it missed.
             if (decision.reason in PARKABLE and payload.utterance_id not in self.utterances
                     and len(self.utterances) < self.MAX_UTTERANCES):
                 parked = Utterance(payload.utterance_id, payload.text, language=payload.language,
@@ -928,7 +928,7 @@ class Room:
             raise Refusal(409, 'The connection or conversation changed. The text was not sent.')
         if not text.strip():
             raise Refusal(422, 'Write a message.')
-        # Typing is not barging in (#67): a text handed over while a reply plays leaves it playing, and the
+        # Typing is not barging in: a text handed over while a reply plays leaves it playing, and the
         # replies already on their way stay current. Only a voice interrupts. The text rides this browser's
         # current epoch, so whatever answers it is as current as everything else.
         client.enqueue_input(text, target=dict(client.target), revision=client.revision,
@@ -986,7 +986,7 @@ class Room:
             if current.get('thread_id') == thread_id and (not title or current.get('title') == title):
                 return {'status': 'already_active', 'binding': dict(current)}
             new = await self._retarget(client, {'thread_id': thread_id, 'title': title})
-        # Coming back to a conversation is a return like any other: what was missed on it plays now (#73).
+        # Coming back to a conversation is a return like any other: what was missed on it plays now.
         from ..pipeline.settings import load_settings
         await self.replay(client, seconds=(client.settings or load_settings()).replay_on_return_seconds)
         return {'status': 'activated', 'binding': new}
@@ -1005,7 +1005,7 @@ class Room:
         new = {'thread_id': target.get('thread_id'), 'title': target.get('title'), 'binding_id': str(uuid.uuid4())}
         try:
             client.switching = True
-            # What was already said goes to the conversation it was said to, before anything moves (#93).
+            # What was already said goes to the conversation it was said to, before anything moves.
             if client.voice is not None and hasattr(client.voice, 'close_turn'):
                 client.voice.close_turn()
             client.revision += 1

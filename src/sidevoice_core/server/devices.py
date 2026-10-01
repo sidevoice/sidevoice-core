@@ -1,4 +1,4 @@
-"""Device pairing over HTTP (rubasace/sidevoice `docs/DEVICE_PAIRING.md`): the node requires a device token on
+"""Device pairing over HTTP: the node requires a device token on
 every route but a few, redeems pairing secrets, proves its identity, and lists and revokes devices.
 
 The logic — the key, the code, the registry — is `control.devices`; this module only maps it to requests.
