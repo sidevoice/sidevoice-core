@@ -15,7 +15,6 @@ import uuid
 from pathlib import Path
 
 import aiohttp
-import socketio
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -29,7 +28,8 @@ from sidevoice_core.control.devices import (CODE_TTL, DeviceRegistry, IdentityEr
 from sidevoice_core.control.history import RoomHistory
 from sidevoice_core.control.room import Room
 from sidevoice_core.server.app import create_app
-from test_rendezvous import NodeTest, until
+from sidevoice_core.server.local import marked
+from test_rendezvous import LOCAL, NodeTest, link_client, until
 
 BASE = 'http://127.0.0.1:8768'
 APP = 'tauri://localhost'
@@ -164,7 +164,7 @@ class NodeSurfaceTests(unittest.TestCase):
     def test_discovery_says_what_pairing_needs_and_nothing_about_the_machine(self):
         with self.client() as client:
             what = client.get('/api/rendezvous')
-            self.assertEqual(what.json(), {'kind': 'node', 'fingerprint': self.devices.store.identity.fingerprint})
+            self.assertEqual(what.json(), {'kind': 'node', 'fingerprint': self.devices.store.identity.fingerprint, 'api': 1})
             proof = client.get('/api/device/identity', params={'nonce': b64url(os.urandom(32))}).json()
             self.assertEqual(set(proof), {'fingerprint', 'public_key', 'signature'}, 'no host name before a code is redeemed')
 
@@ -249,7 +249,7 @@ class NodeSurfaceTests(unittest.TestCase):
             self.assertEqual(client.get('/api/presentation/rtc/config', headers=auth(token)).status_code, 200)
             self.assertEqual(client.get('/api/device/devices', headers={'authorization': f'bearer {token}'}).status_code, 200)
             self.assertEqual(client.get('/api/models/catalog', headers=auth(token)).status_code, 200)
-            # Open: what this is, the redemption, the identity proof, preflights, the connector's own link.
+            # Open: what this is, the redemption, the identity proof, preflights.
             what = client.get('/api/rendezvous')
             self.assertEqual(what.status_code, 200)
             self.assertEqual(what.json()['fingerprint'], self.devices.store.identity.fingerprint)
@@ -259,8 +259,11 @@ class NodeSurfaceTests(unittest.TestCase):
                 'Origin': APP, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization, content-type'})
             self.assertEqual(preflight.status_code, 204)
             self.assertIn('authorization', preflight.headers['access-control-allow-headers'])
-            self.assertEqual(client.get('/api/connectors/link/', params={'EIO': '4', 'transport': 'polling'}).status_code, 200,
-                             'the connector link carries its own credential')
+            # The connector's own link is not on TCP at all: it is served only through the local socket.
+            self.assertEqual(client.get('/api/connectors/link/', params={'EIO': '4', 'transport': 'polling'}).status_code, 404)
+        with TestClient(marked(self.app), base_url=BASE) as local:
+            self.assertEqual(local.get('/api/connectors/link/', params={'EIO': '4', 'transport': 'polling'}).status_code, 200,
+                             'through the socket the link is open: it carries its own credential')
         with self.client('http://attacker.example') as client:
             self.assertEqual(client.get('/api/presentation/admission', headers=auth(token)).status_code, 421, 'a foreign Host goes first')
 
@@ -303,7 +306,8 @@ class NodeSurfaceTests(unittest.TestCase):
             listed = client.get('/api/device/devices', headers=auth(mine['token'])).json()['devices']
             self.assertEqual([(d['id'], d['name'], d['current']) for d in listed],
                              [(mine['device_id'], 'Mi portátil', True), (other['device_id'], 'El móvil', False)])
-            self.assertEqual(set(listed[0]), {'id', 'name', 'created', 'last_seen', 'current'})
+            self.assertEqual(set(listed[0]), {'id', 'name', 'kind', 'created', 'last_seen', 'current'})
+            self.assertEqual({d['kind'] for d in listed}, {'code'}, 'paired with a code')
             self.assertIsInstance(listed[0]['created'], int)
             gone = client.delete(f"/api/device/devices/{other['device_id']}", headers=auth(mine['token']))
             self.assertEqual((gone.status_code, gone.json()), (200, {'ok': True}))
@@ -333,8 +337,8 @@ class LinkedNodeTest(NodeTest):
 
     async def connector(self):
         credential = self.node_room.journal.redeem_pairing_code(self.node_room.journal.create_pairing_code())
-        connector = socketio.AsyncClient(reconnection=False)
-        await connector.connect(f'http://127.0.0.1:{self.node_port}', socketio_path='/api/connectors/link',
+        connector = link_client(self, self.socket_path)
+        await connector.connect(LOCAL, socketio_path='/api/connectors/link',
                                 namespaces=['/connectors'], transports=['websocket'],
                                 auth={'connector_id': credential[0], 'token': credential[1], 'protocol': CONNECTOR_PROTOCOL,
                                       'host': 'this-laptop', 'platform': 'Linux x86_64', 'version': '0.7.0'})

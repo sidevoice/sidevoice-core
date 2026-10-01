@@ -1,13 +1,13 @@
 """The link itself: a real `python-socketio` client against the room's real namespace.
 
 `test_connector_control` says what each event means with a peer that carries nothing. This one
-says that the events arrive at all — over `/api/connectors/link`, through uvicorn, with the
-handshake that authenticates and the acknowledgements the library gives us. What it must never do
-is re-test the control plane's decisions: it checks that the wire reaches them.
+says that the events arrive at all — over `/api/connectors/link`, through uvicorn on a Unix socket as
+this computer's connector reaches its core (`server.local`), with the handshake that authenticates and
+the acknowledgements the library gives us. What it must never do is re-test the control plane's
+decisions: it checks that the wire reaches them.
 """
 import asyncio
 import gc
-import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +21,7 @@ from sidevoice_core.server.connector_link import mount_connector_link
 from sidevoice_core.server.connector_link import NAMESPACE, PATH
 from sidevoice_core.control.history import RoomHistory
 from test_connector_control import FakeHub
+from test_rendezvous import LOCAL, link_client
 
 
 async def until(check, timeout=10.0, every=.002):
@@ -30,12 +31,6 @@ async def until(check, timeout=10.0, every=.002):
             return True
         await asyncio.sleep(every)
     raise AssertionError('timed out waiting')
-
-
-def free_port():
-    with socket.socket() as probe:
-        probe.bind(('127.0.0.1', 0))
-        return probe.getsockname()[1]
 
 
 class LinkTests(unittest.IsolatedAsyncioTestCase):
@@ -48,8 +43,8 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         # A keepalive budget shorter than the suite, so a room that stops answering is noticed here.
         self.control = mount_connector_link(app, self.hub, heartbeat_seconds=0.2, ack_timeout=1)
         self.connector_id, self.token = self.journal.redeem_pairing_code(self.journal.create_pairing_code())
-        self.port = free_port()
-        self.server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=self.port, log_level='error'))
+        self.socket = str(Path(self.temp.name) / 'local.sock')
+        self.server = uvicorn.Server(uvicorn.Config(app, uds=self.socket, log_level='error'))
         self.serving = asyncio.create_task(self.server.serve())
         await until(lambda: self.server.started, timeout=20)
 
@@ -65,15 +60,14 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         """One connector, connected. `refused` collects what the room said when it would not have
         it: this client reports only that a namespace failed, so the reason is read where it
         arrives — which is also where the JavaScript client puts it, in `connect_error`."""
-        client = socketio.AsyncClient(reconnection=False)
-        self.addAsyncCleanup(client.disconnect)
+        client = link_client(self, self.socket)
         client.refused = []
         welcomed = asyncio.get_running_loop().create_future()
         client.on('connector.welcome', lambda data: welcomed.done() or welcomed.set_result(data),
                   namespace=NAMESPACE)
         client.on('connect_error', lambda data: client.refused.append(data), namespace=NAMESPACE)
         try:
-            await client.connect(f'http://127.0.0.1:{self.port}', socketio_path=PATH, namespaces=[NAMESPACE],
+            await client.connect(LOCAL, socketio_path=PATH, namespaces=[NAMESPACE],
                                  transports=['websocket'], auth=self.credential(**overrides))
         except socketio.exceptions.ConnectionError as error:
             error.refused = client.refused
