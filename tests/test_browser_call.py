@@ -61,7 +61,7 @@ class FakeTranscriber:
 
 
 PATIENT_HELLO = {'conversation': 'thread-a', 'mic': {'turn_patience': 'calm'},
-                 'transcription': {'model': 'onnx-community/whisper-tiny', 'device': 'wasm'}}
+                 'transcription': {'model': 'whisper-tiny', 'engine': 'transformers-js', 'accelerator': 'wasm', 'cached': True}}
 TIMER_HELLO = PATIENT_HELLO  # kept while older tests still name it
 
 
@@ -127,8 +127,10 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         self.assertEqual(session['mic_settings']['merge_window_secs'], 1.5)
         self.assertEqual(session['mic_settings']['vad_confidence'], 0.6)
         self.assertEqual(session['mic_settings']['vad_start_secs'], 0.4, "the onset is the room's, four tenths")
-        self.assertEqual((session['transcription']['provider'], session['transcription']['model'],
-                          session['transcription']['device']), ('browser', 'onnx-community/whisper-tiny', 'wasm'))
+        self.assertEqual((session['transcription']['place'], session['transcription']['model'],
+                          session['transcription']['engine'], session['transcription']['accelerator'],
+                          session['transcription']['cached']), ('device', 'whisper-tiny', 'transformers-js', 'wasm', True))
+        self.assertNotIn('device', session['transcription'], 'the accelerator replaced it')
         self.assertEqual(session['mic']['transport'], 'pcm')
         self.assertEqual(client.stt.provider.kind, 'browser')
         self.assertIs(client.voice.transcriber, client.stt)
@@ -172,27 +174,35 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
 
     async def test_the_device_brings_every_setting_and_can_update_the_live_ones(self):
         socket = FakeWebSocket()
-        task, client = await self.join(socket, {'settings': {'stt_provider': 'browser', 'stt_model': 'onnx-community/whisper-base',
-                                                             'spanish_voice': 'em_alex', 'audio_grace_seconds': 4,
-                                                             'turn_patience': 'fast'}})
-        self.assertEqual(client.settings.spanish_voice, 'em_alex')
+        task, client = await self.join(socket, {'settings': {
+            'stt': {'place': 'device', 'model': 'whisper-base', 'options': {'language': 'es'}},
+            'tts': {'place': 'device', 'model': 'kokoro-82m-v1.0', 'options': {'voice': {'es': 'em_alex'}}},
+            'audio_grace_seconds': 4, 'turn_patience': 'fast'}})
+        self.assertEqual(client.settings.tts.options['voice'], {'es': 'em_alex'})
         self.assertEqual(client.audio_grace_seconds, 4)
-        self.assertEqual(client.transcription['model'], 'onnx-community/whisper-base')
+        self.assertEqual((client.transcription['place'], client.transcription['model'], client.transcription['language']),
+                         ('device', 'whisper-base', 'es'))
+        self.assertEqual(client.stt.provider.language, 'es', 'the client is asked to transcribe in the stage\'s language')
+        self.assertNotIn('context', client.transcription, 'the person\'s context is not shown to the rest of the room')
         self.assertEqual(client.mic_settings['user_speech_timeout'], 2.0, 'fast is a whole shape, not one number')
         # Voices and grace change without a reconnect; invalid updates are refused and reported.
-        client.voice.browser_message({'type': 'voice-settings', 'data': {'session_id': client.id, 'settings': {'spanish_voice': 'ef_dora', 'audio_grace_seconds': 1}}})
-        self.assertEqual((client.settings.spanish_voice, client.audio_grace_seconds), ('ef_dora', 1))
-        client.voice.browser_message({'type': 'voice-settings', 'data': {'session_id': client.id, 'settings': {'tts_speed': 9}}})
-        self.assertEqual(client.settings.spanish_voice, 'ef_dora')
+        kokoro = lambda **options: {'place': 'device', 'model': 'kokoro-82m-v1.0', 'options': options}
+        client.voice.browser_message({'type': 'voice-settings', 'data': {'session_id': client.id, 'settings': {
+            'tts': kokoro(voice={'es': 'ef_dora'}), 'audio_grace_seconds': 1}}})
+        self.assertEqual((client.settings.tts.options['voice'], client.audio_grace_seconds), ({'es': 'ef_dora'}, 1))
+        client.voice.browser_message({'type': 'voice-settings', 'data': {'session_id': client.id, 'settings': {
+            'tts': kokoro(voice={'es': 'ef_dora'}, speed=9)}}})
+        self.assertEqual(client.settings.tts.options['voice'], {'es': 'ef_dora'})
         self.assertIn('device settings were not valid', (await self.received(socket, 'error'))['data']['message'])
         # A voice or an engine is resolved per utterance out of these settings, so the change lands on
         # the next reply over this very socket: no second pipeline, and nothing to reconnect.
         from sidevoice_core.pipeline.settings import resolve_voice
         self.assertEqual(resolve_voice(client.settings, 'es')['voice'], 'ef_dora')
-        client.voice.browser_message({'type': 'voice-settings', 'data': {'session_id': client.id, 'settings': {
-            'default_model': 'eleven_flash_v2_5', 'default_voice': 'una-voz', 'spanish_voice': 'inherit', 'tts_speed': 1.1}}})
+        with patch('sidevoice_core.pipeline.integrations.key', return_value='xi-test'):   # the node has its key
+            client.voice.browser_message({'type': 'voice-settings', 'data': {'session_id': client.id, 'settings': {
+                'tts': {'place': 'elevenlabs', 'model': 'eleven_flash_v2_5', 'options': {'voice': {'es': 'una-voz'}, 'speed': 1.1}}}}})
         chosen = resolve_voice(client.settings, 'es')
-        self.assertEqual((chosen['provider'], chosen['voice'], chosen['speed']), ('elevenlabs', 'una-voz', 1.1))
+        self.assertEqual((chosen['place'], chosen['voice'], chosen['speed']), ('elevenlabs', 'una-voz', 1.1))
         self.assertEqual(list(self.hub.clients), [client.id], 'a voice change never opens a second session')
         # And a provider key is read where the audio is made, not where the pipeline was built.
         from sidevoice_core.pipeline import integrations, synthesis
@@ -236,42 +246,104 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
     async def test_a_gpu_fallback_reported_by_the_browser_is_kept_with_its_reason(self):
         socket = FakeWebSocket()
         task, client = await self.join(socket, {'mic': TIMER_HELLO['mic'], 'transcription': {
-            'model': 'onnx-community/whisper-tiny', 'device': 'wasm', 'fallback_from': 'webgpu', 'fallback_error': 'GPU adapter lost'}})
-        self.assertEqual((client.transcription['device'], client.transcription['fallback_from'], client.transcription['fallback_error']),
+            'model': 'whisper-tiny', 'engine': 'transformers-js', 'accelerator': 'wasm', 'cached': False,
+            'fallback_from': 'webgpu', 'fallback_error': 'GPU adapter lost'}})
+        self.assertEqual((client.transcription['accelerator'], client.transcription['fallback_from'], client.transcription['fallback_error']),
                          ('wasm', 'webgpu', 'GPU adapter lost'))
         await self.leave(socket, task)
 
     async def test_incompatible_runtime_is_rejected_but_the_call_stays(self):
         socket = FakeWebSocket()
         task, client = await self.join(socket, {'mic': TIMER_HELLO['mic'],
-                                                'transcription': {'model': 'server-whisper', 'device': 'cuda'}})
+                                                'transcription': {'model': 'server-whisper', 'engine': 'cuda-whisper', 'accelerator': 'cuda'}})
         error = await self.received(socket, 'error')
         self.assertIn('Unsupported', error['data']['message'])
         self.assertTrue(client.connected)
         # The rejected runtime never overrides what the room resolved.
-        self.assertEqual((client.transcription['model'], client.transcription['device']), ('onnx-community/whisper-tiny', 'auto'))
+        self.assertEqual((client.transcription['model'], client.transcription.get('accelerator')), ('whisper-tiny', None))
         await self.leave(socket, task)
 
     async def test_openai_provider_is_built_from_the_saved_key(self):
         socket = FakeWebSocket()
-        choice = {'provider': 'openai', 'available': True, 'model': 'gpt-4o-transcribe', 'reason': 'explicit'}
-        with patch('sidevoice_core.server.app.transcription.resolve', return_value=choice), \
-                patch('sidevoice_core.pipeline.integrations.stored_key', return_value='sk-test-not-used'):
-            task, client = await self.join(socket)
+        with patch('sidevoice_core.pipeline.integrations.stored_key', return_value='sk-test-not-used'):
+            task, client = await self.join(socket, {**PATIENT_HELLO, 'settings': {'stt': {
+                'place': 'openai', 'model': 'gpt-4o-transcribe', 'options': {'language': 'auto', 'context': 'Sidevoice'}}}})
             self.assertEqual(client.stt.provider.kind, 'openai')
-            self.assertEqual(client.stt.provider.model, 'gpt-4o-transcribe')
+            self.assertEqual((client.stt.provider.model, client.stt.provider.language, client.stt.provider.prompt),
+                             ('gpt-4o-transcribe', None, 'Sidevoice'))
+            self.assertEqual(client.transcription['place'], 'openai')
             await self.leave(socket, task)
 
     async def test_openai_without_key_fails_before_accepting_audio(self):
         from sidevoice_core.server.app import browser_call
         socket = FakeWebSocket()
-        choice = {'provider': 'openai', 'available': False, 'model': 'gpt-4o-transcribe'}
-        with patch('sidevoice_core.server.app.transcription.resolve', return_value=choice):
+        self.hello(socket, {'settings': {'stt': {'place': 'openai', 'model': 'gpt-4o-transcribe'}}})
+        with patch('sidevoice_core.pipeline.integrations.key', return_value=None):
             await browser_call(self.hub, socket)
         error = json.loads(socket.sent.get_nowait())
-        self.assertEqual(error['type'], 'error')
-        self.assertIn('clave de API', error['data']['message'])
+        self.assertEqual(error, {'type': 'error', 'data': {'key': 'provider_key_missing', 'provider': 'openai',
+                                                           'message': 'OpenAI needs an API key before connecting.'}})
         self.assertEqual(socket.application_state, WebSocketState.DISCONNECTED)
+        self.assertEqual(self.hub.clients, {})
+
+    async def test_a_keyless_or_voiceless_voice_provider_is_refused_at_the_hello_not_at_its_first_reply(self):
+        """Review R08 and R02: every provider-backed stage is checked before the call exists — ElevenLabs voice
+        with no key on this node, and ElevenLabs with no voice chosen at all (the probe that previewed fine and
+        then could not speak a reply)."""
+        from sidevoice_core.server.app import browser_call
+        eleven = {'place': 'elevenlabs', 'model': 'eleven_flash_v2_5', 'options': {'voice': {'en': 'voice-1'}}}
+        cases = ((None, eleven, {'key': 'provider_key_missing', 'provider': 'elevenlabs',
+                                 'message': 'ElevenLabs needs an API key before connecting.'}),
+                 ('xi-test', {**eleven, 'options': {'voice': {}}},
+                  {'key': 'voice_missing', 'provider': 'elevenlabs', 'message': 'Choose a voice for ElevenLabs before connecting.'}))
+        for key, stage, refusal in cases:
+            with self.subTest(refusal=refusal['key']):
+                socket = FakeWebSocket()
+                self.hello(socket, {**PATIENT_HELLO, 'settings': {'tts': stage}})
+                with patch('sidevoice_core.pipeline.integrations.key', return_value=key):
+                    await browser_call(self.hub, socket)
+                self.assertEqual(json.loads(socket.sent.get_nowait()), {'type': 'error', 'data': refusal})
+                self.assertEqual(socket.application_state, WebSocketState.DISCONNECTED)
+                self.assertEqual(self.hub.clients, {})
+
+    async def test_a_live_change_to_a_keyless_provider_is_refused_and_the_settings_in_use_stay(self):
+        socket = FakeWebSocket()
+        task, client = await self.join(socket, {**PATIENT_HELLO})
+        before = client.settings
+        with patch('sidevoice_core.pipeline.integrations.key', return_value=None):
+            client.voice.browser_message({'type': 'voice-settings', 'data': {'session_id': client.id, 'settings': {
+                'tts': {'place': 'elevenlabs', 'model': 'eleven_v3', 'options': {'voice': {'es': 'v1'}}}}}})
+        self.assertEqual((await self.received(socket, 'error'))['data']['key'], 'provider_key_missing')
+        self.assertIs(client.settings, before)
+        self.assertTrue(client.connected)
+        await self.leave(socket, task)
+
+    async def test_a_stage_on_the_host_is_refused_at_the_hello(self):
+        from sidevoice_core.server.app import browser_call
+        for stage in ({'stt': {'place': 'host', 'model': 'whisper-small'}},
+                      {'tts': {'place': 'host', 'model': 'kokoro-82m-v1.0'}}):
+            with self.subTest(stage=list(stage)[0]):
+                socket = FakeWebSocket()
+                self.hello(socket, {**PATIENT_HELLO, 'settings': stage})
+                await browser_call(self.hub, socket)
+                self.assertEqual(json.loads(socket.sent.get_nowait()), {'type': 'error', 'data': {
+                    'key': 'place_host_unavailable', 'message': 'Running models on the host is not available yet.'}})
+                self.assertEqual(socket.application_state, WebSocketState.DISCONNECTED, 'closed 1008, no call built')
+                self.assertEqual(self.hub.clients, {})
+
+    async def test_a_stage_moved_to_the_host_mid_call_is_refused_and_the_settings_in_use_stay(self):
+        socket = FakeWebSocket()
+        task, client = await self.join(socket, {**PATIENT_HELLO, 'settings': {
+            'tts': {'place': 'device', 'model': 'kokoro-82m-v1.0', 'options': {'voice': {'en': 'bf_emma'}}}}})
+        before = client.settings
+        client.voice.browser_message({'type': 'voice-settings', 'data': {'session_id': client.id, 'settings': {
+            'tts': {'place': 'host', 'model': 'kokoro-82m-v1.0'}, 'audio_grace_seconds': 7}}})
+        self.assertEqual((await self.received(socket, 'error'))['data'],
+                         {'key': 'place_host_unavailable', 'message': 'Running models on the host is not available yet.'})
+        self.assertIs(client.settings, before)
+        self.assertEqual((client.settings.tts.place, client.audio_grace_seconds), ('device', 1.0))
+        self.assertTrue(client.connected, 'the call goes on with what it had')
+        await self.leave(socket, task)
 
     # ----- what a turn does, whatever closed it -----
 
@@ -284,8 +356,8 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         client.connected = True
         client.target = {'thread_id': 'thread-a', 'title': 'A', 'binding_id': 'bind-a'}
         voice = VoiceCall(client, FakeTranscriber(results, offline), sent.append, settings=LanguageSettings(), mic=MicSettings(),
-                          choice={'provider': 'browser', 'model': 'onnx-community/whisper-tiny', 'reason': 'explicit'},
-                          runtime={'model': 'onnx-community/whisper-tiny', 'device': 'webgpu'})
+                          choice={'place': 'device', 'model': 'whisper-tiny', 'language': 'en', 'context': '', 'available': True},
+                          runtime={'model': 'whisper-tiny', 'engine': 'transformers-js', 'accelerator': 'webgpu', 'cached': True})
         return voice, client, sent
 
     async def test_the_session_message_and_the_snapshot_say_which_build_the_room_serves(self):
@@ -351,13 +423,20 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
 
     async def test_a_model_switch_in_the_browser_updates_what_the_room_reports(self):
         voice, client, sent = self.voice([])
-        voice.browser_message({'type': 'voice-stt-ready', 'data': {'session_id': client.id, 'model': 'onnx-community/whisper-small', 'device': 'webgpu'}})
-        self.assertEqual(client.transcription['model'], 'onnx-community/whisper-small')
-        voice.browser_message({'type': 'voice-stt-ready', 'data': {'session_id': 'other', 'model': 'onnx-community/whisper-tiny', 'device': 'wasm'}})
-        self.assertEqual(client.transcription['model'], 'onnx-community/whisper-small')
+        voice.browser_message({'type': 'voice-stt-ready', 'data': {'session_id': client.id, 'model': 'whisper-small',
+                                                                   'engine': 'sherpa-onnx', 'accelerator': 'coreml', 'cached': True}})
+        self.assertEqual((client.transcription['model'], client.transcription['engine'], client.transcription['accelerator']),
+                         ('whisper-small', 'sherpa-onnx', 'coreml'))
+        voice.browser_message({'type': 'voice-stt-ready', 'data': {'session_id': 'other', 'model': 'whisper-tiny',
+                                                                   'engine': 'transformers-js', 'accelerator': 'wasm'}})
+        self.assertEqual(client.transcription['model'], 'whisper-small')
+        voice.browser_message({'type': 'voice-stt-ready', 'data': {'session_id': client.id, 'model': 'whisper-base',
+                                                                   'engine': 'transformers-js', 'accelerator': 'wasm',
+                                                                   'fallback_from': 'webgpu', 'fallback_error': 'no adapter'}})
+        self.assertEqual((client.transcription['accelerator'], client.transcription['fallback_from']), ('wasm', 'webgpu'))
         voice.browser_message({'type': 'voice-stt-ready', 'data': {'session_id': client.id, 'model': 'server-whisper', 'device': 'cuda'}})
         self.assertEqual(sent[-1]['type'], 'error')
-        self.assertEqual(client.transcription['model'], 'onnx-community/whisper-small')
+        self.assertEqual(client.transcription['model'], 'whisper-base')
 
     async def test_empty_failed_or_cancelled_turns_are_not_delivered(self):
         from sidevoice_core.pipeline.transcribers import Transcript
@@ -527,25 +606,23 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         """
         old_socket, new_socket = FakeWebSocket(), FakeWebSocket()
         old_task, old = await self.join(old_socket)
-        self.assertEqual(old.transcription['provider'], 'browser')
+        self.assertEqual(old.transcription['place'], 'device')
         self.assertEqual(old.mic_settings['smart_turn_min_silence'], 1.3, 'this device asked for calm')
 
-        choice = {'provider': 'openai', 'available': True, 'model': 'gpt-4o-transcribe', 'reason': 'explicit'}
-        with patch('sidevoice_core.server.app.transcription.resolve', return_value=choice), \
-                patch('sidevoice_core.pipeline.integrations.stored_key', return_value='sk-test-not-used'):
+        with patch('sidevoice_core.pipeline.integrations.stored_key', return_value='sk-test-not-used'):
             new_task, new = await self.join(new_socket, {
                 'conversation': 'thread-a',
-                'settings': {'stt_provider': 'openai', 'stt_model': 'gpt-4o-transcribe',
+                'settings': {'stt': {'place': 'openai', 'model': 'gpt-4o-transcribe'},
                              'turn_patience': 'fast'}})
 
         # Two sockets, two pipelines, two clients: the second is built from the new hello alone.
         self.assertNotEqual(old.id, new.id)
         self.assertEqual(len(self.hub.clients), 2)
         self.assertTrue(old.connected and new.connected)
-        self.assertEqual(new.transcription['provider'], 'openai')
+        self.assertEqual(new.transcription['place'], 'openai')
         self.assertEqual((new.mic_settings['smart_turn_min_silence'], new.mic_settings['vad_confidence']), (0.6, 0.6),
                          "the new hello brought its own patience; the detector stayed the room's")
-        self.assertEqual(old.transcription['provider'], 'browser', 'the call still running is untouched')
+        self.assertEqual(old.transcription['place'], 'device', 'the call still running is untouched')
         # The tab's conversation travelled in the hello, so the new session is already on it.
         self.assertEqual(new.target['thread_id'], 'thread-a')
         self.assertNotEqual(new.target['binding_id'], old.target['binding_id'])
@@ -754,8 +831,8 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         first = FakeWebSocket()
         first_task, first_client = await self.join(first)
         with patch_('sidevoice_core.pipeline.settings.resolve_voice',
-                    return_value={'provider': 'kokoro', 'model': 'kokoro', 'voice': 'ef_dora',
-                                  'speed': 1.0, 'language': 'es', 'device': 'auto'}):
+                    return_value={'place': 'device', 'model': 'kokoro-82m-v1.0', 'voice': 'ef_dora',
+                                  'speed': 1.0, 'language': 'es'}):
             await self.hub.publish(Speech(thread_id='thread-a', session_id=first_client.id, revision=0,
                                           text='Lo último que te dije', utterance_id='u-1'))
             # The tunnel: the socket goes, the call does not, and that reply was never heard through.
@@ -786,8 +863,8 @@ class BrowserCallTest(IsolatedAsyncioTestCase):
         first = FakeWebSocket()
         first_task, first_client = await self.join(first)
         with patch_('sidevoice_core.pipeline.settings.resolve_voice',
-                    return_value={'provider': 'kokoro', 'model': 'kokoro', 'voice': 'ef_dora',
-                                  'speed': 1.0, 'language': 'es', 'device': 'auto'}):
+                    return_value={'place': 'device', 'model': 'kokoro-82m-v1.0', 'voice': 'ef_dora',
+                                  'speed': 1.0, 'language': 'es'}):
             await self.hub.publish(Speech(thread_id='thread-a', session_id=first_client.id, revision=0,
                                           text='Lo último que te dije', utterance_id='u-1'))
         await self.leave(first, first_task)

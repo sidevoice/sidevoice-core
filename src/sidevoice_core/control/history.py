@@ -17,6 +17,8 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 
+from ..storage import write_private
+
 # Seconds before the next delivery attempt after the n-th failure; the last value repeats.
 RETRY_BACKOFF = (2, 5, 15, 60)
 # How long the room keeps holding a message for a conversation that is not there. A connector that
@@ -96,11 +98,7 @@ class RoomHistory:
         self._save_state()
 
     def _save_state(self):
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_suffix('.tmp')
-        temporary.write_text(json.dumps({'connectors': self.connectors}, indent=1))
-        temporary.chmod(0o600)
-        os.replace(temporary, self.state_path)
+        write_private(self.state_path, json.dumps({'connectors': self.connectors}, indent=1))
 
     # ----- transcript and outbox (memory only) -----
 

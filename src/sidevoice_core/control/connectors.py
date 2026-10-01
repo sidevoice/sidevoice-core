@@ -388,8 +388,8 @@ def local_credential(journal, path):
     a code read from one terminal into another (LOCAL_MODE_PLAN D2, taken as recommended). The journal
     keeps it as a paired connector like any other, so participants still read as this machine.
     """
-    import os
     from pathlib import Path
+    from ..storage import write_private
     path = Path(path)
     try:
         saved = json.loads(path.read_text(encoding='utf8'))
@@ -398,9 +398,6 @@ def local_credential(journal, path):
     except (OSError, ValueError, AttributeError, TypeError):
         pass
     connector_id, token = journal.redeem_pairing_code(journal.create_pairing_code())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps({'connector_id': connector_id, 'token': token}), encoding='utf8')
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    # Private from its first byte, like every secret this node writes (review F17).
+    write_private(path, json.dumps({'connector_id': connector_id, 'token': token}))
     return connector_id, token

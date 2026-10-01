@@ -62,7 +62,7 @@ class ConfigurationTest(unittest.TestCase):
         self.assertFalse(telemetry.enabled)
         self.assertIsNone(telemetry.tracer)
         call = CallTelemetry('s', CallLatency('s'))
-        call.call_started(TRACEPARENT, {'sidevoice.stt_provider': 'openai'})
+        call.call_started(TRACEPARENT, {'sidevoice.stt_place': 'openai'})
         call.turn_context('a', 1, TRACEPARENT)
         call.turn_finished('a', 1, speech_end=1, turn_closed=2, transcript=3, delivered=4)
         call.audio_event('stall')
@@ -156,7 +156,7 @@ class TurnTraceTest(TelemetryHarness):
     def call(self):
         latency = CallLatency('s')
         call = CallTelemetry('s', latency)
-        call.call_started(TRACEPARENT, {'sidevoice.stt_provider': 'browser'})
+        call.call_started(TRACEPARENT, {'sidevoice.stt_place': 'device'})
         call.turn_context('a', 1, TRACEPARENT)
         return call, latency
 
@@ -211,7 +211,7 @@ class TurnTraceTest(TelemetryHarness):
         latency.start_synthesis('u')
         latency.clock = lambda: 301.0
         latency.mark('u', 'audio_ready')
-        call.synthesis('u', provider='elevenlabs', model='v3', shared=True,
+        call.synthesis('u', place='elevenlabs', model='v3', shared=True,
                        provider_ms={'request_to_complete_ms': 800})
         names = self.finished()
         self.assertIn('reply_to_synthesis', names)
@@ -225,7 +225,7 @@ class TurnTraceTest(TelemetryHarness):
         latency.start_synthesis('u')
         latency.clock = lambda: 301.0
         latency.mark('u', 'audio_ready')
-        call.synthesis('u', provider='elevenlabs', model='v3', shared=False,
+        call.synthesis('u', place='elevenlabs', model='v3', shared=False,
                        provider_ms={'request_to_complete_ms': 800})
         span = self.finished()['provider_synthesis']
         self.assertEqual(self.span_ms(span), 800)
@@ -295,7 +295,7 @@ class PrivacyTest(TelemetryHarness):
         call.connected = True
         call.target = {'thread_id': 'a'}
         call.on_browser_event = lambda event: None
-        call.telemetry.call_started(TRACEPARENT, {'sidevoice.stt_provider': 'openai',
+        call.telemetry.call_started(TRACEPARENT, {'sidevoice.stt_place': 'openai',
                                                   'sidevoice.stt_model': 'gpt-4o-transcribe'})
         call.telemetry.turn_context('a', 1, TRACEPARENT)
         call.user_started()
@@ -305,7 +305,7 @@ class PrivacyTest(TelemetryHarness):
         call.telemetry.turn_finished('a', 1, speech_end=1.0, turn_closed=1.5, transcript=2.0,
                                      delivered=2.1, metrics={'request_to_transcript_ms': 120})
         call.speaking = False
-        choice = {'provider': 'elevenlabs', 'model': 'test', 'voice': 'test', 'speed': 1}
+        choice = {'place': 'elevenlabs', 'model': 'test', 'voice': 'test', 'speed': 1}
         audio = {'mime_type': 'audio/mpeg', 'audio_base64': 'YQ==',
                  'timings_ms': {'request_to_complete_ms': 800}}
         with patch('sidevoice_core.pipeline.settings.load_settings'), \

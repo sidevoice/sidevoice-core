@@ -1,45 +1,95 @@
+"""Transcription by place: the client itself (`device`), a provider from this node (`openai`), or the host —
+which is not available yet. And what a client reports about the runtime it transcribes with."""
 import asyncio
-import os
 import unittest
 
 from sidevoice_core.pipeline import transcription
-from sidevoice_core.pipeline.settings import LanguageSettings
+from sidevoice_core.pipeline.call import browser_runtime
+from sidevoice_core.pipeline.settings import LanguageSettings, Transcription
+from sidevoice_core.pipeline.transcribers import ClientTranscriber, OpenAITranscriber
+
+KEY = {'VOICE_STT_API_KEY': 'test-key'}
 
 
-class TranscriptionTests(unittest.TestCase):
-    def test_catalogue_exposes_browser_and_openai_without_leaking_keys(self):
-        providers = {item['id']: item for item in transcription.CATALOG['providers']}
-        self.assertEqual(set(providers), {'browser', 'openai'})
-        browser_ids = {item['id'] for item in providers['browser']['models']}
-        self.assertEqual(browser_ids, {'onnx-community/whisper-tiny', 'onnx-community/whisper-base',
-                                       'onnx-community/whisper-small', 'onnx-community/whisper-large-v3-turbo'})
-        self.assertEqual(providers['openai']['models'], [])
-        self.assertEqual(providers['openai']['models_source'], 'remote')
-        for model in providers['browser']['models']:
-            self.assertTrue(set(model['devices']) <= {'webgpu', 'wasm', 'native'})
-            self.assertIn('native', model['devices'], 'a desktop app can run every browser model natively')
-            self.assertTrue(model['devices'])
-            self.assertTrue(model['description'])
+def settings(place='device', model='whisper-small', **options):
+    return LanguageSettings(stt=Transcription(place=place, model=model, options=options))
 
-    def test_browser_runtime_remains_local(self):
-        choice = transcription.resolve(LanguageSettings(
-            stt_provider='browser', stt_device='webgpu',
-            stt_model='onnx-community/whisper-base'))
-        self.assertEqual((choice['provider'], choice['location'], choice['device']),
-                         ('browser', 'browser', 'webgpu'))
 
-    def test_openai_runtime_uses_cloud_and_preserves_model(self):
-        settings = LanguageSettings(stt_provider='openai', stt_model='gpt-4o-mini-transcribe')
-        choice = transcription.resolve(settings, {'VOICE_STT_API_KEY': 'test-key'})
-        self.assertEqual((choice['provider'], choice['location'], choice['model']),
-                         ('openai', 'remote', 'gpt-4o-mini-transcribe'))
-        self.assertTrue(choice['available'])
+class ResolveTests(unittest.TestCase):
+    def test_on_the_device_the_client_transcribes_with_the_catalogue_model(self):
+        choice = transcription.resolve(settings(language='es'), {})
+        self.assertEqual(choice, {'place': 'device', 'model': 'whisper-small', 'language': 'es',
+                                  'context': '', 'available': True})
+        self.assertIsNone(transcription.resolve(settings(language='auto'), {})['language'], 'auto is detection')
 
-    def test_openai_runtime_preserves_future_account_model(self):
-        settings = LanguageSettings(stt_provider='openai', stt_model='gpt-5-mini-transcribe-2026-09-01')
-        choice = transcription.resolve(settings, {'VOICE_STT_API_KEY': 'test-key'})
-        self.assertEqual(choice['model'], 'gpt-5-mini-transcribe-2026-09-01')
+    def test_a_provider_is_available_with_its_key_and_keeps_its_model(self):
+        choice = transcription.resolve(settings('openai', 'gpt-5-mini-transcribe-2026-09-01'), KEY)
+        self.assertEqual((choice['place'], choice['model'], choice['language'], choice['context'], choice['available']),
+                         ('openai', 'gpt-5-mini-transcribe-2026-09-01', 'en', '', True))
+        self.assertFalse(transcription.resolve(settings('openai', 'gpt-4o-transcribe'), {})['available'])
 
+    def test_the_host_is_not_available_yet(self):
+        self.assertFalse(transcription.resolve(settings('host'), KEY)['available'])
+
+    def test_the_old_catalogue_and_its_lists_are_gone(self):
+        for gone in ('BROWSER_MODELS', 'CATALOG', 'PROVIDERS'):
+            self.assertFalse(hasattr(transcription, gone), gone)
+
+
+class BuildTests(unittest.TestCase):
+    def test_the_device_gets_the_turns_to_transcribe_itself(self):
+        sent = []
+        choice = transcription.resolve(settings(language='fr'), {})
+        provider = transcription.build(choice, config={}, send=sent.append, session_id='s1')
+        self.assertIsInstance(provider, ClientTranscriber)
+        self.assertEqual((provider.session_id, provider.language), ('s1', 'fr'))
+        with self.assertRaises(ValueError):
+            transcription.build(choice, config={})
+
+    def test_openai_is_called_from_here_with_the_key_the_model_the_language_and_the_context(self):
+        choice = transcription.resolve(settings('openai', 'gpt-4o-mini-transcribe', language='es', context='Sidevoice, Pipecat'), KEY)
+        provider = transcription.build(choice, config=KEY)
+        self.assertIsInstance(provider, OpenAITranscriber)
+        self.assertEqual((provider.model, provider.language, provider.prompt), ('gpt-4o-mini-transcribe', 'es', 'Sidevoice, Pipecat'))
+        empty = transcription.build(transcription.resolve(settings('openai', 'whisper-1'), KEY), config=KEY)
+        self.assertIsNone(empty.prompt, 'no context is no prompt')
+        with self.assertRaises(ValueError):
+            transcription.build(choice, config={})
+
+    def test_nothing_is_built_on_the_host(self):
+        with self.assertRaises(ValueError):
+            transcription.build(transcription.resolve(settings('host'), {}), config={}, send=print, session_id='s1')
+
+
+class RuntimeReportTests(unittest.TestCase):
+    """What a client says it transcribes with: a catalogue model, one of its engines, an accelerator."""
+
+    def test_a_catalogue_model_on_one_of_its_engines(self):
+        self.assertEqual(browser_runtime({'model': 'whisper-small', 'engine': 'sherpa-onnx', 'accelerator': 'coreml', 'cached': True}),
+                         {'model': 'whisper-small', 'engine': 'sherpa-onnx', 'accelerator': 'coreml', 'cached': True})
+        self.assertFalse(browser_runtime({'model': 'whisper-tiny', 'engine': 'transformers-js', 'accelerator': 'wasm'})['cached'])
+        self.assertIsNone(browser_runtime(None))
+
+    def test_anything_else_is_refused(self):
+        for report in ({'model': 'onnx-community/whisper-small', 'engine': 'transformers-js', 'accelerator': 'webgpu'},
+                       {'model': 'kokoro-82m-v1.0', 'engine': 'sherpa-onnx', 'accelerator': 'cpu'},
+                       {'model': 'whisper-small', 'engine': 'mlx-audio', 'accelerator': 'metal'},
+                       {'model': 'whisper-small', 'engine': 'sherpa-onnx', 'accelerator': ''},
+                       {'model': 'whisper-small', 'engine': 'sherpa-onnx'},
+                       {'model': 'whisper-small', 'device': 'webgpu'},
+                       {'model': ['whisper-small'], 'engine': 'sherpa-onnx', 'accelerator': 'cpu'}):
+            with self.subTest(report=report), self.assertRaises(ValueError):
+                browser_runtime(report)
+
+    def test_a_fallback_keeps_its_reason_bounded(self):
+        runtime = browser_runtime({'model': 'whisper-base', 'engine': 'transformers-js', 'accelerator': 'wasm', 'cached': False,
+                                   'fallback_from': 'webgpu' * 10, 'fallback_error': 'GPU adapter lost' * 50})
+        self.assertEqual((runtime['accelerator'], len(runtime['fallback_from']), len(runtime['fallback_error'])), ('wasm', 20, 300))
+        self.assertNotIn('fallback_from', browser_runtime({'model': 'whisper-base', 'engine': 'transformers-js',
+                                                           'accelerator': 'wasm', 'fallback_from': 'webgpu'}))
+
+
+class RemoteCatalogueTests(unittest.TestCase):
     def test_remote_catalog_filters_to_transcription_models(self):
         class Response:
             status = 200
@@ -59,17 +109,3 @@ class TranscriptionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
-
-class NativeDeviceTests(unittest.TestCase):
-    """'native' is the client's own engine (the desktop app's): the node accepts it as a device choice."""
-
-    def test_settings_and_the_reported_runtime_accept_native(self):
-        from sidevoice_core.pipeline.call import browser_runtime
-        from sidevoice_core.pipeline.settings import settings_from
-        settings, problem = settings_from({'stt_provider': 'browser', 'stt_device': 'native', 'tts_device': 'native'})
-        self.assertIsNone(problem)
-        self.assertEqual((settings.stt_device, settings.tts_device), ('native', 'native'))
-        self.assertEqual(browser_runtime({'model': 'onnx-community/whisper-small', 'device': 'native'})['device'], 'native')
-        with self.assertRaises(ValueError):
-            browser_runtime({'model': 'onnx-community/whisper-small', 'device': 'cuda'})

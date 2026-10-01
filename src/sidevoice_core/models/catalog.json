@@ -86,10 +86,6 @@
           ],
           "auto": true,
           "default": "en"
-        },
-        {
-          "id": "context",
-          "kind": "text"
         }
       ]
     },
@@ -122,7 +118,28 @@
       ],
       "key": true,
       "stt": {
-        "models": "remote"
+        "models": "remote",
+        "options": [
+          {
+            "id": "language",
+            "kind": "language",
+            "values": [
+              "es",
+              "en",
+              "fr",
+              "it",
+              "pt",
+              "hi"
+            ],
+            "auto": true,
+            "default": "en"
+          },
+          {
+            "id": "context",
+            "kind": "text",
+            "max": 400
+          }
+        ]
       }
     },
     {

@@ -1,4 +1,6 @@
-"""Integrations (#64): one key per provider, kept by the node, written by the owner, never read back."""
+"""Integrations (#64): one key per provider, kept by the node, written from any paired device, never read back — private
+from the moment the file exists, and in the order the changes were asked for."""
+import asyncio
 import json
 import os
 import stat
@@ -56,20 +58,15 @@ class StoreTests(Keys):
 
     def test_the_listing_never_carries_a_key(self):
         integrations.save_key('openai', 'sk-secret-value-9876')
-        owner = integrations.listing(True, {})
-        self.assertNotIn('sk-secret-value-9876', json.dumps(owner))
-        rows = {row['id']: row for row in owner['providers']}
+        listed = integrations.listing({})
+        self.assertNotIn('sk-secret-value-9876', json.dumps(listed))
+        self.assertEqual(list(listed), ['providers'], 'no owner, no guest: one listing for every paired device')
+        rows = {row['id']: row for row in listed['providers']}
         self.assertEqual(rows['openai'], {'id': 'openai', 'label': 'OpenAI', 'capabilities': ['transcription'],
                                           'configured': True, 'source': 'stored', 'hint': '…9876',
                                           'environment': 'VOICE_STT_API_KEY'})
         self.assertEqual(rows['elevenlabs']['capabilities'], ['voice'])
-        self.assertFalse(rows['elevenlabs']['configured'], 'the owner sees what can still be configured')
-
-    def test_a_guest_sees_only_what_it_can_choose_and_nothing_about_the_key(self):
-        integrations.save_key('elevenlabs', 'xi-secret-value-1111')
-        guest = integrations.listing(False, {})
-        self.assertEqual(guest, {'owner': False, 'providers': [
-            {'id': 'elevenlabs', 'label': 'ElevenLabs', 'capabilities': ['voice'], 'configured': True}]})
+        self.assertFalse(rows['elevenlabs']['configured'], 'a provider with no key is listed, to be configured')
 
 
 class RouteTests(Keys):
@@ -126,18 +123,165 @@ class RouteTests(Keys):
         self.assertFalse(self.file.exists())
         self.verify_openai.assert_not_awaited()
 
-    def test_only_the_owner_writes_and_a_guest_sees_only_configured_providers(self):
-        integrations.save_key('openai', 'sk-owner-7777')
-        with patch('sidevoice_core.server.devices.is_owner', return_value=False):
-            self.assertEqual(self.put('elevenlabs', 'xi-guest').status_code, 403)
-            self.assertEqual(self.client.delete('/api/presentation/integrations/openai', headers=PAGE).status_code, 403)
-            listing = self.client.get('/api/presentation/integrations').json()
-        self.assertEqual(listing, {'owner': False, 'providers': [
-            {'id': 'openai', 'label': 'OpenAI', 'capabilities': ['transcription'], 'configured': True}]})
-        self.assertEqual(self.stored(), {'openai': 'sk-owner-7777'})
-        self.assertTrue(self.client.get('/api/presentation/integrations').json()['owner'],
-                        'every paired device is the owner until guests exist')
+    def test_any_paired_device_lists_every_provider_and_writes_keys(self):
+        """A paired device has the node's full authority: it sees every provider, keyed or not, and can write."""
+        listing = self.client.get('/api/presentation/integrations').json()
+        self.assertEqual([(row['id'], row['configured']) for row in listing['providers']], [('openai', False), ('elevenlabs', False)])
+        self.assertNotIn('owner', listing)
+        self.assertEqual(self.put('openai', 'sk-any-device-7777').status_code, 200)
+        self.assertEqual(self.stored(), {'openai': 'sk-any-device-7777'})
 
+
+
+class PrivateFileTests(Keys):
+    def observe_creation(self):
+        """Every file the write creates, as it is at creation: its name, flags and mode, before a byte is in it."""
+        created, real_open = [], os.open
+
+        def observed(path, flags, mode=0o777, *args, **kwargs):
+            descriptor = real_open(path, flags, mode, *args, **kwargs)
+            if flags & os.O_CREAT:
+                info = os.fstat(descriptor)
+                created.append((Path(path), flags, stat.S_IMODE(info.st_mode), info.st_size))
+            return descriptor
+        return created, patch('sidevoice_core.storage.os.open', side_effect=observed)
+
+    def test_the_keys_file_is_private_from_its_creation_under_a_name_of_its_own(self):
+        created, observing = self.observe_creation()
+        previous = os.umask(0)   # the loosest a process can run with: nothing but the creation mode protects it
+        try:
+            with observing:
+                integrations.save_key('openai', 'sk-first-1111')
+                integrations.save_key('elevenlabs', 'xi-second-2222')
+        finally:
+            os.umask(previous)
+        self.assertEqual(len(created), 2, 'each write creates its file through the private path')
+        for path, flags, mode, size in created:
+            self.assertEqual((mode, size), (0o600, 0), 'private before a byte of the secret is written')
+            self.assertTrue(flags & os.O_EXCL, 'created, never reused')
+            self.assertEqual(path.parent, self.file.parent)
+            self.assertNotEqual(path.name, 'integrations.tmp', 'no fixed name another writer could share')
+        self.assertNotEqual(created[0][0], created[1][0])
+        self.assertEqual([entry.name for entry in self.root.iterdir()], ['integrations.json'], 'no temporary is left behind')
+        self.assertEqual(stat.S_IMODE(self.file.stat().st_mode), 0o600)
+
+    def test_every_secret_this_node_keeps_is_private_from_its_creation(self):
+        """The connector's credential, the journal's connector state and the ready file hold secrets too: each is
+        written through the same private path as the keys (review F17), never written first and chmodded after."""
+        from sidevoice_core.control.connectors import local_credential
+        from sidevoice_core.control.history import RoomHistory
+        from sidevoice_core.server.__main__ import write_ready
+        created, observing = self.observe_creation()
+        previous = os.umask(0)
+        try:
+            with observing:
+                local_credential(RoomHistory(self.root / 'journal'), self.root / 'connector-credential.json')
+                write_ready(self.root / 'core.json', {'pid': 1, 'port': 2})
+        finally:
+            os.umask(previous)
+        names = [path.name for path, *_ in created]
+        for secret in ('connector-credential.json', 'room-state.json', 'core.json'):
+            self.assertTrue(any(name.startswith('.' + secret + '.') for name in names), f'{secret} through the private path: {names}')
+        for path, flags, mode, size in created:
+            self.assertEqual((mode, size), (0o600, 0), path.name)
+            self.assertTrue(flags & os.O_EXCL, path.name)
+
+    def test_a_write_that_fails_leaves_the_old_file_and_no_temporary(self):
+        integrations.save_key('openai', 'sk-working-0000')
+        with patch('sidevoice_core.storage.os.replace', side_effect=OSError('disk full')), self.assertRaises(OSError):
+            integrations.save_key('openai', 'sk-never-1111')
+        self.assertEqual(self.stored(), {'openai': 'sk-working-0000'})
+        self.assertEqual([entry.name for entry in self.root.iterdir()], ['integrations.json'])
+
+    def test_the_data_directory_has_one_name(self):
+        from sidevoice_core.runtime import data_dir
+        self.assertEqual(data_dir({'SIDEVOICE_CORE_DATA_DIR': '/srv/node'}), Path('/srv/node'))
+        self.assertEqual(data_dir({'VOICE_RUNTIME_ROOT': '/srv/room'}), Path.home() / '.sidevoice' / 'core',
+                         'the room\'s old name is not read')
+
+
+class Answer:
+    def __init__(self, status_code, body):
+        self.status_code, self.text = status_code, body.decode('utf8')
+
+    def json(self):
+        return json.loads(self.text)
+
+
+async def call(app, method, path, body=None):
+    """One request straight into the ASGI app, as its own client: no HTTP library, no socket, no lifespan."""
+    content = json.dumps(body).encode() if body is not None else b''
+    headers = [(b'host', b'127.0.0.1:8768'), (b'content-type', b'application/json'),
+               *((name.lower().encode(), value.encode()) for name, value in PAGE.items())]
+    scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': method, 'scheme': 'http',
+             'path': path, 'raw_path': path.encode(), 'query_string': b'', 'root_path': '', 'headers': headers,
+             'client': ('127.0.0.1', 50000), 'server': ('127.0.0.1', 8768)}
+    sent, status, chunks = False, None, []
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            await asyncio.Event().wait()   # the client stays connected until the answer is out
+        sent = True
+        return {'type': 'http.request', 'body': content, 'more_body': False}
+
+    async def send(message):
+        nonlocal status
+        if message['type'] == 'http.response.start':
+            status = message['status']
+        elif message['type'] == 'http.response.body':
+            chunks.append(message.get('body', b''))
+    await app(scope, receive, send)
+    return Answer(status, b''.join(chunks))
+
+
+class OrderingTests(unittest.IsolatedAsyncioTestCase, Keys):
+    """A key is verified before it is saved; a removal or a newer key asked for meanwhile, from any client, wins."""
+
+    async def asyncSetUp(self):
+        from sidevoice_core.server.app import create_app
+        self.app = create_app(device_auth=False, config={'SIDEVOICE_CORE_DATA_DIR': str(self.root)})
+        self.checking, self.release = asyncio.Event(), asyncio.Event()
+
+        async def verify(provider, key):
+            if key.startswith('sk-slow'):   # the provider is taking its time with this one
+                self.checking.set()
+                await self.release.wait()
+        patcher = patch.object(transcription, 'verify', verify)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def put(self, key):
+        """A PUT from its own client, running on its own."""
+        return asyncio.create_task(call(self.app, 'PUT', '/api/presentation/integrations/openai', {'key': key}))
+
+    async def test_a_removal_while_a_key_is_being_verified_is_not_undone_by_it(self):
+        integrations.save_key('openai', 'sk-installed-0000')
+        pending = self.put('sk-slow-1111')
+        await asyncio.wait_for(self.checking.wait(), 5)
+        removed = await call(self.app, 'DELETE', '/api/presentation/integrations/openai')
+        self.assertEqual(removed.status_code, 200)
+        self.assertIsNone(integrations.stored_key('openai'))
+        self.release.set()
+        answer = await asyncio.wait_for(pending, 5)
+        self.assertEqual(answer.status_code, 409)
+        self.assertEqual(answer.json()['detail'], {
+            'key': 'integration_superseded',
+            'message': 'This key was replaced or removed while it was being checked, so it was not saved.'})
+        self.assertIsNone(integrations.stored_key('openai'), 'the removal stands')
+        self.assertEqual(self.stored(), {})
+
+    async def test_a_newer_key_wins_over_an_older_one_still_being_verified(self):
+        older = self.put('sk-slow-1111')
+        await asyncio.wait_for(self.checking.wait(), 5)
+        newer = await self.put('sk-newer-2222')
+        self.assertEqual(newer.status_code, 200, newer.text)
+        self.release.set()
+        self.assertEqual((await asyncio.wait_for(older, 5)).status_code, 409)
+        self.assertEqual(self.stored(), {'openai': 'sk-newer-2222'})
+        # Nothing was pending this time: a key is saved as ever.
+        self.assertEqual((await self.put('sk-plain-3333')).status_code, 200)
+        self.assertEqual(self.stored(), {'openai': 'sk-plain-3333'})
 
 
 if __name__ == '__main__':

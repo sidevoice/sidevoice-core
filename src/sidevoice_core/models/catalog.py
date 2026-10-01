@@ -9,8 +9,9 @@ Shape (version 2):
 - `ranking.default`: which engine wins when a model has several builds that fit, unless the build's own
   `rank` for the platform says otherwise.
 - `families`: the task (`stt`, `tts`) and the options every model of the family takes, as a schema a client
-  renders.
-- `providers`: external services a host calls with its own key; their models are theirs to list (`remote`).
+  renders and the node validates a device's settings against (a `text` option may cap its length with `max`).
+- `providers`: external services a host calls with its own key; their models are theirs to list (`remote`),
+  and each task names the options it takes, like a family.
 - `models`: what a person picks. Each has one build per engine it runs on: the format, what to download (a
   native engine's files), the engine's own configuration, and optionally the `accelerators` it is limited to
   and the capabilities it `needs` beyond them.
@@ -74,6 +75,10 @@ def _option_problems(where, options):
                 problems.append(f'{where}: range {name} needs min < max')
             elif default is not None and not low <= default <= high:
                 problems.append(f'{where}: range {name} has its default outside it')
+        if option.get('kind') == 'text' and 'max' in option:
+            limit = option['max']
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+                problems.append(f'{where}: text {name} needs a positive whole max')
     return problems
 
 

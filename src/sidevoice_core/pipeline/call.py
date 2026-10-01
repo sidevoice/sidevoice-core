@@ -27,8 +27,8 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import TurnAn
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
-from . import transcription
 from .processors import NoInference, PresentationGate, PresentationPlayback
+from .settings import catalogue_model, settings_from, unavailable
 from .transcribers import TurnTranscriber
 
 
@@ -106,14 +106,20 @@ def audio_idle_timeout(config):
 
 
 def browser_runtime(data):
-    """The local Whisper runtime a browser reports, or None when it reports none or an unsupported one."""
+    """The transcription runtime a client reports (in its hello and in `voice-stt-ready`), or None when it reports
+    none: a catalogue model of the stt task, on one of that model's engines, and the accelerator it runs on — what
+    the stats show, not what the node obeys. A load that fell back keeps its reason where the stats can show it."""
     if not isinstance(data, dict):
         return None
-    model, device = data.get('model'), data.get('device')
-    models = {item['id'] for item in transcription.PROVIDERS['browser']['models']}
-    if model not in models or device not in {'webgpu', 'wasm', 'native'}:
-        raise ValueError('Unsupported browser transcription engine.')
-    return {'model': model, 'device': device}
+    model, engine, accelerator = catalogue_model(data.get('model'), 'stt'), data.get('engine'), data.get('accelerator')
+    if (model is None or engine not in {build['engine'] for build in model['builds']}
+            or not isinstance(accelerator, str) or not 0 < len(accelerator) <= 40):
+        raise ValueError('Unsupported transcription runtime.')
+    runtime = {'model': model['id'], 'engine': engine, 'accelerator': accelerator, 'cached': data.get('cached') is True}
+    if data.get('fallback_error'):
+        runtime['fallback_from'] = str(data.get('fallback_from') or '')[:20]
+        runtime['fallback_error'] = str(data['fallback_error'])[:300]
+    return runtime
 
 
 def turn_stop_strategy(mic, config):
@@ -147,7 +153,9 @@ class VoiceCall:
     so the same flow serves any turn-end strategy and any transcription provider.
     """
 
-    def __init__(self, call, transcriber, send, *, settings, mic, choice, runtime=None, vad_stop_secs=0.2, vad=None):
+    def __init__(self, call, transcriber, send, *, settings, mic, choice, runtime=None, vad_stop_secs=0.2, vad=None,
+                 config=None):
+        self.config = config   # whose provider keys a live change is checked against (None: this node's own)
         self.call, self.transcriber, self.send = call, transcriber, send
         self.vad, self.mic = vad, mic
         self.bar_raised = False
@@ -161,7 +169,9 @@ class VoiceCall:
         call.stt = transcriber
         call.voice = self
         call.settings = settings
-        call.transcription = {**choice, **(runtime or {})}
+        # What the room may show about this call's transcription. The context is the person's own words to
+        # the recogniser (names, jargon): it goes to the recogniser and nowhere else, not to other listeners.
+        call.transcription = {key: value for key, value in {**choice, **(runtime or {})}.items() if key != 'context'}
         call.mic_settings = mic.model_dump()
         call.input_stats = {'transport': 'pcm', 'turns': 0, 'audio_ms': 0, 'recognition_ms': 0, 'pending': 0}
         call.on_browser_event = send
@@ -239,10 +249,14 @@ class VoiceCall:
                         ' | '.join(f"{e.get('kind')}{(' ' + str(e.get('detail'))) if e.get('detail') else ''}" for e in reported['events'][-8:]))
             return
         if message['type'] == 'voice-settings':
-            from .settings import settings_from
             settings, problem = settings_from(data.get('settings'))
             if problem:
                 self.send({'type': 'error', 'data': {'message': problem}})
+                return
+            refusal = unavailable(settings, self.config)
+            if refusal:
+                # Refused whole, like at the hello: the settings in use stay, and the page is told why.
+                self.send({'type': 'error', 'data': refusal})
                 return
             self.call.settings = settings
             self.call.audio_grace_seconds = settings.audio_grace_seconds

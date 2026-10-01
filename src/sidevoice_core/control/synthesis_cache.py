@@ -30,7 +30,7 @@ class SynthesisCache:
 
     @staticmethod
     def key(choice, text):
-        material = json.dumps([choice.get('provider'), choice.get('model'), choice.get('voice'),
+        material = json.dumps([choice.get('place'), choice.get('model'), choice.get('voice'),
                                choice.get('speed'), text], sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(material.encode('utf8')).hexdigest()[:32]
 

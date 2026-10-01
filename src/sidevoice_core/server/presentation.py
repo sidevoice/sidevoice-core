@@ -102,64 +102,62 @@ def mount_presentation(app, hub):
 
     @app.get('/api/presentation/voice-catalog')
     async def voice_catalog(request: Request):
+        """The languages a reply can be spoken in, and what each voice provider's account offers. The models on
+        this device are the model catalogue's (`/api/models/catalog`), not listed here."""
         require_same_origin(request)
         from ..pipeline.settings import CATALOG
         from ..pipeline import synthesis
-        eleven = await synthesis.catalog()
-        catalog = {**CATALOG,
-                   'models': [{**item, 'provider': 'kokoro'} for item in CATALOG['models']]
-                             + [{**item, 'provider': 'elevenlabs'} for item in eleven['models']],
-                   'providers': {'elevenlabs': eleven}}
-        return catalog
-
-    def owner(request):
-        from .devices import DEVICE_KEY, is_owner
-        return is_owner(request.scope.get(DEVICE_KEY))
+        return {'languages': CATALOG['languages'], 'providers': {'elevenlabs': await synthesis.catalog()}}
 
     def writing_key(provider, request):
-        """Who may change a provider's key: a client's page, the owner, a provider this node knows."""
+        """Who may change a provider's key: a client's page (any paired device: the token got it here), for a provider
+        this node knows."""
         from ..pipeline import integrations
         if provider not in integrations.PROVIDERS:
             raise HTTPException(404, 'Proveedor desconocido.')
         if not request.headers.get('origin'):
             raise HTTPException(403, 'Save the key from the room, not from an external client.')
         require_same_origin(request)
-        if not owner(request):
-            raise HTTPException(403, 'Solo quien es dueño de esta máquina configura sus integraciones.')
 
-    # Integrations (#64): one key per provider, the node's. Listed for every paired device, written by the owner.
+    # Integrations (#64): one key per provider, the node's. Listed for, and written by, any paired device.
     @app.get('/api/presentation/integrations')
     async def integrations_listing(request: Request):
         require_same_origin(request)
         from ..pipeline import integrations
-        return integrations.listing(owner(request))
+        return integrations.listing()
 
     @app.put('/api/presentation/integrations/{provider}')
     async def integration_key(provider: str, payload: dict, request: Request):
         """A new key is stored only once the provider has taken it: one it refuses is never stored, and the key
-        in place keeps working."""
+        in place keeps working. The change takes its ticket before the provider is asked, so a removal or a newer
+        key asked for meanwhile — from this client or any other — wins, and this one stores nothing (409)."""
         writing_key(provider, request)
         from ..pipeline import integrations, synthesis, transcription
         key = payload.get('key')
         if not isinstance(key, str) or not key.strip():
             raise HTTPException(422, 'The key is empty.')
         key = key.strip()
+        ticket = integrations.ticket(provider)
         try:
             if provider == 'elevenlabs':
                 await synthesis.verify(key)
             else:
                 await transcription.verify(provider, key)
-            integrations.save_key(provider, key)
+            integrations.save_key(provider, key, ticket=ticket)
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
-        return integrations.listing(owner(request))
+        except integrations.Superseded as error:
+            raise HTTPException(409, {'key': 'integration_superseded',
+                                      'message': 'This key was replaced or removed while it was being checked, '
+                                                 'so it was not saved.'}) from error
+        return integrations.listing()
 
     @app.delete('/api/presentation/integrations/{provider}')
     async def integration_clear(provider: str, request: Request):
         writing_key(provider, request)
         from ..pipeline import integrations
         integrations.clear_key(provider)
-        return integrations.listing(owner(request))
+        return integrations.listing()
 
     @app.post('/api/presentation/synthesis/preview')
     async def synthesis_preview(payload: dict, request: Request):
@@ -172,12 +170,6 @@ def mount_presentation(app, hub):
                                              speed=float(payload.get('speed', 1)))
         except (TypeError, ValueError) as error:
             raise HTTPException(422, str(error)) from error
-
-    @app.get('/api/presentation/transcription')
-    async def transcription_settings(request: Request):
-        require_same_origin(request)
-        from ..pipeline import transcription
-        return {'catalog': transcription.CATALOG}
 
     @app.get('/api/presentation/transcription/models')
     async def transcription_models(provider: str, request: Request):

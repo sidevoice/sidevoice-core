@@ -22,7 +22,7 @@ const session=await new Promise((resolve,reject)=>{
 socket.onclose=null;
 check(received.at(-1)==='voice-session','the room announces voice-session after any preparation events');
 check(typeof session.session_id==='string'&&session.session_id.length>0,'voice-session carries a call id: '+session.session_id);
-socket.send(JSON.stringify({type:'voice-stt-ready',data:{session_id:session.session_id,model:'onnx-community/whisper-tiny',device:'wasm'}}));
+socket.send(JSON.stringify({type:'voice-stt-ready',data:{session_id:session.session_id,model:'whisper-tiny',engine:'transformers-js',accelerator:'wasm',cached:true}}));
 socket.send(JSON.stringify({type:'voice-input-start',data:{session_id:session.session_id,turn_id:'probe-turn'}}));
 socket.send(JSON.stringify({type:'voice-input-transcript',data:{session_id:session.session_id,turn_id:'probe-turn',sequence:1,text:'Prueba local del navegador',metrics:{audio_ms:1000,recognition_ms:10}}}));
 socket.send(JSON.stringify({type:'voice-input-end',data:{session_id:session.session_id,turn_id:'probe-turn',sequence:1}}));

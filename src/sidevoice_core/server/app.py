@@ -61,9 +61,16 @@ async def client_hello(websocket):
     return data
 
 
+async def refuse_hello(websocket, refusal):
+    """A hello this node cannot build a call from: why, as a key the page translates and an English sentence
+    for one that does not know it, then a policy close — the same settings would be refused again."""
+    await websocket.send_text(json.dumps({'type': 'error', 'data': dict(refusal)}))
+    await websocket.close(code=1008)
+
+
 async def browser_call(room, websocket, config=None):
     """Every browser gets the same call, configured by what that browser brings in its first message."""
-    from ..pipeline.settings import settings_from
+    from ..pipeline.settings import settings_from, unavailable
     config = dict(os.environ) if config is None else config
     if await room_is_full(room, websocket):
         return
@@ -74,13 +81,12 @@ async def browser_call(room, websocket, config=None):
         logger.info('A browser opened a socket and left before its first message')
         return
     settings, problem = settings_from(hello.get('settings'))
-    choice = transcription.resolve(settings, config)
-    if choice['provider'] == 'openai' and not choice.get('available'):
-        logger.info('A browser was refused: OpenAI has no API key in this room')
-        await websocket.send_text(json.dumps({'type': 'error', 'data': {
-            'message': 'OpenAI necesita una clave de API antes de conectar.'}}))
-        await websocket.close(code=1008)
+    refusal = unavailable(settings, config)
+    if refusal:
+        logger.info('A browser was refused: {}', refusal['key'])
+        await refuse_hello(websocket, refusal)
         return
+    choice = transcription.resolve(settings, config)
     serializer = BrowserFrameSerializer()
     transport = FastAPIWebsocketTransport(websocket, FastAPIWebsocketParams(
         audio_in_enabled=True, serializer=serializer, allowed_origins=[]))

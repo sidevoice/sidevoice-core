@@ -827,6 +827,70 @@
       ]
     },
     {
+      "name": "Memory the place cannot tell (memory_mb null, as a native bridge may say): nothing is left out for it",
+      "catalog": "fixture",
+      "capabilities": {
+        "runs": "native",
+        "os": "macos",
+        "arch": "aarch64",
+        "has": [
+          "cpu",
+          "coreml",
+          "metal",
+          "mlx"
+        ],
+        "memory_mb": null
+      },
+      "place": "device",
+      "offers": [
+        {
+          "model": "plain",
+          "task": "stt",
+          "engine": "native-b",
+          "accelerator": "metal",
+          "download_size": 2070,
+          "reason": "native-b (metal): first in the catalogue's engine order",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "cpu"
+            },
+            {
+              "engine": "native-a",
+              "accelerator": "coreml"
+            }
+          ]
+        },
+        {
+          "model": "ranked",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 1050,
+          "reason": "native-a (cpu): this model ranks it first on macos-aarch64",
+          "alternatives": [
+            {
+              "engine": "native-a",
+              "accelerator": "coreml"
+            },
+            {
+              "engine": "native-b",
+              "accelerator": "metal"
+            }
+          ]
+        },
+        {
+          "model": "big",
+          "task": "stt",
+          "engine": "native-a",
+          "accelerator": "cpu",
+          "download_size": 5050,
+          "reason": "native-a (cpu): the only build that runs here",
+          "alternatives": []
+        }
+      ]
+    },
+    {
       "name": "A package that requires CUDA, on a machine that has it",
       "catalog": "fixture",
       "capabilities": {

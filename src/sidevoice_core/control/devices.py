@@ -25,6 +25,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from ..storage import write_private
+
 IDENTITY_FILE = 'node-identity.json'
 DEVICES_FILE = 'devices.json'
 CODE_PREFIX = 'SV1.'
@@ -52,24 +54,6 @@ def b64url_decode(text):
 
 def digest(secret):
     return hashlib.sha256(secret.encode('utf8')).hexdigest()
-
-
-def write_private(path, text):
-    """Atomically, and 0600 from its first byte: the file is replaced whole or not at all."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp')
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, 'w', encoding='utf8') as file:
-            file.write(text)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
 
 
 # ----- the node's identity -----

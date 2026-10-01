@@ -17,8 +17,8 @@ from sidevoice_core.control.room import Room, RoomClient
 from sidevoice_core.control.history import RoomHistory
 from sidevoice_core.control.synthesis_cache import SynthesisCache
 
-KOKORO = {'provider': 'kokoro', 'model': 'kokoro', 'voice': 'ef_dora', 'speed': 1.0, 'language': 'es'}
-ELEVEN = {'provider': 'elevenlabs', 'model': 'eleven_v3', 'voice': 'una-voz', 'speed': 1.0, 'language': 'es'}
+KOKORO = {'place': 'device', 'model': 'kokoro-82m-v1.0', 'voice': 'ef_dora', 'speed': 1.0, 'language': 'es'}
+ELEVEN = {'place': 'elevenlabs', 'model': 'eleven_v3', 'voice': 'una-voz', 'speed': 1.0, 'language': 'es'}
 
 
 class RoomFixture(IsolatedAsyncioTestCase):
@@ -39,7 +39,7 @@ class RoomFixture(IsolatedAsyncioTestCase):
 
     async def render(self, choice, text):
         """Stand in for ElevenLabs: one call here is one call the room would have paid for."""
-        self.renders.append((choice['provider'], choice['voice'], text))
+        self.renders.append((choice['place'], choice['voice'], text))
         return {'mime_type': 'audio/mpeg', 'audio_base64': 'YQ==',
                 'timings_ms': {'request_to_complete_ms': 20},
                 'alignment': {'characters': list(text[:3])}}
@@ -506,7 +506,7 @@ class SharedRenderTests(IsolatedAsyncioTestCase):
     """The cache itself: one render per configuration, shared, bounded."""
 
     def choice(self, voice='v', speed=1.0):
-        return {'provider': 'elevenlabs', 'model': 'm', 'voice': voice, 'speed': speed}
+        return {'place': 'elevenlabs', 'model': 'm', 'voice': voice, 'speed': speed}
 
     @staticmethod
     def audio(size=4):
@@ -891,3 +891,45 @@ class ReplyAfterTheBrowserChangedTests(IsolatedAsyncioTestCase):
         result = await self.hub.publish(Speech(thread_id='a', session_id='old', revision=0,
                                                text='Nadie escucha', utterance_id='alone'))
         self.assertEqual((result['status'], result['reason']), ('text_only', 'call_ended'))
+
+
+class VoiceByPlaceTests(IsolatedAsyncioTestCase):
+    """Each browser's own settings decide who speaks its reply: the browser itself for a voice placed on the
+    device (`voice-speech`, which it renders), the room through the provider otherwise (`voice-speech-audio`)."""
+
+    async def asyncSetUp(self):
+        from sidevoice_core.pipeline.settings import LanguageSettings
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.renders = []
+        self.hub = Room(RoomHistory(Path(self.temp.name) / 'history.sqlite3'), SynthesisCache(renderer=self.render))
+        self.settings = LanguageSettings
+
+    async def render(self, choice, text):
+        self.renders.append(dict(choice))
+        return {'mime_type': 'audio/mpeg', 'audio_base64': 'YQ==', 'timings_ms': {}, 'alignment': None}
+
+    def browser(self, session_id, tts):
+        client = RoomClient(session_id, self.hub, worker=AsyncMock())
+        client.connected = True
+        client.target = {'thread_id': 'task', 'title': 'Tarea', 'binding_id': 'bind-' + session_id}
+        client.settings = self.settings.model_validate({'tts': tts})
+        client.heard = []
+        client.on_browser_event = client.heard.append
+        return client
+
+    async def test_the_device_renders_its_own_and_a_provider_s_is_rendered_here(self):
+        device = self.browser('device', {'place': 'device', 'model': 'kokoro-82m-v1.0',
+                                         'options': {'voice': {'es': 'em_alex'}, 'speed': 1.3}})
+        paid = self.browser('paid', {'place': 'elevenlabs', 'model': 'eleven_v3', 'options': {'voice': {'es': 'una-voz'}}})
+        await self.hub.publish(Speech(thread_id='task', session_id='device', revision=0, text='Hola',
+                                      utterance_id='u-1', language='es'))
+        speech = next(event['data'] for event in device.heard if event['type'] == 'voice-speech')
+        self.assertEqual({key: speech[key] for key in ('place', 'model', 'voice', 'speed', 'language')},
+                         {'place': 'device', 'model': 'kokoro-82m-v1.0', 'voice': 'em_alex', 'speed': 1.3, 'language': 'es'})
+        self.assertFalse({'provider', 'device'} & set(speech), 'the place replaced both')
+        audio = next(event['data'] for event in paid.heard if event['type'] == 'voice-speech-audio')
+        self.assertEqual((audio['place'], audio['voice'], audio['audio_base64']), ('elevenlabs', 'una-voz', 'YQ=='))
+        self.assertFalse(any(event['type'] == 'voice-speech' for event in paid.heard))
+        self.assertEqual([(choice['place'], choice['voice']) for choice in self.renders], [('elevenlabs', 'una-voz')],
+                         'only the provider\'s voice is paid for, once')

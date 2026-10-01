@@ -115,7 +115,7 @@ class LatencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
         call.input_receipt(payload, 'delivered')
         call.user_started()
         call.speaking = False
-        choice = {'provider': 'elevenlabs', 'model': 'test', 'voice': 'test', 'speed': 1}
+        choice = {'place': 'elevenlabs', 'model': 'test', 'voice': 'test', 'speed': 1}
         audio = {'mime_type': 'audio/mpeg', 'audio_base64': 'YQ==',
                  'timings_ms': {'request_to_first_chunk_ms': 10, 'request_to_complete_ms': 20}}
         with patch('sidevoice_core.pipeline.settings.load_settings'), patch('sidevoice_core.pipeline.settings.resolve_voice', return_value=choice), patch(

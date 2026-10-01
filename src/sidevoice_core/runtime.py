@@ -11,11 +11,11 @@ from pathlib import Path
 def data_dir(environ=None):
     """The node's own directory: provider keys, the local link's credential, the ready file.
 
-    `SIDEVOICE_CORE_DATA_DIR` names it; `VOICE_RUNTIME_ROOT` is the room's older name for the same
-    thing and still works; otherwise it sits beside the connector's own files, under `~/.sidevoice`.
+    `SIDEVOICE_CORE_DATA_DIR` names it; otherwise it sits beside the connector's own files, under
+    `~/.sidevoice`.
     """
     environ = os.environ if environ is None else environ
-    named = environ.get('SIDEVOICE_CORE_DATA_DIR') or environ.get('VOICE_RUNTIME_ROOT')
+    named = environ.get('SIDEVOICE_CORE_DATA_DIR')
     return Path(named) if named else Path.home() / '.sidevoice' / 'core'
 
 

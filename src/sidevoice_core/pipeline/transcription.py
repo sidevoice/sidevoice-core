@@ -1,78 +1,45 @@
-"""Speech-to-text catalogue: the client transcribes (its own Whisper), or OpenAI from this node."""
-import re
-
+"""Speech to text, by where the stage is placed: the client transcribes itself (`device`: its own Whisper, in a
+page or in the desktop app's native engine), a provider transcribes from this node with the node's key
+(`openai`), or the host — which runs no models yet, and is refused before a call is built on it."""
 from . import integrations
+from .settings import MODEL_ID
 
-# 'native': the same model run by the client's own engine outside the page (the desktop app, which downloads it
-# once); a client offers it only when it has such an engine.
-BROWSER_MODELS = [
-    {'id': 'onnx-community/whisper-tiny', 'label': 'Whisper tiny',
-     'description': 'Fastest and lightest; recommended for conversation and mobile.',
-     'devices': ['webgpu', 'wasm', 'native']},
-    {'id': 'onnx-community/whisper-base', 'label': 'Whisper base',
-     'description': 'More accurate, with a larger download and more latency.',
-     'devices': ['webgpu', 'wasm', 'native']},
-    {'id': 'onnx-community/whisper-small', 'label': 'Whisper small',
-     'description': 'Mejor calidad multilingüe. Aproximadamente 285 MiB en Q4; requiere WebGPU.',
-     'devices': ['webgpu', 'native']},
-    {'id': 'onnx-community/whisper-large-v3-turbo', 'label': 'Whisper large v3 turbo',
-     'description': 'Best local quality available. About 538 MiB quantised; needs WebGPU with fp16.',
-     'devices': ['webgpu', 'native']},
-]
 OPENAI_API = 'https://api.openai.com'
 DEFAULT_OPENAI_MODEL = 'gpt-4o-transcribe'
-MODEL_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$')
-CATALOG = {
-    'providers': [
-        {'id': 'browser', 'label': 'In this browser', 'needs_key': False,
-         'note': 'The room receives the audio to detect your turns; the text is recognised in this browser, with no API. WebGPU uses the GPU; CPU uses WebAssembly.',
-         'default_model': 'onnx-community/whisper-tiny', 'models': BROWSER_MODELS},
-        {'id': 'openai', 'label': 'OpenAI', 'needs_key': True,
-         'note': 'The audio of your turns is sent to OpenAI for transcription.',
-         'default_model': DEFAULT_OPENAI_MODEL, 'models': [], 'models_source': 'remote'},
-    ],
-}
-PROVIDERS = {item['id']: item for item in CATALOG['providers']}
 
 
 def resolve(settings, config=None):
-    provider = getattr(settings, 'stt_provider', 'browser') or 'browser'
-    if provider not in PROVIDERS:
-        provider = 'browser'
-    model = (getattr(settings, 'stt_model', '') or '').strip()
-    if provider == 'browser':
-        known = {item['id'] for item in PROVIDERS[provider]['models']}
-        if model not in known:
-            model = PROVIDERS[provider]['default_model']
-    elif not MODEL_ID.fullmatch(model) or model.startswith('onnx-community/'):
-        # Cloud catalogues change independently of Sidevoice releases. Keep a
-        # valid account-provided model instead of pinning it to a baked list.
-        model = PROVIDERS[provider]['default_model']
-    if provider == 'browser':
-        return {'provider': provider, 'model': model, 'reason': 'explicit',
-                'engine': 'Transformers.js · Whisper', 'location': 'browser',
-                'device': getattr(settings, 'stt_device', 'auto'),
-                'compute_type': 'fp32 (WebGPU) / q8 (WASM)'}
-    key = integrations.key('openai', config)
-    return {'provider': provider, 'model': model,
-            'reason': 'explicit' if key else 'missing_key',
-            'engine': 'OpenAI API', 'location': 'remote', 'device': 'cloud',
-            'compute_type': None, 'available': bool(key)}
+    """What one call transcribes with: where, which model, in which language (None to detect it), with which
+    context, and whether it can run at all — a provider needs its key here, the host is not available yet."""
+    stage = settings.stt
+    language = stage.options.get('language')
+    choice = {'place': stage.place, 'model': stage.model,
+              'language': None if language in (None, 'auto') else language,
+              'context': stage.options.get('context') or ''}
+    if stage.place == 'device':
+        available = True
+    elif stage.place == 'host':
+        available = False
+    else:
+        available = bool(integrations.key(stage.place, config))
+    return {**choice, 'available': available}
 
 
-def build(settings, choice, *, config=None, send=None, session_id=None):
-    """The transcription provider for one call: OpenAI from here, or the browser that is speaking."""
-    language = None if settings.stt_language == 'auto' else settings.stt_language
-    if choice['provider'] == 'browser':
+def build(choice, *, config=None, send=None, session_id=None):
+    """The transcription provider for one call: the client that is speaking, or a provider from here."""
+    if choice['place'] == 'device':
         if send is None or not session_id:
-            raise ValueError('Browser transcription needs its own connection.')
+            raise ValueError('Transcription on the device needs its own connection.')
         from .transcribers import ClientTranscriber
-        return ClientTranscriber(send, session_id, language=language)
-    key = integrations.key('openai', config)
-    if not key:
-        raise ValueError('OpenAI necesita una clave de API antes de conectar.')
-    from .transcribers import OpenAITranscriber
-    return OpenAITranscriber(key, model=choice['model'], language=language, prompt=settings.stt_context or None)
+        return ClientTranscriber(send, session_id, language=choice['language'])
+    if choice['place'] == 'openai':
+        key = integrations.key('openai', config)
+        if not key:
+            raise ValueError('OpenAI needs an API key before connecting.')
+        from .transcribers import OpenAITranscriber
+        return OpenAITranscriber(key, model=choice['model'], language=choice['language'],
+                                 prompt=choice['context'] or None)
+    raise ValueError(f'Nothing transcribes on {choice["place"]!r} yet.')
 
 
 async def verify(provider, key):
@@ -117,7 +84,7 @@ async def _models(http, value):
 async def catalog(provider, config=None):
     """Load a provider model catalogue only when its picker is selected."""
     if provider != 'openai':
-        raise ValueError('Proveedor desconocido.')
+        raise ValueError('Unknown provider.')
     value = integrations.key(provider, config)
     result = {'provider': provider, 'configured': bool(value), 'models': [], 'error': None}
     if not value:

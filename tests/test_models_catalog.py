@@ -9,7 +9,6 @@ from starlette.testclient import TestClient
 
 from sidevoice_core.models.catalog import catalog_text, check, load, vectors
 from sidevoice_core.models.offers import UnknownPlace, offers
-from sidevoice_core.pipeline import transcription
 from sidevoice_core.pipeline.settings import CATALOG as VOICE_CATALOG
 from sidevoice_core.server.app import create_app
 
@@ -65,6 +64,8 @@ class CatalogTest(unittest.TestCase):
                 (lambda c: model(c, 'whisper-tiny').update(requires={'memory_mb': 'lots'}), 'memory_mb'),
                 (lambda c: c['providers'][0].update(id='host'), 'not a place'),
                 (lambda c: c['families']['kokoro']['options'][1].update(default=3), 'default outside'),
+                (lambda c: c['providers'][0]['stt']['options'][1].update(max='400'), 'text context needs a positive whole max'),
+                (lambda c: c['providers'][0]['stt']['options'][1].update(max=True), 'text context needs a positive whole max'),
                 (lambda c: c['ranking']['default'].append('mlx-audio'), 'ranking: unknown engine mlx-audio'),
                 (lambda c: c.update(version=1), 'version must be 2')]:
             catalog = load()
@@ -108,8 +109,13 @@ class OffersTest(unittest.TestCase):
 
 class OtherListsAgreeTest(unittest.TestCase):
     """What this node still keeps elsewhere, until later phases move it onto the catalogue: the voice
-    catalogue's voices, the transcription settings' list of the models a client runs, and the integrations'
-    providers."""
+    catalogue's voices, and the integrations' providers."""
+
+    def test_the_voice_catalogue_names_no_models(self):
+        """Which models exist is the model catalogue's alone: the voice catalogue keeps languages, their voices'
+        names and samples, and no model list of its own (review R12)."""
+        from sidevoice_core.pipeline.settings import CATALOG
+        self.assertNotIn('models', CATALOG)
 
     def test_kokoro_speaks_the_voices_the_voice_catalogue_offers(self):
         voices = [voice['id'] for voice in model(load(), 'kokoro-82m-v1.0')['voices']]
@@ -118,19 +124,6 @@ class OtherListsAgreeTest(unittest.TestCase):
             spoken = {voice['language'].split('-')[0] for voice in model(load(), 'kokoro-82m-v1.0')['voices']
                       if voice['id'] in {v[0] for v in language['voices']}}
             self.assertEqual(spoken, {language['id']}, language['id'])
-
-    def test_the_client_side_whisper_models_are_the_catalogue_s_page_builds(self):
-        catalog = load()
-        engine = next(item for item in catalog['engines'] if item['id'] == 'transformers-js')
-        page = []
-        for item in catalog['models']:
-            if item['family'] != 'whisper':
-                continue
-            entry = build(item, 'transformers-js')
-            page.append({'id': entry['config']['repository'], 'label': item['label'],
-                         'devices': entry.get('accelerators', engine['accelerators']) + ['native']})
-        listed = [{key: value[key] for key in ('id', 'label', 'devices')} for value in transcription.BROWSER_MODELS]
-        self.assertEqual(page, listed)
 
     def test_the_providers_are_the_integrations_own(self):
         from sidevoice_core.pipeline import integrations
@@ -141,12 +134,19 @@ class OtherListsAgreeTest(unittest.TestCase):
         self.assertEqual(catalogued, listed)
         self.assertTrue(all(provider['key'] for provider in load()['providers']), 'every integration takes a key')
 
-    def test_whisper_s_languages_are_the_settings_own(self):
-        language = next(option for option in load()['families']['whisper']['options'] if option['id'] == 'language')
+    def test_openai_takes_whisper_s_language_and_a_context_the_device_does_not(self):
+        """A device switching between its own Whisper and OpenAI keeps its language: the two schemas say the same
+        about it. The context is OpenAI's alone: its prompt uses it, and no local Whisper path does, so the device's
+        schema does not offer a setting that would be accepted and discarded (review R09)."""
+        catalog = load()
+        whisper = catalog['families']['whisper']['options']
+        openai = next(provider for provider in catalog['providers'] if provider['id'] == 'openai')['stt']['options']
+        self.assertEqual([option['id'] for option in whisper], ['language'])
+        self.assertEqual(openai[0], whisper[0])
+        self.assertEqual(openai[1], {'id': 'context', 'kind': 'text', 'max': 400})
         from sidevoice_core.pipeline.settings import LanguageSettings
-        allowed = LanguageSettings.model_fields['stt_language'].annotation.__args__
-        self.assertEqual(['auto'] + language['values'], list(allowed))
-        self.assertEqual(language['default'], LanguageSettings().stt_language)
+        self.assertEqual(LanguageSettings().stt.options['language'],
+                         next(option for option in whisper if option['id'] == 'language')['default'])
 
 
 class EndpointTest(unittest.TestCase):

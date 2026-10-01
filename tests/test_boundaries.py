@@ -83,9 +83,10 @@ class ImportDirectionTest(unittest.TestCase):
                 with self.subTest(file=str(path.relative_to(PACKAGE))):
                     self.assertEqual(forbidden(imports_in(path), prefixes), [])
 
-    def test_the_runtime_module_both_halves_read_imports_neither(self):
-        path = PACKAGE / 'runtime.py'
-        self.assertEqual(forbidden(imports_in(path), ('sidevoice_core',) + WEB_FRAMEWORKS), [])
+    def test_the_leaf_modules_both_halves_read_import_neither(self):
+        for name in ('runtime.py', 'storage.py'):
+            with self.subTest(file=name):
+                self.assertEqual(forbidden(imports_in(PACKAGE / name), ('sidevoice_core',) + WEB_FRAMEWORKS), [])
 
 
 class CallPortTest(unittest.TestCase):
@@ -107,7 +108,7 @@ class CallPortTest(unittest.TestCase):
         call.report_client_error = lambda data: told.append(data)
         transcriber = SimpleNamespace(on_message=None)
         voice = VoiceCall(call, transcriber, told.append, settings=LanguageSettings(), mic=MicSettings(),
-                          choice={'provider': 'browser', 'model': 'm', 'reason': 'explicit'})
+                          choice={'place': 'device', 'model': 'whisper-tiny', 'language': 'en', 'context': '', 'available': True})
         voice.browser_message({'type': 'voice-audio-health', 'data': {'session_id': 'call-1', 'reason': 'stall', 'health': {}}})
         voice.browser_message({'type': 'voice-turn-trace', 'data': {'session_id': 'call-1', 'thread_id': 't', 'revision': 1}})
         voice.browser_message({'type': 'voice-client-error', 'data': {'session_id': 'call-1', 'message': 'x'}})

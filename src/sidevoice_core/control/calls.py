@@ -21,7 +21,7 @@ from .room import RoomClient
 async def run_call(room, transport, serializer, *, settings, config, choice, hello, refuse, settings_problem=None):
     """One pipeline for every call: PCM in, the device's turn detection, and a transcription provider.
 
-    The provider is OpenAI or the client itself; the pipeline never knows which.
+    The provider is the client itself or a provider called from here; the pipeline never knows which.
 
     A device that changes a setting this pipeline was built from opens a second socket instead of
     hanging up, so the same browser may hold two of these at once for as long as the swap takes.
@@ -57,34 +57,30 @@ async def run_call(room, transport, serializer, *, settings, config, choice, hel
         record = room.journal.binding_for_thread(wanted) if room.journal else None
         if record:
             call.target = {'thread_id': wanted, 'title': record.get('title'), 'binding_id': str(uuid.uuid4())}
-    provider = transcription.build(settings, choice, config=config, send=send, session_id=call.id)
-    pipeline = CallPipeline(transport, mic=mic, config=config, provider=provider,
-                            language=None if settings.stt_language == 'auto' else settings.stt_language)
+    provider = transcription.build(choice, config=config, send=send, session_id=call.id)
+    pipeline = CallPipeline(transport, mic=mic, config=config, provider=provider, language=choice['language'])
     transcriber = pipeline.transcriber
     runtime, runtime_problem = None, None
     try:
         runtime = browser_runtime(hello.get('transcription'))
     except ValueError as error:
         runtime_problem = str(error)
-    reported = hello.get('transcription') if isinstance(hello.get('transcription'), dict) else {}
-    if runtime and reported.get('fallback_error'):
-        # The browser offered a GPU and could not load Whisper on it: keep the reason where the stats can show it.
-        runtime['fallback_from'] = str(reported.get('fallback_from') or '')[:20]
-        runtime['fallback_error'] = str(reported['fallback_error'])[:300]
-        logger.warning('Call {}: local Whisper fell back from {} to {}: {}', call.id[:8], runtime['fallback_from'],
-                       runtime['device'], runtime['fallback_error'])
-    voice = VoiceCall(call, transcriber, send, settings=settings, mic=mic, choice=choice, runtime=runtime,
+    if runtime and runtime.get('fallback_error'):
+        # The client offered an accelerator and could not load the model on it: said here as well as in the stats.
+        logger.warning('Call {}: local transcription fell back from {} to {}: {}', call.id[:8], runtime['fallback_from'],
+                       runtime['accelerator'], runtime['fallback_error'])
+    voice = VoiceCall(call, transcriber, send, settings=settings, mic=mic, choice=choice, runtime=runtime, config=config,
                       vad_stop_secs=pipeline.vad_stop_secs, vad=pipeline.vad)
     # The hello carries the browser's call span, so the room's turns are inside the browser's call
     # and not a trace of their own. What this call is made of goes on it once, never on every turn.
     told = hello.get('telemetry') if isinstance(hello.get('telemetry'), dict) else {}
     call.telemetry.call_started(told.get('traceparent'), {
-        'sidevoice.stt_provider': choice['provider'], 'sidevoice.stt_model': call.transcription.get('model'),
-        'sidevoice.stt_device': call.transcription.get('device'), 'sidevoice.turn_end_mode': mic.turn_end_mode})
+        'sidevoice.stt_place': choice['place'], 'sidevoice.stt_model': call.transcription.get('model'),
+        'sidevoice.stt_accelerator': call.transcription.get('accelerator'), 'sidevoice.turn_end_mode': mic.turn_end_mode})
     call.mic = serializer
     problems = [message for message in (problem, runtime_problem) if message]
-    logger.info('Call {}: transcription {} · {} ({}), turn end {}', call.id[:8], choice['provider'],
-                call.transcription.get('model'), choice['reason'], mic.turn_end_mode)
+    logger.info('Call {}: transcription {} · {} · {}, turn end {}', call.id[:8], choice['place'],
+                call.transcription.get('model'), call.transcription.get('accelerator') or '-', mic.turn_end_mode)
 
     await pipeline.serve(call, voice)
     call.feed_audio = pipeline.feed   # a second path for the microphone, when the client negotiates one

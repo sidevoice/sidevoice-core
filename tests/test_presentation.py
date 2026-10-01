@@ -607,3 +607,31 @@ class OwnHostsTests(IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {'SIDEVOICE_ALLOWED_HOSTS': 'node.tailnet.example'}):
             with TestClient(create_app(device_auth=False), base_url='http://node.tailnet.example:8768') as client:
                 self.assertEqual(client.get('/api/presentation/admission').status_code, 200, 'a node someone made reachable')
+
+
+class SettingsSurfaceTests(IsolatedAsyncioTestCase):
+    """What a page reads to render the stages: the defaults in the stage shape, the voice catalogue's languages and
+    providers (its models are the model catalogue's), and no transcription catalogue of its own any more."""
+
+    async def test_the_defaults_the_voice_catalogue_and_what_is_gone(self):
+        import tempfile
+        from starlette.testclient import TestClient
+        from sidevoice_core.pipeline import synthesis, transcription
+        from sidevoice_core.pipeline.settings import CATALOG, load_settings
+        from sidevoice_core.server.app import create_app
+        eleven = {'configured': False, 'models': [{'id': 'eleven_v3', 'label': 'Eleven v3'}], 'voices': [], 'error': None}
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(synthesis, 'catalog', AsyncMock(return_value=eleven)), \
+                patch.object(transcription, 'catalog', AsyncMock(return_value={'provider': 'openai', 'models': []})):
+            app = create_app(device_auth=False, config={'SIDEVOICE_CORE_DATA_DIR': root})
+            with TestClient(app, base_url='http://127.0.0.1:8768') as client:
+                defaults = client.get('/api/presentation/languages').json()
+                self.assertEqual(defaults, load_settings().model_dump())
+                self.assertEqual(defaults['stt'], {'place': 'device', 'model': 'whisper-tiny',
+                                                   'options': {'language': 'en'}, 'build': None})
+                self.assertEqual(defaults['tts'], {'place': 'device', 'model': 'kokoro-82m-v1.0',
+                                                   'options': {'speed': 1.0}, 'build': None})
+                catalogue = client.get('/api/presentation/voice-catalog').json()
+                self.assertEqual(catalogue, {'languages': CATALOG['languages'], 'providers': {'elevenlabs': eleven}})
+                self.assertEqual(client.get('/api/presentation/transcription').status_code, 404)
+                self.assertEqual(client.get('/api/presentation/transcription/models', params={'provider': 'openai'}).status_code, 200)

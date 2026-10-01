@@ -1,4 +1,4 @@
-{"models":[{"id":"kokoro","label":"Kokoro · 82M"}],"languages":[
+{"languages":[
 {"id":"es","label":"Español","espeak":"es","voices":[["ef_dora","Dora"],["em_alex","Alex"],["em_santa","Santa"]],"sample":"Hola. Esta es una prueba de voz. Podemos conversar y seguir pensando juntos."},
 {"id":"en","label":"English","espeak":"en-us","voices":[["af_heart","Heart · US"],["af_bella","Bella · US"],["bf_emma","Emma · UK"],["bm_george","George · UK"]],"sample":"Hello. This is a voice preview. We can talk and keep thinking together."},
 {"id":"fr","label":"Français","espeak":"fr-fr","voices":[["ff_siwis","Siwis"]],"sample":"Bonjour. Ceci est un essai de voix. Nous pouvons discuter et réfléchir ensemble."},

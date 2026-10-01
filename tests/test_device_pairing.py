@@ -182,6 +182,31 @@ class NodeSurfaceTests(unittest.TestCase):
         self.assertEqual(entry['token_hash'], hashlib.sha256(redeemed['token'].encode()).hexdigest())
         self.assertEqual(entry['name'], 'Mi portátil')
 
+    def test_every_paired_device_has_the_node_s_full_authority_over_its_integrations(self):
+        """No owner and no guests (the operator, 2026-10-01): two genuinely paired devices — real tokens, device
+        auth on — each see every provider, keyed or not, and each may write and remove a key; without a token,
+        nothing."""
+        from unittest.mock import AsyncMock, patch
+        from sidevoice_core.pipeline import integrations, transcription
+        keys = Path(self.temp.name) / 'integrations.json'
+        with patch.object(integrations, 'CREDENTIALS', keys), patch.object(transcription, 'verify', AsyncMock()), \
+                self.client() as client:
+            first, second = (self.paired(client, name)['token'] for name in ('Mi portátil', 'El móvil'))
+            for token in (first, second):
+                listing = client.get('/api/presentation/integrations', headers=auth(token)).json()
+                self.assertEqual(listing, {'providers': [
+                    {'id': 'openai', 'label': 'OpenAI', 'capabilities': ['transcription'], 'configured': False,
+                     'source': None, 'hint': None, 'environment': 'VOICE_STT_API_KEY'},
+                    {'id': 'elevenlabs', 'label': 'ElevenLabs', 'capabilities': ['voice'], 'configured': False,
+                     'source': None, 'hint': None, 'environment': 'VOICE_ELEVENLABS_API_KEY'}]})
+            page = {'Origin': BASE}
+            self.assertEqual(client.put('/api/presentation/integrations/openai', json={'key': 'sk-from-the-phone'},
+                                        headers={**page, **auth(second)}).status_code, 200)
+            self.assertEqual(integrations.stored_key('openai'), 'sk-from-the-phone')
+            self.assertEqual(client.delete('/api/presentation/integrations/openai', headers={**page, **auth(first)}).status_code, 200)
+            self.assertIsNone(integrations.stored_key('openai'))
+            self.assertEqual(client.get('/api/presentation/integrations').status_code, 401, 'device-token authentication stays')
+
     def test_every_route_but_the_open_ones_needs_a_device_token(self):
         with self.client() as client:
             token = self.paired(client)['token']
@@ -370,6 +395,25 @@ class RelayTests(LinkedNodeTest):
         self.assertEqual([d['current'] for d in json.loads(listed['body'])['devices']], [True])
         self.assertEqual((await relayed('/api/connectors', {'authorization': f'Bearer {token}'}))['status'], 404,
                          'still only the client surface is relayed')
+
+    async def test_the_model_catalogue_is_relayed_behind_the_token(self):
+        """A page reaching this node through the room resolves its offers from the same catalogue as one on the
+        node itself: relayed, and only with a paired device's token."""
+        from sidevoice_core.models.catalog import catalog_text
+        await until(lambda: self.room.sid)
+        token = (await self.redeem_through_the_relay(self.app.state.devices.issue_code()['payload']['secret']))['token']
+
+        async def relayed(path, headers=None):
+            return await self.room.ask('relay.http', {'method': 'GET', 'path': path, 'query': '',
+                                                      'headers': {'accept': 'application/json', **(headers or {})}, 'body': None})
+        self.assertEqual((await relayed('/api/models/catalog'))['status'], 401)
+        self.assertEqual((await relayed('/api/models/catalog', {'authorization': 'Bearer guessed'}))['status'], 401)
+        answer = await relayed('/api/models/catalog', {'authorization': f'Bearer {token}', 'origin': 'https://room.example'})
+        self.assertEqual(answer['status'], 200)
+        self.assertEqual(answer['body'].decode('utf8'), catalog_text(), 'byte for byte what the node ships')
+        for path in ('/api/models/%2e%2e/connectors', '/api/models/../rendezvous', '/api/modelsx/catalog'):
+            with self.subTest(path=path):
+                self.assertEqual((await relayed(path, {'authorization': f'Bearer {token}'}))['status'], 404)
 
     async def test_encoded_dot_segments_do_not_leave_the_relayed_surface(self):
         await until(lambda: self.room.sid)

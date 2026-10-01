@@ -99,8 +99,9 @@ class WebRTCTest(unittest.IsolatedAsyncioTestCase):
     async def call(self):
         ws = await self.http.ws_connect(self.base.replace('http', 'ws') + '/api/presentation/ws')
         await ws.send_str(json.dumps({'label': 'rtvi-ai', 'type': 'client-ready', 'id': 'x', 'data': {
-            'settings': {'stt_provider': 'browser', 'turn_patience': 'fast'}, 'conversation': 'thread-a',
-            'transcription': {'model': 'onnx-community/whisper-tiny', 'device': 'wasm'}}}))
+            'settings': {'stt': {'place': 'device', 'model': 'whisper-tiny'}, 'turn_patience': 'fast'},
+            'conversation': 'thread-a',
+            'transcription': {'model': 'whisper-tiny', 'engine': 'transformers-js', 'accelerator': 'wasm', 'cached': True}}}))
         messages = []
 
         async def listen():

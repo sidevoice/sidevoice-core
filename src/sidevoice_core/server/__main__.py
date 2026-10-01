@@ -21,11 +21,8 @@ DEFAULT_IDLE_SECONDS = 600
 
 
 def write_ready(path, facts):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f'.{os.getpid()}.tmp')
-    temporary.write_text(json.dumps(facts), encoding='utf8')
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    from ..storage import write_private
+    write_private(path, json.dumps(facts))
 
 
 def remove_ready(path):

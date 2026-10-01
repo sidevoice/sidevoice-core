@@ -480,7 +480,7 @@ class RoomClient:
         self.playback_watch = asyncio.create_task(expire())
 
     async def play_in_browser(self, utterance, rev):
-        """Hand this browser the reply to play. Kokoro it renders; a paid engine the room did."""
+        """Hand this browser the reply to play. A voice placed on the device it renders; a provider's the room did."""
         from ..pipeline.settings import load_settings, resolve_voice
         uid = utterance.id
         choice = resolve_voice(self.settings or load_settings(), utterance.language)
@@ -495,9 +495,9 @@ class RoomClient:
                   **({'replay': True} if utterance.replay_of else {}),
                   # Asked for from the bubble: the page plays it even though it has heard it before.
                   **({'requested': True} if utterance.requested else {})}
-        if choice['provider'] == 'kokoro':
+        if choice['place'] == 'device':
             self.latency.mark(uid, 'audio_dispatched')
-            self.telemetry.synthesis(uid, provider=choice['provider'], model=choice.get('model'))
+            self.telemetry.synthesis(uid, place=choice['place'], model=choice.get('model'))
             self.on_browser_event({'type': 'voice-speech', 'data': {**common, **choice}})
             self.watch_playback(utterance)
             return
@@ -527,7 +527,7 @@ class RoomClient:
         # recording that request as its own would be a measurement it never made.
         self.latency.provider(uid, audio['timings_ms'] if fresh else {})
         self.latency.mark(uid, 'audio_dispatched')
-        self.telemetry.synthesis(uid, provider=choice['provider'], model=choice.get('model'),
+        self.telemetry.synthesis(uid, place=choice['place'], model=choice.get('model'),
                                  shared=not fresh, provider_ms=audio['timings_ms'])
         self.on_browser_event({'type': 'voice-speech-audio', 'data': {
             **common, **choice, **audio,
@@ -744,9 +744,9 @@ class Room:
             try:
                 choice = resolve_voice(client.settings or load_settings(), original.language)
             except ValueError:
-                choice = {'provider': 'kokoro'}
+                choice = {'place': 'device'}
             bought = original.rendered and not original.parked
-            if choice['provider'] != 'kokoro' and bought and self.stored_audio(original, choice) is None:
+            if choice['place'] != 'device' and bought and self.stored_audio(original, choice) is None:
                 # The room no longer has that audio and will not invent it or buy it again. A reply that was
                 # never rendered — parked, or queued and left before its turn came — was never bought at all:
                 # rendering it now is its first time, not a second.
@@ -784,7 +784,7 @@ class Room:
                 choice = resolve_voice(client.settings or load_settings(), utterance.language)
             except ValueError:
                 continue
-            if choice['provider'] != 'kokoro' and self.stored_audio(utterance, choice) is not None:
+            if choice['place'] != 'device' and self.stored_audio(utterance, choice) is not None:
                 rows.add(utterance.row_id)
         return rows
 
@@ -801,8 +801,8 @@ class Room:
         try:
             choice = resolve_voice(client.settings or load_settings(), original.language)
         except ValueError:
-            choice = {'provider': 'kokoro'}
-        if choice['provider'] == 'kokoro' or self.stored_audio(original, choice) is None:
+            choice = {'place': 'device'}
+        if choice['place'] == 'device' or self.stored_audio(original, choice) is None:
             raise Refusal(410, 'La sala ya no tiene el audio de esa respuesta.')
         echo = Utterance(original.id + ':again:' + uuid.uuid4().hex[:8], original.text, language=original.language,
                          thread_id=original.thread_id, revision=client.revision, row_id=original.row_id, at=original.at)

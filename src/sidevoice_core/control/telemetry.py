@@ -42,7 +42,7 @@ ATTRIBUTES = frozenset({
     'sidevoice.session_id', 'sidevoice.thread_id', 'sidevoice.turn_revision',
     'sidevoice.reply_revision', 'sidevoice.utterance_id',
     'sidevoice.status', 'sidevoice.reason', 'sidevoice.outcome', 'sidevoice.kind',
-    'sidevoice.stt_provider', 'sidevoice.stt_model', 'sidevoice.stt_device',
+    'sidevoice.stt_place', 'sidevoice.stt_model', 'sidevoice.stt_accelerator',
     'sidevoice.tts_provider', 'sidevoice.tts_model', 'sidevoice.turn_end_mode',
     'sidevoice.harness', 'sidevoice.shared_audio', 'sidevoice.synthesis_attempt',
     'sidevoice.stage', 'sidevoice.duration_ms', 'sidevoice.audio_output',
@@ -330,8 +330,9 @@ class CallTelemetry:
         self.stage(thread_id, revision, 'read_to_reply', start=marks.get('read'), end=received, values=values)
         self.stage(thread_id, revision, 'input_queued_to_reply', start=marks.get('queued'), end=received, values=values)
 
-    def synthesis(self, utterance_id, *, provider=None, model=None, shared=False, provider_ms=None):
-        """Reply → synthesis, and the provider's own request when this listener is the one who paid for it."""
+    def synthesis(self, utterance_id, *, place=None, model=None, shared=False, provider_ms=None):
+        """Reply → synthesis, and the provider's own request when this listener is the one who paid for it.
+        `place` is where the voice was made: `device`, or the provider's id."""
         if not telemetry.enabled:
             return
         row = self.latency.replies.get(utterance_id)
@@ -340,7 +341,7 @@ class CallTelemetry:
         thread_id, revision = row['thread_id'], row['reply_revision']
         marks = row['marks']
         values = {'sidevoice.utterance_id': utterance_id, 'sidevoice.reply_revision': revision,
-                  'sidevoice.tts_provider': provider, 'sidevoice.tts_model': model,
+                  'sidevoice.tts_provider': place, 'sidevoice.tts_model': model,
                   'sidevoice.shared_audio': bool(shared), 'sidevoice.synthesis_attempt': row['synthesis_attempt']}
         self.stage(thread_id, revision, 'reply_to_synthesis',
                    start=marks.get('received'), end=marks.get('synthesis_started'), values=values)
