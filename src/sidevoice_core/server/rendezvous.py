@@ -14,7 +14,13 @@ Whichever side opened it, the room then asks the same things: `relay.http` (a br
 very same request to this node on loopback: the relay adds no second implementation of any endpoint,
 and a relayed browser is a browser like any other to everything behind it — its device token included
 (`docs/DEVICE_PAIRING.md`): the room checks none, it passes `authorization` and the socket's offered
-subprotocols through, and this node checks them end to end.
+subprotocols through, and this node checks them.
+
+The room is trusted. It terminates the browser's TLS and this node's, so it sees every device token, every
+pairing secret redeemed through it and every byte of the traffic it relays, and it could replay or use them.
+The node's signed identity (`control.devices`) proves which node answered; it does not encrypt anything, and
+it does not keep the relay from reading what it carries. Only an end-to-end encrypted channel to the pinned
+identity would.
 """
 import asyncio
 import json
@@ -25,6 +31,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from loguru import logger
+
+from .transport import credential_safe
 
 PROTOCOL = 3
 PATH = '/api/connectors/link'      # on the room: the path its proxy already exempts
@@ -60,15 +68,6 @@ def relayable(base, path):
     except ValueError:
         return False
     return relayed(final)
-
-
-def private_network(hostname):
-    """Where a credential may travel in clear: loopback and a Kubernetes service name, the same rule the
-    connector applies (`pair.mjs`). Anything else needs TLS."""
-    import re
-    if hostname in {'127.0.0.1', 'localhost', '::1', '[::1]'}:
-        return True
-    return bool(re.fullmatch(r'[a-z0-9-]+\.[a-z0-9-]+\.svc(\.[a-z0-9.-]+)?', hostname or '', re.I))
 
 
 def public_origin(value):
@@ -344,8 +343,9 @@ class Rendezvous:
     async def dial_room(self, pairing):
         import socketio
         origin = pairing['origin']
-        if urlsplit(origin).scheme != 'https' and not private_network(urlsplit(origin).hostname):
-            await self.report(error='The room URL must be https:// unless it is on this machine or inside its cluster.')
+        if not credential_safe(origin):
+            await self.report(error='The room URL must be https:// unless it is on this machine or a trusted cluster host '
+                                    '(SIDEVOICE_TRUSTED_CLUSTER_HOSTS).')
             return False
         client = socketio.AsyncClient(reconnection=True, reconnection_delay=self.RETRY_FIRST,
                                       reconnection_delay_max=self.RETRY_MAX, logger=False, engineio_logger=False)

@@ -2,8 +2,11 @@
 `docs/DEVICE_PAIRING.md`).
 
 - **Identity**: one ECDSA P-256 key per node, created on first start, kept in `node-identity.json` (0600).
-  A client pins its public key when it pairs and asks the node to sign a nonce before using a base, so a
-  relay or a squatter on a URL cannot pass for the node.
+  A client pins its public key when it pairs and asks the node to sign a nonce before using a base, so an
+  address that is not the node and cannot reach it (a squatter on a stale URL) cannot pass for it. A relay
+  that reaches the node can: it forwards the signature, and it sees the pairing secret, the device token and
+  all the traffic it carries. The signature encrypts nothing; a relay is trusted with everything that goes
+  through it until there is an end-to-end encrypted channel to the pinned identity.
 - **Pairing code**: `SV1.` + base64url(JSON) with a one-time secret, valid ten minutes. The secret lives in
   memory only: a code outlives neither its ten minutes nor this process.
 - **Devices**: a redeemed secret becomes a device token. Only its SHA-256 is kept (`devices.json`, 0600); a

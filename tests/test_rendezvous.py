@@ -161,12 +161,6 @@ class OutboundTests(NodeTest):
             await self.room.tell('node.revoked', {'reason': 'revoked from the page'})
             await until(lambda: heard and heard[-1].get('refused') == 'revoked from the page')
             self.assertFalse(heard[-1]['connected'])
-            # And it says so on /api/rendezvous too, with the machine as its connector described it.
-            import aiohttp
-            async with aiohttp.ClientSession() as http:
-                async with http.get(f'http://127.0.0.1:{self.node_port}/api/rendezvous') as answer:
-                    told = await answer.json()
-            self.assertEqual((told['kind'], told['id'], told['host']), ('node', 'machine-1', 'this-laptop'))
         finally:
             await connector.disconnect()
 

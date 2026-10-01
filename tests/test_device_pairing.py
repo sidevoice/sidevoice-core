@@ -133,7 +133,8 @@ class NodeSurfaceTests(unittest.TestCase):
         self.data = Path(self.temp.name) / 'core'
         self.room = Room(RoomHistory(self.data / 'room-state.json'))
         self.app = create_app(self.room, config={'VOICE_BROWSER_HEARTBEAT_SECONDS': '0', 'SIDEVOICE_CORE_DATA_DIR': str(self.data),
-                                                 'SIDEVOICE_PUBLIC_URLS': ' https://node.example/ , ftp://not.a.web.url, https://node.example'})
+                                                 'SIDEVOICE_PUBLIC_URLS': ' https://node.example/ , ftp://not.a.web.url, https://node.example, '
+                                                                          'http://node.lan:8768, http://node.voice.svc.cluster.local:8768'})
         self.devices = self.app.state.devices
         self.devices.listen_url = BASE
 
@@ -151,9 +152,21 @@ class NodeSurfaceTests(unittest.TestCase):
 
     def test_a_code_says_where_the_node_answers(self):
         payload = self.devices.issue_code()['payload']
-        self.assertEqual(payload['urls'], [BASE, 'https://node.example'])
+        self.assertEqual(payload['urls'], [BASE, 'https://node.example'], 'plaintext only on loopback: no http://node.lan')
         self.assertIsNone(payload['rv'], 'no rendezvous, no room')
         self.assertEqual(payload['host'], self.devices.host())
+
+    def test_a_code_names_a_plaintext_cluster_address_only_when_its_host_is_trusted(self):
+        self.devices.config = {**self.devices.config, 'SIDEVOICE_TRUSTED_CLUSTER_HOSTS': '.svc.cluster.local'}
+        self.assertEqual(self.devices.issue_code()['payload']['urls'],
+                         [BASE, 'https://node.example', 'http://node.voice.svc.cluster.local:8768'])
+
+    def test_discovery_says_what_pairing_needs_and_nothing_about_the_machine(self):
+        with self.client() as client:
+            what = client.get('/api/rendezvous')
+            self.assertEqual(what.json(), {'kind': 'node', 'fingerprint': self.devices.store.identity.fingerprint})
+            proof = client.get('/api/device/identity', params={'nonce': b64url(os.urandom(32))}).json()
+            self.assertEqual(set(proof), {'fingerprint', 'public_key', 'signature'}, 'no host name before a code is redeemed')
 
     def test_a_code_is_redeemed_once_and_only_its_hash_is_kept(self):
         with self.client() as client:
@@ -272,7 +285,7 @@ class NodeSurfaceTests(unittest.TestCase):
             answer = client.get('/api/device/identity', params={'nonce': nonce})
             self.assertEqual(answer.status_code, 200, answer.text)
             proof = answer.json()
-            self.assertEqual(set(proof), {'fingerprint', 'public_key', 'host', 'signature'})
+            self.assertEqual(set(proof), {'fingerprint', 'public_key', 'signature'})
             self.assertEqual(fingerprint_of(proof['public_key']), proof['fingerprint'])
             verify(proof['public_key'], nonce, proof['signature'])
             with self.assertRaises(InvalidSignature):
@@ -365,6 +378,9 @@ class ConnectorCodeTests(LinkedNodeTest):
         self.assertEqual(self.app.state.devices.issue_code()['payload']['rv'], {'url': 'http://127.0.0.1:9', 'node': 'machine-2'},
                          'not the old room\'s address, even before the old link is let go')
         await until(lambda: self.rendezvous.public_url is None, timeout=15)
+        # A room reached in clear over a network nobody vouched for is not where a device sends its secret.
+        self.pairing.write_text(json.dumps({'url': 'http://room.lan', 'connector_id': 'machine-3', 'token': 't'}))
+        self.assertIsNone(self.app.state.devices.issue_code()['payload']['rv'])
 
 
 class RelayTests(LinkedNodeTest):

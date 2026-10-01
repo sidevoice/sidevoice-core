@@ -251,7 +251,6 @@ def mount_rendezvous(app, room, rendezvous):
     """What this node is, for a page or a shell deciding where it is (`GET /api/rendezvous`), and — when
     it has one — its link with the hosted room, started and stopped with the app."""
     from contextlib import asynccontextmanager
-    from .rendezvous import read_pairing
     app.state.rendezvous = rendezvous
 
     from fastapi import Request
@@ -285,11 +284,9 @@ def mount_rendezvous(app, room, rendezvous):
 
     @app.get('/api/rendezvous')
     async def what_this_is():
-        pairing = read_pairing(rendezvous.pairing_path) if rendezvous and rendezvous.pairing_path else None
-        told = (room.control.identity if room.control else None) or {}
-        return {'kind': 'node', 'id': pairing and pairing['connector_id'], 'host': told.get('host'),
-                'fingerprint': app.state.devices.store.identity.fingerprint,
-                'room': rendezvous.state if rendezvous else None}
+        # Open to anyone who reaches this address: that it is a node, and which (the fingerprint a pairing pins).
+        # Its host name, its id at a room and its room's state are no stranger's business.
+        return {'kind': 'node', 'fingerprint': app.state.devices.store.identity.fingerprint}
 
     if rendezvous is None:
         return

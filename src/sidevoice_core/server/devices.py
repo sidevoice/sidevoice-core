@@ -8,9 +8,11 @@ import socket
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from ..control.devices import NodeDevices, valid_nonce
+from .transport import credential_safe
 
 SUBPROTOCOL = 'sidevoice'
 TOKEN_SUBPROTOCOL = 'sidevoice.token.'
@@ -19,6 +21,7 @@ DEVICE_KEY = 'sidevoice.device'    # the scope key the authenticated device's id
 
 # What needs no device token (the contract's table): what this node is, the redemption itself (it carries the
 # one-time secret), the identity proof (public), preflights, and the links that carry their own credentials.
+# The open answers say no more than pairing needs: the node's key and fingerprint, never its host name or ids.
 OPEN_ROUTES = frozenset({('GET', '/api/rendezvous'), ('POST', '/api/device/pair'), ('GET', '/api/device/identity')})
 OPEN_MOUNTS = ('/api/connectors/link', '/api/rendezvous/link')
 
@@ -113,24 +116,40 @@ class DevicePairing:
         told = (self.room.control.identity if self.room.control else None) or {}
         return told.get('host') or socket.gethostname()
 
+    def advertisable(self, url):
+        """Whether a code may send a device's pairing secret and token to `url` (`server.transport`)."""
+        if credential_safe(url, self.config):
+            return True
+        logger.warning('Not putting {} in a pairing code: a credential may go there only over https, '
+                       'unless it is loopback or a trusted cluster host', url)
+        return False
+
     def urls(self):
-        """Where this node answers directly: its listen URL, then `SIDEVOICE_PUBLIC_URLS`."""
+        """Where this node answers directly: its listen URL, then `SIDEVOICE_PUBLIC_URLS`; each one https, or
+        plaintext only where `server.transport` allows it."""
         urls = [self.listen_url] if self.listen_url else []
         for url in str(self.config.get('SIDEVOICE_PUBLIC_URLS') or '').split(','):
             url = url.strip().rstrip('/')
             if url and urlsplit(url).scheme in {'http', 'https'} and url not in urls:
                 urls.append(url)
-        return urls
+        return [url for url in urls if self.advertisable(url)]
 
     def rv(self):
-        return self.rendezvous.room_for_devices() if self.rendezvous is not None else None
+        """The room a device can reach this node through, if a credential may travel to it."""
+        room = self.rendezvous.room_for_devices() if self.rendezvous is not None else None
+        return room if room and self.advertisable(room['url']) else None
 
     def issue_code(self):
         return self.store.issue_code(host=self.host(), urls=self.urls(), rv=self.rv())
 
-    def node(self):
+    def public_identity(self):
+        """What anyone may learn without a token: the key a code's fingerprint names, nothing about the machine."""
         identity = self.store.identity
-        return {'fingerprint': identity.fingerprint, 'public_key': identity.public_key, 'host': self.host()}
+        return {'fingerprint': identity.fingerprint, 'public_key': identity.public_key}
+
+    def node(self):
+        """What a device that redeemed a code learns: the key it pins, and the machine's name to call it by."""
+        return {**self.public_identity(), 'host': self.host()}
 
 
 class Redeem(BaseModel):
@@ -159,7 +178,7 @@ def mount_devices(app, room, rendezvous, config):
         require_same_origin(request)
         if not valid_nonce(nonce):
             raise HTTPException(400, 'nonce must be base64url of 16 to 64 bytes.')
-        return {**devices.node(), 'signature': devices.store.identity.sign(nonce)}
+        return {**devices.public_identity(), 'signature': devices.store.identity.sign(nonce)}
 
     @app.get('/api/device/devices')
     async def listing(request: Request):
