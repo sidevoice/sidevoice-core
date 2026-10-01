@@ -204,7 +204,11 @@ class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Application startup complete', log.read_text(), 'uvicorn\'s own lines too')
             process.terminate()
             self.assertEqual(process.wait(20), 0)
-            self.assertEqual(process.stderr.read(), '', 'nothing on stderr when nothing crashed')
+            # None of the core's own lines: what native libraries print there themselves (onnxruntime's hardware
+            # probe on some machines) is outside its logging, and stays the manager's to keep.
+            stderr = process.stderr.read()
+            for line in ('listening on', 'Application startup complete', 'Pipecat', ' | INFO ', 'INFO:'):
+                self.assertNotIn(line, stderr)
             self.assertEqual(facts['launch_id'], 'logged')
 
     async def test_a_socket_a_dead_core_left_is_replaced(self):
