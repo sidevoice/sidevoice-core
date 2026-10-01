@@ -9,6 +9,7 @@ from fastapi import HTTPException, Request, Response
 from pydantic import ValidationError
 
 from ..models.catalog import catalog_text
+from .devices import DEVICE_KEY
 from .presentation import require_same_origin
 
 # A device checks the models it runs itself (it has the clips too); only a provider is checked from here.
@@ -16,6 +17,9 @@ CHECK_ON_DEVICE = {'key': 'check_on_device', 'message': 'A device checks the mod
 
 
 def mount_models(app):
+    from ..control.check_budget import CheckBudget
+    budget = app.state.check_budget = CheckBudget()
+
     @app.get('/api/models/catalog')
     async def model_catalog(request: Request):
         require_same_origin(request)
@@ -42,6 +46,17 @@ def mount_models(app):
         except ValidationError as error:
             detail = '; '.join(item.get('msg', '') for item in error.errors()[:3])
             raise HTTPException(422, {'key': 'check_invalid', 'message': detail}) from error
-        language = payload.get('language')
-        result = await checks.check(stage, language=language if isinstance(language, str) else None)
+        language = payload.get('language') if isinstance(payload.get('language'), str) else None
+        # Bounded (review R08): a passed check answers for itself for a while, identical ones share a run, and runs
+        # are budgeted per device and per provider. The key is told apart by a digest, never stored or returned.
+        from ..control.check_budget import Limited, check_key
+        from ..pipeline import integrations
+        key = check_key(task, stage.place, stage.model, stage.options, language, integrations.key(stage.place))
+        try:
+            result = await budget.run(key, device=request.scope.get(DEVICE_KEY) or 'local', provider=stage.place,
+                                      work=lambda: checks.check(stage, language=language))
+        except Limited as limited:
+            raise HTTPException(429, {'key': 'check_rate_limited', 'retry_after': limited.retry_after, 'scope': limited.scope,
+                                      'message': f'Too many model checks; try again in {limited.retry_after} s.'},
+                                headers={'Retry-After': str(limited.retry_after)}) from limited
         return {'stage': task, 'place': stage.place, 'model': stage.model, **result}

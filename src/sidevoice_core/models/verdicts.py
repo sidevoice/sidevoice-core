@@ -82,7 +82,10 @@ def audio_problem(samples, rate):
     """Why a voice check failed, as a refusal, or None when the audio is audible and lasts a plausible time.
     `samples` are floats in [-1, 1]."""
     count = len(samples)
-    seconds = count / rate if rate else 0.0
+    # Audio that is not numbers (NaN, ±inf), or a rate that is not one, is no audio: never "loud enough".
+    if not (isinstance(rate, (int, float)) and math.isfinite(rate) and rate > 0) or not all(math.isfinite(value) for value in samples):
+        return {'key': 'check_invalid_audio', 'message': 'The model produced audio that is not a valid waveform.'}
+    seconds = count / rate
     rms = math.sqrt(sum(value * value for value in samples) / count) if count else 0.0
     if rms < spec()['tts']['min_rms']:
         return {'key': 'check_silent', 'message': 'The model loaded but produced nothing.'}

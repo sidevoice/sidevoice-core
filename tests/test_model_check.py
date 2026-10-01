@@ -2,6 +2,7 @@
 verdict judges what came back, a provider's model is checked here with the node's key, and a failure is an
 answer that names its step and its reason — never an exception, never a stage saved."""
 import array
+import asyncio
 import base64
 import io
 import math
@@ -63,6 +64,19 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(verdicts.audio_problem([], 16000)['key'], 'check_silent')
         short = verdicts.audio_problem(tone[:1600], 16000)
         self.assertEqual((short['key'], short['seconds']), ('check_duration', 0.1))
+
+    def test_audio_that_is_not_numbers_is_never_audible(self):
+        """Review R10: NaN or ±inf samples, or a rate that is not one, used to pass as loud enough."""
+        tone = [0.3 * math.sin(i / 10) for i in range(16000 * 5)]
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                self.assertEqual(verdicts.audio_problem([value] * 16000 * 5, 16000)['key'], 'check_invalid_audio')
+                one = list(tone)
+                one[777] = value
+                self.assertEqual(verdicts.audio_problem(one, 16000)['key'], 'check_invalid_audio')
+        for rate in (math.nan, 0, math.inf):
+            with self.subTest(rate=rate):
+                self.assertEqual(verdicts.audio_problem(tone, rate)['key'], 'check_invalid_audio')
 
     def test_slowness_is_measured_against_the_comfort_line(self):
         line = verdicts.spec()['stt']['comfort_ms']
@@ -213,3 +227,82 @@ class EndpointTest(Keys):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BudgetTest(unittest.IsolatedAsyncioTestCase):
+    """Review R08: checks of a paid provider are bounded however often an authorised device asks."""
+
+    def setUp(self):
+        from sidevoice_core.control.check_budget import CheckBudget
+        self.now = [0.0]
+        self.budget = CheckBudget(clock=lambda: self.now[0], per_device=(3, 60), per_provider=(5, 60), remember=600)
+        self.runs = 0
+
+    async def work(self, ok=True):
+        self.runs += 1
+        await asyncio.sleep(0)
+        return {'ok': ok, 'passes': []}
+
+    async def test_a_passed_check_answers_for_itself_until_it_is_old_or_the_key_changes(self):
+        from sidevoice_core.control.check_budget import check_key
+        same = check_key('stt', 'openai', 'whisper-1', {'language': 'es'}, 'es', 'sk-one')
+        for _ in range(20):
+            await self.budget.run(same, device='a', provider='openai', work=self.work)
+        self.assertEqual(self.runs, 1)
+        self.assertTrue((await self.budget.run(same, device='a', provider='openai', work=self.work))['remembered'])
+        self.assertNotIn('sk-one', same, 'the key itself is never part of what is kept')
+        await self.budget.run(check_key('stt', 'openai', 'whisper-1', {'language': 'es'}, 'es', 'sk-two'), device='a', provider='openai', work=self.work)
+        self.assertEqual(self.runs, 2, 'a new key is checked afresh')
+        self.now[0] += 601
+        await self.budget.run(same, device='a', provider='openai', work=self.work)
+        self.assertEqual(self.runs, 3, 'and an old answer is not trusted forever')
+
+    async def test_a_failed_check_is_not_remembered_and_runs_are_budgeted_per_device_and_per_provider(self):
+        from sidevoice_core.control.check_budget import Limited
+        for model in ('m1', 'm2', 'm3'):
+            await self.budget.run(model, device='a', provider='openai', work=lambda: self.work(ok=False))
+        with self.assertRaises(Limited) as refused:
+            await self.budget.run('m4', device='a', provider='openai', work=self.work)
+        self.assertEqual((refused.exception.scope, refused.exception.retry_after), ('device', 60))
+        await self.budget.run('m1', device='b', provider='openai', work=self.work)
+        await self.budget.run('m2', device='b', provider='openai', work=self.work)
+        with self.assertRaises(Limited) as refused:
+            await self.budget.run('m3', device='c', provider='openai', work=self.work)
+        self.assertEqual(refused.exception.scope, 'provider', 'every device together has a bound too')
+        await self.budget.run('x', device='c', provider='elevenlabs', work=self.work)
+        self.now[0] += 60
+        await self.budget.run('m9', device='a', provider='openai', work=self.work)
+        self.assertEqual(self.runs, 7)
+
+    async def test_identical_checks_asked_together_share_one_run(self):
+        answers = await asyncio.gather(*(self.budget.run('same', device=str(i), provider='openai', work=self.work) for i in range(8)))
+        self.assertEqual(self.runs, 1)
+        self.assertTrue(all(answer['ok'] for answer in answers))
+
+
+class BudgetedEndpointTest(Keys):
+    """The reviewer's probe: a paired device, auth on, twenty checks in a row."""
+
+    def test_twenty_checks_in_a_row_cost_one_run_and_a_burst_of_different_ones_is_refused_with_a_key(self):
+        from sidevoice_core.control.history import RoomHistory
+        from sidevoice_core.control.room import Room
+        data = Path(tempfile.mkdtemp()) / 'core'
+        app = create_app(Room(RoomHistory(data / 'room-state.json')), config={'SIDEVOICE_CORE_DATA_DIR': str(data), 'VOICE_BROWSER_HEARTBEAT_SECONDS': '0'})
+        app.state.devices.listen_url = 'http://127.0.0.1:8768'
+        integrations.save_key('openai', 'sk-test')
+        FakeTranscriber.answers = [SPANISH] * 400
+        with TestClient(app, base_url='http://127.0.0.1:8768') as client:
+            code = app.state.devices.issue_code()
+            token = client.post('/api/device/pair', json={'secret': code['payload']['secret'], 'name': 'probe'}).json()['token']
+            auth = {**PAGE, 'Authorization': f'Bearer {token}'}
+            body = {'stage': 'stt', 'place': 'openai', 'model': 'gpt-4o-transcribe', 'options': {'language': 'es'}}
+            self.assertEqual(client.post('/api/models/check', headers=PAGE, json=body).status_code, 401)
+            answers = [client.post('/api/models/check', headers=auth, json=body) for _ in range(20)]
+            self.assertTrue(all(answer.status_code == 200 and answer.json()['ok'] for answer in answers))
+            self.assertEqual(len(FakeTranscriber.made), 1, 'one run (its two passes); the rest answered from memory')
+            self.assertNotIn('sk-test', ''.join(answer.text for answer in answers))
+            statuses = [client.post('/api/models/check', headers=auth, json={**body, 'model': f'gpt-{n}-transcribe'}) for n in range(8)]
+            refused = [answer for answer in statuses if answer.status_code == 429]
+            self.assertTrue(refused, 'a burst of different checks meets the budget')
+            self.assertEqual(refused[0].json()['detail']['key'], 'check_rate_limited')
+            self.assertTrue(int(refused[0].headers['retry-after']) > 0)
