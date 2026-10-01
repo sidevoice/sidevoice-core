@@ -7,6 +7,7 @@
 
 <p>
   <a href="https://github.com/sidevoice/sidevoice-core/actions/workflows/test.yml"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/github/ci/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&workflow=test.yml&branch=main&mode=dark" /><img alt="CI status" src="https://shieldcn.dev/github/ci/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&workflow=test.yml&branch=main&mode=light" /></picture></a>
+  <a href="LICENSE"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/github/license/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&mode=dark" /><img alt="licence" src="https://shieldcn.dev/github/license/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&mode=light" /></picture></a>
   <picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/python-3.12+.svg?variant=secondary&size=sm&logo=python&mode=dark" /><img alt="requires Python 3.12 or newer" src="https://shieldcn.dev/badge/python-3.12+.svg?variant=secondary&size=sm&logo=python&mode=light" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/status-beta.svg?variant=secondary&size=sm&mode=dark" /><img alt="status: beta" src="https://shieldcn.dev/badge/status-beta.svg?variant=secondary&size=sm&mode=light" /></picture>
 </p>
@@ -119,4 +120,5 @@ which release notes are written ([`RELEASING.md`](RELEASING.md)).
 
 ## Licence
 
-To be decided — [sidevoice/.github#11](https://github.com/sidevoice/.github/issues/11).
+[Apache-2.0](LICENSE). The Sidevoice name and logo are trademarks: forks are welcome under their own name — see
+[`TRADEMARKS.md`](TRADEMARKS.md).
