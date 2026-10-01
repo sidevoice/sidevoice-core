@@ -1,7 +1,6 @@
-"""A desktop shell pointed straight at this node (sidevoice-desktop, docs/RENDEZVOUS.md "Web client
-contract"): its bundled page lives on another origin, so the node answers CORS for the origins it accepts,
-accepts the shell's own origins without configuration, and lets that page pair this machine with a room —
-by asking the connector, which owns the pairing."""
+"""A desktop shell pointed straight at this node (sidevoice-desktop): its bundled page lives on
+another origin, so the node answers CORS for the origins it accepts, accepts the shell's own origins without
+configuration, and lets that page pair this machine with a room — by asking the connector, which owns the pairing."""
 import tempfile
 import unittest
 from pathlib import Path

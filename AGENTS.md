@@ -16,4 +16,4 @@ Rules for any coding agent (and person) working in this repository.
 ## Before changing things
 
 Read `README.md`. Refusals and errors that a person will read must be translatable: a stable key with its parameters, rendered by
-the client, or whatever rubasace/sidevoice#128 settles — never a finished sentence in one language.
+the client, or whatever sidevoice/sidevoice-web#17 settles — never a finished sentence in one language.

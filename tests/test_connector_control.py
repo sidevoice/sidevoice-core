@@ -172,7 +172,7 @@ class ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(journal.authenticate_connector('old-connector', 'old-token'))
         self.assertEqual(journal.history(), [])
         self.assertTrue((root / 'room-state.json').exists())
-        self.assertTrue((root / 'room-history.sqlite3').exists(), 'the old database is left for the operator to delete')
+        self.assertTrue((root / 'room-history.sqlite3').exists(), 'the old database is left for whoever runs the node to delete')
 
     async def test_closing_from_the_room_tells_the_connector_and_forgets_the_binding(self):
         peer = await self.attach()

@@ -385,7 +385,7 @@ def local_credential(journal, path):
 
     Pairing is a person's act because a room and a machine are two parties. The connector and its own
     node's core are one user's process tree on one machine, so the proof is the file's ownership, not
-    a code read from one terminal into another (LOCAL_MODE_PLAN D2, taken as recommended). The journal
+    a code read from one terminal into another. The journal
     keeps it as a paired connector like any other, so participants still read as this machine.
     """
     from pathlib import Path

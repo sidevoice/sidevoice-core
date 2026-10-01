@@ -93,7 +93,7 @@ def mount_presentation(app, hub):
     async def history(request: Request, thread_id: str | None = None, session_id: str | None = None):
         require_same_origin(request)
         messages = hub.journal.history(thread_id)
-        # Asked by a browser in the call, each reply also says whether that browser can hear it again (#100).
+        # Asked by a browser in the call, each reply also says whether that browser can hear it again.
         client = client_for(session_id) if session_id else None
         if client is not None:
             again = hub.replayable_rows(client)
@@ -119,7 +119,7 @@ def mount_presentation(app, hub):
             raise HTTPException(403, 'Save the key from the room, not from an external client.')
         require_same_origin(request)
 
-    # Integrations (#64): one key per provider, the node's. Listed for, and written by, any paired device.
+    # Integrations: one key per provider, the node's. Listed for, and written by, any paired device.
     @app.get('/api/presentation/integrations')
     async def integrations_listing(request: Request):
         require_same_origin(request)
@@ -194,7 +194,7 @@ def mount_presentation(app, hub):
         """Why the room would refuse a browser right now.
 
         A refusal travels in a frame and in a close code, and a proxy can lose both — the page then
-        shows its own generic sentence while the room had written the real one (#63). This is the
+        shows its own generic sentence while the room had written the real one. This is the
         third way, and the one nothing in between rewrites: a page whose socket closed before it had
         a session asks here and reads what the room would have told it.
         """
@@ -324,7 +324,7 @@ def mount_presentation(app, hub):
 
     @app.post('/api/presentation/replay')
     async def replay_reply(payload: dict, request: Request):
-        """Play a reply again from its bubble, for the browser asking (#100)."""
+        """Play a reply again from its bubble, for the browser asking."""
         require_same_origin(request)
         client = client_for(payload.get('session_id'))
         if not client or not client.connected:

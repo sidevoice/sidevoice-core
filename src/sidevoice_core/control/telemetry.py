@@ -7,7 +7,7 @@ fail nothing, so nothing here starts a provider, opens a socket or allocates a
 span until an endpoint names one.
 
 The span names are the stage keys the stats dialog already uses
-(`apps/web/src/services/room-session-controller.js`, `LATENCY_STAGES`), so a
+(sidevoice-web's `apps/web/src/services/room-session-controller.js`, `LATENCY_STAGES`), so a
 span and a stats row are the same thing. The marks they are built from belong to
 `CallLatency`: this module reads them, it never keeps a second copy.
 

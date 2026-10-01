@@ -35,7 +35,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv venv --python 3.12 .venv
       - run: uv pip install --python .venv/bin/python -e '.[test]'
-      # Tests that need a rubasace/sidevoice checkout (the connector, the protocol package) skip here.
+      # Tests that need the connector or web checkout skip here.
       - run: .venv/bin/python -m pytest -q -p no:warnings
 
   package:

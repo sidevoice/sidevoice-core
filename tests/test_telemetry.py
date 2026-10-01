@@ -137,10 +137,10 @@ class ContractTest(unittest.TestCase):
     def contract(self, name):
         import os
         from pathlib import Path
-        # The protocol package lives in rubasace/sidevoice: SIDEVOICE_REPOSITORY names that checkout.
+        # The protocol package lives in the sidevoice-web repository: SIDEVOICE_REPOSITORY names that checkout.
         source = Path(os.environ.get('SIDEVOICE_REPOSITORY') or '/nonexistent') / 'packages' / 'protocol' / 'src' / 'index.ts'
         if not source.exists():
-            self.skipTest('SIDEVOICE_REPOSITORY does not name a rubasace/sidevoice checkout')
+            self.skipTest('SIDEVOICE_REPOSITORY does not name a sidevoice-web checkout')
         body = source.read_text().split('export const ' + name + ' = [', 1)
         self.assertEqual(len(body), 2, name + ' is not declared in the protocol package')
         return re.findall(r'"([^"]+)"', body[1].split(']', 1)[0])

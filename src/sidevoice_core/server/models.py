@@ -47,7 +47,7 @@ def mount_models(app):
             detail = '; '.join(item.get('msg', '') for item in error.errors()[:3])
             raise HTTPException(422, {'key': 'check_invalid', 'message': detail}) from error
         language = payload.get('language') if isinstance(payload.get('language'), str) else None
-        # Bounded (review R08): a passed check answers for itself for a while, identical ones share a run, and runs
+        # Bounded: a passed check answers for itself for a while, identical ones share a run, and runs
         # are budgeted per device and per provider. The key is told apart by a digest, never stored or returned.
         from ..control.check_budget import Limited, check_key
         from ..pipeline import integrations

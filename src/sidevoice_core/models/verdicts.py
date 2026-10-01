@@ -1,4 +1,4 @@
-"""What a model check runs and how its output is judged (#124 §6 step 5, #90).
+"""What a model check runs and how its output is judged (sidevoice/sidevoice-core#21, sidevoice/sidevoice-core#13).
 
 Selecting a model loads it and checks it before it takes effect: a transcription model transcribes a bundled
 clip of about five seconds and must give back text close to what the clip says; a voice model speaks a fixed
@@ -98,5 +98,5 @@ def audio_problem(samples, rate):
 
 def slow(latency_ms):
     """Whether a transcription's turn-final latency is above the comfort line: shown, and the person decides
-    (D12) — never a failure."""
+    — never a failure."""
     return latency_ms > spec()['stt']['comfort_ms']

@@ -2,7 +2,7 @@
 /** Dev probe for the browser link, no microphone needed: opens the call socket, takes the call id the
  * room announces, submits a browser-side transcript and checks that the room reports that call as
  * connected, then as disconnected once the socket closes.
- * Usage: node apps/server/tests/probe_browser_socket.mjs [http://127.0.0.1:8767] */
+ * Usage: node tests/probe_browser_socket.mjs [http://127.0.0.1:8767] */
 const base=(process.argv[2]||'http://127.0.0.1:8767').replace(/\/$/,'');
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const room=async()=>(await fetch(base+'/api/presentation')).json();

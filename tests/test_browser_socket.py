@@ -31,7 +31,7 @@ class BrowserSocketTest(IsolatedAsyncioTestCase):
 
     async def test_anything_the_browser_sends_says_that_it_is_still_there(self):
         # The keepalive asks a quiet socket, not a muted one: PCM, an answer and even a frame the
-        # room cannot read are all this browser being alive (#63).
+        # room cannot read are all this browser being alive.
         with patch('sidevoice_core.pipeline.serializer.time.monotonic', side_effect=[10.0, 20.0, 30.0, 40.0]):
             serializer = BrowserFrameSerializer()
             self.assertEqual(serializer.last_frame_at, 10.0, 'the hello that opened the call counts')

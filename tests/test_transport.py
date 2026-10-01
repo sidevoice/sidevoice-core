@@ -1,5 +1,5 @@
-"""Where a credential may travel in clear (`server.transport`): loopback, and the cluster hosts the operator
-named. No host name is trusted for its spelling."""
+"""Where a credential may travel in clear (`server.transport`): loopback, and the cluster hosts whoever deploys
+the node named. No host name is trusted for its spelling."""
 import asyncio
 import unittest
 

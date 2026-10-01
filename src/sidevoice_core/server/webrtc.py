@@ -3,7 +3,7 @@ carries its requests (the room's relay, or nothing when the page talks to the no
 
 The call socket stays for everything it already carries — the session, turns, receipts, replies —
 and stays the fallback: a page whose peer connection never connects, or drops, says `voice-media:
-socket` and goes on sending PCM on it (rubasace/sidevoice `docs/RENDEZVOUS.md`, phase 4). What arrives
+socket` and goes on sending PCM on it. What arrives
 on the track is resampled to the pipeline's 16 kHz mono and fed into the same input the socket's
 frames reach, so the detector, the turn and the transcription never learn which path it took.
 

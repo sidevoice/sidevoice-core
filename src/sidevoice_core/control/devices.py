@@ -1,5 +1,4 @@
-"""Which devices may use this node, and how this node proves it is itself (rubasace/sidevoice
-`docs/DEVICE_PAIRING.md`).
+"""Which devices may use this node, and how this node proves it is itself.
 
 - **Identity**: one ECDSA P-256 key per node, created on first start, kept in `node-identity.json` (0600).
   A client pins its public key when it pairs and asks the node to sign a nonce before using a base, so an

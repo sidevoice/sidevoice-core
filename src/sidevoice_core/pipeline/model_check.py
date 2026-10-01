@@ -1,4 +1,4 @@
-"""A provider's model checked before a client makes it its stage (#124 §6, #90): the same check a device runs on
+"""A provider's model checked before a client makes it its stage (sidevoice/sidevoice-core#21, sidevoice/sidevoice-core#13): the same check a device runs on
 the models it runs itself, run here because the key is here.
 
 The node calls the provider with its own key, twice — the first pass warms the connection up, the second is

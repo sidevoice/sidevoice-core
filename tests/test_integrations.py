@@ -1,4 +1,4 @@
-"""Integrations (#64): one key per provider, kept by the node, written from any paired device, never read back — private
+"""Integrations: one key per provider, kept by the node, written from any paired device, never read back — private
 from the moment the file exists, and in the order the changes were asked for."""
 import asyncio
 import json

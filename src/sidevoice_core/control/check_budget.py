@@ -1,4 +1,4 @@
-"""How often a provider's model may be checked from this node (#124 §6; review R08).
+"""How often a provider's model may be checked from this node (sidevoice/sidevoice-core#21).
 
 A check calls a paid provider twice with the node's key. A paired device has the node's full authority, so this is
 not about who may ask but about how much: a retry loop, a person rechecking again and again, or a misbehaving
