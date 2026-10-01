@@ -95,16 +95,24 @@ class DevicePairing:
         self.store, self.room, self.rendezvous, self.config = store, room, rendezvous, config
         self.listen_url = None   # the node's own address, once it listens (`server.__main__`)
         self.calls = {}          # device id -> the call sockets it has open
+        self.sockets = set()     # every call socket open, from its acceptance to its close, whoever it belongs to
 
     def call_opened(self, device_id, websocket):
+        self.sockets.add(websocket)
         if device_id:
             self.calls.setdefault(device_id, set()).add(websocket)
 
     def call_closed(self, device_id, websocket):
+        self.sockets.discard(websocket)
         if device_id and device_id in self.calls:
             self.calls[device_id].discard(websocket)
             if not self.calls[device_id]:
                 del self.calls[device_id]
+
+    def open_calls(self):
+        """How many call sockets are open: one still waiting for its first message too, and a call whose microphone
+        moved to WebRTC once (its media rides on its socket)."""
+        return len(self.sockets)
 
     async def end_calls(self, device_id):
         """A revoked device's open calls end at once, with the same close as a refused token."""

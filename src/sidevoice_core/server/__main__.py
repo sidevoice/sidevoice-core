@@ -14,6 +14,11 @@ the data directory is not this user's alone (`identity.unsafe-directory`), the n
 (`import.missing-module`). Anything else is an exit with a traceback in the log, as before. So that a missing
 module is one of the named reasons, nothing that can fail to import is imported before the guard in `main`.
 
+One data directory has one core. Before it touches anything there, a core takes an exclusive lock on
+`core.lock` in it (and in the socket's directory, when that is elsewhere) and holds it until it has removed its
+socket and its ready file; a second starter meanwhile is refused (`bind.port-in-use`, naming the socket). Only the
+lock's holder may decide that a socket file is a dead core's and replace it.
+
 `--self-test` imports everything serving needs and says whether it could, in one line, without binding or writing
 anything: what an installer runs on a staged runtime before committing to it.
 
@@ -37,6 +42,7 @@ DEFAULT_PORT = 8768
 DEFAULT_IDLE_SECONDS = 600
 SOCKET_NAME = 'local.sock'
 FAILURE_FILE = 'core-failure.json'
+LOCK_FILE = 'core.lock'
 # What serving imports inside functions, beyond this package's own modules (each imported by `--self-test`).
 DEPENDENCIES = ('uvicorn', 'aiohttp', 'yarl', 'socketio', 'cryptography.hazmat.primitives.asymmetric.ec', 'aiortc',
                 'av', 'opentelemetry.sdk.trace', 'opentelemetry.exporter.otlp.proto.http.trace_exporter',
@@ -78,9 +84,26 @@ def private_directory(path):
         raise StartFailure('directory', 'identity.unsafe-directory', problem)
 
 
+def claim(directory):
+    """This process's exclusive hold on `directory` (a descriptor to keep open), or None when another core has it.
+    flock: the kernel lets go of it with the process, however that process ends, so a dead core never leaves a
+    lock behind that a new one would have to judge stale."""
+    import fcntl
+    descriptor = os.open(Path(directory) / LOCK_FILE, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        return None
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def bind(host, port):
-    """The TCP listener, bound here rather than by uvicorn, so a port in use is told apart from every other
-    failure to start."""
+    """The TCP listener, bound and listening here rather than in uvicorn, so a port in use is told apart from every
+    other failure to start, and a port bound is a port held: no other starter can listen on it in between."""
     import socket
     family, kind, proto, _, address = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM,
                                                          flags=socket.AI_PASSIVE)[0]
@@ -88,6 +111,7 @@ def bind(host, port):
     try:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(address)
+        listener.listen()
     except BaseException:
         listener.close()
         raise
@@ -100,16 +124,17 @@ def taken(error, what):
     return None
 
 
-def idle(room):
-    control = room.control
-    return not room.clients and not (control and control.peers)
+def idle(app):
+    """No call socket open (one still waiting for its first message counts) and no connector linked."""
+    control = app.state.room.control
+    return not app.state.devices.open_calls() and not (control and control.peers)
 
 
-async def watch_idle(room, server, seconds, *, every=5.0):
+async def watch_idle(app, server, seconds, *, every=5.0):
     quiet_since = time.monotonic()
     while not server.should_exit:
         await asyncio.sleep(min(every, seconds))
-        if not idle(room):
+        if not idle(app):
             quiet_since = time.monotonic()
         elif time.monotonic() - quiet_since >= seconds:
             from loguru import logger
@@ -117,10 +142,18 @@ async def watch_idle(room, server, seconds, *, every=5.0):
             server.should_exit = True
 
 
-async def started(server, serving):
+async def started(server, serving, what):
     while not server.started:
         if serving.done():
-            await serving   # it could not start: uvicorn has said why
+            try:
+                await serving   # it could not start: uvicorn has said why
+            except OSError as error:
+                # The listener failed after the app's lifespan had started: it ends as uvicorn ends it when its own
+                # bind fails, rather than being cancelled under the event loop's teardown.
+                lifespan = getattr(server, 'lifespan', None)
+                if lifespan is not None:
+                    await lifespan.shutdown()
+                raise taken(error, what) or error
             raise SystemExit(1)
         await asyncio.sleep(0.02)
 
@@ -140,48 +173,57 @@ async def serve(arguments):
     from .app import create_app
     from .local import LocalListener, LocalSocket
     from .rendezvous import Rendezvous
-    # Everything below reads the data directory from the environment when it needs it (the provider
-    # keys included), so it is said once, here, where the process is assembled.
-    os.environ['SIDEVOICE_CORE_DATA_DIR'] = str(data)
-    room = Room(RoomHistory(data / 'room-state.json'))
-    connector_id, token = local_credential(room.journal, data / 'connector-credential.json')
-    # The link with the room needs this node's own address to relay to, known once it listens.
-    rendezvous = Rendezvous(arguments.room_credential, None)
-    app = create_app(room, rendezvous=rendezvous)
-    app.state.launch_id = arguments.launch_id
-    # The node's identity exists from its first start, and one that cannot be read stops it here, loudly:
-    # every paired device pins it, so it is never replaced behind anyone's back.
-    try:
-        app.state.devices.store.identity
-    except (IdentityError, OSError) as error:
-        raise StartFailure('identity', 'identity.unreadable', str(error)) from error
-    try:
-        tcp = bind(arguments.host, arguments.port)
-    except OSError as error:
-        raise taken(error, f'{arguments.host}:{arguments.port}') or error
-    try:
-        local = LocalSocket(socket_path)
-    except OSError as error:
-        tcp.close()
-        raise taken(error, str(socket_path)) or error
-    server = uvicorn.Server(uvicorn.Config(app, log_level='info'))
-    listener = LocalListener(app, server, log_level='info')
-
-    def stop(*_):
-        server.should_exit = True
-
-    # A supervisor's SIGTERM (or ^C) is the same clean exit as going idle. uvicorn handles the signal while it
-    # serves and raises it again once it has stopped: under the default handler the process would die right
-    # there, leaving `core.json` and the socket behind for the next start to trip over.
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, stop)
+    held = []
+    for directory in dict.fromkeys((data, socket_path.parent)):
+        descriptor = claim(directory)
+        if descriptor is None:
+            for other in held:
+                os.close(other)
+            raise StartFailure('bind', 'bind.port-in-use', f'Another core is serving {socket_path}: it holds '
+                               f'{Path(directory) / LOCK_FILE}.')
+        held.append(descriptor)
     ready = Path(arguments.ready_file) if arguments.ready_file else data / 'core.json'
-    serving = asyncio.create_task(server.serve(sockets=[tcp]))
-    local_serving = None
+    tcp = local = listener = local_serving = None
     try:
-        await started(server, serving)   # the app's lifespan runs here, once
+        # Everything below reads the data directory from the environment when it needs it (the provider
+        # keys included), so it is said once, here, where the process is assembled.
+        os.environ['SIDEVOICE_CORE_DATA_DIR'] = str(data)
+        room = Room(RoomHistory(data / 'room-state.json'))
+        connector_id, token = local_credential(room.journal, data / 'connector-credential.json')
+        # The link with the room needs this node's own address to relay to, known once it listens.
+        rendezvous = Rendezvous(arguments.room_credential, None)
+        app = create_app(room, rendezvous=rendezvous)
+        app.state.launch_id = arguments.launch_id
+        # The node's identity exists from its first start, and one that cannot be read stops it here, loudly:
+        # every paired device pins it, so it is never replaced behind anyone's back.
+        try:
+            app.state.devices.store.identity
+        except (IdentityError, OSError) as error:
+            raise StartFailure('identity', 'identity.unreadable', str(error)) from error
+        address = f'{arguments.host}:{arguments.port}'
+        try:
+            tcp = bind(arguments.host, arguments.port)
+        except OSError as error:
+            raise taken(error, address) or error
+        try:
+            local = LocalSocket(socket_path)
+        except OSError as error:
+            raise taken(error, str(socket_path)) or error
+        server = uvicorn.Server(uvicorn.Config(app, log_level='info'))
+        listener = LocalListener(app, server, log_level='info')
+
+        def stop(*_):
+            server.should_exit = True
+
+        # A supervisor's SIGTERM (or ^C) is the same clean exit as going idle. uvicorn handles the signal while it
+        # serves and raises it again once it has stopped: under the default handler the process would die right
+        # there, leaving `core.json` and the socket behind for the next start to trip over.
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signum, stop)
+        serving = asyncio.create_task(server.serve(sockets=[tcp]))
+        await started(server, serving, address)   # the app's lifespan runs here, once
         local_serving = asyncio.create_task(listener.serve(sockets=[local.socket]))
-        await started(listener, local_serving)
+        await started(listener, local_serving, str(socket_path))
         port = tcp.getsockname()[1]
         write_ready(ready, {'pid': os.getpid(), 'port': port, 'url': f'http://127.0.0.1:{port}',
                             'socket': str(socket_path), 'launch_id': arguments.launch_id,
@@ -192,27 +234,38 @@ async def serve(arguments):
         rendezvous.base = f'http://127.0.0.1:{port}'
         app.state.devices.listen_url = rendezvous.base   # the first of a pairing code's `urls`
         await rendezvous.start()
-        watcher = asyncio.create_task(watch_idle(room, server, arguments.idle_exit)) if arguments.idle_exit else None
+        watcher = asyncio.create_task(watch_idle(app, server, arguments.idle_exit)) if arguments.idle_exit else None
         await serving
         if watcher:
             watcher.cancel()
     finally:
-        listener.should_exit = True
+        # However the start or the run ended: the socket and the ready file go, then the hold on the directory.
+        if listener is not None:
+            listener.should_exit = True
         if local_serving is not None:
-            await local_serving
-        local.remove()
+            await asyncio.gather(local_serving, return_exceptions=True)
+        if tcp is not None:
+            tcp.close()
+        if local is not None:
+            local.socket.close()
+            local.remove()
         remove_ready(ready)
+        for descriptor in held:
+            os.close(descriptor)
 
 
 def failed(arguments, failure):
     """Why this start ended, where the supervisor reads it, and in the log beside it."""
-    from ..storage import write_private
+    from ..storage import write_private_into
     report = {'launch_id': arguments.launch_id, 'step': failure.step, 'key': failure.key, 'message': failure.message,
               'at': datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')}
+    # Only into the data directory itself, this user's own: one that is a link to elsewhere, or someone else's, is
+    # not written through (it was refused for that), and the cause stays in the log beside the supervisor's fallback.
+    # One that is merely open to others still takes the report, which holds no secret: that is how its key is known.
     try:
-        write_private(Path(arguments.data_dir) / FAILURE_FILE, json.dumps(report))
+        write_private_into(arguments.data_dir, FAILURE_FILE, json.dumps(report))
     except OSError as error:
-        print(f'sidevoice-core: could not write {FAILURE_FILE}: {error}', file=sys.stderr)
+        print(f'sidevoice-core: {FAILURE_FILE} not written ({error})', file=sys.stderr)
     print(f'sidevoice-core could not start ({failure.key}): {failure.message}', file=sys.stderr)
     return 1
 

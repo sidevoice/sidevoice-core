@@ -48,3 +48,31 @@ def write_private(path, text):
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def write_private_into(directory, name, text):
+    """`write_private`, into `directory` only if it is one of this user's own, reached without following a link at
+    its last step: a directory refused as a link to somewhere else, or as someone else's, is never written through.
+    The file is created and replaced relative to the directory opened and checked, never by its path again.
+    OSError when it is not such a directory."""
+    folder = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        if os.fstat(folder).st_uid != os.getuid():
+            raise PermissionError(f'{directory} belongs to another user')
+        temporary = f'.{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp'
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, 'w', encoding='utf8') as file:
+                file.write(text)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
+        except BaseException:
+            try:
+                os.unlink(temporary, dir_fd=folder)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(folder)

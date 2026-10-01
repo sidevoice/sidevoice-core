@@ -2,6 +2,7 @@
 machine's connector link through its local socket with the credential in that file, leaves once nothing
 uses it, and — when it cannot start — says why in a file its supervisor reads."""
 import asyncio
+import fcntl
 import json
 import os
 import signal
@@ -18,7 +19,7 @@ from pathlib import Path
 import socketio
 
 from sidevoice_core.control.connectors import PROTOCOL
-from test_rendezvous import LOCAL, link_client
+from test_rendezvous import LOCAL, link_client, through
 
 
 async def until(check, timeout=20.0, every=0.05):
@@ -45,6 +46,29 @@ def shadowing(root, module):
     package.mkdir(parents=True)
     (package / '__init__.py').write_text(f'raise ModuleNotFoundError("No module named {module!r}", name={module!r})\n')
     return {**os.environ, 'PYTHONPATH': os.pathsep.join(filter(None, [str(package.parent), os.environ.get('PYTHONPATH')]))}
+
+
+# Fails the n-th listen() on a TCP socket with EADDRINUSE, as a rival bound to the same port and listening first
+# would: (1) the core's own bind, (2) uvicorn starting its server on that socket, after the app's lifespan began.
+FAIL_LISTEN = """import errno, os, socket
+fail, calls, listen = int(os.environ['SIDEVOICE_TEST_FAIL_LISTEN']), [0], socket.socket.listen
+def failing(self, *args):
+    if self.family in (socket.AF_INET, socket.AF_INET6):
+        calls[0] += 1
+        if calls[0] == fail:
+            raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
+    return listen(self, *args)
+socket.socket.listen = failing
+"""
+
+
+def failing_listen(root, which):
+    """An environment whose interpreter fails the `which`-th TCP listen() (`sitecustomize`, first on the path)."""
+    site = Path(root) / 'site'
+    site.mkdir()
+    (site / 'sitecustomize.py').write_text(FAIL_LISTEN)
+    return {**os.environ, 'SIDEVOICE_TEST_FAIL_LISTEN': str(which),
+            'PYTHONPATH': os.pathsep.join(filter(None, [str(site), os.environ.get('PYTHONPATH')]))}
 
 
 class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
@@ -134,6 +158,50 @@ class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(welcome, {'protocol': PROTOCOL})
 
 
+    async def test_a_call_still_waiting_for_its_first_message_keeps_the_core_up_and_is_counted(self):
+        """What a supervisor reads before restarting, and what idle exit waits for, is every call socket open —
+        from its acceptance, not from its first message."""
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / 'core'
+            process = self.start(data, '2')
+            facts = await until(lambda: ready(data / 'core.json'))
+            async with through(facts['socket']) as http:
+                async with http.post(LOCAL + '/api/device/local/pair', json={'name': 'app'}) as answer:
+                    token = (await answer.json())['token']
+                ws = await http.ws_connect('ws://localhost/api/presentation/ws',
+                                           protocols=['sidevoice', f'sidevoice.token.{token}'])
+                async with http.get(LOCAL + '/api/local/health') as answer:
+                    self.assertEqual((await answer.json())['calls'], 1, 'before any hello')
+                await asyncio.sleep(4)   # past the idle budget, well inside the ten seconds a hello may take
+                self.assertIsNone(process.poll(), 'a call waiting for its first message is a call')
+                await ws.close()
+            await until(lambda: process.poll() is not None, timeout=20)
+
+    async def test_overlapping_starts_leave_exactly_one_core(self):
+        """Two starters at once on one data directory: whichever order their steps interleave in, one serves and
+        the other says the socket is taken — never two cores, never one socket replacing another's."""
+        for attempt in range(3):
+            with self.subTest(attempt=attempt), tempfile.TemporaryDirectory() as root:
+                data = Path(root) / 'core'
+                data.mkdir(mode=0o700)
+                rivals = [self.start(data, '0', '--launch-id', f'rival-{n}') for n in range(2)]
+                facts = await until(lambda: ready(data / 'core.json'), timeout=60)
+                loser = await until(lambda: next((r for r in rivals if r.poll() is not None), None), timeout=60)
+                winner = next(r for r in rivals if r is not loser)
+                await asyncio.sleep(1)
+                self.assertIsNone(winner.poll(), 'the other one serves')
+                self.assertEqual(loser.returncode, 1)
+                self.assertEqual(facts['pid'], winner.pid)
+                report = json.loads((data / 'core-failure.json').read_text())
+                self.assertEqual((report['key'], report['step']), ('bind.port-in-use', 'bind'))
+                self.assertEqual(report['launch_id'], f'rival-{rivals.index(loser)}')
+                self.assertIn(str(data / 'local.sock'), report['message'], 'the socket is named')
+                async with through(data / 'local.sock') as http, http.get(LOCAL + '/api/local/health') as answer:
+                    self.assertEqual((await answer.json())['pid'], winner.pid, 'the socket is the survivor\'s')
+                winner.terminate()
+                self.assertEqual(winner.wait(20), 0)
+
+
 class StartFailureTest(unittest.TestCase):
     """Each reason a start fails for leaves its key, with the launch that failed, in `core-failure.json`."""
 
@@ -163,6 +231,50 @@ class StartFailureTest(unittest.TestCase):
             (data / 'node-identity.json').write_text('{"private_key_pem": "not a key"}')
             self.failure(data, self.run_core(data), 'identity', 'identity.unreadable')
             self.assertEqual((data / 'node-identity.json').read_text(), '{"private_key_pem": "not a key"}', 'never replaced')
+
+    def test_an_identity_that_is_not_even_text(self):
+        for content in (b'\xff\xfe', b'{"private_key_pem": "\xc3\x28"}'):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as root:
+                data = Path(root) / 'core'
+                data.mkdir(mode=0o700)
+                (data / 'node-identity.json').write_bytes(content)
+                self.failure(data, self.run_core(data), 'identity', 'identity.unreadable')
+                self.assertEqual((data / 'node-identity.json').read_bytes(), content, 'never replaced')
+
+    def test_a_directory_another_core_holds(self):
+        """The lock is taken before anything is: a refused starter has written nothing but its report."""
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root) / 'core'
+            data.mkdir(mode=0o700)
+            with open(data / 'core.lock', 'w') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                report = self.failure(data, self.run_core(data), 'bind', 'bind.port-in-use')
+            self.assertIn(str((data / 'local.sock').absolute()), report['message'])
+            self.assertEqual(sorted(p.name for p in data.iterdir()), ['core-failure.json', 'core.lock'])
+
+    def test_a_port_taken_between_bind_and_listen(self):
+        """Taken at the core's own listen(), or at uvicorn's after the app's lifespan began: the same key, and
+        whatever this start had bound is gone with it."""
+        for which in (1, 2):
+            with self.subTest(listen=which), tempfile.TemporaryDirectory() as root:
+                data = Path(root) / 'core'
+                result = self.run_core(data, env=failing_listen(root, which))
+                report = self.failure(data, result, 'bind', 'bind.port-in-use')
+                self.assertIn('127.0.0.1:0', report['message'])
+                self.assertFalse((data / 'local.sock').exists(), 'no socket left behind')
+
+    def test_a_data_directory_that_is_a_link_is_not_written_through(self):
+        with tempfile.TemporaryDirectory() as root:
+            elsewhere = Path(root) / 'elsewhere'
+            elsewhere.mkdir(mode=0o700)
+            (elsewhere / 'core-failure.json').write_text('somebody else\'s')
+            data = Path(root) / 'core'
+            data.symlink_to(elsewhere)
+            result = self.run_core(data)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('identity.unsafe-directory', result.stderr, 'the cause is in the log')
+            self.assertEqual((elsewhere / 'core-failure.json').read_text(), 'somebody else\'s', 'untouched')
+            self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ['core-failure.json'], 'nothing else either')
 
     def test_a_directory_other_users_may_enter(self):
         with tempfile.TemporaryDirectory() as root:

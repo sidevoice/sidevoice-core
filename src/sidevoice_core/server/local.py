@@ -85,7 +85,7 @@ class LocalPair(BaseModel):
     name: str | None = Field(default=None, max_length=200)
 
 
-def mount_local(app, room):
+def mount_local(app):
     """The routes served only on the socket. `app.state.launch_id` is the launch a supervisor named
     (`--launch-id`), so it can tell this core from one that answers on a socket it left behind."""
     from ..runtime import API, version
@@ -98,7 +98,7 @@ def mount_local(app, room):
         identity = devices.store.identity
         return {'launch_id': app.state.launch_id, 'pid': os.getpid(), 'version': version(), 'api': API,
                 'fingerprint': identity.fingerprint, 'public_key': identity.public_key, 'host': devices.host(),
-                'calls': len(room.clients)}
+                'calls': devices.open_calls()}
 
     @app.post('/api/device/local/pair')
     async def pair_local(body: LocalPair = LocalPair()):
@@ -121,8 +121,9 @@ def mount_local(app, room):
 
 
 class LocalSocket:
-    """The socket's file, bound and 0600 before anything can listen on it. A file left by a core that died is
-    replaced; one a live core still answers on is not taken from it (EADDRINUSE)."""
+    """The socket's file, bound, 0600 and listening at once: from then on it answers, so no other starter can take
+    it for a dead core's. A file left by a core that died is replaced; one a live core still answers on is not
+    taken from it (EADDRINUSE). Only the holder of the data directory's lock (`server.__main__`) judges which."""
 
     def __init__(self, path):
         self.path = Path(path)
@@ -145,6 +146,7 @@ class LocalSocket:
             # The directory already keeps everyone else out; the socket says so too.
             os.chmod(self.path, 0o600)
             self.inode = os.stat(self.path).st_ino
+            self.socket.listen()
         except BaseException:
             self.socket.close()
             raise

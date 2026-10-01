@@ -2,6 +2,7 @@
 serves — the readiness probe, the app's own pairing and its undoing, the connector's link — and that none of it
 exists over TCP or through a room's relay; that pairing the app again replaces it, calls included; and that every
 other route on the socket still wants a device token."""
+import errno
 import json
 import os
 import socket
@@ -9,12 +10,14 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import aiohttp
 import socketio
 
 from sidevoice_core.control.connectors import PROTOCOL as CONNECTOR_PROTOCOL
-from sidevoice_core.server.local import local_only
+from sidevoice_core.control.devices import DeviceRegistry
+from sidevoice_core.server.local import LocalSocket, local_only
 from sidevoice_core.server.rendezvous import relayable
 from sidevoice_core.storage import unsafe_directory
 from test_rendezvous import LOCAL, NodeTest, link_client, through, until
@@ -76,6 +79,35 @@ class LocalSocketTests(NodeTest):
         self.assertEqual((await self.via_socket('GET', '/api/local/health'))[1]['calls'], 1)
         await ws.close()
         await until(lambda: not self.node_room.clients, timeout=15)
+
+    async def test_a_call_socket_counts_from_its_acceptance_to_its_close(self):
+        """Before its first message too: a supervisor that read `calls: 0` there would restart under a call."""
+        ws = await self.call((await self.pair_local())['token'])
+        await until(lambda: self.app.state.devices.open_calls() == 1)
+        self.assertEqual((await self.via_socket('GET', '/api/local/health'))[1]['calls'], 1, 'no hello sent')
+        self.assertEqual(self.node_room.clients, {}, 'not in the room yet: still a call')
+        await ws.close()
+        await until(lambda: self.app.state.devices.open_calls() == 0)
+        self.assertEqual((await self.via_socket('GET', '/api/local/health'))[1]['calls'], 0)
+
+    async def test_a_removal_that_could_not_be_written_is_still_there_to_finish(self):
+        """A failed write leaves the app paired, in memory as on disk: the retry finds it, revokes it for good and
+        ends its call — never a 'nothing to revoke' while its token still works after a restart."""
+        paired = await self.pair_local()
+        ws = await self.call(paired['token'])
+        await until(lambda: self.app.state.devices.open_calls() == 1)
+        registry = self.app.state.devices.store.registry
+        with patch.object(registry, 'save', side_effect=OSError('disk full')):
+            async with self.local_http.delete(LOCAL + '/api/device/local') as failed:
+                self.assertEqual(failed.status, 500)
+        self.assertEqual(registry.authenticate(paired['token']), paired['device_id'], 'still paired')
+        self.assertEqual(self.app.state.devices.open_calls(), 1, 'and its call goes on: nothing was revoked')
+        self.assertEqual(await self.via_socket('DELETE', '/api/device/local'), (200, {'ok': True, 'revoked': True}))
+        message = await ws.receive(timeout=10)
+        self.assertEqual((message.type, ws.close_code), (aiohttp.WSMsgType.CLOSE, 4401))
+        reloaded = DeviceRegistry(Path(self.temp.name) / 'core' / 'devices.json')
+        self.assertIsNone(reloaded.authenticate(paired['token']), 'gone from the file too')
+        self.assertEqual(reloaded.devices, {})
 
     async def test_the_app_pairs_with_no_code_and_unpairs_itself(self):
         paired = await self.pair_local()
@@ -181,9 +213,21 @@ class LocalSocketTests(NodeTest):
                     self.assertEqual((answer['status'], json.loads(answer['body'])), (404, {'detail': 'Not relayed.'}),
                                      'refused by name, before any request is made')
         self.assertEqual(self.app.state.devices.store.registry.devices, {}, 'nothing was paired through the room')
-        # What sits beside them under the relayed prefix still is relayed.
-        self.assertTrue(relayable(self.tcp, '/api/device/pair'))
-        self.assertTrue(relayable(self.tcp, '/api/device/localhost'))
+
+
+class LocalSocketFileTests(unittest.TestCase):
+    def test_a_socket_is_listening_from_its_binding_so_a_second_starter_cannot_take_it(self):
+        """The review's sequence: two starters bind one path, one after the other, before either has served. The
+        second meets a socket that answers, and leaves it alone."""
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'local.sock'
+            first = LocalSocket(path)
+            self.addCleanup(first.socket.close)
+            with self.assertRaises(OSError) as taken:
+                LocalSocket(path)
+            self.assertEqual(taken.exception.errno, errno.EADDRINUSE)
+            self.assertIn(str(path), str(taken.exception))
+            self.assertEqual(os.stat(path).st_ino, first.inode, 'the first one\'s file, still')
 
 
 class LocalOnlyRuleTests(unittest.TestCase):

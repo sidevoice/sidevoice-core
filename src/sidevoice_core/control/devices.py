@@ -78,7 +78,7 @@ class NodeIdentity:
         file is linked into place only if absent, and the loser reads the winner's."""
         path = Path(path)
         try:
-            return cls.parse(path.read_text(encoding='utf8'), path)
+            return cls.parse(path.read_bytes(), path)
         except FileNotFoundError:
             pass
         from cryptography.hazmat.primitives import serialization
@@ -91,14 +91,15 @@ class NodeIdentity:
         try:
             os.link(staged, path)
         except FileExistsError:
-            return cls.parse(path.read_text(encoding='utf8'), path)
+            return cls.parse(path.read_bytes(), path)
         finally:
             staged.unlink(missing_ok=True)
         logger.info('This node has a new identity ({})', path)
-        return cls.parse(path.read_text(encoding='utf8'), path)
+        return cls.parse(path.read_bytes(), path)
 
     @classmethod
     def parse(cls, text, path):
+        """The key in `text` — bytes as read, so bytes that are not even UTF-8 are one more way of not being it."""
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import ec
         try:
@@ -258,22 +259,36 @@ class DeviceRegistry:
                 for device_id, entry in sorted(self.devices.items(), key=lambda item: item[1].get('created') or 0)]
 
     def revoke(self, device_id):
-        """Its token stops working now; the file follows. False when no such device is paired."""
+        """Its token stops working now; the file follows. False when no such device is paired. A write that fails
+        leaves it paired, in memory as on disk, so asking again revokes it."""
         entry = self.devices.pop(device_id, None) if isinstance(device_id, str) else None
         if entry is None:
             return False
         self.by_token.pop(entry['token_hash'], None)
-        self.save()
+        try:
+            self.save()
+        except BaseException:
+            self.devices[device_id] = entry
+            self.by_token[entry['token_hash']] = device_id
+            raise
         return True
 
     def revoke_local(self):
-        """The ids of the `local` devices revoked (none, or this computer's app)."""
-        local = [device_id for device_id, entry in self.devices.items() if entry.get('kind') == 'local']
-        for device_id in local:
-            self.by_token.pop(self.devices.pop(device_id)['token_hash'], None)
-        if local:
-            self.save()
-        return local
+        """The ids of the `local` devices revoked (none, or this computer's app). Revoked in memory and on disk, or in
+        neither: a write that fails leaves the device as it was, so asking again still finds it — and its calls."""
+        gone = {device_id: entry for device_id, entry in self.devices.items() if entry.get('kind') == 'local'}
+        for device_id, entry in gone.items():
+            del self.devices[device_id]
+            self.by_token.pop(entry['token_hash'], None)
+        if gone:
+            try:
+                self.save()
+            except BaseException:
+                for device_id, entry in gone.items():
+                    self.devices[device_id] = entry
+                    self.by_token[entry['token_hash']] = device_id
+                raise
+        return list(gone)
 
 
 class NodeDevices:

@@ -240,7 +240,7 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None, de
     mount_browser_call(app, room, config)
     mount_webrtc(app, room)
     devices = mount_devices(app, room, rendezvous, config)
-    mount_local(app, room)
+    mount_local(app)
     mount_rendezvous(app, room, rendezvous)
     instrument(app)
     if device_auth:
