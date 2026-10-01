@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "ea211af5844aa9190ad521ab6313d8e2a389c3f1",
+  "include-component-in-tag": false,
+  "draft": true,
+  "force-tag-creation": true,
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "sidevoice-core",
+      "bump-minor-pre-major": true
+    }
+  }
+}

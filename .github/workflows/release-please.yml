@@ -1,0 +1,50 @@
+name: release-please
+
+# On every push to main: keep the "release X.Y.Z" PR up to date (version from feat/fix, changelog from the squashed
+# PR titles). Merging that PR is the release: this run then creates the tag and a draft GitHub Release, and
+# test.yml (called below) builds the wheel, sdist, catalogue and vectors from the tag, attaches them and publishes
+# it. RELEASING.md.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never cancelled: a run that created a release must finish attaching its assets.
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PR and release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+      - name: Run the PR-title check on the release PR (its own pushes start no workflow)
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: gh workflow run pr-title.yml --ref "$BRANCH"
+
+  assets:
+    name: Release assets
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/test.yml
+    with:
+      release-tag: ${{ needs.release-please.outputs.tag_name }}

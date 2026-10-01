@@ -1,15 +1,128 @@
 name: test
+
+# What runs when (RELEASING.md):
+# - pull request: the unit tests on Linux.
+# - push to main, manual run: the tests, then the wheel, sdist, model catalogue and resolver vectors; a green run on
+#   main replaces the `nightly` pre-release.
+# - a release (called by release-please.yml with the tag it created): the same, attached to that release.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: The draft release release-please created (vX.Y.Z); its assets are built from that tag.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per ref. A release (github.workflow is the caller's, release-please) never shares a group with a push.
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release-tag }}
       - uses: astral-sh/setup-uv@v6
       - run: uv venv --python 3.12 .venv
       - run: uv pip install --python .venv/bin/python -e '.[test]'
       # Tests that need a rubasace/sidevoice checkout (the connector, the protocol package) skip here.
       - run: .venv/bin/python -m pytest -q -p no:warnings
+
+  package:
+    name: Wheel, sdist, model catalogue and vectors
+    needs: python
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      # Where the assets go: the release that called this, or the rolling `nightly` pre-release on a push to main.
+      publish: ${{ steps.kind.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release-tag }}
+      - uses: astral-sh/setup-uv@v6
+      - id: kind
+        run: echo "publish=${{ inputs.release-tag && 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'nightly' || '' }}" >> "$GITHUB_OUTPUT"
+      - name: Wheel and sdist
+        run: uv build --python 3.12 --out-dir dist
+      - name: The model catalogue and the resolver vectors, as shipped in the wheel
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src uv run --no-project --python 3.12 python -c '
+          from sidevoice_core.models.catalog import check, load
+          problems = check(load())
+          assert not problems, problems'
+          cp src/sidevoice_core/models/catalog.json dist/models-catalog.json
+          cp src/sidevoice_core/models/vectors.json dist/models-vectors.json
+          WHEEL=$(ls dist/*.whl)
+          unzip -p "$WHEEL" sidevoice_core/models/catalog.json | cmp - dist/models-catalog.json
+          unzip -p "$WHEEL" sidevoice_core/models/vectors.json | cmp - dist/models-vectors.json
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          ls -la dist; cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidevoice-core-dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # Only after the tests and the package passed. Pull requests never get here.
+  publish:
+    name: Publish (release or nightly)
+    needs: package
+    if: needs.package.outputs.publish != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.release-tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sidevoice-core-dist
+          path: assets
+      - name: Attach to the release, then publish it (a version with -rc.N is a pre-release, never latest)
+        if: needs.package.outputs.publish == 'release'
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" assets/* --clobber
+          if [[ "$TAG" == *-* ]]; then
+            gh release edit "$TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$TAG" --draft=false --prerelease=false --latest
+          fi
+      - name: Replace the nightly pre-release (move its tag here, replace every asset)
+        if: needs.package.outputs.publish == 'nightly'
+        env:
+          WHEN: ${{ github.event.head_commit.timestamp }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GH_REPO/git/ref/tags/nightly" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          NOTES="Snapshot of \`main\` at $GITHUB_SHA (committed $WHEN). Not a versioned release: the \`nightly\` tag moves to every commit on \`main\` whose CI passes, and these assets are replaced each time. Versioned releases are the \`vX.Y.Z\` ones."
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly --title "Nightly (main)" --notes "$NOTES" --prerelease --latest=false
+            gh release upload nightly assets/* --clobber
+            # Anything left from an older snapshot that this one did not replace (the wheel and sdist are named after the version).
+            gh release view nightly --json assets -q '.assets[].name' | while read -r name; do
+              [ -e "assets/$name" ] || gh release delete-asset nightly "$name" --yes
+            done
+          else
+            gh release create nightly assets/* --verify-tag --title "Nightly (main)" --notes "$NOTES" \
+              --prerelease --latest=false
+          fi
