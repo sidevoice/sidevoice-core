@@ -20,9 +20,15 @@ from tools.core_bundle import (
     MACOS_PYAV_LIBSHARPYUV_SHA256,
     MACOS_PYAV_UPSTREAM_RPATH,
     MACOS_PYAV_WHEEL_SHA256,
+    MACOS_SCIPY_FBLAS_DEPENDENCIES,
+    MACOS_SCIPY_FBLAS_PATH,
+    MACOS_SCIPY_FBLAS_SHA256,
+    MACOS_SCIPY_UPSTREAM_RPATHS,
+    MACOS_SCIPY_WHEEL_SHA256,
     PIL_CODEC_ROUNDTRIP_PROBE,
     PYAV_AUDIO_ROUNDTRIP_PROBE,
     PYAV_WEBP_ROUNDTRIP_PROBE,
+    SCIPY_RUNTIME_PROBE,
     PILLOW_CODECS,
     PILLOW_REQUIRED_FEATURES,
     _parse_otool_dependencies,
@@ -34,7 +40,10 @@ from tools.core_bundle import (
     _validate_macho_path,
     _validate_pillow_rpath_exception,
     _validate_pyav_rpath_exception,
+    _validate_scipy_rpath_exception,
     _require_no_vendor_trace,
+    _require_no_reviewed_rpath_trace,
+    _validate_rpath_positive_control,
     create_archive,
     extract_python_distribution,
     inspect_archive,
@@ -61,6 +70,18 @@ class CoreBundleTests(unittest.TestCase):
         self.assertEqual(arm_wheel["hash"].removeprefix("sha256:"), MACOS_PILLOW_WHEEL_SHA256)
         self.assertRegex(MACOS_PILLOW_LIBJPEG_SHA256, r"^[0-9a-f]{64}$")
 
+    def test_scipy_rpath_exception_is_bound_to_the_locked_wheel(self):
+        import tomllib
+
+        project = Path(__file__).resolve().parents[1]
+        lock = tomllib.loads((project / "uv.lock").read_text(encoding="utf-8"))
+        scipy = next(package for package in lock["package"] if package["name"] == "scipy")
+        arm_wheel = next(
+            wheel for wheel in scipy["wheels"] if "cp312-cp312-macosx_14_0_arm64.whl" in wheel["url"]
+        )
+        self.assertEqual(arm_wheel["hash"].removeprefix("sha256:"), MACOS_SCIPY_WHEEL_SHA256)
+        self.assertRegex(MACOS_SCIPY_FBLAS_SHA256, r"^[0-9a-f]{64}$")
+
     def test_pillow_codec_probe_requires_native_features_and_lzw_tiff(self):
         import subprocess
         import sys
@@ -76,6 +97,7 @@ class CoreBundleTests(unittest.TestCase):
         self.assertEqual(evidence["features"], list(PILLOW_REQUIRED_FEATURES))
         self.assertEqual(evidence["tiff_compression"], "tiff_lzw")
         self.assertEqual(evidence["vendor_images"], [])
+        self.assertEqual(evidence["rpath_images"], [])
 
     def test_python_build_standalone_pins_match_their_release_urls(self):
         pins_path = Path(__file__).resolve().parents[1] / "packaging/python-build-standalone.json"
@@ -296,11 +318,57 @@ Load command 4
             evidence = json.loads(result.stdout)
             self.assertEqual(evidence["version"], "17.1.0")
             self.assertEqual(evidence["vendor_images"], [])
+            self.assertEqual(evidence["rpath_images"], [])
+            if probe == PYAV_WEBP_ROUNDTRIP_PROBE:
+                self.assertEqual(evidence["sharp_conversion"]["function"], "SharpYuvConvert")
+                self.assertEqual(evidence["sharp_conversion"]["input_rgb_bytes"], 16 * 16 * 3)
+                self.assertRegex(evidence["sharp_conversion"]["output_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_scipy_runtime_probe_executes_blas_and_solve(self):
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", SCIPY_RUNTIME_PROBE],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        evidence = json.loads(result.stdout)
+        self.assertEqual(evidence["scipy_version"], "1.18.1")
+        self.assertEqual(evidence["dgemm"], [[19.0, 22.0], [43.0, 50.0]])
+        self.assertEqual(evidence["solve"], [1.0, 2.0])
+        self.assertEqual(evidence["rpath_images"], [])
 
     def test_dyld_trace_rejects_both_tmp_path_spellings(self):
         for path in ("/tmp/vendor/lib/libcandidate.dylib", "/private/tmp/vendor/lib/libcandidate.dylib"):
             with self.subTest(path=path), self.assertRaisesRegex(ValueError, "dyld loaded an image"):
                 _require_no_vendor_trace(f"dyld: {path}\n", "test probe")
+        for path in (
+            MACOS_PILLOW_UPSTREAM_RPATH + "/libjpeg.62.dylib",
+            *[rpath + "/libgcc_s.1.1.dylib" for rpath in MACOS_SCIPY_UPSTREAM_RPATHS],
+        ):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "reviewed upstream LC_RPATH"):
+                _require_no_reviewed_rpath_trace(f"dyld: loaded: {path}\n", "test probe")
+
+    def test_rpath_positive_control_requires_stderr_trace_separate_from_image_capture(self):
+        with self.assertRaisesRegex(ValueError, "DYLD_PRINT_LIBRARIES capture"):
+            _validate_rpath_positive_control(
+                return_code=0,
+                marker_loaded=True,
+                loaded_image_lines=["/tmp/vendor/lib/libsidevoice_rpath_canary.dylib"],
+                trace_lines=[],
+                canonical_directory="/tmp/vendor/lib",
+            )
+        evidence = _validate_rpath_positive_control(
+            return_code=0,
+            marker_loaded=True,
+            loaded_image_lines=["/private/tmp/vendor/lib/libsidevoice_rpath_canary.dylib"],
+            trace_lines=["dyld[123]: loaded: /private/tmp/vendor/lib/libsidevoice_rpath_canary.dylib"],
+            canonical_directory="/private/tmp/vendor/lib",
+        )
+        self.assertTrue(evidence["loaded_image_capture"])
+        self.assertTrue(evidence["dyld_stderr_trace"])
 
     def test_pyav_load_command_parsers_and_exact_runpath_exception(self):
         import tempfile
@@ -325,6 +393,9 @@ Load command 3
         self.assertEqual(rpaths, (MACOS_PYAV_UPSTREAM_RPATH,))
         self.assertEqual(install_names, (MACOS_PYAV_LIBSHARPYUV_ID,))
         self.assertEqual(symbols, ("_malloc", "_free"))
+        self.assertEqual(_parse_nm_undefined_symbols("                 _dlopen\n _dlsym\n"), ("_dlopen", "_dlsym"))
+        with self.assertRaisesRegex(ValueError, "unrecognized `nm -u` output"):
+            _parse_nm_undefined_symbols("unexpected nm diagnostic")
         self.assertFalse(_has_macho_initializers(load_commands))
         self.assertTrue(_has_macho_initializers("cmd LC_ROUTINES_64\nsectname __mod_init_func"))
         self.assertEqual(_rpath_candidate_name("@rpath/libcodec.dylib"), "libcodec.dylib")
@@ -445,7 +516,6 @@ Load command 3
                         root=root,
                         executable_directory=root / "python/bin",
                     )
-
             other_binary = root / "python/lib/python3.12/site-packages/av/.dylibs/libwebp.dylib"
             other_binary.parent.mkdir(parents=True, exist_ok=True)
             other_binary.write_bytes(b"another dylib")
@@ -461,6 +531,114 @@ Load command 3
                         undefined_symbols=symbols,
                         has_initializers=False,
                     )
+
+    def test_scipy_exact_rpath_exception_pins_file_hash_and_complete_load_surface(self):
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "relocated"
+            binary = root / MACOS_SCIPY_FBLAS_PATH
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"locked SciPy _fblas fixture")
+            with patch("tools.core_bundle.digest", return_value=MACOS_SCIPY_FBLAS_SHA256):
+                evidence = _validate_scipy_rpath_exception(
+                    binary=binary,
+                    root=root,
+                    dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
+                    rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                    install_names=(),
+                    undefined_symbols=("_dgemm_", "_malloc"),
+                    has_initializers=False,
+                )
+            self.assertEqual(evidence["binary"], MACOS_SCIPY_FBLAS_PATH)
+            self.assertEqual(evidence["binary_sha256"], MACOS_SCIPY_FBLAS_SHA256)
+            self.assertEqual(evidence["wheel_sha256"], MACOS_SCIPY_WHEEL_SHA256)
+            self.assertEqual(evidence["lc_rpaths"], list(MACOS_SCIPY_UPSTREAM_RPATHS))
+            self.assertEqual(evidence["dependencies"], list(MACOS_SCIPY_FBLAS_DEPENDENCIES))
+            self.assertEqual(evidence["dynamic_loader_symbols"], [])
+            self.assertFalse(evidence["has_initializers"])
+
+            with patch("tools.core_bundle.digest", return_value="0" * 64):
+                with self.assertRaisesRegex(ValueError, "binary digest changed"):
+                    _validate_scipy_rpath_exception(
+                        binary=binary,
+                        root=root,
+                        dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
+                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                        install_names=(),
+                        undefined_symbols=(),
+                        has_initializers=False,
+                    )
+            with patch("tools.core_bundle.digest", return_value=MACOS_SCIPY_FBLAS_SHA256):
+                with self.assertRaisesRegex(ValueError, "LC_RPATH command set"):
+                    _validate_scipy_rpath_exception(
+                        binary=binary,
+                        root=root,
+                        dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
+                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS[:-1],
+                        install_names=(),
+                        undefined_symbols=(),
+                        has_initializers=False,
+                    )
+                with self.assertRaisesRegex(ValueError, "load graph changed"):
+                    _validate_scipy_rpath_exception(
+                        binary=binary,
+                        root=root,
+                        dependencies=("@rpath/libunexpected.dylib",),
+                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                        install_names=(),
+                        undefined_symbols=(),
+                        has_initializers=False,
+                    )
+                with self.assertRaisesRegex(ValueError, "dynamic-loader APIs"):
+                    _validate_scipy_rpath_exception(
+                        binary=binary,
+                        root=root,
+                        dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
+                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                        install_names=(),
+                        undefined_symbols=("_dlopen",),
+                        has_initializers=False,
+                    )
+                with self.assertRaisesRegex(ValueError, "Mach-O initializers"):
+                    _validate_scipy_rpath_exception(
+                        binary=binary,
+                        root=root,
+                        dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
+                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                        install_names=(),
+                        undefined_symbols=(),
+                        has_initializers=True,
+                    )
+                with patch("tools.core_bundle._embedded_rpath_candidate_names", return_value=("libexternal.dylib",)):
+                    with self.assertRaisesRegex(ValueError, "embedded @rpath names changed"):
+                        _validate_scipy_rpath_exception(
+                            binary=binary,
+                            root=root,
+                            dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
+                            rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                            install_names=(),
+                            undefined_symbols=(),
+                            has_initializers=False,
+                        )
+            with self.assertRaisesRegex(ValueError, "outside the relocated bundle"):
+                _validate_scipy_rpath_exception(
+                    binary=Path(temporary) / "other.dylib",
+                    root=root,
+                    dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
+                    rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                    install_names=(),
+                    undefined_symbols=(),
+                    has_initializers=False,
+                )
+        with self.assertRaisesRegex(ValueError, "non-system absolute Mach-O load path"):
+            _validate_macho_path(
+                MACOS_SCIPY_UPSTREAM_RPATHS[0],
+                binary=Path("_fblas.dylib"),
+                root=Path("/bundle"),
+                executable_directory=Path("/bundle/python/bin"),
+            )
 
     def test_python_archive_filter_contains_a_symlink_chain(self):
         import tempfile

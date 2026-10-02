@@ -45,12 +45,35 @@ MACOS_PYAV_UPSTREAM_RPATH = "/tmp/vendor/lib"
 MACOS_PYAV_LIBSHARPYUV_DEPENDENCIES = ("/usr/lib/libSystem.B.dylib",)
 MACOS_PYAV_LIBSHARPYUV_EMBEDDED_RPATH_NAMES = ()
 MACOS_PYAV_VERSION = "17.1.0"
+# The locked SciPy 1.18.1 arm64 wheel carries these three build-host runpaths on _fblas.
+MACOS_SCIPY_WHEEL_SHA256 = "7bbf207c4453ce1ad2e00b17313852b33310b83090c2311bdaf97f93c0380d12"
+MACOS_SCIPY_FBLAS_PATH = "python/lib/python3.12/site-packages/scipy/linalg/_fblas.cpython-312-darwin.so"
+MACOS_SCIPY_FBLAS_SHA256 = "6502e4e093d03932479317d45bfea018ef0999bc5c4bd46687253322c13e9448"
+MACOS_SCIPY_UPSTREAM_RPATHS = (
+    "/opt/homebrew/Cellar/gcc@13/13.4.0/lib/gcc/13/gcc/aarch64-apple-darwin23/13",
+    "/opt/homebrew/Cellar/gcc@13/13.4.0/lib/gcc/13/gcc",
+    "/opt/homebrew/Cellar/gcc@13/13.4.0/lib/gcc/13",
+)
+MACOS_SCIPY_FBLAS_DEPENDENCIES = (
+    "/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate",
+    "/usr/lib/libSystem.B.dylib",
+)
+MACOS_SCIPY_FBLAS_EMBEDDED_RPATH_NAMES = ()
 MACOS_PYAV_CANARY_NAMES = (
     "libsharpyuv.0.1.2.dylib",
     "libSystem.B.dylib",
     "libsidevoice_rpath_canary.dylib",
 )
 MACOS_TEMP_VENDOR_PATHS = ("/tmp/vendor/lib/", "/private/tmp/vendor/lib/")
+MACOS_REVIEWED_RPATH_DIRECTORIES = tuple(dict.fromkeys((
+    MACOS_PILLOW_UPSTREAM_RPATH,
+    MACOS_PYAV_UPSTREAM_RPATH,
+    *MACOS_SCIPY_UPSTREAM_RPATHS,
+)))
+MACOS_REVIEWED_RPATH_PATH_MARKERS = tuple(dict.fromkeys((
+    *MACOS_REVIEWED_RPATH_DIRECTORIES,
+    "/private/tmp/vendor/lib",
+)))
 MACOS_DYNAMIC_LOADER_SYMBOL_PREFIXES = (
     "_dlopen",
     "_dlsym",
@@ -418,6 +441,38 @@ MACOS_SYSTEM_PATH_DIRECTORIES = (
     "/Library/Apple/System/Library",
     "/usr/lib",
 )
+SCIPY_RUNTIME_PROBE = "\n".join((
+    "import json, scipy, sys",
+    "import numpy as np",
+    "from scipy.linalg import solve",
+    "from scipy.linalg.blas import dgemm",
+    "if scipy.__version__ != '1.18.1':",
+    "    raise RuntimeError(f'locked SciPy version changed: {scipy.__version__!r}')",
+    "left = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)",
+    "right = np.array([[5.0, 6.0], [7.0, 8.0]], dtype=np.float64)",
+    "product = dgemm(1.0, left, right)",
+    "solution = solve(left, np.array([5.0, 11.0], dtype=np.float64))",
+    "if not np.array_equal(product, np.array([[19.0, 22.0], [43.0, 50.0]])):",
+    "    raise RuntimeError(f'SciPy dgemm returned unexpected product: {product!r}')",
+    "if not np.allclose(solution, np.array([1.0, 2.0])):",
+    "    raise RuntimeError(f'SciPy solve returned unexpected result: {solution!r}')",
+    "if sys.platform == 'darwin':",
+    "    import ctypes",
+    "    _dyld = ctypes.CDLL(None)",
+    "    _dyld._dyld_image_count.restype = ctypes.c_uint32",
+    "    _dyld._dyld_get_image_name.argtypes = [ctypes.c_uint32]",
+    "    _dyld._dyld_get_image_name.restype = ctypes.c_char_p",
+    "    _images = [_dyld._dyld_get_image_name(i).decode() for i in range(_dyld._dyld_image_count())]",
+    "    _fblas_images = [path for path in _images if path.endswith('/scipy/linalg/_fblas.cpython-312-darwin.so')]",
+    f"    _reviewed_rpaths = {MACOS_REVIEWED_RPATH_PATH_MARKERS!r}",
+    "    _rpath_images = [path for path in _images if any(path == rpath or path.startswith(rpath.rstrip('/') + '/') for rpath in _reviewed_rpaths)]",
+    "else:",
+    "    _fblas_images = []",
+    "    _rpath_images = []",
+    "if sys.platform == 'darwin' and (len(_fblas_images) != 1 or _rpath_images):",
+    "    raise RuntimeError(f'SciPy runtime did not use only the relocated _fblas module: fblas={_fblas_images}, runpath_images={_rpath_images}')",
+    "print(json.dumps({'scipy_version': scipy.__version__, 'dgemm': product.tolist(), 'solve': solution.tolist(), 'fblas_images': _fblas_images, 'rpath_images': _rpath_images}))",
+))
 MACOS_NATIVE_IMPORT_PROBE = "\n".join((
     "import aiohttp._http_parser",
     "import aiortc",
@@ -438,7 +493,9 @@ MACOS_NATIVE_IMPORT_PROBE = "\n".join((
     "_dyld._dyld_get_image_name.restype = ctypes.c_char_p",
     "_images = [_dyld._dyld_get_image_name(i).decode() for i in range(_dyld._dyld_image_count())]",
     "_vendor_images = [path for path in _images if '/tmp/vendor/lib/' in path or '/private/tmp/vendor/lib/' in path]",
-    "print(json.dumps({'native_imports': 12, 'vendor_images': _vendor_images}))",
+    f"_reviewed_rpaths = {MACOS_REVIEWED_RPATH_PATH_MARKERS!r}",
+    "_rpath_images = [path for path in _images if any(path == rpath or path.startswith(rpath.rstrip('/') + '/') for rpath in _reviewed_rpaths)]",
+    "print(json.dumps({'native_imports': 12, 'vendor_images': _vendor_images, 'rpath_images': _rpath_images}))",
 ))
 PIL_CODEC_ROUNDTRIP_PROBE = "\n".join((
     "import json",
@@ -474,10 +531,14 @@ PIL_CODEC_ROUNDTRIP_PROBE = "\n".join((
     "    _dyld._dyld_get_image_name.restype = ctypes.c_char_p",
     "    _images = [_dyld._dyld_get_image_name(i).decode() for i in range(_dyld._dyld_image_count())]",
     "    _vendor_images = [path for path in _images if '/tmp/vendor/lib/' in path or '/private/tmp/vendor/lib/' in path]",
+    f"    _reviewed_rpaths = {MACOS_REVIEWED_RPATH_PATH_MARKERS!r}",
+    "    _rpath_images = [path for path in _images if any(path == rpath or path.startswith(rpath.rstrip('/') + '/') for rpath in _reviewed_rpaths)]",
     "else:",
     "    _vendor_images = []",
+    "    _rpath_images = []",
     "print(json.dumps({'codecs': list(required_codecs), 'features': list(required_features),",
-    "                  'tiff_compression': 'tiff_lzw', 'vendor_images': _vendor_images}))",
+    "                  'tiff_compression': 'tiff_lzw', 'vendor_images': _vendor_images,",
+    "                  'rpath_images': _rpath_images}))",
 ))
 PYAV_AUDIO_ROUNDTRIP_PROBE = "\n".join((
     "import io, json, av",
@@ -516,15 +577,20 @@ PYAV_AUDIO_ROUNDTRIP_PROBE = "\n".join((
     "    _dyld._dyld_get_image_name.restype = ctypes.c_char_p",
     "    _images = [_dyld._dyld_get_image_name(i).decode() for i in range(_dyld._dyld_image_count())]",
     "    _vendor_images = [path for path in _images if '/tmp/vendor/lib/' in path or '/private/tmp/vendor/lib/' in path]",
+    f"    _reviewed_rpaths = {MACOS_REVIEWED_RPATH_PATH_MARKERS!r}",
+    "    _rpath_images = [path for path in _images if any(path == rpath or path.startswith(rpath.rstrip('/') + '/') for rpath in _reviewed_rpaths)]",
     "else:",
     "    _vendor_images = []",
+    "    _rpath_images = []",
     "print(json.dumps({'version': av.__version__, 'container': 'wav', 'codec': 'pcm_s16le',",
     "                  'decoded_samples': decoded_samples, 'resampled_rate': 8000,",
-    "                  'resampled_samples': resampled_samples, 'vendor_images': _vendor_images}))",
+    "                  'resampled_samples': resampled_samples, 'vendor_images': _vendor_images,",
+    "                  'rpath_images': _rpath_images}))",
 ))
 PYAV_WEBP_ROUNDTRIP_PROBE = "\n".join((
-    "import json, av",
+    "import av, ctypes, hashlib, json, sys",
     "from io import BytesIO",
+    "from pathlib import Path",
     "from av import VideoFrame",
     f"expected_version = {MACOS_PYAV_VERSION!r}",
     "if av.__version__ != expected_version:",
@@ -536,8 +602,9 @@ PYAV_WEBP_ROUNDTRIP_PROBE = "\n".join((
     "    stream = container.add_stream('libwebp', rate=1)",
     "    stream.width = 16",
     "    stream.height = 16",
-    "    stream.pix_fmt = 'yuv420p'",
-    "    frame = VideoFrame(16, 16, format='yuv420p')",
+    "    stream.pix_fmt = 'bgra'",
+    "    frame = VideoFrame(16, 16, format='bgra')",
+    "    frame.planes[0].update(bytes(channel for y in range(16) for x in range(16) for channel in ((x * 11 + y * 3) & 255, (x * 5 + y * 17) & 255, (x * 19 + y * 7) & 255, 255)))",
     "    for packet in stream.encode(frame):",
     "        container.mux(packet)",
     "    for packet in stream.encode(None):",
@@ -549,7 +616,30 @@ PYAV_WEBP_ROUNDTRIP_PROBE = "\n".join((
     "    frames = list(container.decode(video=0))",
     "if len(frames) != 1 or (frames[0].width, frames[0].height) != (16, 16):",
     "    raise RuntimeError(f'PyAV WebP decode returned unexpected frames: {len(frames)}')",
-    "import sys",
+    "if sys.platform == 'darwin':",
+    "    sharp_path = Path(av.__file__).parent / '.dylibs/libsharpyuv.0.1.2.dylib'",
+    "else:",
+    "    sharp_path = next(Path(av.__file__).parent.parent.glob('av.libs/libsharpyuv*.so*'))",
+    "sharp = ctypes.CDLL(str(sharp_path))",
+    "class SharpYuvConversionMatrix(ctypes.Structure):",
+    "    _fields_ = [('rgb_to_y', ctypes.c_int * 4), ('rgb_to_u', ctypes.c_int * 4), ('rgb_to_v', ctypes.c_int * 4)]",
+    "sharp.SharpYuvGetConversionMatrix.argtypes = [ctypes.c_int]",
+    "sharp.SharpYuvGetConversionMatrix.restype = ctypes.POINTER(SharpYuvConversionMatrix)",
+    "sharp.SharpYuvConvert.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.POINTER(SharpYuvConversionMatrix)]",
+    "sharp.SharpYuvConvert.restype = ctypes.c_int",
+    "width = height = 16",
+    "rgb = [[(x * rx + y * ry + offset) & 255 for y in range(height) for x in range(width)] for rx, ry, offset in ((11, 3, 17), (5, 17, 29), (19, 7, 43))]",
+    "rgb_channels = [(ctypes.c_uint8 * len(channel))(*channel) for channel in rgb]",
+    "y_plane = (ctypes.c_uint8 * (width * height))()",
+    "u_plane = (ctypes.c_uint8 * ((width // 2) * (height // 2)))()",
+    "v_plane = (ctypes.c_uint8 * ((width // 2) * (height // 2)))()",
+    "matrix = sharp.SharpYuvGetConversionMatrix(0)",
+    "if not matrix or not sharp.SharpYuvConvert(*(ctypes.cast(channel, ctypes.c_void_p) for channel in rgb_channels), 1, width, 8, ctypes.cast(y_plane, ctypes.c_void_p), width, ctypes.cast(u_plane, ctypes.c_void_p), width // 2, ctypes.cast(v_plane, ctypes.c_void_p), width // 2, 8, width, height, matrix):",
+    "    raise RuntimeError('locked libsharpyuv SharpYuvConvert did not process initialized RGB input')",
+    "sharp_outputs = bytes(y_plane) + bytes(u_plane) + bytes(v_plane)",
+    "if len(set(y_plane)) < 2 or len(set(u_plane)) < 2 or len(set(v_plane)) < 2:",
+    "    raise RuntimeError('locked libsharpyuv returned non-varying conversion planes')",
+    "sharp_conversion = {'library': sharp_path.name, 'function': 'SharpYuvConvert', 'input_rgb_bytes': width * height * 3, 'output_sha256': hashlib.sha256(sharp_outputs).hexdigest()}",
     "if sys.platform == 'darwin':",
     "    import ctypes",
     "    _dyld = ctypes.CDLL(None)",
@@ -559,16 +649,22 @@ PYAV_WEBP_ROUNDTRIP_PROBE = "\n".join((
     "    _images = [_dyld._dyld_get_image_name(i).decode() for i in range(_dyld._dyld_image_count())]",
     "    _vendor_images = [path for path in _images if '/tmp/vendor/lib/' in path or '/private/tmp/vendor/lib/' in path]",
     "    _sharpyuv_images = [path for path in _images if path.endswith('/av/.dylibs/libsharpyuv.0.1.2.dylib')]",
+    f"    _reviewed_rpaths = {MACOS_REVIEWED_RPATH_PATH_MARKERS!r}",
+    "    _rpath_images = [path for path in _images if any(path == rpath or path.startswith(rpath.rstrip('/') + '/') for rpath in _reviewed_rpaths)]",
     "    if not _sharpyuv_images:",
     "        raise RuntimeError('PyAV WebP encode/decode did not load its bundled libsharpyuv dylib')",
     "else:",
     "    _vendor_images = []",
     "    _sharpyuv_images = []",
+    "    _rpath_images = []",
     "if sys.platform == 'darwin' and not _sharpyuv_images:",
     "    raise RuntimeError('PyAV WebP encode/decode did not load its bundled libsharpyuv dylib')",
+    "if sys.platform == 'darwin' and _rpath_images:",
+    "    raise RuntimeError(f'PyAV WebP/sharpyuv loaded images from an upstream runpath: {_rpath_images}')",
     "print(json.dumps({'version': av.__version__, 'format': 'webp', 'codec': 'libwebp',",
     "                  'encoded_bytes': len(webp_bytes), 'decoded_frames': len(frames),",
-    "                  'sharpyuv_images': _sharpyuv_images, 'vendor_images': _vendor_images}))",
+    "                  'sharpyuv_images': _sharpyuv_images, 'vendor_images': _vendor_images,",
+    "                  'rpath_images': _rpath_images, 'sharp_conversion': sharp_conversion}))",
 ))
 MACHO_LOAD_COMMAND_RE = re.compile(r"^\s*cmd (LC_[A-Z0-9_]+)$")
 MACHO_DEPENDENCY_COMMANDS = {
@@ -620,10 +716,17 @@ def _parse_nm_undefined_symbols(output: str) -> tuple[str, ...]:
     symbols = []
     for line in output.splitlines():
         fields = line.split()
+        if not fields:
+            continue
         if len(fields) >= 2 and fields[0] == "U":
             symbols.append(fields[1])
         elif len(fields) >= 3 and fields[0] == "(undefined)" and fields[1] == "external":
             symbols.append(fields[2])
+        elif len(fields) == 1 and re.fullmatch(r"_[A-Za-z0-9_$?.]+", fields[0]):
+            # Apple cctools `nm -u` defaults to listing only the undefined symbol name.
+            symbols.append(fields[0])
+        else:
+            raise ValueError(f"unrecognized `nm -u` output line: {line!r}")
     return tuple(symbols)
 
 
@@ -768,6 +871,54 @@ def _validate_pyav_rpath_exception(
     }
 
 
+def _validate_scipy_rpath_exception(
+    *,
+    binary: Path,
+    root: Path,
+    dependencies: tuple[str, ...],
+    rpaths: tuple[str, ...],
+    install_names: tuple[str, ...],
+    undefined_symbols: tuple[str, ...],
+    has_initializers: bool,
+) -> dict:
+    """Allow only the exact SciPy _fblas wheel binary after its loader surface is checked."""
+    try:
+        relative_path = binary.relative_to(root).as_posix()
+    except ValueError as error:
+        raise ValueError(f"SciPy LC_RPATH exception binary is outside the relocated bundle: {binary}") from error
+    if relative_path != MACOS_SCIPY_FBLAS_PATH:
+        raise ValueError(f"upstream SciPy LC_RPATH appears in an unreviewed Mach-O binary: {binary}")
+    if rpaths != MACOS_SCIPY_UPSTREAM_RPATHS:
+        raise ValueError(f"unreviewed absolute LC_RPATH command set in locked SciPy _fblas: {rpaths!r}")
+    if digest(binary) != MACOS_SCIPY_FBLAS_SHA256:
+        raise ValueError(f"locked SciPy _fblas binary digest changed: {binary}")
+    if dependencies != MACOS_SCIPY_FBLAS_DEPENDENCIES:
+        raise ValueError(f"locked SciPy _fblas load graph changed: {dependencies!r}")
+    if install_names:
+        raise ValueError(f"locked SciPy _fblas unexpectedly has an install name: {install_names!r}")
+    dynamic_loader_symbols = tuple(
+        symbol for symbol in undefined_symbols
+        if any(symbol.startswith(prefix) for prefix in MACOS_DYNAMIC_LOADER_SYMBOL_PREFIXES)
+    )
+    if dynamic_loader_symbols:
+        raise ValueError(f"locked SciPy _fblas imports dynamic-loader APIs: {dynamic_loader_symbols!r}")
+    if has_initializers:
+        raise ValueError("locked SciPy _fblas contains Mach-O initializers")
+    rpath_names = _embedded_rpath_candidate_names(binary)
+    if rpath_names != MACOS_SCIPY_FBLAS_EMBEDDED_RPATH_NAMES:
+        raise ValueError(f"locked SciPy _fblas embedded @rpath names changed: {rpath_names!r}")
+    return {
+        "binary": relative_path,
+        "binary_sha256": MACOS_SCIPY_FBLAS_SHA256,
+        "wheel_sha256": MACOS_SCIPY_WHEEL_SHA256,
+        "lc_rpaths": list(rpaths),
+        "dependencies": list(dependencies),
+        "embedded_rpath_names": list(rpath_names),
+        "dynamic_loader_symbols": list(dynamic_loader_symbols),
+        "has_initializers": has_initializers,
+    }
+
+
 def _verify_pillow_codec_runtime(root: Path, env: dict[str, str]) -> dict:
     """Require the locked Pillow native features and image codecs after relocation."""
     interpreter = root / "python" / "bin" / "python3"
@@ -791,6 +942,7 @@ def _verify_pillow_codec_runtime(root: Path, env: dict[str, str]) -> dict:
         "features": list(PILLOW_REQUIRED_FEATURES),
         "tiff_compression": "tiff_lzw",
         "vendor_images": [],
+        "rpath_images": [],
     }
     if evidence != expected:
         raise ValueError(f"relocated Pillow codec probe returned unexpected evidence: {evidence!r}")
@@ -817,6 +969,7 @@ def _inspect_macos_native_runtime(root: Path) -> dict:
     inspected = 0
     pillow_rpath_evidence = []
     pyav_rpath_evidence = []
+    scipy_rpath_evidence = []
     rpath_candidate_names = set(MACOS_PYAV_CANARY_NAMES)
     for binary in sorted(path for path in root.rglob("*") if path.is_file()):
         try:
@@ -834,6 +987,19 @@ def _inspect_macos_native_runtime(root: Path) -> dict:
             _validate_macho_path(value, binary=binary, root=root, executable_directory=executable_directory)
             if candidate := _rpath_candidate_name(value):
                 rpath_candidate_names.add(candidate)
+        if any(value in MACOS_SCIPY_UPSTREAM_RPATHS for value in rpaths):
+            symbols = subprocess.run([nm, "-u", str(binary)], check=True, capture_output=True, text=True)
+            scipy_rpath_evidence.append(
+                _validate_scipy_rpath_exception(
+                    binary=binary,
+                    root=root,
+                    dependencies=dependencies,
+                    rpaths=rpaths,
+                    install_names=_parse_otool_install_names(load_commands.stdout),
+                    undefined_symbols=_parse_nm_undefined_symbols(symbols.stdout),
+                    has_initializers=_has_macho_initializers(load_commands.stdout),
+                )
+            )
         for value in rpaths:
             if value == MACOS_PILLOW_UPSTREAM_RPATH:
                 pillow_rpath_evidence.append(
@@ -861,6 +1027,8 @@ def _inspect_macos_native_runtime(root: Path) -> dict:
                         has_initializers=_has_macho_initializers(load_commands.stdout),
                     )
                 )
+            elif value in MACOS_SCIPY_UPSTREAM_RPATHS:
+                continue
             else:
                 _validate_macho_path(value, binary=binary, root=root, executable_directory=executable_directory)
         rpath_candidate_names.update(_embedded_rpath_candidate_names(binary))
@@ -871,43 +1039,38 @@ def _inspect_macos_native_runtime(root: Path) -> dict:
         raise ValueError(f"expected exactly one reviewed Pillow LC_RPATH, found {len(pillow_rpath_evidence)}")
     if len(pyav_rpath_evidence) != 1:
         raise ValueError(f"expected exactly one reviewed PyAV LC_RPATH, found {len(pyav_rpath_evidence)}")
+    if len(scipy_rpath_evidence) != 1:
+        raise ValueError(f"expected exactly one reviewed SciPy LC_RPATH binary, found {len(scipy_rpath_evidence)}")
     return {
         "macho_files": inspected,
         "pillow_lc_rpath_exception": pillow_rpath_evidence,
         "pyav_lc_rpath_exception": pyav_rpath_evidence,
+        "scipy_lc_rpath_exception": scipy_rpath_evidence,
         "rpath_canary_names": sorted(rpath_candidate_names),
+        "rpath_canary_directories": list(MACOS_REVIEWED_RPATH_DIRECTORIES),
     }
 
 
 @contextmanager
-def _populated_macos_rpath_directory(root: Path, candidate_names: list[str], marker: Path):
-    """Populate the embedded runpath and prove dyld image capture with a positive control."""
-    vendor_root = Path("/tmp/vendor")
-    vendor_lib = vendor_root / "lib"
-    if vendor_root.is_symlink() or (vendor_root.exists() and not vendor_root.is_dir()):
-        raise ValueError("refusing to use a non-directory or symlink at /tmp/vendor")
-    if vendor_lib.is_symlink() or (vendor_lib.exists() and not vendor_lib.is_dir()):
-        raise ValueError("refusing to use a non-directory or symlink at /tmp/vendor/lib")
-    if vendor_lib.exists() and any(vendor_lib.iterdir()):
-        raise ValueError("refusing to overwrite existing entries in /tmp/vendor/lib for the runpath probe")
-
+def _populated_macos_rpath_directories(
+    root: Path, directories: list[str], candidate_names: list[str], marker: Path
+):
+    """Populate each reviewed absolute runpath and validate image capture independently."""
     clang = shutil.which("clang")
     if clang is None:
-        raise ValueError("clang is required to populate /tmp/vendor/lib with runpath canaries")
+        raise ValueError("clang is required to populate reviewed macOS runpaths with canaries")
     otool = shutil.which("otool")
     if otool is None:
-        raise ValueError("otool is required to validate the runpath canary positive control")
+        raise ValueError("otool is required to validate runpath canary positive controls")
     marker.parent.mkdir(parents=True, exist_ok=True)
-    created_vendor_root = not vendor_root.exists()
-    created_vendor_lib = not vendor_lib.exists()
-    created_directories = []
+    created_directories: list[Path] = []
+    created_directory_set = set()
     created_links = []
     canary_workspace = tempfile.TemporaryDirectory(prefix="sidevoice-rpath-canary-", dir=root)
     canary_root = Path(canary_workspace.name)
     canary_source = canary_root / "canary.c"
-    canary_binary = vendor_lib / "__sidevoice_rpath_canary__.dylib"
+    canary_binary = canary_root / "libsidevoice_rpath_canary.dylib"
     positive_source = canary_root / "positive.c"
-    positive_binary = canary_root / "positive-control"
     marker_literal = json.dumps(str(marker))
     canary_source.write_text(
         "#include <fcntl.h>\n"
@@ -924,12 +1087,13 @@ def _populated_macos_rpath_directory(root: Path, candidate_names: list[str], mar
         "#include <stdio.h>\n"
         "#include <string.h>\n"
         "extern int sidevoice_rpath_canary_probe(void);\n"
-        "int main(void) {\n"
+        "int main(int argc, char **argv) {\n"
+        "    if (argc != 2) return 4;\n"
         "    if (sidevoice_rpath_canary_probe() != 0) return 2;\n"
         "    int found = 0;\n"
         "    for (uint32_t i = 0; i < _dyld_image_count(); ++i) {\n"
         "        const char *image = _dyld_get_image_name(i);\n"
-        "        if (image && (strstr(image, \"/tmp/vendor/lib/\") || strstr(image, \"/private/tmp/vendor/lib/\"))) {\n"
+        "        if (image && strstr(image, argv[1])) {\n"
         "            puts(image); found = 1;\n"
         "        }\n"
         "    }\n"
@@ -938,7 +1102,6 @@ def _populated_macos_rpath_directory(root: Path, candidate_names: list[str], mar
         encoding="utf-8",
     )
     try:
-        vendor_lib.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [
                 clang, "-dynamiclib", "-arch", "arm64", str(canary_source),
@@ -948,86 +1111,112 @@ def _populated_macos_rpath_directory(root: Path, candidate_names: list[str], mar
             capture_output=True,
             text=True,
         )
-        for name in sorted(set(candidate_names)):
-            relative = PurePosixPath(name)
-            if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
-                raise ValueError(f"unsafe runpath canary name: {name!r}")
-            destination = vendor_lib.joinpath(*relative.parts)
-            parent = destination.parent
-            missing_parents = []
-            current = parent
-            while current != vendor_lib and not current.exists():
-                missing_parents.append(current)
+        positive_controls = []
+        canary_names = sorted(set(candidate_names) | {"libsidevoice_rpath_canary.dylib"})
+        for index, value in enumerate(directories):
+            path = Path(value)
+            if not path.is_absolute() or any(part in {".", ".."} for part in PurePosixPath(value).parts):
+                raise ValueError(f"unsafe absolute runpath directory: {value!r}")
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                raise ValueError(f"runpath target is a symlink or not a directory: {path}")
+            missing = []
+            current = path
+            while not current.exists() and current != current.parent:
+                missing.append(current)
                 current = current.parent
-            for directory in reversed(missing_parents):
+            for directory in reversed(missing):
                 directory.mkdir()
-                created_directories.append(directory)
-            if destination.exists() or destination.is_symlink():
-                raise ValueError(f"runpath canary path already exists: {destination}")
-            destination.symlink_to(canary_binary)
-            created_links.append(destination)
+                if directory not in created_directory_set:
+                    created_directories.append(directory)
+                    created_directory_set.add(directory)
 
-        positive_link = vendor_lib / "libsidevoice_rpath_canary.dylib"
-        if not positive_link.exists():
+            positive_link = path / "libsidevoice_rpath_canary.dylib"
+            if positive_link.exists() or positive_link.is_symlink():
+                raise ValueError(f"runpath positive-control path already exists: {positive_link}")
             positive_link.symlink_to(canary_binary)
             created_links.append(positive_link)
-        subprocess.run(
-            [
-                clang, "-arch", "arm64", str(positive_source), "-L", str(vendor_lib),
-                "-lsidevoice_rpath_canary", "-Wl,-rpath,/tmp/vendor/lib", "-o", str(positive_binary),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        positive_load_commands = subprocess.run(
-            [otool, "-l", str(positive_binary)], check=True, capture_output=True, text=True
-        ).stdout
-        positive_dependencies = _parse_otool_dependencies(positive_load_commands)
-        positive_rpaths = _parse_otool_rpaths(positive_load_commands)
-        expected_positive_dependency = "@rpath/libsidevoice_rpath_canary.dylib"
-        if expected_positive_dependency not in positive_dependencies or "/tmp/vendor/lib" not in positive_rpaths:
-            raise ValueError(
-                "runpath canary positive control is not linked through the expected @rpath: "
-                f"dependencies={positive_dependencies!r}, rpaths={positive_rpaths!r}"
+            for name in canary_names:
+                relative = PurePosixPath(name)
+                if relative.is_absolute() or not relative.parts or any(
+                    part in {"", ".", ".."} for part in relative.parts
+                ):
+                    raise ValueError(f"unsafe runpath canary name: {name!r}")
+                destination = path.joinpath(*relative.parts)
+                if destination == positive_link:
+                    continue
+                missing_parents = []
+                current = destination.parent
+                while not current.exists() and current != path and current != current.parent:
+                    missing_parents.append(current)
+                    current = current.parent
+                for directory in reversed(missing_parents):
+                    directory.mkdir()
+                    if directory not in created_directory_set:
+                        created_directories.append(directory)
+                        created_directory_set.add(directory)
+                if destination.exists() or destination.is_symlink():
+                    # Never overwrite an existing library; the runtime image check still covers it.
+                    continue
+                destination.symlink_to(canary_binary)
+                created_links.append(destination)
+
+            canonical_directory = str(path.resolve(strict=True))
+            positive_binary = canary_root / f"positive-control-{index}"
+            subprocess.run(
+                [
+                    clang, "-arch", "arm64", str(positive_source), "-L", str(path),
+                    "-lsidevoice_rpath_canary", f"-Wl,-rpath,{value}", "-o", str(positive_binary),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
             )
-        marker.unlink(missing_ok=True)
-        positive = subprocess.run(
-            [str(positive_binary)],
-            check=False,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "DYLD_PRINT_LIBRARIES": "1"},
-        )
-        positive_images = [line.strip() for line in positive.stdout.splitlines() if line.strip()]
-        positive_trace = positive.stdout + positive.stderr
-        if positive.returncode or not marker.is_file() or not any(
-            token in image for image in positive_images for token in MACOS_TEMP_VENDOR_PATHS
-        ) or not any(token in positive_trace for token in MACOS_TEMP_VENDOR_PATHS):
-            raise ValueError(
-                "runpath canary positive control did not capture an image loaded from /tmp/vendor/lib: "
-                f"status={positive.returncode}, stdout={positive.stdout!r}, stderr={positive.stderr!r}"
+            positive_load_commands = subprocess.run(
+                [otool, "-l", str(positive_binary)], check=True, capture_output=True, text=True
+            ).stdout
+            expected_dependency = "@rpath/libsidevoice_rpath_canary.dylib"
+            positive_dependencies = _parse_otool_dependencies(positive_load_commands)
+            positive_rpaths = _parse_otool_rpaths(positive_load_commands)
+            if positive_dependencies != (expected_dependency,) or positive_rpaths != (value,):
+                raise ValueError(
+                    f"runpath positive control is not linked through {value!r}: "
+                    f"dependencies={positive_dependencies!r}, rpaths={positive_rpaths!r}"
+                )
+            marker.unlink(missing_ok=True)
+            positive = subprocess.run(
+                [str(positive_binary), canonical_directory],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "DYLD_PRINT_LIBRARIES": "1"},
             )
-        canonical_directory = str(vendor_lib.resolve(strict=True))
-        marker.unlink()
+            positive_images = [line.strip() for line in positive.stdout.splitlines() if line.strip()]
+            positive_trace = _validate_rpath_positive_control(
+                return_code=positive.returncode,
+                marker_loaded=marker.is_file(),
+                loaded_image_lines=positive_images,
+                trace_lines=positive.stderr.splitlines(),
+                canonical_directory=canonical_directory,
+            )
+            marker.unlink()
+            positive_controls.append({
+                "directory": value,
+                "canonical_directory": canonical_directory,
+                **positive_trace,
+            })
         yield {
-            "directory": MACOS_PYAV_UPSTREAM_RPATH,
-            "canonical_directory": canonical_directory,
-            "canary_names": sorted(set(candidate_names)),
-            "canary_count": len(set(candidate_names)),
-            "loaded_image_capture_positive_control": positive_images,
-            "positive_control_marker": True,
+            "directories": list(directories),
+            "canary_names": canary_names,
+            "canary_count": len(canary_names),
+            "positive_controls": positive_controls,
+            "loaded_image_capture_positive_control": True,
+            "dyld_stderr_capture_positive_control": True,
         }
     finally:
         for link in reversed(created_links):
             link.unlink(missing_ok=True)
-        canary_binary.unlink(missing_ok=True)
         for directory in reversed(created_directories):
             directory.rmdir()
-        if created_vendor_lib and vendor_lib.exists():
-            vendor_lib.rmdir()
-        if created_vendor_root and vendor_root.exists():
-            vendor_root.rmdir()
         canary_workspace.cleanup()
 
 
@@ -1088,6 +1277,10 @@ def _verify_pyav_webp_runtime(root: Path, env: dict[str, str]) -> dict:
         or evidence.get("decoded_frames") != 1
         or not evidence.get("sharpyuv_images")
         or evidence.get("vendor_images") != []
+        or evidence.get("rpath_images") != []
+        or evidence.get("sharp_conversion", {}).get("function") != "SharpYuvConvert"
+        or evidence.get("sharp_conversion", {}).get("input_rgb_bytes") != 16 * 16 * 3
+        or not re.fullmatch(r"[0-9a-f]{64}", evidence.get("sharp_conversion", {}).get("output_sha256", ""))
     ):
         raise ValueError(f"relocated PyAV WebP probe returned unexpected evidence: {evidence!r}")
     return evidence
@@ -1204,22 +1397,86 @@ def _verify_macos_native_runtime(root: Path, env: dict[str, str], graph: dict) -
         imports = json.loads(probe.stdout)
     except json.JSONDecodeError as error:
         raise ValueError("relocated macOS native import probe did not return valid JSON") from error
-    if imports != {"native_imports": 12, "vendor_images": []}:
+    if imports != {"native_imports": 12, "vendor_images": [], "rpath_images": []}:
         raise ValueError(f"relocated macOS native import probe returned unexpected evidence: {imports!r}")
+    scipy = _verify_scipy_runtime(root, env)
     audio = _verify_pyav_audio_runtime(root, env)
     webp = _verify_pyav_webp_runtime(root, env)
     return {
         **imports,
         **graph,
+        "scipy_linalg_runtime": scipy,
         "pyav_audio_roundtrip": audio,
         "pyav_webp_roundtrip": webp,
     }
 
 
-def _require_no_vendor_trace(trace: str, stage: str) -> None:
-    matches = [line.strip() for line in trace.splitlines() if any(path in line for path in MACOS_TEMP_VENDOR_PATHS)]
+def _verify_scipy_runtime(root: Path, env: dict[str, str]) -> dict:
+    """Run BLAS and linear solves through SciPy after relocation with the RPATH canaries populated."""
+    interpreter = root / "python" / "bin" / "python3"
+    result = subprocess.run(
+        [str(interpreter), "-I", "-B", "-c", SCIPY_RUNTIME_PROBE],
+        cwd=root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise ValueError(f"relocated SciPy BLAS/solve probe failed: {result.stderr.strip()}")
+    _require_no_reviewed_rpath_trace(result.stderr, "SciPy BLAS and solve")
+    try:
+        evidence = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError("relocated SciPy probe did not return valid JSON") from error
+    solution = evidence.get("solve")
+    if (
+        evidence.get("scipy_version") != "1.18.1"
+        or evidence.get("dgemm") != [[19.0, 22.0], [43.0, 50.0]]
+        or not isinstance(solution, list)
+        or len(solution) != 2
+        or not all(isinstance(value, (int, float)) for value in solution)
+        or not all(abs(actual - expected) < 1e-12 for actual, expected in zip(solution, [1.0, 2.0]))
+        or evidence.get("rpath_images") != []
+        or (sys.platform == "darwin" and len(evidence.get("fblas_images", [])) != 1)
+    ):
+        raise ValueError(f"relocated SciPy probe returned unexpected evidence: {evidence!r}")
+    return evidence
+
+
+def _require_no_reviewed_rpath_trace(trace: str, stage: str) -> None:
+    matches = [
+        line.strip()
+        for line in trace.splitlines()
+        if any(path in line for path in MACOS_REVIEWED_RPATH_PATH_MARKERS)
+    ]
     if matches:
-        raise ValueError(f"dyld loaded an image from /tmp/vendor/lib during {stage}: {matches!r}")
+        raise ValueError(f"dyld loaded an image from a reviewed upstream LC_RPATH during {stage}: {matches!r}")
+
+
+def _validate_rpath_positive_control(
+    *,
+    return_code: int,
+    marker_loaded: bool,
+    loaded_image_lines: list[str],
+    trace_lines: list[str],
+    canonical_directory: str,
+) -> dict:
+    """Require constructor, dyld image enumeration and stderr trace as independent evidence."""
+    loaded_images = [line.strip() for line in loaded_image_lines if canonical_directory in line]
+    traced_images = [line.strip() for line in trace_lines if canonical_directory in line]
+    if return_code or not marker_loaded or not loaded_images or not traced_images:
+        raise ValueError(
+            "runpath positive control did not independently prove constructor, image enumeration and "
+            f"DYLD_PRINT_LIBRARIES capture at {canonical_directory!r}: status={return_code}, "
+            f"marker_loaded={marker_loaded}, stdout={loaded_image_lines!r}, stderr={trace_lines!r}"
+        )
+    return {"loaded_image_capture": loaded_images, "dyld_stderr_trace": traced_images}
+
+
+def _require_no_vendor_trace(trace: str, stage: str) -> None:
+    """Compatibility alias for the existing /tmp canary assertions."""
+    _require_no_reviewed_rpath_trace(trace, stage)
 
 
 def inspect_archive(archive_path: Path, forbidden_paths: tuple[Path, ...] = ()) -> dict:
@@ -1298,7 +1555,12 @@ def verify_relocation(archive_path: Path, *, build_paths: tuple[Path, ...] = ())
             marker = root / "pyav-rpath-canary-loaded.marker"
             if marker.exists():
                 raise ValueError("runpath canary marker unexpectedly exists before the relocated runtime checks")
-            with _populated_macos_rpath_directory(root, graph["rpath_canary_names"], marker) as canary:
+            with _populated_macos_rpath_directories(
+                root,
+                graph["rpath_canary_directories"],
+                graph["rpath_canary_names"],
+                marker,
+            ) as canary:
                 macos_env = {
                     **env,
                     "DYLD_PRINT_LIBRARIES": "1",
@@ -1336,7 +1598,7 @@ def verify_relocation(archive_path: Path, *, build_paths: tuple[Path, ...] = ())
 def _require_unloaded_rpath_canary(marker: Path, canary: dict, stage: str) -> None:
     if marker.exists():
         raise ValueError(
-            f"/tmp/vendor/lib runpath canary was loaded during {stage}; "
+            f"a reviewed upstream LC_RPATH canary was loaded during {stage}; "
             f"candidate names were {canary['canary_names']!r}"
         )
 
