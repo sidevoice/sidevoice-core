@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from email.parser import Parser
 import hashlib
 import json
 import os
@@ -18,6 +19,10 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 PINS = ROOT / "packaging" / "python-build-standalone.json"
+PILLOW_BUILD_PINS = ROOT / "packaging" / "pillow-macos-build.json"
+PILLOW_CODEC_ROUNDTRIPS = tuple(
+    json.loads(PILLOW_BUILD_PINS.read_text(encoding="utf-8"))["build_settings"]["required_codec_roundtrips"]
+)
 REQUIRED = (
     "python/bin/python3",
     "python/lib/python3.12/LICENSE.txt",
@@ -26,6 +31,7 @@ REQUIRED = (
     "TRADEMARKS.md",
     "DEPENDENCIES.lock.txt",
     "BUNDLE-NOTICES.md",
+    "python/lib/python3.12/site-packages/PIL/Image.py",
     "python-build-standalone-licenses/LICENSE.libffi.txt",
     "python/lib/python3.12/site-packages/sidevoice_core/server/__main__.py",
 )
@@ -189,7 +195,13 @@ def create_archive(bundle_root: Path, output: Path, *, epoch: int = 0) -> dict:
 
 
 def build_bundle(
-    target: str, wheel: Path, output: Path, *, epoch: int = 0, temp_dir: Path | None = None
+    target: str,
+    wheel: Path,
+    output: Path,
+    *,
+    epoch: int = 0,
+    temp_dir: Path | None = None,
+    pillow_wheel: Path | None = None,
 ) -> dict:
     """Download pinned CPython, install the universal lock and core wheel, then create a stable tar.zst."""
     try:
@@ -204,6 +216,12 @@ def build_bundle(
         raise ValueError(f"unsupported core bundle target: {target}") from error
     if not wheel.is_file():
         raise ValueError(f"core wheel not found: {wheel}")
+    if target == "macos-aarch64" and pillow_wheel is None:
+        raise ValueError("macos-aarch64 requires the full-feature, source-built Pillow wheel")
+    if target != "macos-aarch64" and pillow_wheel is not None:
+        raise ValueError("a source-built Pillow wheel may only be used for macos-aarch64")
+    if pillow_wheel is not None and not pillow_wheel.is_file():
+        raise ValueError(f"source-built Pillow wheel not found: {pillow_wheel}")
 
     if temp_dir is not None:
         temp_dir.mkdir(parents=True, exist_ok=True)
@@ -233,15 +251,59 @@ def build_bundle(
             raise ValueError("python-build-standalone project license does not match its reviewed copy")
 
         requirements = work / "DEPENDENCIES.lock.txt"
-        export = subprocess.run([
+        export_command = [
             "uv", "export", "--locked", "--no-dev", "--no-default-groups", "--no-group", "bundle-build",
             "--no-extra", "test", "--no-emit-project", "--format", "requirements.txt",
-        ], cwd=ROOT, check=True, capture_output=True, text=True)
-        requirements.write_text(export.stdout, encoding="utf-8")
+        ]
+        if pillow_wheel is not None:
+            export_command.extend(("--no-emit-package", "pillow"))
+        export = subprocess.run(export_command, cwd=ROOT, check=True, capture_output=True, text=True)
+        runtime_requirements = work / "RUNTIME-DEPENDENCIES.lock.txt"
+        runtime_requirements.write_text(export.stdout, encoding="utf-8")
         _run([
             "uv", "pip", "install", "--quiet", "--link-mode=copy", "--python", str(python), "--require-hashes",
-            "--no-python-downloads", "--no-managed-python", "-r", str(requirements),
+            "--no-python-downloads", "--no-managed-python",
+            *( ["--no-deps"] if pillow_wheel is not None else [] ),
+            "-r", str(runtime_requirements),
         ], cwd=ROOT, env=_python_env())
+        pillow_source_pin = None
+        pillow_wheel_sha256 = None
+        if pillow_wheel is not None:
+            with zipfile.ZipFile(pillow_wheel) as source_wheel:
+                metadata_paths = [
+                    name for name in source_wheel.namelist()
+                    if name.endswith(".dist-info/METADATA")
+                ]
+                if len(metadata_paths) != 1:
+                    raise ValueError("source-built Pillow wheel has invalid distribution metadata")
+                metadata = source_wheel.read(metadata_paths[0]).decode("utf-8")
+            metadata_headers = Parser().parsestr(metadata)
+            if metadata_headers.get("Name", "").lower() != "pillow" or metadata_headers.get("Version") != "12.3.0":
+                raise ValueError("source-built Pillow wheel does not identify Pillow 12.3.0")
+            _run([
+                "uv", "pip", "install", "--quiet", "--link-mode=copy", "--python", str(python), "--no-deps",
+                "--no-python-downloads", "--no-managed-python", str(pillow_wheel),
+            ], cwd=ROOT, env=_python_env())
+            pillow_build_pins = json.loads(PILLOW_BUILD_PINS.read_text(encoding="utf-8"))
+            pillow_source_pin = pillow_build_pins["pillow_source"]
+            pillow_wheel_sha256 = digest(pillow_wheel)
+            pillow_build_pins["build_result"] = {
+                "wheel": pillow_wheel.name,
+                "sha256": pillow_wheel_sha256,
+                "size": pillow_wheel.stat().st_size,
+            }
+            requirements_text = (
+                export.stdout.rstrip()
+                + "\n\n# macOS Pillow 12.3.0 is built from the hash-pinned source and native inputs recorded in "
+                + "PILLOW-MACOS-SOURCE.lock.json.\n"
+            )
+            (bundle_root / "PILLOW-MACOS-SOURCE.lock.json").write_text(
+                json.dumps(pillow_build_pins, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        else:
+            requirements_text = export.stdout
+        requirements.write_text(requirements_text, encoding="utf-8")
         removed_entrypoints = remove_build_path_entrypoints(python.parent, python)
 
         purelib = subprocess.check_output(
@@ -268,6 +330,14 @@ def build_bundle(
             if not license_path.is_file() or digest(license_path) != expected_sha256:
                 raise ValueError(f"python-build-standalone license does not match its reviewed copy: {name}")
             shutil.copy2(license_path, bundle_licenses / name)
+        pillow_notice = (
+            "On macOS arm64, Pillow 12.3.0 was rebuilt from hash-pinned upstream source with the upstream wheel's "
+            "codec configuration. Pillow source, multibuild helpers, native dependency cache and resulting wheel "
+            f"SHA-256 are recorded in PILLOW-MACOS-SOURCE.lock.json ({pillow_wheel_sha256}). Native library "
+            "loader paths are checked after bundle relocation.\n\n"
+            if pillow_source_pin is not None
+            else ""
+        )
         notice = (
             "Sidevoice Core runtime bundle\n"
             "\n"
@@ -283,7 +353,8 @@ def build_bundle(
             "Runtime dependencies were installed from DEPENDENCIES.lock.txt with SHA-256 hashes. Their wheel license "
             "files are retained under each distribution's .dist-info/licenses directory when supplied.\n"
             "\n"
-            f"{removed_sboms} upstream wheel SBOM file(s) containing absolute build-checkout paths were omitted.\n"
+            + pillow_notice
+            + f"{removed_sboms} upstream wheel SBOM file(s) containing absolute build-checkout paths were omitted.\n"
             "\n"
             f"{removed_direct_urls} installer origin record(s) were omitted; DEPENDENCIES.lock.txt preserves the "
             "version and hash of each runtime dependency.\n"
@@ -351,6 +422,26 @@ MACOS_NATIVE_IMPORT_PROBE = "\n".join((
     "import soxr",
     "import yaml._yaml",
 ))
+PIL_CODEC_ROUNDTRIP_PROBE = "\n".join((
+    "import json",
+    "from io import BytesIO",
+    "from PIL import Image",
+    "Image.init()",
+    f"required = {PILLOW_CODEC_ROUNDTRIPS!r}",
+    "missing = [codec for codec in required if codec not in Image.OPEN or codec not in Image.SAVE]",
+    "if missing:",
+    "    raise RuntimeError(f'Pillow codecs cannot both read and write: {missing}')",
+    "source = Image.new('RGB', (3, 2), (31, 97, 173))",
+    "for codec in required:",
+    "    buffer = BytesIO()",
+    "    source.save(buffer, format=codec)",
+    "    buffer.seek(0)",
+    "    with Image.open(buffer) as decoded:",
+    "        decoded.load()",
+    "        if decoded.size != source.size:",
+    "            raise RuntimeError(f'{codec} round trip changed the image size')",
+    "print(json.dumps({'codecs': list(required)}))",
+))
 MACHO_LOAD_COMMAND_RE = re.compile(r"^\s*cmd (LC_[A-Z0-9_]+)$")
 MACHO_DEPENDENCY_COMMANDS = {
     "LC_LOAD_DYLIB",
@@ -416,6 +507,28 @@ def _validate_macho_path(value: str, *, binary: Path, root: Path, executable_dir
     raise ValueError(f"unsupported Mach-O load path: {value} in {binary}")
 
 
+def _verify_pillow_codec_runtime(root: Path, env: dict[str, str]) -> dict:
+    """Require the core image codecs to read and write after relocation."""
+    interpreter = root / "python" / "bin" / "python3"
+    probe = subprocess.run(
+        [str(interpreter), "-I", "-B", "-c", PIL_CODEC_ROUNDTRIP_PROBE],
+        cwd=root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode:
+        raise ValueError(f"relocated Pillow codec round-trip probe failed: {probe.stderr.strip()}")
+    try:
+        codecs = json.loads(probe.stdout)["codecs"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ValueError("relocated Pillow codec probe did not return valid JSON") from error
+    if codecs != list(PILLOW_CODEC_ROUNDTRIPS):
+        raise ValueError(f"relocated Pillow codec probe returned an unexpected result: {codecs!r}")
+    return {"pillow_codec_roundtrips": codecs}
+
+
 def _verify_macos_native_runtime(root: Path, env: dict[str, str]) -> dict:
     """Import key native dependencies and check every Mach-O load name after relocation."""
     machine = platform.machine().lower()
@@ -432,7 +545,6 @@ def _verify_macos_native_runtime(root: Path, env: dict[str, str]) -> dict:
     )
     if probe.returncode:
         raise ValueError(f"relocated macOS native import probe failed: {probe.stderr.strip()}")
-
     otool = shutil.which("otool")
     if otool is None:
         raise ValueError("otool is required to verify macOS Mach-O load paths")
@@ -453,7 +565,10 @@ def _verify_macos_native_runtime(root: Path, env: dict[str, str]) -> dict:
         inspected += 1
     if inspected == 0:
         raise ValueError("no Mach-O files found in the relocated macOS core bundle")
-    return {"native_imports": len(MACOS_NATIVE_IMPORT_PROBE.splitlines()), "macho_files": inspected}
+    return {
+        "native_imports": len(MACOS_NATIVE_IMPORT_PROBE.splitlines()),
+        "macho_files": inspected,
+    }
 
 
 def inspect_archive(archive_path: Path, forbidden_paths: tuple[Path, ...] = ()) -> dict:
@@ -530,8 +645,9 @@ def verify_relocation(archive_path: Path, *, build_paths: tuple[Path, ...] = ())
         result = subprocess.run(relocated_command, cwd=second, env=env, check=True, capture_output=True, text=True)
         if '"ok": true' not in result.stdout and '"ok":true' not in result.stdout:
             raise ValueError(f"relocated bundle self-test did not report success: {result.stdout.strip()}")
+        codec_check = _verify_pillow_codec_runtime(second, env)
         native_check = _verify_macos_native_runtime(second, env) if sys.platform == "darwin" else {}
-    return {**info, **native_check}
+    return {**info, **codec_check, **native_check}
 
 
 def main() -> None:
@@ -540,6 +656,7 @@ def main() -> None:
     build = subparsers.add_parser("build")
     build.add_argument("--target", required=True)
     build.add_argument("--wheel", type=Path, required=True)
+    build.add_argument("--pillow-wheel", type=Path)
     build.add_argument("--output", type=Path, required=True)
     build.add_argument("--epoch", type=int, default=0)
     build.add_argument("--temp-dir", type=Path)
@@ -549,7 +666,14 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "build":
-        result = build_bundle(args.target, args.wheel, args.output, epoch=args.epoch, temp_dir=args.temp_dir)
+        result = build_bundle(
+            args.target,
+            args.wheel,
+            args.output,
+            epoch=args.epoch,
+            temp_dir=args.temp_dir,
+            pillow_wheel=args.pillow_wheel,
+        )
     else:
         result = verify_relocation(args.archive, build_paths=tuple(args.build_path))
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

@@ -164,7 +164,15 @@ jobs:
           name: sidevoice-core-dist
           path: dist
       - name: Prepare locked bundle tooling
-        run: uv sync --locked --python 3.12 --no-install-project --no-default-groups --only-group bundle-build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [ "$TARGET" = macos-aarch64 ]; then
+            uv sync --locked --python 3.12 --no-install-project --no-default-groups \
+              --only-group bundle-build --only-group pillow-build
+          else
+            uv sync --locked --python 3.12 --no-install-project --no-default-groups --only-group bundle-build
+          fi
       - name: Build and test the relocatable bundle
         id: bundle
         env:
@@ -177,7 +185,15 @@ jobs:
           VERSION=${VERSION%-py3-none-any.whl}
           ARCHIVE="dist/sidevoice-core-${VERSION}-${TARGET}.tar.zst"
           EPOCH=$(git show -s --format=%ct HEAD)
-          TMPDIR="$RUNNER_TEMP" .venv/bin/python tools/core_bundle.py build --target "$TARGET" --wheel "$WHEEL" \
+          BUNDLE_ARGS=(build --target "$TARGET" --wheel "$WHEEL")
+          if [ "$TARGET" = macos-aarch64 ]; then
+            PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH" .venv/bin/python tools/build_macos_pillow.py \
+              --output-dir "$RUNNER_TEMP/pillow-wheel" --temp-dir "$RUNNER_TEMP" | tee "$RUNNER_TEMP/pillow-build.json"
+            PILLOW_WHEEL=$(find "$RUNNER_TEMP/pillow-wheel" -maxdepth 1 -name 'pillow-12.3.0-*.whl' -print -quit)
+            test -n "$PILLOW_WHEEL"
+            BUNDLE_ARGS+=(--pillow-wheel "$PILLOW_WHEEL")
+          fi
+          TMPDIR="$RUNNER_TEMP" .venv/bin/python tools/core_bundle.py "${BUNDLE_ARGS[@]}" \
             --output "$ARCHIVE" --epoch "$EPOCH" --temp-dir "$RUNNER_TEMP" | tee "$RUNNER_TEMP/build-stats.json"
           .venv/bin/python tools/core_bundle.py verify --archive "$ARCHIVE" \
             --build-path "$GITHUB_WORKSPACE" --build-path "$RUNNER_TEMP" | tee "$RUNNER_TEMP/verify-stats.json"

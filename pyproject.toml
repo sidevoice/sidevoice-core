@@ -30,6 +30,16 @@ test = ["pytest", "pytest-asyncio"]
 [dependency-groups]
 bundle-build = ["zstandard==0.24.0"]
 package-build = ["setuptools==80.9.0"]
+pillow-build = [
+    "cmake==4.4.3",
+    "delocate==0.13.0",
+    "meson==1.12.1",
+    "ninja==1.13.2",
+    "pip==26.2.1",
+    "pybind11==3.1.0",
+    "setuptools==80.9.0",
+    "wheel==0.48.0",
+]
 
 [project.scripts]
 sidevoice-core = "sidevoice_core.server.__main__:main"

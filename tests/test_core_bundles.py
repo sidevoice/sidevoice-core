@@ -45,6 +45,60 @@ class CoreBundleTests(unittest.TestCase):
         for name, expected in pins["license_files"].items():
             self.assertEqual(sha256(license_directory / name), expected, name)
 
+    def test_macos_pillow_source_build_inputs_are_hash_pinned(self):
+        import tomllib
+
+        from tools.build_macos_pillow import FEATURE_SETTINGS, REQUIRED_CACHE_FILES, _load_pins
+
+        pins = _load_pins()
+        self.assertEqual(pins["version"], "12.3.0")
+        self.assertEqual(
+            pins["locked_wheel"]["filename"],
+            "pillow-12.3.0-cp312-cp312-macosx_11_0_arm64.whl",
+        )
+        self.assertRegex(pins["locked_wheel"]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertTrue(pins["build_settings"]["cmake_skip_rpath"])
+        self.assertEqual(
+            pins["build_settings"]["required_codec_roundtrips"],
+            ["JPEG", "JPEG2000", "PNG", "TIFF", "WEBP", "AVIF"],
+        )
+        self.assertEqual(
+            FEATURE_SETTINGS,
+            tuple(pins["build_settings"]["pillow_config_settings"]),
+        )
+        self.assertEqual(len(REQUIRED_CACHE_FILES), len(set(REQUIRED_CACHE_FILES)))
+        for key in ("pillow_source", "multibuild", "dependency_cache"):
+            self.assertRegex(pins[key]["commit"], r"^[0-9a-f]{40}$")
+            self.assertRegex(pins[key]["sha256"], r"^[0-9a-f]{64}$")
+        project = Path(__file__).resolve().parents[1]
+        lock = tomllib.loads((project / "uv.lock").read_text(encoding="utf-8"))
+        pillow = next(package for package in lock["package"] if package["name"] == "pillow")
+        locked_arm_wheel = next(
+            wheel for wheel in pillow["wheels"] if wheel["url"].endswith(pins["locked_wheel"]["filename"])
+        )
+        self.assertEqual(locked_arm_wheel["hash"].removeprefix("sha256:"), pins["locked_wheel"]["sha256"])
+
+    def test_macos_pillow_dependency_cache_extraction_rejects_escape(self):
+        import tempfile
+        import zipfile
+
+        from tools.build_macos_pillow import _extract_dependency_cache
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "cache.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("pillow-depends-abc123/native.tar.gz", b"source")
+            output = root / "cache"
+            _extract_dependency_cache(archive_path, output, "pillow-depends-abc123")
+            self.assertEqual((output / "native.tar.gz").read_bytes(), b"source")
+
+            unsafe_path = root / "unsafe.zip"
+            with zipfile.ZipFile(unsafe_path, "w") as archive:
+                archive.writestr("pillow-depends-abc123/../../escape", b"bad")
+            with self.assertRaisesRegex(ValueError, "unsafe archive member path"):
+                _extract_dependency_cache(unsafe_path, root / "unsafe", "pillow-depends-abc123")
+
     def test_removes_sboms_with_this_build_paths_but_keeps_upstream_provenance(self):
         import tempfile
 
@@ -282,6 +336,8 @@ Load command 4
             python.chmod(0o755)
             (root / "python/lib/python3.12/site-packages/sidevoice_core/server").mkdir(parents=True)
             (root / "python/lib/python3.12/site-packages/sidevoice_core/server/__main__.py").write_text("\n")
+            (root / "python/lib/python3.12/site-packages/PIL").mkdir(parents=True)
+            (root / "python/lib/python3.12/site-packages/PIL/Image.py").write_text("\n")
             (root / "python/lib/python3.12/LICENSE.txt").write_text("PSF license\n")
             for name in ("LICENSE", "LICENSE.python-build-standalone", "TRADEMARKS.md", "DEPENDENCIES.lock.txt", "BUNDLE-NOTICES.md"):
                 (root / name).write_text(f"{name}\n")
@@ -294,7 +350,10 @@ Load command 4
             self.assertEqual(created["compressed_bytes"], archive.stat().st_size)
             self.assertEqual(inspected["compressed_bytes"], archive.stat().st_size)
             self.assertGreater(inspected["unpacked_bytes"], 0)
-            verified = verify_relocation(archive, build_paths=(root,))
+            from unittest.mock import patch
+
+            with patch("tools.core_bundle._verify_pillow_codec_runtime", return_value={}):
+                verified = verify_relocation(archive, build_paths=(root,))
             self.assertEqual(verified["compressed_bytes"], archive.stat().st_size)
 
     def test_archive_rejects_this_build_path_but_allows_upstream_native_source_strings(self):
@@ -308,6 +367,8 @@ Load command 4
             python.chmod(0o755)
             (root / "python/lib/python3.12/site-packages/sidevoice_core/server").mkdir(parents=True)
             (root / "python/lib/python3.12/site-packages/sidevoice_core/server/__main__.py").write_text("\n")
+            (root / "python/lib/python3.12/site-packages/PIL").mkdir(parents=True)
+            (root / "python/lib/python3.12/site-packages/PIL/Image.py").write_text("\n")
             (root / "python/lib/python3.12/LICENSE.txt").write_text("PSF license\n")
             for name in ("LICENSE", "LICENSE.python-build-standalone", "TRADEMARKS.md", "DEPENDENCIES.lock.txt", "BUNDLE-NOTICES.md"):
                 (root / name).write_text(f"{name}\n")
