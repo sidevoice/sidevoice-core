@@ -2,6 +2,7 @@
 pairing, serves the room's relayed requests by making them to itself, carries a call socket both ways,
 reports the link to its connector, and accepts a room that dials it only with the right key."""
 import asyncio
+import functools
 import json
 import socket
 import tempfile
@@ -9,6 +10,7 @@ import time
 import unittest
 from pathlib import Path
 
+import aiohttp
 import socketio
 import uvicorn
 
@@ -16,7 +18,10 @@ from sidevoice_core.control.connectors import PROTOCOL as CONNECTOR_PROTOCOL
 from sidevoice_core.control.history import RoomHistory
 from sidevoice_core.control.room import Room
 from sidevoice_core.server.app import create_app
+from sidevoice_core.server.local import LocalListener, LocalSocket
 from sidevoice_core.server.rendezvous import PROTOCOL, Rendezvous
+
+LOCAL = 'http://localhost'   # the base a client of the local socket names; the socket is what it reaches
 
 
 def free_port():
@@ -33,6 +38,23 @@ async def until(check, timeout=10.0, every=0.02):
             return value
         await asyncio.sleep(every)
     raise AssertionError('timed out waiting')
+
+
+def through(path):
+    """An HTTP session that reaches a node through its local socket, as this computer's connector and app do."""
+    return aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=str(path)))
+
+
+def link_client(case, path):
+    """A Socket.IO client that reaches a node through its local socket (`connect(LOCAL, …)`), let go with `case`."""
+    session = through(path)
+    client = socketio.AsyncClient(reconnection=False, http_session=session)
+    # The namespace's handshake gets ten seconds, not the library's one: a loaded machine is not a refusal (a
+    # refusal still fails at once).
+    client.connect = functools.partial(client.connect, wait_timeout=10)
+    case.addAsyncCleanup(session.close)
+    case.addAsyncCleanup(client.disconnect)
+    return client
 
 
 class StandInRoom:
@@ -100,11 +122,20 @@ class NodeTest(unittest.IsolatedAsyncioTestCase):
         self.node_server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=self.node_port, log_level='warning'))
         self.node_task = asyncio.create_task(self.node_server.serve())
         await until(lambda: self.room_server.started and self.node_server.started)
+        # The node's second listener, as `server.__main__` runs it: the same app, on the local socket.
+        (root / 'core').mkdir(mode=0o700, exist_ok=True)
+        self.socket_path = root / 'core' / 'local.sock'
+        self.local = LocalSocket(self.socket_path)
+        self.local_server = LocalListener(app, self.node_server, log_level='warning')
+        self.local_task = asyncio.create_task(self.local_server.serve(sockets=[self.local.socket]))
+        await until(lambda: self.local_server.started)
         await self.rendezvous.start()
 
     async def asyncTearDown(self):
         self.node_server.should_exit = True
         await self.node_task
+        await self.local_task
+        self.local.remove()
         self.room_server.should_exit = True
         await self.room_task
         self.temp.cleanup()
@@ -148,9 +179,9 @@ class OutboundTests(NodeTest):
         # A connector linked to this core: what it is told about the room arrives as `node.rendezvous`.
         credential = self.node_room.journal.redeem_pairing_code(self.node_room.journal.create_pairing_code())
         heard = []
-        connector = socketio.AsyncClient(reconnection=False)
+        connector = link_client(self, self.socket_path)
         connector.on('node.rendezvous', lambda data: heard.append(data), namespace='/connectors')
-        await connector.connect(f'http://127.0.0.1:{self.node_port}', socketio_path='/api/connectors/link',
+        await connector.connect(LOCAL, socketio_path='/api/connectors/link',
                                 namespaces=['/connectors'], transports=['websocket'],
                                 auth={'connector_id': credential[0], 'token': credential[1], 'protocol': CONNECTOR_PROTOCOL,
                                       'host': 'this-laptop', 'platform': 'Linux x86_64', 'version': '0.7.0'})

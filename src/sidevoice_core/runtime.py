@@ -7,6 +7,11 @@ at import: a test, and a second core in one process, get the environment they we
 import os
 from pathlib import Path
 
+# The client HTTP/WS surface this core serves, as one integer a client build compares with the range it speaks
+# (`GET /api/rendezvous`, `/api/local/health`). It moves when that surface changes incompatibly; the connector's
+# link has its own number (`control.connectors.PROTOCOL`).
+API = 1
+
 
 def data_dir(environ=None):
     """The node's own directory: provider keys, the local link's credential, the ready file.
