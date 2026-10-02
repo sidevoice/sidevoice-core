@@ -140,6 +140,32 @@ Load command 4
                     executable_directory=executable_directory,
                 )
 
+    def test_rejects_upstream_absolute_lc_rpath(self):
+        import tempfile
+
+        load_commands = """Load command 8
+          cmd LC_RPATH
+      cmdsize 64
+         path /Users/runner/work/Pillow/Pillow/build/deps/darwin/lib (offset 12)
+"""
+        rpaths = _parse_otool_rpaths(load_commands)
+        self.assertEqual(rpaths, ("/Users/runner/work/Pillow/Pillow/build/deps/darwin/lib",))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "relocated"
+            binary = root / "python/lib/python3.12/site-packages/PIL/.dylibs/libjpeg.dylib"
+            executable_directory = root / "python/bin"
+            binary.parent.mkdir(parents=True)
+            executable_directory.mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, "non-system absolute Mach-O load path"):
+                for rpath in rpaths:
+                    _validate_macho_path(
+                        rpath,
+                        binary=binary,
+                        root=root,
+                        executable_directory=executable_directory,
+                    )
+
     def test_python_archive_filter_contains_a_symlink_chain(self):
         import tempfile
 
