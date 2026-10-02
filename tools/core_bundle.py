@@ -740,6 +740,9 @@ def _parse_nm_undefined_symbols(output: str) -> tuple[str, ...]:
         elif len(fields) == 1 and re.fullmatch(r"_[A-Za-z0-9_$?.]+", fields[0]):
             # Apple cctools `nm -u` defaults to listing only the undefined symbol name.
             symbols.append(fields[0])
+        elif fields == ["dyld_stub_binder"]:
+            # Apple also emits this linker-generated lazy-binding symbol without a U marker.
+            symbols.append(fields[0])
         else:
             raise ValueError(f"unrecognized `nm -u` output line: {line!r}")
     return tuple(symbols)

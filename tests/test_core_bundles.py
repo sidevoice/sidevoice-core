@@ -427,6 +427,7 @@ Load command 3
         self.assertEqual(install_names, (MACOS_PYAV_LIBSHARPYUV_ID,))
         self.assertEqual(symbols, ("_malloc", "_free"))
         self.assertEqual(_parse_nm_undefined_symbols("                 _dlopen\n _dlsym\n"), ("_dlopen", "_dlsym"))
+        self.assertEqual(_parse_nm_undefined_symbols("dyld_stub_binder\n"), ("dyld_stub_binder",))
         with self.assertRaisesRegex(ValueError, "unrecognized `nm -u` output"):
             _parse_nm_undefined_symbols("unexpected nm diagnostic")
         self.assertFalse(_has_macho_initializers(load_commands))
