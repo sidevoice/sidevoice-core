@@ -91,6 +91,19 @@ class StandInRoom:
         await self.server.emit(event, data, to=self.sid, namespace='/nodes')
 
 
+class HostAgentsPeer:
+    def __init__(self):
+        self.requests = []
+
+    async def request(self, event, data, *, timeout):
+        self.requests.append((event, data, timeout))
+        return {
+            'agents': [{'id': 'codex', 'label': 'Codex', 'registration': 'not-connected'}],
+            'scanned_at': '2026-10-02T12:00:00Z',
+            'custom': {'command': 'sidevoice mcp', 'snippet': '{}', 'version': '0.7.0'},
+        }
+
+
 class NodeTest(unittest.IsolatedAsyncioTestCase):
     room_refuses = None
     room_public_url = None
@@ -194,6 +207,47 @@ class OutboundTests(NodeTest):
             self.assertFalse(heard[-1]['connected'])
         finally:
             await connector.disconnect()
+
+
+class AuthenticatedHostAgentsRelayTests(NodeTest):
+    device_auth = True
+
+    async def test_room_relay_preserves_device_auth_and_rewrites_page_origin_for_host_agents(self):
+        await until(lambda: self.room.sid)
+        await until(lambda: self.rendezvous.state['connected'])
+        _, token, _ = self.app.state.devices.store.registry.pair_local('relayed app')
+        peer = HostAgentsPeer()
+        self.node_room.control.peers['local'] = peer
+
+        relayed = await self.room.ask('relay.http', {
+            'method': 'GET', 'path': '/api/host/agents', 'query': 'rescan=1&watch=codex',
+            'headers': {
+                'accept': 'application/json',
+                'authorization': f'Bearer {token}',
+                'origin': 'https://room.example',
+            },
+            'body': None,
+        })
+        self.assertEqual(relayed['status'], 200, relayed['body'])
+        self.assertEqual(json.loads(relayed['body']), {
+            'agents': [{'id': 'codex', 'label': 'Codex', 'registration': 'not-connected'}],
+            'scanned_at': '2026-10-02T12:00:00Z',
+            'custom': {'command': 'sidevoice mcp', 'snippet': '{}', 'version': '0.7.0'},
+        })
+        self.assertEqual(peer.requests, [('agents.list', {'rescan': True, 'watch': 'codex'}, 20.0)])
+
+        refused = await self.room.ask('relay.http', {
+            'method': 'GET', 'path': '/api/host/agents', 'query': '',
+            'headers': {'accept': 'application/json', 'origin': 'https://room.example'}, 'body': None,
+        })
+        self.assertEqual(refused['status'], 401, 'the room carries but never grants device authority')
+        self.assertEqual(len(peer.requests), 1)
+
+        local_link = await self.room.ask('relay.http', {
+            'method': 'GET', 'path': '/api/connectors/link', 'query': 'EIO=4&transport=polling',
+            'headers': {'authorization': f'Bearer {token}'}, 'body': None,
+        })
+        self.assertEqual(local_link['status'], 404, 'the connector credential path remains local-only')
 
 
 class LinkLifeTests(NodeTest):

@@ -40,11 +40,11 @@ PATH = '/api/connectors/link'      # on the room: the path its proxy already exe
 NAMESPACE = '/nodes'
 DIAL_PATH = '/api/rendezvous/link'  # on this node, for a room that dials it
 DIAL_NAMESPACE = '/room'
-# The client surface, and only it: the room's page, device pairing, and the model catalogue a client resolves
-# its offers from. Never the connector's link nor this node's own rendezvous routes, and never what only the local
-# socket serves (`server.local.LOCAL_ONLY`), even where it sits under a relayed prefix (`/api/device/local`): the
-# relay makes its requests over TCP, where those routes do not exist, and it refuses them by name besides.
-RELAYED = ('/api/presentation', '/api/device', '/api/models')
+# The browser surface for the room page and paired clients: presentation, device pairing, model offers and the
+# authenticated host-agent API. Never the connector's link nor this node's rendezvous routes, and never what only
+# the local socket serves (`server.local.LOCAL_ONLY`), even where it sits under a relayed prefix: the relay makes
+# its requests over TCP, where those routes do not exist, and it refuses them by name besides.
+RELAYED = ('/api/presentation', '/api/device', '/api/models', '/api/host')
 CALL_SOCKET = '/api/presentation/ws'
 # A subprotocol is an HTTP token (RFC 6455 §4.1): nothing else may reach the loopback handshake's header.
 SUBPROTOCOL = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}$")
