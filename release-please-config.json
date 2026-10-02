@@ -8,7 +8,8 @@
     ".": {
       "release-type": "python",
       "package-name": "sidevoice-core",
-      "bump-minor-pre-major": true
+      "bump-minor-pre-major": true,
+      "extra-files": ["uv.lock"]
     }
   }
 }

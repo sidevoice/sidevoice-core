@@ -1,9 +1,8 @@
 name: test
 
 # What runs when (RELEASING.md):
-# - pull request: the unit tests on Linux.
-# - push to main, manual run: the tests, then the wheel, sdist, model catalogue and resolver vectors; a green run on
-#   main replaces the `nightly` pre-release.
+# - pull request: unit tests plus native bundle build, archive relocation and manifest checks; nothing is published.
+# - push to main: tests and packages, then replace the `nightly` pre-release with verified assets.
 # - a release (called by release-please.yml with the tag it created): the same, attached to that release.
 on:
   push:
@@ -29,12 +28,14 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.release-tag }}
-      - uses: astral-sh/setup-uv@v6
-      - run: uv venv --python 3.12 .venv
-      - run: uv pip install --python .venv/bin/python -e '.[test]'
+      - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        with:
+          version: 0.12.9
+      - run: uv sync --locked --python 3.12 --no-install-project --extra test --group bundle-build --group package-build
+      - run: uv sync --locked --python 3.12 --extra test --group bundle-build --group package-build --no-build-isolation
       # Tests that need the connector or web checkout skip here.
       - run: .venv/bin/python -m pytest -q -p no:warnings
       # The local socket's boundary is the OS user, and a test suite runs as one: here a second user, on a real core,
@@ -87,20 +88,33 @@ jobs:
   package:
     name: Wheel, sdist, model catalogue and vectors
     needs: python
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       # Where the assets go: the release that called this, or the rolling `nightly` pre-release on a push to main.
       publish: ${{ steps.kind.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.release-tag }}
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        with:
+          version: 0.12.9
+      - name: Install the hash-locked build backend
+        run: uv sync --locked --python 3.12 --no-install-project --no-default-groups --only-group package-build
       - id: kind
-        run: echo "publish=${{ inputs.release-tag && 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'nightly' || '' }}" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release-tag }}
+        run: |
+          if [ -n "$RELEASE_TAG_INPUT" ]; then
+            PUBLISH_KIND=release
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            PUBLISH_KIND=nightly
+          else
+            PUBLISH_KIND=
+          fi
+          echo "publish=$PUBLISH_KIND" >> "$GITHUB_OUTPUT"
       - name: Wheel and sdist
-        run: uv build --python 3.12 --out-dir dist
+        run: uv build --no-build-isolation --python .venv/bin/python --out-dir dist
       - name: The model catalogue and the resolver vectors, as shipped in the wheel
         run: |
           set -euo pipefail
@@ -115,60 +129,301 @@ jobs:
           unzip -p "$WHEEL" sidevoice_core/models/vectors.json | cmp - dist/models-vectors.json
           (cd dist && sha256sum -- * > SHA256SUMS)
           ls -la dist; cat dist/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sidevoice-core-dist
           path: dist/
           retention-days: 7
           if-no-files-found: error
 
-  # Only after the tests and the package passed. Pull requests never get here.
-  publish:
-    name: Publish (release or nightly)
+  bundles:
+    name: Self-contained core bundle (${{ matrix.target }})
     needs: package
-    if: needs.package.outputs.publish != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-aarch64
+            runner: macos-14
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.release-tag }}
+      - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        with:
+          version: 0.12.9
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sidevoice-core-dist
+          path: dist
+      - name: Prepare locked bundle tooling
+        run: uv sync --locked --python 3.12 --no-install-project --no-default-groups --only-group bundle-build
+      - name: Build and test the relocatable bundle
+        id: bundle
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          WHEEL=$(find dist -maxdepth 1 -name 'sidevoice_core-*-py3-none-any.whl' -print -quit)
+          test -n "$WHEEL"
+          VERSION=${WHEEL##*/sidevoice_core-}
+          VERSION=${VERSION%-py3-none-any.whl}
+          ARCHIVE="dist/sidevoice-core-${VERSION}-${TARGET}.tar.zst"
+          EPOCH=$(git show -s --format=%ct HEAD)
+          TMPDIR="$RUNNER_TEMP" .venv/bin/python tools/core_bundle.py build --target "$TARGET" --wheel "$WHEEL" \
+            --output "$ARCHIVE" --epoch "$EPOCH" --temp-dir "$RUNNER_TEMP" | tee "$RUNNER_TEMP/build-stats.json"
+          .venv/bin/python tools/core_bundle.py verify --archive "$ARCHIVE" \
+            --build-path "$GITHUB_WORKSPACE" --build-path "$RUNNER_TEMP" | tee "$RUNNER_TEMP/verify-stats.json"
+          COMPRESSED=$(jq -r .compressed_bytes "$RUNNER_TEMP/build-stats.json")
+          UNPACKED=$(jq -r .unpacked_bytes "$RUNNER_TEMP/build-stats.json")
+          printf '### Bundle measurement: %s\n\n' "$TARGET" >> "$GITHUB_STEP_SUMMARY"
+          printf '| Asset | Compressed bytes | Unpacked file bytes |\n|---|---:|---:|\n| %s | %s | %s |\n' \
+            "$ARCHIVE" "$COMPRESSED" "$UNPACKED" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nRelocation and native verification:\n\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/verify-stats.json" >> "$GITHUB_STEP_SUMMARY"
+          printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'archive=%s\n' "$ARCHIVE" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sidevoice-core-bundle-${{ matrix.target }}
+          path: ${{ steps.bundle.outputs.archive }}
+          retention-days: 7
+          if-no-files-found: error
+
+  prepare-assets:
+    name: Prepare and validate release assets
+    needs: [package, bundles]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.release-tag }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sidevoice-core-dist
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: sidevoice-core-bundle-*
+          path: bundles
+          merge-multiple: true
+      - name: Generate manifest from built artifact bytes
+        id: manifest
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          mkdir assets
+          cp dist/* assets/
+          cp bundles/*.tar.zst assets/
+          if [ -n "$RELEASE_TAG" ]; then
+            DESTINATION_TAG="$RELEASE_TAG"
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            DESTINATION_TAG=nightly
+          else
+            DESTINATION_TAG="pr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          python3 tools/core_manifest.py --assets assets --tag "$DESTINATION_TAG" --output assets/core-manifest.json
+          rm assets/SHA256SUMS
+          (cd assets && sha256sum -- *.whl *.tar.gz models-catalog.json models-vectors.json \
+            sidevoice-core-*.tar.zst core-manifest.json > SHA256SUMS)
+          WHEEL=$(basename "$(find assets -maxdepth 1 -name 'sidevoice_core-*-py3-none-any.whl' -print -quit)")
+          VERSION=${WHEEL#sidevoice_core-}
+          VERSION=${VERSION%-py3-none-any.whl}
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          cat assets/core-manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sidevoice-core-publish-assets
+          path: assets/
+          retention-days: 7
+          if-no-files-found: error
+
+  # Only trusted main-push or called release runs have these write and OIDC permissions. PR builds never reach here.
+  publish:
+    name: Attest and publish (release or nightly)
+    needs: [package, prepare-assets]
+    if: >-
+      github.repository == 'sidevoice/sidevoice-core' && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      ((needs.package.outputs.publish == 'nightly' && github.workflow_ref == 'sidevoice/sidevoice-core/.github/workflows/test.yml@refs/heads/main') ||
+       (needs.package.outputs.publish == 'release' && github.workflow_ref == 'sidevoice/sidevoice-core/.github/workflows/release-please.yml@refs/heads/main'))
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ inputs.release-tag }}
+      RELEASE_TAG: ${{ inputs.release-tag }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: sidevoice-core-dist
+          name: sidevoice-core-publish-assets
           path: assets
-      - name: Attach to the release, then publish it (a version with -rc.N is a pre-release, never latest)
-        if: needs.package.outputs.publish == 'release'
-        run: |
-          set -euo pipefail
-          gh release upload "$TAG" assets/* --clobber
-          if [[ "$TAG" == *-* ]]; then
-            gh release edit "$TAG" --draft=false --prerelease --latest=false
-          else
-            gh release edit "$TAG" --draft=false --prerelease=false --latest
-          fi
-      - name: Replace the nightly pre-release (move its tag here, replace every asset)
-        if: needs.package.outputs.publish == 'nightly'
+      - name: Attest the macOS arm64 bundle
+        id: attest-macos-aarch64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/sidevoice-core-${{ needs.prepare-assets.outputs.version }}-macos-aarch64.tar.zst
+      - name: Save the macOS arm64 Sigstore bundle
         env:
+          BUNDLE: ${{ steps.attest-macos-aarch64.outputs.bundle-path }}
+          VERSION: ${{ needs.prepare-assets.outputs.version }}
+        run: cp "$BUNDLE" "assets/sidevoice-core-${VERSION}-macos-aarch64.tar.zst.sigstore.json"
+      - name: Attest the Linux x86_64 bundle
+        id: attest-linux-x86_64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/sidevoice-core-${{ needs.prepare-assets.outputs.version }}-linux-x86_64.tar.zst
+      - name: Save the Linux x86_64 Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest-linux-x86_64.outputs.bundle-path }}
+          VERSION: ${{ needs.prepare-assets.outputs.version }}
+        run: cp "$BUNDLE" "assets/sidevoice-core-${VERSION}-linux-x86_64.tar.zst.sigstore.json"
+      - name: Attest the Linux arm64 bundle
+        id: attest-linux-aarch64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/sidevoice-core-${{ needs.prepare-assets.outputs.version }}-linux-aarch64.tar.zst
+      - name: Save the Linux arm64 Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest-linux-aarch64.outputs.bundle-path }}
+          VERSION: ${{ needs.prepare-assets.outputs.version }}
+        run: cp "$BUNDLE" "assets/sidevoice-core-${VERSION}-linux-aarch64.tar.zst.sigstore.json"
+      - name: Attest the core wheel
+        id: attest-wheel
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/sidevoice_core-${{ needs.prepare-assets.outputs.version }}-py3-none-any.whl
+      - name: Save the wheel Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest-wheel.outputs.bundle-path }}
+          VERSION: ${{ needs.prepare-assets.outputs.version }}
+        run: cp "$BUNDLE" "assets/sidevoice_core-${VERSION}-py3-none-any.whl.sigstore.json"
+      - name: Attest the core manifest
+        id: attest-manifest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/core-manifest.json
+      - name: Save the manifest Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest-manifest.outputs.bundle-path }}
+        run: cp "$BUNDLE" assets/core-manifest.json.sigstore.json
+      - name: Set the destination tag and prepare the nightly release ref
+        env:
+          PUBLISH_KIND: ${{ needs.package.outputs.publish }}
           WHEN: ${{ github.event.head_commit.timestamp }}
         run: |
           set -euo pipefail
-          if gh api "repos/$GH_REPO/git/ref/tags/nightly" >/dev/null 2>&1; then
-            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          if [ "$PUBLISH_KIND" = release ]; then
+            test -n "$RELEASE_TAG"
+            echo "TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
           else
-            gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" >/dev/null
+            echo 'TAG=nightly' >> "$GITHUB_ENV"
+            if gh api "repos/$GH_REPO/git/ref/tags/nightly" >/dev/null 2>&1; then
+              gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+            else
+              gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" >/dev/null
+            fi
+            NOTES="Snapshot of \`main\` at $GITHUB_SHA (committed $WHEN). Not a versioned release: the \`nightly\` tag moves to every commit on \`main\` whose CI passes, and these assets are replaced each time. Versioned releases are the \`vX.Y.Z\` ones."
+            if gh release view nightly >/dev/null 2>&1; then
+              gh release edit nightly --title "Nightly (main)" --notes "$NOTES" --prerelease --latest=false
+            fi
           fi
-          NOTES="Snapshot of \`main\` at $GITHUB_SHA (committed $WHEN). Not a versioned release: the \`nightly\` tag moves to every commit on \`main\` whose CI passes, and these assets are replaced each time. Versioned releases are the \`vX.Y.Z\` ones."
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release edit nightly --title "Nightly (main)" --notes "$NOTES" --prerelease --latest=false
+      - name: Attach the assets to the release
+        env:
+          PUBLISH_KIND: ${{ needs.package.outputs.publish }}
+          WHEN: ${{ github.event.head_commit.timestamp }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH_KIND" = release ]; then
+            gh release upload "$TAG" assets/* --clobber
+          elif gh release view nightly >/dev/null 2>&1; then
             gh release upload nightly assets/* --clobber
-            # Anything left from an older snapshot that this one did not replace (the wheel and sdist are named after the version).
             gh release view nightly --json assets -q '.assets[].name' | while read -r name; do
               [ -e "assets/$name" ] || gh release delete-asset nightly "$name" --yes
             done
           else
+            NOTES="Snapshot of \`main\` at $GITHUB_SHA (committed $WHEN). Not a versioned release: the \`nightly\` tag moves to every commit on \`main\` whose CI passes, and these assets are replaced each time. Versioned releases are the \`vX.Y.Z\` ones."
             gh release create nightly assets/* --verify-tag --title "Nightly (main)" --notes "$NOTES" \
-              --prerelease --latest=false
+              --draft --prerelease --latest=false
           fi
+      - name: Verify exact release assets with the attached Sigstore bundles
+        env:
+          VERSION: ${{ needs.prepare-assets.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir verify-assets
+          WHEEL="sidevoice_core-${VERSION}-py3-none-any.whl"
+          ASSETS=(
+            "sidevoice-core-${VERSION}-macos-aarch64.tar.zst"
+            "sidevoice-core-${VERSION}-linux-x86_64.tar.zst"
+            "sidevoice-core-${VERSION}-linux-aarch64.tar.zst"
+            "$WHEEL"
+            "core-manifest.json"
+          )
+          for asset in "${ASSETS[@]}"; do
+            gh release download "$TAG" --pattern "$asset" --dir verify-assets
+            gh release download "$TAG" --pattern "$asset.sigstore.json" --dir verify-assets
+            cmp "assets/$asset" "verify-assets/$asset"
+            cmp "assets/$asset.sigstore.json" "verify-assets/$asset.sigstore.json"
+            env -u GH_TOKEN -u GITHUB_TOKEN gh attestation verify "verify-assets/$asset" \
+              --repo sidevoice/sidevoice-core \
+              --bundle "verify-assets/$asset.sigstore.json" \
+              --cert-identity 'https://github.com/sidevoice/sidevoice-core/.github/workflows/test.yml@refs/heads/main' \
+              --deny-self-hosted-runners
+          done
+      - name: Publish a verified version release (a version with -rc.N stays a pre-release)
+        if: needs.package.outputs.publish == 'release'
+        env:
+          VERSION_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$VERSION_TAG" == *-* ]]; then
+            gh release edit "$VERSION_TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$VERSION_TAG" --draft=false --prerelease=false --latest
+          fi
+      - name: Publish the verified nightly pre-release
+        if: needs.package.outputs.publish == 'nightly'
+        run: gh release edit nightly --draft=false --prerelease --latest=false
+      - name: Verify public asset downloads and attestations without a GitHub token
+        env:
+          VERSION: ${{ needs.prepare-assets.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir public-assets
+          WHEEL="sidevoice_core-${VERSION}-py3-none-any.whl"
+          ASSETS=(
+            "sidevoice-core-${VERSION}-macos-aarch64.tar.zst"
+            "sidevoice-core-${VERSION}-linux-x86_64.tar.zst"
+            "sidevoice-core-${VERSION}-linux-aarch64.tar.zst"
+            "$WHEEL"
+            core-manifest.json
+          )
+          BASE_URL="https://github.com/sidevoice/sidevoice-core/releases/download/$TAG"
+          for asset in "${ASSETS[@]}"; do
+            env -u GH_TOKEN -u GITHUB_TOKEN curl --fail --location --retry 3 \
+              --output "public-assets/$asset" "$BASE_URL/$asset"
+            env -u GH_TOKEN -u GITHUB_TOKEN curl --fail --location --retry 3 \
+              --output "public-assets/$asset.sigstore.json" "$BASE_URL/$asset.sigstore.json"
+            cmp "assets/$asset" "public-assets/$asset"
+            cmp "assets/$asset.sigstore.json" "public-assets/$asset.sigstore.json"
+            env -u GH_TOKEN -u GITHUB_TOKEN gh attestation verify "public-assets/$asset" \
+              --repo sidevoice/sidevoice-core \
+              --bundle "public-assets/$asset.sigstore.json" \
+              --cert-identity 'https://github.com/sidevoice/sidevoice-core/.github/workflows/test.yml@refs/heads/main' \
+              --deny-self-hosted-runners
+          done
