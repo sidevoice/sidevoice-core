@@ -47,6 +47,7 @@ from tools.core_bundle import (
     _require_no_reviewed_rpath_trace,
     _validate_rpath_positive_control,
     _validate_rpath_positive_control_load_commands,
+    _make_short_private_socket_location,
     create_archive,
     extract_python_distribution,
     inspect_archive,
@@ -409,6 +410,15 @@ Load command 3
                 ValueError, "runpath positive control is not linked"
             ):
                 _validate_rpath_positive_control_load_commands(altered, "/tmp/vendor/lib")
+
+    def test_relocated_core_probe_uses_a_private_short_unix_socket_path(self):
+        socket_directory, socket_path = _make_short_private_socket_location()
+        try:
+            self.assertEqual(socket_directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(socket_path.parent, socket_directory)
+            self.assertLess(len(str(socket_path).encode()), 80)
+        finally:
+            socket_directory.rmdir()
 
     def test_pyav_load_command_parsers_and_exact_runpath_exception(self):
         import tempfile

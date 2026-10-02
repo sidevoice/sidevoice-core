@@ -1313,21 +1313,11 @@ def _verify_relocated_core_start(root: Path, env: dict[str, str]) -> dict:
     interpreter = root / "python" / "bin" / "python3"
     data_directory = root / "core-start-probe"
     ready_file = data_directory / "core.json"
-    socket_path = data_directory / "local.sock"
+    socket_directory, socket_path = _make_short_private_socket_location()
     dyld_log_path = root / "core-dyld-trace.log"
     launch_id = "r4-a-relocated-core-start"
-    dyld_log = dyld_log_path.open("w", encoding="utf-8")
-    process = subprocess.Popen(
-        [
-            str(interpreter), "-I", "-B", "-m", "sidevoice_core.server",
-            "--port", "0", "--data-dir", str(data_directory), "--idle-exit", "0", "--launch-id", launch_id,
-        ],
-        cwd=root,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=dyld_log,
-    )
+    dyld_log = None
+    process = None
 
     class UnixHTTPConnection(http.client.HTTPConnection):
         def connect(self):
@@ -1336,6 +1326,19 @@ def _verify_relocated_core_start(root: Path, env: dict[str, str]) -> dict:
             self.sock.connect(str(socket_path))
 
     try:
+        dyld_log = dyld_log_path.open("w", encoding="utf-8")
+        process = subprocess.Popen(
+            [
+                str(interpreter), "-I", "-B", "-m", "sidevoice_core.server",
+                "--port", "0", "--data-dir", str(data_directory), "--socket", str(socket_path),
+                "--idle-exit", "0", "--launch-id", launch_id,
+            ],
+            cwd=root,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=dyld_log,
+        )
         deadline = time.monotonic() + 60
         while not ready_file.is_file():
             if process.poll() is not None:
@@ -1388,12 +1391,28 @@ def _verify_relocated_core_start(root: Path, env: dict[str, str]) -> dict:
             "vendor_images": [],
         }
     finally:
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             process.kill()
             process.wait(timeout=10)
-        if not dyld_log.closed:
+        if dyld_log is not None and not dyld_log.closed:
             dyld_log.close()
         dyld_log_path.unlink(missing_ok=True)
+        shutil.rmtree(socket_directory, ignore_errors=True)
+
+
+def _make_short_private_socket_location() -> tuple[Path, Path]:
+    """Reserve a private, short /tmp path for the core-start probe's AF_UNIX socket."""
+    socket_directory = Path(tempfile.mkdtemp(prefix="svcore-", dir="/tmp")).resolve(strict=True)
+    try:
+        if socket_directory.stat().st_mode & 0o077:
+            raise ValueError(f"core-start socket directory is not private: {socket_directory}")
+        socket_path = socket_directory / "local.sock"
+        if len(os.fsencode(socket_path)) >= 80:
+            raise ValueError(f"core-start socket path is not short enough for macOS: {socket_path}")
+        return socket_directory, socket_path
+    except Exception:
+        shutil.rmtree(socket_directory, ignore_errors=True)
+        raise
 
 
 def _verify_macos_native_runtime(root: Path, env: dict[str, str], graph: dict) -> dict:
