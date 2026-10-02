@@ -13,13 +13,28 @@ from tools.core_bundle import (
     MACOS_PILLOW_LIBJPEG_SHA256,
     MACOS_PILLOW_UPSTREAM_RPATH,
     MACOS_PILLOW_WHEEL_SHA256,
+    MACOS_PYAV_LIBSHARPYUV_DEPENDENCIES,
+    MACOS_PYAV_LIBSHARPYUV_EMBEDDED_RPATH_NAMES,
+    MACOS_PYAV_LIBSHARPYUV_ID,
+    MACOS_PYAV_LIBSHARPYUV_PATH,
+    MACOS_PYAV_LIBSHARPYUV_SHA256,
+    MACOS_PYAV_UPSTREAM_RPATH,
+    MACOS_PYAV_WHEEL_SHA256,
     PIL_CODEC_ROUNDTRIP_PROBE,
+    PYAV_AUDIO_ROUNDTRIP_PROBE,
+    PYAV_WEBP_ROUNDTRIP_PROBE,
     PILLOW_CODECS,
     PILLOW_REQUIRED_FEATURES,
     _parse_otool_dependencies,
+    _parse_otool_install_names,
     _parse_otool_rpaths,
+    _parse_nm_undefined_symbols,
+    _has_macho_initializers,
+    _rpath_candidate_name,
     _validate_macho_path,
     _validate_pillow_rpath_exception,
+    _validate_pyav_rpath_exception,
+    _require_no_vendor_trace,
     create_archive,
     extract_python_distribution,
     inspect_archive,
@@ -60,6 +75,7 @@ class CoreBundleTests(unittest.TestCase):
         self.assertEqual(evidence["codecs"], list(PILLOW_CODECS))
         self.assertEqual(evidence["features"], list(PILLOW_REQUIRED_FEATURES))
         self.assertEqual(evidence["tiff_compression"], "tiff_lzw")
+        self.assertEqual(evidence["vendor_images"], [])
 
     def test_python_build_standalone_pins_match_their_release_urls(self):
         pins_path = Path(__file__).resolve().parents[1] / "packaging/python-build-standalone.json"
@@ -239,6 +255,199 @@ Load command 4
                     root=root,
                     executable_directory=root / "python/bin",
                 )
+
+    def test_pyav_rpath_exception_is_bound_to_the_locked_wheel(self):
+        import tomllib
+
+        project = Path(__file__).resolve().parents[1]
+        lock = tomllib.loads((project / "uv.lock").read_text(encoding="utf-8"))
+        pyav = next(package for package in lock["package"] if package["name"] == "av")
+        macos_arm64 = [
+            wheel for wheel in pyav["wheels"]
+            if urlsplit(wheel["url"]).path.endswith("av-17.1.0-cp311-abi3-macosx_14_0_arm64.whl")
+        ]
+        self.assertEqual(len(macos_arm64), 1)
+        self.assertEqual(macos_arm64[0]["hash"], f"sha256:{MACOS_PYAV_WHEEL_SHA256}")
+
+    def test_pyav_audio_and_webp_runtime_probes(self):
+        import subprocess
+        import sys
+
+        for probe in (PYAV_AUDIO_ROUNDTRIP_PROBE, PYAV_WEBP_ROUNDTRIP_PROBE):
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", probe],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            evidence = json.loads(result.stdout)
+            self.assertEqual(evidence["version"], "17.1.0")
+            self.assertEqual(evidence["vendor_images"], [])
+
+    def test_dyld_trace_rejects_both_tmp_path_spellings(self):
+        for path in ("/tmp/vendor/lib/libcandidate.dylib", "/private/tmp/vendor/lib/libcandidate.dylib"):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "dyld loaded an image"):
+                _require_no_vendor_trace(f"dyld: {path}\n", "test probe")
+
+    def test_pyav_load_command_parsers_and_exact_runpath_exception(self):
+        import tempfile
+        from unittest.mock import patch
+
+        load_commands = f"""Load command 1
+          cmd LC_ID_DYLIB
+             name {MACOS_PYAV_LIBSHARPYUV_ID} (offset 24)
+Load command 2
+          cmd LC_LOAD_DYLIB
+             name /usr/lib/libSystem.B.dylib (offset 24)
+Load command 3
+          cmd LC_RPATH
+      cmdsize 40
+         path /tmp/vendor/lib (offset 12)
+"""
+        dependencies = _parse_otool_dependencies(load_commands)
+        rpaths = _parse_otool_rpaths(load_commands)
+        install_names = _parse_otool_install_names(load_commands)
+        symbols = _parse_nm_undefined_symbols("                 U _malloc\n(undefined) external _free (from libSystem)\n")
+        self.assertEqual(dependencies, MACOS_PYAV_LIBSHARPYUV_DEPENDENCIES)
+        self.assertEqual(rpaths, (MACOS_PYAV_UPSTREAM_RPATH,))
+        self.assertEqual(install_names, (MACOS_PYAV_LIBSHARPYUV_ID,))
+        self.assertEqual(symbols, ("_malloc", "_free"))
+        self.assertFalse(_has_macho_initializers(load_commands))
+        self.assertTrue(_has_macho_initializers("cmd LC_ROUTINES_64\nsectname __mod_init_func"))
+        self.assertEqual(_rpath_candidate_name("@rpath/libcodec.dylib"), "libcodec.dylib")
+        self.assertEqual(_rpath_candidate_name("@loader_path/libcodec.dylib"), None)
+        with self.assertRaisesRegex(ValueError, "unsafe @rpath candidate"):
+            _rpath_candidate_name("@rpath/../outside.dylib")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "relocated"
+            binary = root / MACOS_PYAV_LIBSHARPYUV_PATH
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"locked PyAV libsharpyuv fixture")
+            with patch("tools.core_bundle.digest", return_value=MACOS_PYAV_LIBSHARPYUV_SHA256):
+                evidence = _validate_pyav_rpath_exception(
+                    rpaths[0],
+                    binary=binary,
+                    root=root,
+                    dependencies=dependencies,
+                    rpaths=rpaths,
+                    install_names=install_names,
+                    undefined_symbols=symbols,
+                    has_initializers=False,
+                )
+            self.assertEqual(evidence["binary"], MACOS_PYAV_LIBSHARPYUV_PATH)
+            self.assertEqual(evidence["binary_sha256"], MACOS_PYAV_LIBSHARPYUV_SHA256)
+            self.assertEqual(evidence["wheel_sha256"], MACOS_PYAV_WHEEL_SHA256)
+            self.assertEqual(evidence["install_name"], MACOS_PYAV_LIBSHARPYUV_ID)
+            self.assertEqual(evidence["dependencies"], list(MACOS_PYAV_LIBSHARPYUV_DEPENDENCIES))
+            self.assertEqual(evidence["embedded_rpath_names"], list(MACOS_PYAV_LIBSHARPYUV_EMBEDDED_RPATH_NAMES))
+            self.assertEqual(evidence["dynamic_loader_symbols"], [])
+            self.assertFalse(evidence["has_initializers"])
+
+            with patch("tools.core_bundle.digest", return_value="0" * 64):
+                with self.assertRaisesRegex(ValueError, "binary digest changed"):
+                    _validate_pyav_rpath_exception(
+                        rpaths[0],
+                        binary=binary,
+                        root=root,
+                        dependencies=dependencies,
+                        rpaths=rpaths,
+                        install_names=install_names,
+                        undefined_symbols=symbols,
+                        has_initializers=False,
+                    )
+            with patch("tools.core_bundle.digest", return_value=MACOS_PYAV_LIBSHARPYUV_SHA256):
+                with self.assertRaisesRegex(ValueError, "load graph changed"):
+                    _validate_pyav_rpath_exception(
+                        rpaths[0],
+                        binary=binary,
+                        root=root,
+                        dependencies=("@rpath/libsharpyuv.0.1.2.dylib",),
+                        rpaths=rpaths,
+                        install_names=install_names,
+                        undefined_symbols=symbols,
+                        has_initializers=False,
+                    )
+                with self.assertRaisesRegex(ValueError, "install name changed"):
+                    _validate_pyav_rpath_exception(
+                        rpaths[0],
+                        binary=binary,
+                        root=root,
+                        dependencies=dependencies,
+                        rpaths=rpaths,
+                        install_names=("@rpath/libsharpyuv.0.1.2.dylib",),
+                        undefined_symbols=symbols,
+                        has_initializers=False,
+                    )
+                with self.assertRaisesRegex(ValueError, "dynamic-loader APIs"):
+                    _validate_pyav_rpath_exception(
+                        rpaths[0],
+                        binary=binary,
+                        root=root,
+                        dependencies=dependencies,
+                        rpaths=rpaths,
+                        install_names=install_names,
+                        undefined_symbols=("_dlopen",),
+                        has_initializers=False,
+                    )
+                with self.assertRaisesRegex(ValueError, "Mach-O initializers"):
+                    _validate_pyav_rpath_exception(
+                        rpaths[0],
+                        binary=binary,
+                        root=root,
+                        dependencies=dependencies,
+                        rpaths=rpaths,
+                        install_names=install_names,
+                        undefined_symbols=symbols,
+                        has_initializers=True,
+                    )
+                binary.write_bytes(b"@rpath/unexpected.dylib\x00")
+                with self.assertRaisesRegex(ValueError, "embedded @rpath names changed"):
+                    _validate_pyav_rpath_exception(
+                        rpaths[0],
+                        binary=binary,
+                        root=root,
+                        dependencies=dependencies,
+                        rpaths=rpaths,
+                        install_names=install_names,
+                        undefined_symbols=symbols,
+                        has_initializers=False,
+                    )
+                binary.write_bytes(b"locked PyAV libsharpyuv fixture")
+                with self.assertRaisesRegex(ValueError, "unreviewed PyAV LC_RPATH command set"):
+                    _validate_pyav_rpath_exception(
+                        rpaths[0],
+                        binary=binary,
+                        root=root,
+                        dependencies=dependencies,
+                        rpaths=(MACOS_PYAV_UPSTREAM_RPATH, MACOS_PYAV_UPSTREAM_RPATH),
+                        install_names=install_names,
+                        undefined_symbols=symbols,
+                        has_initializers=False,
+                    )
+                with self.assertRaisesRegex(ValueError, "non-system absolute Mach-O load path"):
+                    _validate_macho_path(
+                        MACOS_PYAV_UPSTREAM_RPATH,
+                        binary=binary,
+                        root=root,
+                        executable_directory=root / "python/bin",
+                    )
+
+            other_binary = root / "python/lib/python3.12/site-packages/av/.dylibs/libwebp.dylib"
+            other_binary.parent.mkdir(parents=True, exist_ok=True)
+            other_binary.write_bytes(b"another dylib")
+            with patch("tools.core_bundle.digest", return_value=MACOS_PYAV_LIBSHARPYUV_SHA256):
+                with self.assertRaisesRegex(ValueError, "unreviewed Mach-O binary"):
+                    _validate_pyav_rpath_exception(
+                        rpaths[0],
+                        binary=other_binary,
+                        root=root,
+                        dependencies=dependencies,
+                        rpaths=rpaths,
+                        install_names=install_names,
+                        undefined_symbols=symbols,
+                        has_initializers=False,
+                    )
 
     def test_python_archive_filter_contains_a_symlink_chain(self):
         import tempfile
