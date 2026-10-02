@@ -41,6 +41,7 @@ from tools.core_bundle import (
     _validate_macho_path,
     _validate_pillow_rpath_exception,
     _validate_pyav_rpath_exception,
+    _validate_pyav_audio_runtime_evidence,
     _validate_scipy_rpath_exception,
     _require_no_vendor_trace,
     _require_no_reviewed_rpath_trace,
@@ -325,6 +326,12 @@ Load command 4
                 self.assertEqual(evidence["sharp_conversion"]["function"], "SharpYuvConvert")
                 self.assertEqual(evidence["sharp_conversion"]["input_rgb_bytes"], 16 * 16 * 3)
                 self.assertRegex(evidence["sharp_conversion"]["output_sha256"], r"^[0-9a-f]{64}$")
+            else:
+                self.assertEqual(_validate_pyav_audio_runtime_evidence(evidence), evidence)
+                incomplete = dict(evidence)
+                del incomplete["rpath_images"]
+                with self.assertRaisesRegex(ValueError, "unexpected evidence"):
+                    _validate_pyav_audio_runtime_evidence(incomplete)
 
     def test_scipy_runtime_probe_executes_blas_and_solve(self):
         import subprocess

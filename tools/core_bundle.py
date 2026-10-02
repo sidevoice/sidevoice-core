@@ -1249,6 +1249,11 @@ def _verify_pyav_audio_runtime(root: Path, env: dict[str, str]) -> dict:
         evidence = json.loads(probe.stdout)
     except json.JSONDecodeError as error:
         raise ValueError("relocated PyAV probe did not return valid JSON") from error
+    return _validate_pyav_audio_runtime_evidence(evidence)
+
+
+def _validate_pyav_audio_runtime_evidence(evidence: dict) -> dict:
+    """Require the complete audio result, including both external-image checks."""
     expected = {
         "version": MACOS_PYAV_VERSION,
         "container": "wav",
@@ -1257,6 +1262,7 @@ def _verify_pyav_audio_runtime(root: Path, env: dict[str, str]) -> dict:
         "resampled_rate": 8000,
         "resampled_samples": 160,
         "vendor_images": [],
+        "rpath_images": [],
     }
     if evidence != expected:
         raise ValueError(f"relocated PyAV audio probe returned unexpected evidence: {evidence!r}")
