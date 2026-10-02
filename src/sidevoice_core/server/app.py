@@ -220,6 +220,7 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None, de
     from fastapi import FastAPI
     from ..control.telemetry import configure as configure_telemetry
     from .connector_link import mount_connector_link
+    from .host_agents import mount_host_agents
     config = dict(os.environ) if config is None else config
     if room is None:
         room = Room(RoomHistory(data_dir(config) / 'room-state.json'))
@@ -236,7 +237,8 @@ def create_app(room=None, *, config=None, link_options=None, rendezvous=None, de
     configure_telemetry(environ=config)
     mount_presentation(app, room)
     mount_models(app)
-    mount_connector_link(app, room, **(link_options or {}))
+    connector_control = mount_connector_link(app, room, **(link_options or {}))
+    mount_host_agents(app, connector_control)
     mount_browser_call(app, room, config)
     mount_webrtc(app, room)
     devices = mount_devices(app, room, rendezvous, config)
