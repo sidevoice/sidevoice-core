@@ -8,6 +8,9 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
 from tools.core_bundle import (
+    _parse_otool_dependencies,
+    _parse_otool_rpaths,
+    _validate_macho_path,
     create_archive,
     extract_python_distribution,
     inspect_archive,
@@ -42,7 +45,7 @@ class CoreBundleTests(unittest.TestCase):
         for name, expected in pins["license_files"].items():
             self.assertEqual(sha256(license_directory / name), expected, name)
 
-    def test_removes_sboms_with_maintainer_checkout_paths_only(self):
+    def test_removes_sboms_with_this_build_paths_but_keeps_upstream_provenance(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -51,13 +54,89 @@ class CoreBundleTests(unittest.TestCase):
             sboms.mkdir(parents=True)
             dist_info = sboms.parent
             (dist_info / "direct_url.json").write_text('{"url":"file:///build/pip.whl"}', encoding="utf-8")
-            (sboms / "unsafe.json").write_text("file:///home/runner/work/pkg", encoding="utf-8")
+            checkout = Path(temporary) / "sidevoice-core"
+            temp_root = Path(temporary) / "runner-temp"
+            (sboms / "checkout.json").write_text(str(checkout), encoding="utf-8")
+            (sboms / "temp.json").write_text(str(temp_root), encoding="utf-8")
+            (sboms / "upstream.json").write_text(
+                "file:///Users/runner/work/PyAV/PyAV/src/av/core.py", encoding="utf-8"
+            )
             (sboms / "safe.json").write_text('{"bomFormat":"CycloneDX"}', encoding="utf-8")
-            self.assertEqual(remove_upstream_sboms(site_packages), 1)
+            self.assertEqual(remove_upstream_sboms(site_packages, (checkout, temp_root)), 2)
             self.assertEqual(remove_install_source_metadata(site_packages), 1)
-            self.assertFalse((sboms / "unsafe.json").exists())
+            self.assertFalse((sboms / "checkout.json").exists())
+            self.assertFalse((sboms / "temp.json").exists())
+            self.assertTrue((sboms / "upstream.json").is_file())
             self.assertTrue((sboms / "safe.json").is_file())
             self.assertFalse((dist_info / "direct_url.json").exists())
+
+    def test_macho_load_path_parser_and_validation(self):
+        import tempfile
+
+        dependency_output = """bundle:
+\t@rpath/libavcodec.dylib (compatibility version 1.0.0, current version 1.0.0)
+\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)
+"""
+        load_commands = """Load command 1
+          cmd LC_RPATH
+      cmdsize 40
+         path @loader_path/.dylibs (offset 12)
+Load command 2
+          cmd LC_LOAD_DYLIB
+             name @rpath/libavcodec.dylib (offset 24)
+"""
+        self.assertEqual(
+            _parse_otool_dependencies(dependency_output),
+            ("@rpath/libavcodec.dylib", "/usr/lib/libSystem.B.dylib"),
+        )
+        self.assertEqual(_parse_otool_rpaths(load_commands), ("@loader_path/.dylibs",))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "relocated"
+            binary = root / "python/lib/python3.12/site-packages/av/_core.abi3.so"
+            executable_directory = root / "python/bin"
+            binary.parent.mkdir(parents=True)
+            executable_directory.mkdir(parents=True)
+            _validate_macho_path(
+                "@loader_path/.dylibs/libavcodec.dylib",
+                binary=binary,
+                root=root,
+                executable_directory=executable_directory,
+            )
+            _validate_macho_path(
+                "/usr/lib/libSystem.B.dylib",
+                binary=binary,
+                root=root,
+                executable_directory=executable_directory,
+            )
+            with self.assertRaisesRegex(ValueError, "escapes the relocated bundle"):
+                _validate_macho_path(
+                    "@loader_path/../../../../../../outside.dylib",
+                    binary=binary,
+                    root=root,
+                    executable_directory=executable_directory,
+                )
+            with self.assertRaisesRegex(ValueError, "non-system absolute Mach-O load path"):
+                _validate_macho_path(
+                    "/Users/runner/work/sidevoice-core/sidevoice-core/libsecret.dylib",
+                    binary=binary,
+                    root=root,
+                    executable_directory=executable_directory,
+                )
+            with self.assertRaisesRegex(ValueError, "non-system absolute Mach-O load path"):
+                _validate_macho_path(
+                    "/Users/runner/work/PyAV/PyAV/libavcodec.dylib",
+                    binary=binary,
+                    root=root,
+                    executable_directory=executable_directory,
+                )
+            with self.assertRaisesRegex(ValueError, "unsafe absolute Mach-O load path"):
+                _validate_macho_path(
+                    "/usr/lib/../Users/runner/work/PyAV/PyAV/libavcodec.dylib",
+                    binary=binary,
+                    root=root,
+                    executable_directory=executable_directory,
+                )
 
     def test_python_archive_filter_contains_a_symlink_chain(self):
         import tempfile
@@ -190,7 +269,7 @@ class CoreBundleTests(unittest.TestCase):
             verified = verify_relocation(archive, build_paths=(root,))
             self.assertEqual(verified["compressed_bytes"], archive.stat().st_size)
 
-    def test_archive_inspection_rejects_build_paths_and_unsafe_member_paths(self):
+    def test_archive_rejects_this_build_path_but_allows_upstream_native_source_strings(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -206,11 +285,24 @@ class CoreBundleTests(unittest.TestCase):
                 (root / name).write_text(f"{name}\n")
             (root / "python-build-standalone-licenses").mkdir()
             (root / "python-build-standalone-licenses/LICENSE.libffi.txt").write_text("libffi license\n")
-            (root / "leaked.txt").write_text(str(root), encoding="utf-8")
+            native_binary = root / "python/lib/python3.12/site-packages/av/_core.abi3.so"
+            native_binary.parent.mkdir(parents=True, exist_ok=True)
+            native_binary.write_bytes(b"Mach-O fixture: /Users/runner/work/PyAV/PyAV/src/av/core.py\0")
             archive = Path(temporary) / "leaked.tar.zst"
             create_archive(root, archive)
-            with self.assertRaisesRegex(ValueError, "build path"):
-                inspect_archive(archive, forbidden_paths=(root,))
+            self.assertGreater(inspect_archive(archive, forbidden_paths=(root,))["files"], 0)
+
+            (root / "leaked.txt").write_text(f"this build checkout: {root}", encoding="utf-8")
+            create_archive(root, archive)
+            with self.assertRaisesRegex(ValueError, r"leaked.txt contains build path"):
+                inspect_archive(archive, forbidden_paths=(root, Path(temporary) / "runner-temp"))
+
+            (root / "leaked.txt").write_text(
+                f"this temporary build root: {Path(temporary) / 'runner-temp'}", encoding="utf-8"
+            )
+            create_archive(root, archive)
+            with self.assertRaisesRegex(ValueError, r"leaked.txt contains build path"):
+                inspect_archive(archive, forbidden_paths=(root, Path(temporary) / "runner-temp"))
             with self.assertRaisesRegex(ValueError, "unsafe archive member"):
                 safe_member_path("python/../../outside")
             with self.assertRaisesRegex(ValueError, "escapes its root"):

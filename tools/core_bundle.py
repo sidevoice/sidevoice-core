@@ -6,8 +6,11 @@ import argparse
 import hashlib
 import json
 import os
+import platform
+import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -123,11 +126,8 @@ def remove_build_path_entrypoints(binary_directory: Path, python: Path) -> int:
 
 
 def remove_upstream_sboms(site_packages: Path, build_paths: tuple[Path, ...] = ()) -> int:
-    """Drop wheel SBOMs that embed maintainers' absolute build checkout paths."""
-    forbidden = tuple(os.fsencode(path) for path in build_paths if str(path)) + (
-        b"/home/runner/work/",
-        b"/Users/runner/work/",
-    )
+    """Drop wheel SBOMs that embed this build's checkout or temporary paths."""
+    forbidden = tuple(os.fsencode(path) for path in build_paths if str(path))
     removed = 0
     for directory in site_packages.glob("*.dist-info/sboms"):
         for path in directory.rglob("*"):
@@ -317,21 +317,140 @@ def build_bundle(
     }
 
 
-def _check_build_paths(data: bytes, forbidden: tuple[bytes, ...]) -> None:
+def _check_build_paths(data: bytes, forbidden: tuple[bytes, ...], *, member: str = "bundle content") -> None:
     lowered = data.lower()
     for path in forbidden:
         if path and path.lower() in lowered:
-            raise ValueError(f"bundle content contains build path {path.decode(errors='replace')}")
+            raise ValueError(f"{member} contains build path {path.decode(errors='replace')}")
+
+
+MACHO_MAGICS = {
+    b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
+    b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+    b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca",
+}
+MACOS_SYSTEM_PATH_PREFIXES = (
+    "/System/Library/",
+    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/",
+    "/System/Volumes/Preboot/Cryptexes/OS/usr/lib/",
+    "/Library/Apple/System/Library/",
+    "/usr/lib/",
+)
+MACOS_NATIVE_IMPORT_PROBE = "\n".join((
+    "import aiohttp._http_parser",
+    "import aiortc",
+    "import av",
+    "import cryptography.hazmat.bindings._rust",
+    "import llvmlite.binding",
+    "import numpy",
+    "import onnxruntime",
+    "import PIL.Image",
+    "import scipy.signal",
+    "import soundfile",
+    "import soxr",
+    "import yaml._yaml",
+))
+MACHO_DEPENDENCY_RE = re.compile(r"^\s*(.+?) \(compatibility version [^)]*\)")
+MACHO_RPATH_RE = re.compile(r"^\s*path (.+?) \(offset [0-9]+\)$")
+
+
+def _parse_otool_dependencies(output: str) -> tuple[str, ...]:
+    """Read dependency install names from `otool -L` output."""
+    return tuple(
+        match.group(1)
+        for line in output.splitlines()
+        if (match := MACHO_DEPENDENCY_RE.match(line)) is not None
+    )
+
+
+def _parse_otool_rpaths(output: str) -> tuple[str, ...]:
+    """Read LC_RPATH entries from `otool -l` output."""
+    return tuple(
+        match.group(1)
+        for line in output.splitlines()
+        if (match := MACHO_RPATH_RE.match(line)) is not None
+    )
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_macho_path(value: str, *, binary: Path, root: Path, executable_directory: Path) -> None:
+    """Require every Mach-O load name to resolve within the bundle or an OS library directory."""
+    if value.startswith("/"):
+        absolute_parts = PurePosixPath(value).parts
+        if any(part in {".", ".."} for part in absolute_parts):
+            raise ValueError(f"unsafe absolute Mach-O load path: {value} in {binary}")
+        if value.startswith(MACOS_SYSTEM_PATH_PREFIXES):
+            return
+        raise ValueError(f"non-system absolute Mach-O load path: {value} in {binary}")
+    for token, base in (("@loader_path", binary.parent), ("@executable_path", executable_directory)):
+        if value == token or value.startswith(token + "/"):
+            suffix = value[len(token):].lstrip("/")
+            candidate = base.joinpath(*PurePosixPath(suffix).parts)
+            if not _is_within(candidate, root):
+                raise ValueError(f"Mach-O load path escapes the relocated bundle: {value} in {binary}")
+            return
+    if value == "@rpath" or value.startswith("@rpath/"):
+        suffix = value[len("@rpath"):].lstrip("/")
+        if not suffix or ".." in PurePosixPath(suffix).parts:
+            raise ValueError(f"unsafe Mach-O @rpath load name: {value} in {binary}")
+        return
+    raise ValueError(f"unsupported Mach-O load path: {value} in {binary}")
+
+
+def _verify_macos_native_runtime(root: Path, env: dict[str, str]) -> dict:
+    """Import key native dependencies and check every Mach-O load name after relocation."""
+    machine = platform.machine().lower()
+    if machine not in {"arm64", "aarch64"}:
+        raise ValueError(f"macOS bundle verification requires an arm64 runner, found {machine}")
+    interpreter = root / "python" / "bin" / "python3"
+    probe = subprocess.run(
+        [str(interpreter), "-I", "-B", "-c", MACOS_NATIVE_IMPORT_PROBE],
+        cwd=root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode:
+        raise ValueError(f"relocated macOS native import probe failed: {probe.stderr.strip()}")
+
+    otool = shutil.which("otool")
+    if otool is None:
+        raise ValueError("otool is required to verify macOS Mach-O load paths")
+    executable_directory = interpreter.parent
+    inspected = 0
+    for binary in sorted(path for path in root.rglob("*") if path.is_file()):
+        try:
+            with binary.open("rb") as stream:
+                is_macho = stream.read(4) in MACHO_MAGICS
+        except OSError:
+            continue
+        if not is_macho:
+            continue
+        dependencies = subprocess.run([otool, "-L", str(binary)], check=True, capture_output=True, text=True)
+        load_commands = subprocess.run([otool, "-l", str(binary)], check=True, capture_output=True, text=True)
+        paths = (*_parse_otool_dependencies(dependencies.stdout), *_parse_otool_rpaths(load_commands.stdout))
+        for value in paths:
+            _validate_macho_path(value, binary=binary, root=root, executable_directory=executable_directory)
+        inspected += 1
+    if inspected == 0:
+        raise ValueError("no Mach-O files found in the relocated macOS core bundle")
+    return {"native_imports": len(MACOS_NATIVE_IMPORT_PROBE.splitlines()), "macho_files": inspected}
 
 
 def inspect_archive(archive_path: Path, forbidden_paths: tuple[Path, ...] = ()) -> dict:
     """Check entry paths, links, licenses, package layout and embedded build-path leakage."""
     import zstandard
 
-    forbidden = tuple(os.fsencode(path) for path in forbidden_paths if str(path)) + (
-        b"/home/runner/work/",
-        b"/Users/runner/work/",
-    )
+    forbidden = tuple(os.fsencode(path) for path in forbidden_paths if str(path))
     names = set()
     unpacked_size = 0
     with archive_path.open("rb") as compressed:
@@ -356,7 +475,7 @@ def inspect_archive(archive_path: Path, forbidden_paths: tuple[Path, ...] = ()) 
                         tail = b""
                         while chunk := source.read(1024 * 1024):
                             combined = tail + chunk
-                            _check_build_paths(combined, forbidden)
+                            _check_build_paths(combined, forbidden, member=member.name)
                             tail = combined[-max((len(item) for item in forbidden), default=1):]
                     elif not member.isdir():
                         raise ValueError(f"unsupported archive member type: {member.name}")
@@ -401,7 +520,8 @@ def verify_relocation(archive_path: Path, *, build_paths: tuple[Path, ...] = ())
         result = subprocess.run(relocated_command, cwd=second, env=env, check=True, capture_output=True, text=True)
         if '"ok": true' not in result.stdout and '"ok":true' not in result.stdout:
             raise ValueError(f"relocated bundle self-test did not report success: {result.stdout.strip()}")
-    return info
+        native_check = _verify_macos_native_runtime(second, env) if sys.platform == "darwin" else {}
+    return {**info, **native_check}
 
 
 def main() -> None:
