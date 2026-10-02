@@ -164,15 +164,7 @@ jobs:
           name: sidevoice-core-dist
           path: dist
       - name: Prepare locked bundle tooling
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          if [ "$TARGET" = macos-aarch64 ]; then
-            uv sync --locked --python 3.12 --no-install-project --no-default-groups \
-              --only-group bundle-build --only-group pillow-build
-          else
-            uv sync --locked --python 3.12 --no-install-project --no-default-groups --only-group bundle-build
-          fi
+        run: uv sync --locked --python 3.12 --no-install-project --no-default-groups --only-group bundle-build
       - name: Build and test the relocatable bundle
         id: bundle
         env:
@@ -185,15 +177,7 @@ jobs:
           VERSION=${VERSION%-py3-none-any.whl}
           ARCHIVE="dist/sidevoice-core-${VERSION}-${TARGET}.tar.zst"
           EPOCH=$(git show -s --format=%ct HEAD)
-          BUNDLE_ARGS=(build --target "$TARGET" --wheel "$WHEEL")
-          if [ "$TARGET" = macos-aarch64 ]; then
-            PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH" .venv/bin/python tools/build_macos_pillow.py \
-              --output-dir "$RUNNER_TEMP/pillow-wheel" --temp-dir "$RUNNER_TEMP" | tee "$RUNNER_TEMP/pillow-build.json"
-            PILLOW_WHEEL=$(find "$RUNNER_TEMP/pillow-wheel" -maxdepth 1 -name 'pillow-12.3.0-*.whl' -print -quit)
-            test -n "$PILLOW_WHEEL"
-            BUNDLE_ARGS+=(--pillow-wheel "$PILLOW_WHEEL")
-          fi
-          TMPDIR="$RUNNER_TEMP" .venv/bin/python tools/core_bundle.py "${BUNDLE_ARGS[@]}" \
+          TMPDIR="$RUNNER_TEMP" .venv/bin/python tools/core_bundle.py build --target "$TARGET" --wheel "$WHEEL" \
             --output "$ARCHIVE" --epoch "$EPOCH" --temp-dir "$RUNNER_TEMP" | tee "$RUNNER_TEMP/build-stats.json"
           .venv/bin/python tools/core_bundle.py verify --archive "$ARCHIVE" \
             --build-path "$GITHUB_WORKSPACE" --build-path "$RUNNER_TEMP" | tee "$RUNNER_TEMP/verify-stats.json"
@@ -202,6 +186,9 @@ jobs:
           printf '### Bundle measurement: %s\n\n' "$TARGET" >> "$GITHUB_STEP_SUMMARY"
           printf '| Asset | Compressed bytes | Unpacked file bytes |\n|---|---:|---:|\n| %s | %s | %s |\n' \
             "$ARCHIVE" "$COMPRESSED" "$UNPACKED" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nRelocation and native verification:\n\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/verify-stats.json" >> "$GITHUB_STEP_SUMMARY"
+          printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
           printf 'archive=%s\n' "$ARCHIVE" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

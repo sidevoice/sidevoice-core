@@ -8,9 +8,18 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
 from tools.core_bundle import (
+    MACOS_PILLOW_LIBJPEG_DEPENDENCIES,
+    MACOS_PILLOW_LIBJPEG_PATH,
+    MACOS_PILLOW_LIBJPEG_SHA256,
+    MACOS_PILLOW_UPSTREAM_RPATH,
+    MACOS_PILLOW_WHEEL_SHA256,
+    PIL_CODEC_ROUNDTRIP_PROBE,
+    PILLOW_CODECS,
+    PILLOW_REQUIRED_FEATURES,
     _parse_otool_dependencies,
     _parse_otool_rpaths,
     _validate_macho_path,
+    _validate_pillow_rpath_exception,
     create_archive,
     extract_python_distribution,
     inspect_archive,
@@ -25,6 +34,33 @@ from tools.core_manifest import TARGETS, sha256, validate_manifest, write_manife
 
 
 class CoreBundleTests(unittest.TestCase):
+    def test_pillow_rpath_exception_is_bound_to_the_locked_wheel(self):
+        import tomllib
+
+        project = Path(__file__).resolve().parents[1]
+        lock = tomllib.loads((project / "uv.lock").read_text(encoding="utf-8"))
+        pillow = next(package for package in lock["package"] if package["name"] == "pillow")
+        arm_wheel = next(
+            wheel for wheel in pillow["wheels"] if "macosx_11_0_arm64.whl" in wheel["url"]
+        )
+        self.assertEqual(arm_wheel["hash"].removeprefix("sha256:"), MACOS_PILLOW_WHEEL_SHA256)
+        self.assertRegex(MACOS_PILLOW_LIBJPEG_SHA256, r"^[0-9a-f]{64}$")
+
+    def test_pillow_codec_probe_requires_native_features_and_lzw_tiff(self):
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", PIL_CODEC_ROUNDTRIP_PROBE],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        evidence = json.loads(result.stdout)
+        self.assertEqual(evidence["codecs"], list(PILLOW_CODECS))
+        self.assertEqual(evidence["features"], list(PILLOW_REQUIRED_FEATURES))
+        self.assertEqual(evidence["tiff_compression"], "tiff_lzw")
+
     def test_python_build_standalone_pins_match_their_release_urls(self):
         pins_path = Path(__file__).resolve().parents[1] / "packaging/python-build-standalone.json"
         pins = json.loads(pins_path.read_text(encoding="utf-8"))
@@ -44,60 +80,6 @@ class CoreBundleTests(unittest.TestCase):
         self.assertEqual(set(pins["license_files"]), {path.name for path in license_directory.iterdir()})
         for name, expected in pins["license_files"].items():
             self.assertEqual(sha256(license_directory / name), expected, name)
-
-    def test_macos_pillow_source_build_inputs_are_hash_pinned(self):
-        import tomllib
-
-        from tools.build_macos_pillow import FEATURE_SETTINGS, REQUIRED_CACHE_FILES, _load_pins
-
-        pins = _load_pins()
-        self.assertEqual(pins["version"], "12.3.0")
-        self.assertEqual(
-            pins["locked_wheel"]["filename"],
-            "pillow-12.3.0-cp312-cp312-macosx_11_0_arm64.whl",
-        )
-        self.assertRegex(pins["locked_wheel"]["sha256"], r"^[0-9a-f]{64}$")
-        self.assertTrue(pins["build_settings"]["cmake_skip_rpath"])
-        self.assertEqual(
-            pins["build_settings"]["required_codec_roundtrips"],
-            ["JPEG", "JPEG2000", "PNG", "TIFF", "WEBP", "AVIF"],
-        )
-        self.assertEqual(
-            FEATURE_SETTINGS,
-            tuple(pins["build_settings"]["pillow_config_settings"]),
-        )
-        self.assertEqual(len(REQUIRED_CACHE_FILES), len(set(REQUIRED_CACHE_FILES)))
-        for key in ("pillow_source", "multibuild", "dependency_cache"):
-            self.assertRegex(pins[key]["commit"], r"^[0-9a-f]{40}$")
-            self.assertRegex(pins[key]["sha256"], r"^[0-9a-f]{64}$")
-        project = Path(__file__).resolve().parents[1]
-        lock = tomllib.loads((project / "uv.lock").read_text(encoding="utf-8"))
-        pillow = next(package for package in lock["package"] if package["name"] == "pillow")
-        locked_arm_wheel = next(
-            wheel for wheel in pillow["wheels"] if wheel["url"].endswith(pins["locked_wheel"]["filename"])
-        )
-        self.assertEqual(locked_arm_wheel["hash"].removeprefix("sha256:"), pins["locked_wheel"]["sha256"])
-
-    def test_macos_pillow_dependency_cache_extraction_rejects_escape(self):
-        import tempfile
-        import zipfile
-
-        from tools.build_macos_pillow import _extract_dependency_cache
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            archive_path = root / "cache.zip"
-            with zipfile.ZipFile(archive_path, "w") as archive:
-                archive.writestr("pillow-depends-abc123/native.tar.gz", b"source")
-            output = root / "cache"
-            _extract_dependency_cache(archive_path, output, "pillow-depends-abc123")
-            self.assertEqual((output / "native.tar.gz").read_bytes(), b"source")
-
-            unsafe_path = root / "unsafe.zip"
-            with zipfile.ZipFile(unsafe_path, "w") as archive:
-                archive.writestr("pillow-depends-abc123/../../escape", b"bad")
-            with self.assertRaisesRegex(ValueError, "unsafe archive member path"):
-                _extract_dependency_cache(unsafe_path, root / "unsafe", "pillow-depends-abc123")
 
     def test_removes_sboms_with_this_build_paths_but_keeps_upstream_provenance(self):
         import tempfile
@@ -194,8 +176,9 @@ Load command 4
                     executable_directory=executable_directory,
                 )
 
-    def test_rejects_upstream_absolute_lc_rpath(self):
+    def test_exact_locked_pillow_rpath_exception_checks_binary_hash_and_load_graph(self):
         import tempfile
+        from unittest.mock import patch
 
         load_commands = """Load command 8
           cmd LC_RPATH
@@ -203,22 +186,59 @@ Load command 4
          path /Users/runner/work/Pillow/Pillow/build/deps/darwin/lib (offset 12)
 """
         rpaths = _parse_otool_rpaths(load_commands)
-        self.assertEqual(rpaths, ("/Users/runner/work/Pillow/Pillow/build/deps/darwin/lib",))
+        self.assertEqual(rpaths, (MACOS_PILLOW_UPSTREAM_RPATH,))
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "relocated"
-            binary = root / "python/lib/python3.12/site-packages/PIL/.dylibs/libjpeg.dylib"
-            executable_directory = root / "python/bin"
+            binary = root / MACOS_PILLOW_LIBJPEG_PATH
             binary.parent.mkdir(parents=True)
-            executable_directory.mkdir(parents=True)
-            with self.assertRaisesRegex(ValueError, "non-system absolute Mach-O load path"):
-                for rpath in rpaths:
-                    _validate_macho_path(
-                        rpath,
+            binary.write_bytes(b"locked Pillow dylib fixture")
+            with patch("tools.core_bundle.digest", return_value=MACOS_PILLOW_LIBJPEG_SHA256):
+                evidence = _validate_pillow_rpath_exception(
+                    rpaths[0],
+                    binary=binary,
+                    root=root,
+                    dependencies=MACOS_PILLOW_LIBJPEG_DEPENDENCIES,
+                )
+            self.assertEqual(evidence["binary"], MACOS_PILLOW_LIBJPEG_PATH)
+            self.assertEqual(evidence["binary_sha256"], MACOS_PILLOW_LIBJPEG_SHA256)
+            self.assertEqual(evidence["wheel_sha256"], MACOS_PILLOW_WHEEL_SHA256)
+            self.assertEqual(evidence["dependencies"], list(MACOS_PILLOW_LIBJPEG_DEPENDENCIES))
+
+            with patch("tools.core_bundle.digest", return_value="0" * 64):
+                with self.assertRaisesRegex(ValueError, "binary digest changed"):
+                    _validate_pillow_rpath_exception(
+                        rpaths[0],
                         binary=binary,
                         root=root,
-                        executable_directory=executable_directory,
+                        dependencies=MACOS_PILLOW_LIBJPEG_DEPENDENCIES,
                     )
+            with patch("tools.core_bundle.digest", return_value=MACOS_PILLOW_LIBJPEG_SHA256):
+                with self.assertRaisesRegex(ValueError, "load graph changed"):
+                    _validate_pillow_rpath_exception(
+                        rpaths[0],
+                        binary=binary,
+                        root=root,
+                        dependencies=("@rpath/libjpeg.dylib",),
+                    )
+                other_binary = root / "python/lib/python3.12/site-packages/PIL/.dylibs/libpng.dylib"
+                other_binary.parent.mkdir(parents=True, exist_ok=True)
+                other_binary.write_bytes(b"different dylib")
+                with self.assertRaisesRegex(ValueError, "unreviewed Mach-O binary"):
+                    _validate_pillow_rpath_exception(
+                        rpaths[0],
+                        binary=other_binary,
+                        root=root,
+                        dependencies=MACOS_PILLOW_LIBJPEG_DEPENDENCIES,
+                    )
+
+            with self.assertRaisesRegex(ValueError, "non-system absolute Mach-O load path"):
+                _validate_macho_path(
+                    MACOS_PILLOW_UPSTREAM_RPATH,
+                    binary=binary,
+                    root=root,
+                    executable_directory=root / "python/bin",
+                )
 
     def test_python_archive_filter_contains_a_symlink_chain(self):
         import tempfile
@@ -352,7 +372,7 @@ Load command 4
             self.assertGreater(inspected["unpacked_bytes"], 0)
             from unittest.mock import patch
 
-            with patch("tools.core_bundle._verify_pillow_codec_runtime", return_value={}):
+            with patch("tools.core_bundle._verify_pillow_codec_runtime", return_value={"pillow_codecs": []}):
                 verified = verify_relocation(archive, build_paths=(root,))
             self.assertEqual(verified["compressed_bytes"], archive.stat().st_size)
 
