@@ -54,6 +54,7 @@ MACOS_SCIPY_UPSTREAM_RPATHS = (
     "/opt/homebrew/Cellar/gcc@13/13.4.0/lib/gcc/13/gcc",
     "/opt/homebrew/Cellar/gcc@13/13.4.0/lib/gcc/13",
 )
+MACOS_SCIPY_FBLAS_LC_RPATHS = ("@loader_path", *MACOS_SCIPY_UPSTREAM_RPATHS)
 MACOS_SCIPY_FBLAS_DEPENDENCIES = (
     "/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate",
     "/usr/lib/libSystem.B.dylib",
@@ -363,6 +364,19 @@ def build_bundle(
             if target == "macos-aarch64"
             else ""
         )
+        scipy_notice = (
+            "The macOS arm64 bundle uses hash-locked SciPy 1.18.1 wheel "
+            f"SHA-256 {MACOS_SCIPY_WHEEL_SHA256}. Its {MACOS_SCIPY_FBLAS_PATH} binary has SHA-256 "
+            f"{MACOS_SCIPY_FBLAS_SHA256} and the exact LC_RPATH command sequence "
+            f"{', '.join(MACOS_SCIPY_FBLAS_LC_RPATHS)}. Its inspected load graph contains only "
+            "/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate and "
+            "/usr/lib/libSystem.B.dylib; it has no install name, dynamic-loader API imports, initializer, "
+            "or embedded @rpath names. This exact file/hash/load graph is allowlisted; all other unexpected "
+            "absolute Mach-O paths remain rejected. Relocation verification executes SciPy dgemm and solve "
+            "while tracing loaded images against populated reviewed runpath directories.\n\n"
+            if target == "macos-aarch64"
+            else ""
+        )
         notice = (
             "Sidevoice Core runtime bundle\n"
             "\n"
@@ -380,6 +394,7 @@ def build_bundle(
             "\n"
             + pillow_notice
             + pyav_notice
+            + scipy_notice
             + f"{removed_sboms} upstream wheel SBOM file(s) containing absolute build-checkout paths were omitted.\n"
             "\n"
             f"{removed_direct_urls} installer origin record(s) were omitted; DEPENDENCIES.lock.txt preserves the "
@@ -888,8 +903,8 @@ def _validate_scipy_rpath_exception(
         raise ValueError(f"SciPy LC_RPATH exception binary is outside the relocated bundle: {binary}") from error
     if relative_path != MACOS_SCIPY_FBLAS_PATH:
         raise ValueError(f"upstream SciPy LC_RPATH appears in an unreviewed Mach-O binary: {binary}")
-    if rpaths != MACOS_SCIPY_UPSTREAM_RPATHS:
-        raise ValueError(f"unreviewed absolute LC_RPATH command set in locked SciPy _fblas: {rpaths!r}")
+    if rpaths != MACOS_SCIPY_FBLAS_LC_RPATHS:
+        raise ValueError(f"unreviewed LC_RPATH command set in locked SciPy _fblas: {rpaths!r}")
     if digest(binary) != MACOS_SCIPY_FBLAS_SHA256:
         raise ValueError(f"locked SciPy _fblas binary digest changed: {binary}")
     if dependencies != MACOS_SCIPY_FBLAS_DEPENDENCIES:
@@ -1065,7 +1080,7 @@ def _populated_macos_rpath_directories(
     marker.parent.mkdir(parents=True, exist_ok=True)
     created_directories: list[Path] = []
     created_directory_set = set()
-    created_links = []
+    created_images = []
     canary_workspace = tempfile.TemporaryDirectory(prefix="sidevoice-rpath-canary-", dir=root)
     canary_root = Path(canary_workspace.name)
     canary_source = canary_root / "canary.c"
@@ -1130,11 +1145,11 @@ def _populated_macos_rpath_directories(
                     created_directories.append(directory)
                     created_directory_set.add(directory)
 
-            positive_link = path / "libsidevoice_rpath_canary.dylib"
-            if positive_link.exists() or positive_link.is_symlink():
-                raise ValueError(f"runpath positive-control path already exists: {positive_link}")
-            positive_link.symlink_to(canary_binary)
-            created_links.append(positive_link)
+            positive_image = path / "libsidevoice_rpath_canary.dylib"
+            if positive_image.exists() or positive_image.is_symlink():
+                raise ValueError(f"runpath positive-control path already exists: {positive_image}")
+            created_images.append(positive_image)
+            shutil.copy2(canary_binary, positive_image)
             for name in canary_names:
                 relative = PurePosixPath(name)
                 if relative.is_absolute() or not relative.parts or any(
@@ -1142,7 +1157,7 @@ def _populated_macos_rpath_directories(
                 ):
                     raise ValueError(f"unsafe runpath canary name: {name!r}")
                 destination = path.joinpath(*relative.parts)
-                if destination == positive_link:
+                if destination == positive_image:
                     continue
                 missing_parents = []
                 current = destination.parent
@@ -1157,8 +1172,8 @@ def _populated_macos_rpath_directories(
                 if destination.exists() or destination.is_symlink():
                     # Never overwrite an existing library; the runtime image check still covers it.
                     continue
-                destination.symlink_to(canary_binary)
-                created_links.append(destination)
+                created_images.append(destination)
+                shutil.copy2(canary_binary, destination)
 
             canonical_directory = str(path.resolve(strict=True))
             positive_binary = canary_root / f"positive-control-{index}"
@@ -1174,14 +1189,7 @@ def _populated_macos_rpath_directories(
             positive_load_commands = subprocess.run(
                 [otool, "-l", str(positive_binary)], check=True, capture_output=True, text=True
             ).stdout
-            expected_dependency = "@rpath/libsidevoice_rpath_canary.dylib"
-            positive_dependencies = _parse_otool_dependencies(positive_load_commands)
-            positive_rpaths = _parse_otool_rpaths(positive_load_commands)
-            if positive_dependencies != (expected_dependency,) or positive_rpaths != (value,):
-                raise ValueError(
-                    f"runpath positive control is not linked through {value!r}: "
-                    f"dependencies={positive_dependencies!r}, rpaths={positive_rpaths!r}"
-                )
+            _validate_rpath_positive_control_load_commands(positive_load_commands, value)
             marker.unlink(missing_ok=True)
             positive = subprocess.run(
                 [str(positive_binary), canonical_directory],
@@ -1213,8 +1221,8 @@ def _populated_macos_rpath_directories(
             "dyld_stderr_capture_positive_control": True,
         }
     finally:
-        for link in reversed(created_links):
-            link.unlink(missing_ok=True)
+        for image in reversed(created_images):
+            image.unlink(missing_ok=True)
         for directory in reversed(created_directories):
             directory.rmdir()
         canary_workspace.cleanup()
@@ -1472,6 +1480,26 @@ def _validate_rpath_positive_control(
             f"marker_loaded={marker_loaded}, stdout={loaded_image_lines!r}, stderr={trace_lines!r}"
         )
     return {"loaded_image_capture": loaded_images, "dyld_stderr_trace": traced_images}
+
+
+def _validate_rpath_positive_control_load_commands(load_commands: str, expected_rpath: str) -> dict:
+    """Require the canary executable's exact dylib edge and runpath before trusting its trace."""
+    dependencies = _parse_otool_dependencies(load_commands)
+    rpaths = _parse_otool_rpaths(load_commands)
+    expected_dependencies = (
+        "@rpath/libsidevoice_rpath_canary.dylib",
+        "/usr/lib/libSystem.B.dylib",
+    )
+    if (
+        len(dependencies) != len(expected_dependencies)
+        or set(dependencies) != set(expected_dependencies)
+        or rpaths != (expected_rpath,)
+    ):
+        raise ValueError(
+            f"runpath positive control is not linked through {expected_rpath!r}: "
+            f"dependencies={dependencies!r}, rpaths={rpaths!r}"
+        )
+    return {"dependencies": list(dependencies), "rpaths": list(rpaths)}
 
 
 def _require_no_vendor_trace(trace: str, stage: str) -> None:

@@ -21,6 +21,7 @@ from tools.core_bundle import (
     MACOS_PYAV_UPSTREAM_RPATH,
     MACOS_PYAV_WHEEL_SHA256,
     MACOS_SCIPY_FBLAS_DEPENDENCIES,
+    MACOS_SCIPY_FBLAS_LC_RPATHS,
     MACOS_SCIPY_FBLAS_PATH,
     MACOS_SCIPY_FBLAS_SHA256,
     MACOS_SCIPY_UPSTREAM_RPATHS,
@@ -44,6 +45,7 @@ from tools.core_bundle import (
     _require_no_vendor_trace,
     _require_no_reviewed_rpath_trace,
     _validate_rpath_positive_control,
+    _validate_rpath_positive_control_load_commands,
     create_archive,
     extract_python_distribution,
     inspect_archive,
@@ -370,6 +372,37 @@ Load command 4
         self.assertTrue(evidence["loaded_image_capture"])
         self.assertTrue(evidence["dyld_stderr_trace"])
 
+    def test_rpath_positive_control_pins_canary_and_system_load_edges(self):
+        load_commands = """Load command 1
+          cmd LC_LOAD_DYLIB
+             name @rpath/libsidevoice_rpath_canary.dylib (offset 24)
+Load command 2
+          cmd LC_LOAD_DYLIB
+             name /usr/lib/libSystem.B.dylib (offset 24)
+Load command 3
+          cmd LC_RPATH
+      cmdsize 40
+         path /tmp/vendor/lib (offset 12)
+"""
+        self.assertEqual(
+            _validate_rpath_positive_control_load_commands(load_commands, "/tmp/vendor/lib"),
+            {
+                "dependencies": [
+                    "@rpath/libsidevoice_rpath_canary.dylib",
+                    "/usr/lib/libSystem.B.dylib",
+                ],
+                "rpaths": ["/tmp/vendor/lib"],
+            },
+        )
+        for altered in (
+            load_commands.replace("/usr/lib/libSystem.B.dylib", "/usr/lib/libobjc.A.dylib"),
+            load_commands.replace("/tmp/vendor/lib", "/tmp/other/lib"),
+        ):
+            with self.subTest(altered=altered), self.assertRaisesRegex(
+                ValueError, "runpath positive control is not linked"
+            ):
+                _validate_rpath_positive_control_load_commands(altered, "/tmp/vendor/lib")
+
     def test_pyav_load_command_parsers_and_exact_runpath_exception(self):
         import tempfile
         from unittest.mock import patch
@@ -536,6 +569,7 @@ Load command 3
         import tempfile
         from unittest.mock import patch
 
+        self.assertEqual(MACOS_SCIPY_FBLAS_LC_RPATHS[0], "@loader_path")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "relocated"
             binary = root / MACOS_SCIPY_FBLAS_PATH
@@ -546,7 +580,7 @@ Load command 3
                     binary=binary,
                     root=root,
                     dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
-                    rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                    rpaths=MACOS_SCIPY_FBLAS_LC_RPATHS,
                     install_names=(),
                     undefined_symbols=("_dgemm_", "_malloc"),
                     has_initializers=False,
@@ -554,7 +588,7 @@ Load command 3
             self.assertEqual(evidence["binary"], MACOS_SCIPY_FBLAS_PATH)
             self.assertEqual(evidence["binary_sha256"], MACOS_SCIPY_FBLAS_SHA256)
             self.assertEqual(evidence["wheel_sha256"], MACOS_SCIPY_WHEEL_SHA256)
-            self.assertEqual(evidence["lc_rpaths"], list(MACOS_SCIPY_UPSTREAM_RPATHS))
+            self.assertEqual(evidence["lc_rpaths"], list(MACOS_SCIPY_FBLAS_LC_RPATHS))
             self.assertEqual(evidence["dependencies"], list(MACOS_SCIPY_FBLAS_DEPENDENCIES))
             self.assertEqual(evidence["dynamic_loader_symbols"], [])
             self.assertFalse(evidence["has_initializers"])
@@ -565,7 +599,7 @@ Load command 3
                         binary=binary,
                         root=root,
                         dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
-                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                        rpaths=MACOS_SCIPY_FBLAS_LC_RPATHS,
                         install_names=(),
                         undefined_symbols=(),
                         has_initializers=False,
@@ -576,7 +610,7 @@ Load command 3
                         binary=binary,
                         root=root,
                         dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
-                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS[:-1],
+                        rpaths=MACOS_SCIPY_FBLAS_LC_RPATHS[:-1],
                         install_names=(),
                         undefined_symbols=(),
                         has_initializers=False,
@@ -586,7 +620,7 @@ Load command 3
                         binary=binary,
                         root=root,
                         dependencies=("@rpath/libunexpected.dylib",),
-                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                        rpaths=MACOS_SCIPY_FBLAS_LC_RPATHS,
                         install_names=(),
                         undefined_symbols=(),
                         has_initializers=False,
@@ -596,7 +630,7 @@ Load command 3
                         binary=binary,
                         root=root,
                         dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
-                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                        rpaths=MACOS_SCIPY_FBLAS_LC_RPATHS,
                         install_names=(),
                         undefined_symbols=("_dlopen",),
                         has_initializers=False,
@@ -606,7 +640,7 @@ Load command 3
                         binary=binary,
                         root=root,
                         dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
-                        rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                        rpaths=MACOS_SCIPY_FBLAS_LC_RPATHS,
                         install_names=(),
                         undefined_symbols=(),
                         has_initializers=True,
@@ -617,7 +651,7 @@ Load command 3
                             binary=binary,
                             root=root,
                             dependencies=MACOS_SCIPY_FBLAS_DEPENDENCIES,
-                            rpaths=MACOS_SCIPY_UPSTREAM_RPATHS,
+                            rpaths=MACOS_SCIPY_FBLAS_LC_RPATHS,
                             install_names=(),
                             undefined_symbols=(),
                             has_initializers=False,
