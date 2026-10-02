@@ -411,6 +411,13 @@ MACOS_SYSTEM_PATH_PREFIXES = (
     "/Library/Apple/System/Library/",
     "/usr/lib/",
 )
+MACOS_SYSTEM_PATH_DIRECTORIES = (
+    "/System/Library",
+    "/System/Volumes/Preboot/Cryptexes/OS/System/Library",
+    "/System/Volumes/Preboot/Cryptexes/OS/usr/lib",
+    "/Library/Apple/System/Library",
+    "/usr/lib",
+)
 MACOS_NATIVE_IMPORT_PROBE = "\n".join((
     "import aiohttp._http_parser",
     "import aiortc",
@@ -664,7 +671,7 @@ def _validate_macho_path(value: str, *, binary: Path, root: Path, executable_dir
         absolute_parts = PurePosixPath(value).parts
         if any(part in {".", ".."} for part in absolute_parts):
             raise ValueError(f"unsafe absolute Mach-O load path: {value} in {binary}")
-        if value.startswith(MACOS_SYSTEM_PATH_PREFIXES):
+        if value in MACOS_SYSTEM_PATH_DIRECTORIES or value.startswith(MACOS_SYSTEM_PATH_PREFIXES):
             return
         raise ValueError(f"non-system absolute Mach-O load path: {value} in {binary}")
     for token, base in (("@loader_path", binary.parent), ("@executable_path", executable_directory)):

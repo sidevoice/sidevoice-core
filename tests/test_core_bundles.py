@@ -163,6 +163,19 @@ Load command 4
                 root=root,
                 executable_directory=executable_directory,
             )
+            _validate_macho_path(
+                "/usr/lib",
+                binary=binary,
+                root=root,
+                executable_directory=executable_directory,
+            )
+            with self.assertRaisesRegex(ValueError, "non-system absolute Mach-O load path"):
+                _validate_macho_path(
+                    "/usr/library",
+                    binary=binary,
+                    root=root,
+                    executable_directory=executable_directory,
+                )
             with self.assertRaisesRegex(ValueError, "escapes the relocated bundle"):
                 _validate_macho_path(
                     "@loader_path/../../../../../../outside.dylib",
