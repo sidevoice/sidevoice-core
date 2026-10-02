@@ -351,17 +351,28 @@ MACOS_NATIVE_IMPORT_PROBE = "\n".join((
     "import soxr",
     "import yaml._yaml",
 ))
-MACHO_DEPENDENCY_RE = re.compile(r"^\s*(.+?) \(compatibility version [^)]*\)")
+MACHO_LOAD_COMMAND_RE = re.compile(r"^\s*cmd (LC_[A-Z0-9_]+)$")
+MACHO_DEPENDENCY_COMMANDS = {
+    "LC_LOAD_DYLIB",
+    "LC_LOAD_WEAK_DYLIB",
+    "LC_REEXPORT_DYLIB",
+    "LC_LOAD_UPWARD_DYLIB",
+    "LC_LAZY_LOAD_DYLIB",
+}
+MACHO_NAME_RE = re.compile(r"^\s*name (.+?) \(offset [0-9]+\)$")
 MACHO_RPATH_RE = re.compile(r"^\s*path (.+?) \(offset [0-9]+\)$")
 
 
 def _parse_otool_dependencies(output: str) -> tuple[str, ...]:
-    """Read dependency install names from `otool -L` output."""
-    return tuple(
-        match.group(1)
-        for line in output.splitlines()
-        if (match := MACHO_DEPENDENCY_RE.match(line)) is not None
-    )
+    """Read actual LC_LOAD_* dependency names from `otool -l`, excluding LC_ID_DYLIB."""
+    dependencies = []
+    command = None
+    for line in output.splitlines():
+        if match := MACHO_LOAD_COMMAND_RE.match(line):
+            command = match.group(1)
+        elif command in MACHO_DEPENDENCY_COMMANDS and (match := MACHO_NAME_RE.match(line)) is not None:
+            dependencies.append(match.group(1))
+    return tuple(dependencies)
 
 
 def _parse_otool_rpaths(output: str) -> tuple[str, ...]:
@@ -435,9 +446,8 @@ def _verify_macos_native_runtime(root: Path, env: dict[str, str]) -> dict:
             continue
         if not is_macho:
             continue
-        dependencies = subprocess.run([otool, "-L", str(binary)], check=True, capture_output=True, text=True)
         load_commands = subprocess.run([otool, "-l", str(binary)], check=True, capture_output=True, text=True)
-        paths = (*_parse_otool_dependencies(dependencies.stdout), *_parse_otool_rpaths(load_commands.stdout))
+        paths = (*_parse_otool_dependencies(load_commands.stdout), *_parse_otool_rpaths(load_commands.stdout))
         for value in paths:
             _validate_macho_path(value, binary=binary, root=root, executable_directory=executable_directory)
         inspected += 1

@@ -73,20 +73,22 @@ class CoreBundleTests(unittest.TestCase):
     def test_macho_load_path_parser_and_validation(self):
         import tempfile
 
-        dependency_output = """bundle:
-\t@rpath/libavcodec.dylib (compatibility version 1.0.0, current version 1.0.0)
-\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)
-"""
         load_commands = """Load command 1
-          cmd LC_RPATH
-      cmdsize 40
-         path @loader_path/.dylibs (offset 12)
+          cmd LC_ID_DYLIB
+             name libitcl4.3.8.dylib (offset 24)
 Load command 2
           cmd LC_LOAD_DYLIB
              name @rpath/libavcodec.dylib (offset 24)
+Load command 3
+          cmd LC_LOAD_WEAK_DYLIB
+             name /usr/lib/libSystem.B.dylib (offset 24)
+Load command 4
+          cmd LC_RPATH
+      cmdsize 40
+         path @loader_path/.dylibs (offset 12)
 """
         self.assertEqual(
-            _parse_otool_dependencies(dependency_output),
+            _parse_otool_dependencies(load_commands),
             ("@rpath/libavcodec.dylib", "/usr/lib/libSystem.B.dylib"),
         )
         self.assertEqual(_parse_otool_rpaths(load_commands), ("@loader_path/.dylibs",))
