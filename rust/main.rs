@@ -1,19 +1,31 @@
 use std::path::PathBuf;
 
 use serde_json::json;
+use sidevoice_core::messages::{render, LocalizedMessage};
 use sidevoice_core::pipeline::probe_detectors;
 use sidevoice_core::runtime::{self, Config};
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<_> = std::env::args_os().collect();
-    if args.get(1).and_then(|arg| arg.to_str()) == Some("--self-test") {
-        if args.len() != 4 {
+    let Some(flags): Option<Vec<String>> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_str().map(str::to_owned))
+        .collect()
+    else {
+        eprintln!("{}", render(&LocalizedMessage::new("runtime.arguments"), &runtime::system_language()));
+        std::process::exit(2);
+    };
+    if flags.iter().any(|flag| flag == "--help" || flag == "-h") {
+        println!("{}", render(&LocalizedMessage::new("runtime.help"), &runtime::system_language()));
+        return;
+    }
+    if flags.first().map(String::as_str) == Some("--self-test") {
+        if flags.len() != 3 {
             eprintln!("{}", json!({"error_key": "rust_core_t0_usage"}));
             std::process::exit(2);
         }
-        let wav = PathBuf::from(&args[2]);
-        let assets = PathBuf::from(&args[3]);
+        let wav = PathBuf::from(&flags[1]);
+        let assets = PathBuf::from(&flags[2]);
         match probe_detectors(
             &wav,
             &assets.join("silero.onnx"),
@@ -32,15 +44,10 @@ async fn main() {
         }
         return;
     }
-    let flags: Vec<_> = args
-        .iter()
-        .skip(1)
-        .filter_map(|arg| arg.to_str().map(str::to_owned))
-        .collect();
     let config = match Config::from_args(&flags) {
         Ok(config) => config,
         Err(_) => {
-            eprintln!("{}", json!({"error_key": "runtime.arguments"}));
+            eprintln!("{}", render(&LocalizedMessage::new("runtime.arguments"), &runtime::system_language()));
             std::process::exit(2);
         }
     };

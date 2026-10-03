@@ -1,14 +1,15 @@
 //! Process configuration, launch handshake, listeners and shutdown.
 
-use std::fs;
-use std::io;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Map, Value};
-use tokio::net::{TcpListener, UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -26,6 +27,8 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub launch_id: String,
+    pub log_file: PathBuf,
+    pub room_credential: Option<String>,
     pub idle_exit: f64,
 }
 
@@ -54,6 +57,8 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(8768);
         let mut launch_id = Uuid::new_v4().to_string();
+        let mut log_file = None;
+        let mut room_credential = std::env::var("SIDEVOICE_ROOM_CREDENTIAL").ok();
         let mut idle_exit: f64 = std::env::var("SIDEVOICE_CORE_IDLE_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -74,6 +79,8 @@ impl Config {
                     })?
                 }
                 "--launch-id" => launch_id = value.clone(),
+                "--log-file" => log_file = Some(PathBuf::from(value)),
+                "--room-credential" => room_credential = Some(value.clone()),
                 "--idle-exit" => {
                     idle_exit = value.parse().map_err(|_| {
                         io::Error::new(io::ErrorKind::InvalidInput, "runtime.arguments")
@@ -96,6 +103,9 @@ impl Config {
         let data_dir = absolute(data_dir)?;
         let socket = absolute(socket.unwrap_or_else(|| data_dir.join("local.sock")))?;
         let ready_file = absolute(ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;
+        let log_file = absolute(log_file.unwrap_or_else(|| {
+            data_dir.parent().unwrap_or(Path::new(".")).join("core.log")
+        }))?;
         Ok(Self {
             data_dir,
             socket,
@@ -103,6 +113,8 @@ impl Config {
             host,
             port,
             launch_id,
+            log_file,
+            room_credential,
             idle_exit,
         })
     }
@@ -149,6 +161,44 @@ fn failure(config: &Config, error: &StartFailure) {
         let _ = dir.write_json("core-failure.json", &report);
     }
     eprintln!("{}", json!({"key": error.key, "message": message}));
+    let _ = log_event(config, "runtime.log_failure", Some(error.key));
+}
+
+fn log_event(config: &Config, key: &str, cause: Option<&str>) -> io::Result<()> {
+    use crate::messages::{render, LocalizedMessage};
+    let path = &config.log_file;
+    if let Some(parent) = path.parent() {
+        let mut builder = fs::DirBuilder::new();
+        use std::os::unix::fs::DirBuilderExt;
+        builder.recursive(true).mode(0o700).create(parent)?;
+    }
+    if fs::metadata(path).is_ok_and(|meta| meta.len() >= 5_000_000) {
+        let first = path.with_extension("log.1");
+        let second = path.with_extension("log.2");
+        let _ = fs::remove_file(&second);
+        if first.exists() {
+            fs::rename(&first, &second)?;
+        }
+        fs::rename(path, &first)?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let mut message = LocalizedMessage::new(key);
+    if let Some(cause) = cause {
+        message = message.with_param("key", cause);
+    }
+    writeln!(
+        file,
+        "{}",
+        json!({"at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "key": key, "message": render(&message, &system_language()),
+            "launch_id": config.launch_id})
+    )
 }
 
 pub fn system_language() -> String {
@@ -182,9 +232,77 @@ async fn wait_stop(mut receiver: watch::Receiver<bool>) {
     while !*receiver.borrow() && receiver.changed().await.is_ok() {}
 }
 
+async fn probe_http<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, path: &str) -> bool {
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    tokio::time::timeout(Duration::from_millis(250), async {
+        stream.write_all(request.as_bytes()).await?;
+        let mut status = [0u8; 12];
+        stream.read_exact(&mut status).await?;
+        Ok::<_, io::Error>(&status == b"HTTP/1.1 200")
+    })
+    .await
+    .is_ok_and(|result| result.unwrap_or(false))
+}
+
+async fn await_serving_tcp(
+    address: std::net::SocketAddr,
+    task: &tokio::task::JoinHandle<io::Result<()>>,
+) -> Result<(), StartFailure> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let probe_address = if address.ip().is_unspecified() {
+        std::net::SocketAddr::new(
+            if address.is_ipv4() { std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) }
+            else { std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST) },
+            address.port(),
+        )
+    } else {
+        address
+    };
+    loop {
+        if task.is_finished() || tokio::time::Instant::now() >= deadline {
+            return Err(StartFailure::new("start", "start.failed"));
+        }
+        if let Ok(Ok(mut stream)) = tokio::time::timeout(
+            Duration::from_millis(250), TcpStream::connect(probe_address)
+        ).await {
+            if probe_http(&mut stream, "/api/rendezvous").await && !task.is_finished() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn await_serving_local(
+    path: &Path,
+    task: &tokio::task::JoinHandle<io::Result<()>>,
+) -> Result<(), StartFailure> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if task.is_finished() || tokio::time::Instant::now() >= deadline {
+            return Err(StartFailure::new("start", "start.failed"));
+        }
+        if let Ok(Ok(mut stream)) = tokio::time::timeout(
+            Duration::from_millis(250), UnixStream::connect(path)
+        ).await {
+            if probe_http(&mut stream, "/api/local/health").await && !task.is_finished() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 pub async fn run(config: Config) -> i32 {
+    if log_event(&config, "runtime.log_start", None).is_err() {
+        failure(&config, &StartFailure::new("start", "start.failed"));
+        return 0;
+    }
     match serve(&config).await {
-        Ok(()) => 0,
+        Ok(()) => {
+            let _ = log_event(&config, "runtime.log_stop", None);
+            0
+        }
         Err(error) => {
             if error.step != "run" {
                 failure(&config, &error);
@@ -271,22 +389,8 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         "socket": config.socket, "launch_id": config.launch_id, "version": env!("CARGO_PKG_VERSION"),
         "api": API, "protocol": CONNECTOR_PROTOCOL, "connector_protocols": [CONNECTOR_PROTOCOL, 3],
         "connector_id": connector_id, "token": token});
-    let ready_dir = PrivateDir::open(config.ready_file.parent().unwrap_or(dir.path()))
-        .map_err(|_| StartFailure::new("start", "start.failed"))?;
-    if ready_dir
-        .write_json(
-            config
-                .ready_file
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("core.json"),
-            &ready,
-        )
-        .is_err()
-    {
-        return Err(StartFailure::new("start", "start.failed"));
-    }
     let (stopping, receiver) = watch::channel(false);
+    let tcp_address = tcp.local_addr().map_err(|_| StartFailure::new("start", "start.failed"))?;
     let tcp_app = server::router(state.clone(), false);
     let local_app = server::router(state.clone(), true);
     let tcp_receiver = receiver.clone();
@@ -302,6 +406,35 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
     });
     let mut tcp_task = tcp_task;
     let mut local_task = local_task;
+    let startup = async {
+        await_serving_tcp(tcp_address, &tcp_task).await?;
+        await_serving_local(&config.socket, &local_task).await?;
+        if tcp_task.is_finished() || local_task.is_finished() {
+            return Err(StartFailure::new("start", "start.failed"));
+        }
+        let ready_dir = PrivateDir::open(config.ready_file.parent().unwrap_or(dir.path()))
+            .map_err(|_| StartFailure::new("start", "start.failed"))?;
+        ready_dir
+            .write_json(
+                config
+                    .ready_file
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("core.json"),
+                &ready,
+            )
+            .map_err(|_| StartFailure::new("start", "start.failed"))?;
+        let _ = log_event(config, "runtime.log_ready", None);
+        Ok::<_, StartFailure>(())
+    }.await;
+    if let Err(error) = startup {
+        let _ = stopping.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            let _ = tcp_task.await;
+            let _ = local_task.await;
+        }).await;
+        return Err(error);
+    }
     let crashed = tokio::select! {
         _ = stop_signal() => false,
         _ = &mut tcp_task => true,

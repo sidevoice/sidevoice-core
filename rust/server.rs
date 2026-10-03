@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::extract::{
     ws::{CloseFrame, Message, WebSocket},
-    Path, Request, State, WebSocketUpgrade,
+    Extension, Path, Request, State, WebSocketUpgrade,
 };
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -32,6 +32,9 @@ pub struct AppState {
     host: String,
     port: u16,
 }
+
+#[derive(Clone)]
+struct AuthenticatedDevice(String);
 
 impl AppState {
     pub fn new(
@@ -272,7 +275,7 @@ fn cors(response: &mut Response, headers: &HeaderMap) {
 
 async fn guard(
     State((state, local)): State<(Arc<AppState>, bool)>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let headers = request.headers().clone();
@@ -296,6 +299,15 @@ async fn guard(
             .headers()
             .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
         {
+            if headers
+                .get("access-control-request-private-network")
+                .is_some_and(|value| value == "true")
+            {
+                response.headers_mut().insert(
+                    "access-control-allow-private-network",
+                    HeaderValue::from_static("true"),
+                );
+            }
             response.headers_mut().insert(
                 header::ACCESS_CONTROL_ALLOW_METHODS,
                 HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE"),
@@ -315,7 +327,11 @@ async fn guard(
         && matches!(path.as_str(), "/api/rendezvous" | "/api/device/identity"))
         || (request.method() == axum::http::Method::POST && path == "/api/device/pair")
         || (local && local_only(&path));
-    let is_ws = headers.contains_key(header::UPGRADE);
+    let is_ws = request.method() == axum::http::Method::GET
+        && path == "/api/presentation/ws"
+        && headers
+            .get(header::UPGRADE)
+            .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"));
     if !open && !is_ws {
         let token = headers
             .get(header::AUTHORIZATION)
@@ -334,11 +350,12 @@ async fn guard(
                 .expect("registry lock")
                 .authenticate(token)
         });
-        if device.is_none() {
+        let Some(device) = device else {
             let mut response = failure("device.unpaired", StatusCode::UNAUTHORIZED, &headers);
             cors(&mut response, &headers);
             return response;
-        }
+        };
+        request.extensions_mut().insert(AuthenticatedDevice(device));
     }
     let mut response = next.run(request).await;
     cors(&mut response, &headers);
@@ -440,24 +457,15 @@ async fn pair(
     }
 }
 
-fn current(headers: &HeaderMap, state: &AppState) -> Option<String> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, token) = value.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return None;
-    }
-    state
-        .registry
-        .lock()
-        .expect("registry lock")
-        .authenticate(token.trim())
-}
-
-async fn devices(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+async fn devices(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    device: Option<Extension<AuthenticatedDevice>>,
+) -> Response {
     if !origin_allowed(&headers) {
         return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
     }
-    let Some(current) = current(&headers, &state) else {
+    let Some(Extension(AuthenticatedDevice(current))) = device else {
         return failure("device.unpaired", StatusCode::UNAUTHORIZED, &headers);
     };
     Json(
@@ -474,9 +482,13 @@ async fn revoke(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    device: Option<Extension<AuthenticatedDevice>>,
 ) -> Response {
     if !origin_allowed(&headers) {
         return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    if device.is_none() {
+        return failure("device.unpaired", StatusCode::UNAUTHORIZED, &headers);
     }
     match state.registry.lock().expect("registry lock").revoke(&id) {
         Ok(true) => {

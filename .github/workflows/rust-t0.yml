@@ -4,6 +4,12 @@ on:
   push:
     branches: [feat/rust-core-mvp]
   workflow_dispatch:
+    inputs:
+      bootstrap_format_lock:
+        description: Generate a combined formatting and lockfile patch artifact
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,7 +26,25 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
       - name: Stage verified model assets
         run: python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
+      - name: Generate hosted formatting and lockfile patch
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap_format_lock }}
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 > /dev/null
+          cargo fmt --all
+          git diff --binary -- Cargo.lock rust > "$RUNNER_TEMP/t1-fix-format-lock.patch"
+          test -s "$RUNNER_TEMP/t1-fix-format-lock.patch"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap_format_lock }}
+        with:
+          name: t1-fix-format-lock-patch
+          path: ${{ runner.temp }}/t1-fix-format-lock.patch
+          if-no-files-found: error
+      - name: Compile corrected source during bootstrap
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap_format_lock }}
+        run: cargo clippy --all-targets -- -D warnings
       - name: Check sources and pinned fixture
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.bootstrap_format_lock != true }}
         run: |
           set -euo pipefail
           test -s tests/fixtures/hola-sala-16k.wav
@@ -28,8 +52,10 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
       - name: Build selected feature set
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.bootstrap_format_lock != true }}
         run: cargo build --locked --bin sidevoice-core-rust
       - name: Run synthetic Python/Rust state and trust contract without network
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.bootstrap_format_lock != true }}
         run: |
           set -euo pipefail
           docker build -f tests/rust_t1.Dockerfile -t sidevoice-rust-t1 .
@@ -38,6 +64,7 @@ jobs:
             sidevoice-rust-t1 /opt/t1-venv/bin/python tests/rust_t1_hosted.py \
             /workspace/target/debug/sidevoice-core-rust
       - name: Execute real detectors without network
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.bootstrap_format_lock != true }}
         run: |
           set -euo pipefail
           docker run --rm --network none --read-only --tmpfs /tmp \

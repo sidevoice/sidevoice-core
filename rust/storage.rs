@@ -191,32 +191,33 @@ impl PrivateDir {
         if !path.exists() {
             return Ok(serde_json::json!({"connectors": {}}));
         }
-        let mut connectors = serde_json::Map::new();
-        if let Ok(connection) =
+        let sqlite_error = |error| io::Error::new(io::ErrorKind::InvalidData, error);
+        let connection =
             rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        {
-            if let Ok(mut query) = connection
-                .prepare("SELECT id, token_hash, host, created, last_seen, revoked FROM connectors")
-            {
-                if let Ok(rows) = query.query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                    ))
-                }) {
-                    for row in rows.flatten() {
-                        connectors.insert(
-                            row.0,
-                            serde_json::json!({"token_hash": row.1, "host": row.2,
-                            "created": row.3, "last_seen": row.4, "revoked": row.5}),
-                        );
-                    }
-                }
-            }
+                .map_err(sqlite_error)?;
+        let mut query = connection
+            .prepare("SELECT id, token_hash, host, created, last_seen, revoked FROM connectors")
+            .map_err(sqlite_error)?;
+        let rows = query
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(sqlite_error)?;
+        let mut connectors = serde_json::Map::new();
+        for row in rows {
+            let row = row.map_err(sqlite_error)?;
+            connectors.insert(
+                row.0,
+                serde_json::json!({"token_hash": row.1, "host": row.2,
+                "created": row.3, "last_seen": row.4, "revoked": row.5}),
+            );
         }
         let state = serde_json::json!({"connectors": connectors});
         self.write_json("room-state.json", &state)?;

@@ -78,13 +78,21 @@ def mode(path):
     return stat.S_IMODE(path.stat().st_mode)
 
 
-async def closed_by_revocation(port, first, second):
+async def closed_by_revocation(port, first, second, registry_path):
     async with websockets.connect(f"ws://127.0.0.1:{port}/api/presentation/ws",
                                   subprotocols=["sidevoice", f"sidevoice.token.{first}"]) as connection:
         assert connection.subprotocol == "sidevoice"
         assert request(port, "GET", "/api/device/devices", token=second)[0] == 200
         listing = request(port, "GET", "/api/device/devices", token=second)[1]["devices"]
         first_id = next(row["id"] for row in listing if row["current"] is False)
+        before = registry_path.read_bytes()
+        forged = request(port, "DELETE", f"/api/device/devices/{first_id}",
+                         extra_headers={"Upgrade": "websocket"})
+        assert forged[0] == 401 and set(forged[1]) == {"detail"}, forged
+        assert forged[2]["www-authenticate"] == "Bearer"
+        assert registry_path.read_bytes() == before, "forged Upgrade changed persisted devices"
+        pong = await connection.ping()
+        await asyncio.wait_for(pong, 5)
         assert request(port, "DELETE", f"/api/device/devices/{first_id}", token=second)[0] == 200
         try:
             await asyncio.wait_for(connection.recv(), 5)
@@ -118,6 +126,11 @@ def prove_identity(port, fingerprint, public_key):
 def main():
     with tempfile.TemporaryDirectory() as root:
         root = Path(root)
+        help_result = subprocess.run([str(BINARY), "--help"], capture_output=True, text=True)
+        assert help_result.returncode == 0 and "Usage:" in help_result.stdout
+        assert "--log-file" in help_result.stdout and "--room-credential" in help_result.stdout
+        invalid_arg = subprocess.run([os.fsencode(BINARY), b"\xff"], capture_output=True)
+        assert invalid_arg.returncode == 2 and b"Invalid core command-line arguments" in invalid_arg.stderr
         data = root / "core"
         data.mkdir(mode=0o700)
         python_identity = NodeIdentity.load_or_create(data / "node-identity.json")
@@ -127,10 +140,21 @@ def main():
         connector = local_credential(journal, data / "connector-credential.json")
         before_room = json.loads((data / "room-state.json").read_text())
 
-        process = start(data, "--launch-id", "t1-synthetic")
+        log_file = root / "logs" / "custom.log"
+        log_file.parent.mkdir(mode=0o700)
+        log_file.write_bytes(b"x" * 5_000_000)
+        log_file.chmod(0o600)
+        process = start(data, "--launch-id", "t1-synthetic", "--log-file", str(log_file),
+                        "--room-credential", str(root / "room-credentials.json"))
         try:
             ready = wait_ready(data / "core.json", process)
             port = ready["port"]
+            assert request(port, "GET", "/api/rendezvous")[0] == 200
+            assert request(port, "GET", "/api/local/health", unix=data / "local.sock")[0] == 200
+            assert mode(log_file) == 0o600 and Path(f"{log_file}.1").stat().st_size == 5_000_000
+            log_text = log_file.read_text()
+            assert "runtime.log_start" in log_text and "runtime.log_ready" in log_text
+            assert "room-credentials.json" not in log_text
             assert ready["launch_id"] == "t1-synthetic" and ready["api"] == 1
             assert ready["protocol"] == 2 and ready["connector_protocols"] == [2, 3]
             assert (ready["connector_id"], ready["token"]) == connector
@@ -151,6 +175,16 @@ def main():
             unauthenticated = request(port, "GET", "/api/device/devices")
             assert unauthenticated[0] == 401 and set(unauthenticated[1]) == {"detail"}
             assert unauthenticated[2]["www-authenticate"] == "Bearer"
+            pna_headers = {"Access-Control-Request-Method": "POST",
+                           "Access-Control-Request-Private-Network": "true"}
+            accepted = request(port, "OPTIONS", "/api/device/pair", origin="tauri://localhost",
+                               extra_headers=pna_headers)
+            assert accepted[0] == 204 and accepted[2]["access-control-allow-origin"] == "tauri://localhost"
+            assert accepted[2]["access-control-allow-private-network"] == "true"
+            rejected = request(port, "OPTIONS", "/api/device/pair", origin="https://attacker.example",
+                               extra_headers=pna_headers)
+            assert "access-control-allow-origin" not in rejected[2]
+            assert "access-control-allow-private-network" not in rejected[2]
             assert request(port, "GET", "/api/device/devices", token=old_token)[0] == 200
             for status, method, path, options in (
                 (421, "GET", "/api/device/devices", {"token": old_token, "host": "attacker.example"}),
@@ -174,7 +208,7 @@ def main():
             assert DeviceRegistry(data / "devices.json").authenticate(local["token"]) == local["device_id"]
             assert request(port, "GET", "/api/device/devices", token=local["token"])[0] == 200
             assert request(port, "GET", "/api/device/local/pair", unix=data / "local.sock", origin="tauri://localhost")[0] == 404
-            removed = asyncio.run(closed_by_revocation(port, old_token, local["token"]))
+            removed = asyncio.run(closed_by_revocation(port, old_token, local["token"], data / "devices.json"))
             assert removed == old_id
             assert request(port, "GET", "/api/device/devices", token=old_token)[0] == 401
             assert request(port, "DELETE", "/api/device/local", unix=data / "local.sock")[1] == {"ok": True, "revoked": True}
@@ -234,6 +268,36 @@ def main():
         assert imported.wait(timeout=15) == 0
         kept = RoomHistory(legacy / "room-state.json").connectors["legacy-id"]
         assert kept["host"] == "old-machine" and kept["token_hash"] == hashlib.sha256(b"legacy-token").hexdigest()
+
+        repair = root / "repair"
+        repair.mkdir(mode=0o700)
+        legacy_db = repair / "room-history.sqlite3"
+        legacy_db.write_bytes(b"not a sqlite database")
+        broken = start(repair)
+        assert broken.wait(timeout=10) == 0
+        assert json.loads((repair / "core-failure.json").read_text())["key"] == "start.failed"
+        assert not (repair / "room-state.json").exists()
+        legacy_db.unlink()
+        db = sqlite3.connect(legacy_db)
+        db.execute("CREATE TABLE connectors (id TEXT, token_hash TEXT, host TEXT, created INTEGER, last_seen INTEGER, revoked INTEGER)")
+        db.execute("INSERT INTO connectors VALUES (?, ?, ?, ?, ?, ?)",
+                   ("kept-id", hashlib.sha256(b"kept-token").hexdigest(), "repair-host", 1, 2, 0))
+        db.execute("INSERT INTO connectors VALUES (?, ?, ?, ?, ?, ?)",
+                   ("bad-id", hashlib.sha256(b"bad-token").hexdigest(), "bad-host", "not-an-integer", 2, 0))
+        db.commit()
+        db.close()
+        broken_row = start(repair)
+        assert broken_row.wait(timeout=10) == 0
+        assert not (repair / "room-state.json").exists(), "partial SQLite import became authoritative"
+        db = sqlite3.connect(legacy_db)
+        db.execute("DELETE FROM connectors WHERE id = 'bad-id'")
+        db.commit()
+        db.close()
+        repaired = start(repair)
+        wait_ready(repair / "core.json", repaired)
+        repaired.terminate()
+        assert repaired.wait(timeout=15) == 0
+        assert RoomHistory(repair / "room-state.json").connectors["kept-id"]["host"] == "repair-host"
         print(json.dumps({"ok": True, "python_to_rust_to_python": True, "identity": python_identity.fingerprint,
                           "lock": "contended", "revoke": "closed_4401"}))
 
