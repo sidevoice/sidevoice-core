@@ -7,20 +7,43 @@ use serde_json::{json, Map, Value};
 use url::Url;
 
 pub const STAGES: [&str; 10] = [
-    "endpoint_silence", "recognition", "request_to_transcript", "transcript_to_delivery",
-    "delivery_to_read", "read_to_reply", "input_queued_to_reply", "reply_to_synthesis",
-    "provider_synthesis", "audio_received_to_playback",
+    "endpoint_silence",
+    "recognition",
+    "request_to_transcript",
+    "transcript_to_delivery",
+    "delivery_to_read",
+    "read_to_reply",
+    "input_queued_to_reply",
+    "reply_to_synthesis",
+    "provider_synthesis",
+    "audio_received_to_playback",
 ];
 
 const ATTRIBUTES: [&str; 24] = [
-    "sidevoice.session_id", "sidevoice.thread_id", "sidevoice.turn_revision",
-    "sidevoice.reply_revision", "sidevoice.utterance_id", "sidevoice.status",
-    "sidevoice.reason", "sidevoice.outcome", "sidevoice.kind", "sidevoice.stt_place",
-    "sidevoice.stt_model", "sidevoice.stt_accelerator", "sidevoice.tts_provider",
-    "sidevoice.tts_model", "sidevoice.turn_end_mode", "sidevoice.harness",
-    "sidevoice.shared_audio", "sidevoice.synthesis_attempt", "sidevoice.stage",
-    "sidevoice.duration_ms", "sidevoice.audio_output", "sidevoice.audio_context",
-    "sidevoice.stalls", "sidevoice.build_id",
+    "sidevoice.session_id",
+    "sidevoice.thread_id",
+    "sidevoice.turn_revision",
+    "sidevoice.reply_revision",
+    "sidevoice.utterance_id",
+    "sidevoice.status",
+    "sidevoice.reason",
+    "sidevoice.outcome",
+    "sidevoice.kind",
+    "sidevoice.stt_place",
+    "sidevoice.stt_model",
+    "sidevoice.stt_accelerator",
+    "sidevoice.tts_provider",
+    "sidevoice.tts_model",
+    "sidevoice.turn_end_mode",
+    "sidevoice.harness",
+    "sidevoice.shared_audio",
+    "sidevoice.synthesis_attempt",
+    "sidevoice.stage",
+    "sidevoice.duration_ms",
+    "sidevoice.audio_output",
+    "sidevoice.audio_context",
+    "sidevoice.stalls",
+    "sidevoice.build_id",
 ];
 
 /// Exact Python allowlist, with strings bounded before they reach a collector.
@@ -62,7 +85,10 @@ impl Telemetry {
         endpoint.set_path("/v1/metrics");
         endpoint.set_query(None);
         endpoint.set_fragment(None);
-        Some(Self {endpoint, client:reqwest::Client::new()})
+        Some(Self {
+            endpoint,
+            client: reqwest::Client::new(),
+        })
     }
 
     pub fn from_env() -> Option<Self> {
@@ -71,27 +97,52 @@ impl Telemetry {
 
     /// Export one finished stage as an OTLP histogram data point. Caller passes
     /// only already-admitted observations; this type owns no trace or revision.
-    pub async fn observe(&self, stage: &str, milliseconds: f64, values: &Value) -> Result<(), reqwest::Error> {
-        if !STAGES.contains(&stage) || !milliseconds.is_finite() || !(0.0..=3_600_000.0).contains(&milliseconds) {
+    pub async fn observe(
+        &self,
+        stage: &str,
+        milliseconds: f64,
+        values: &Value,
+    ) -> Result<(), reqwest::Error> {
+        if !STAGES.contains(&stage)
+            || !milliseconds.is_finite()
+            || !(0.0..=3_600_000.0).contains(&milliseconds)
+        {
             return Ok(());
         }
         let mut values = attributes(values);
         values["sidevoice.stage"] = json!(stage);
-        let attrs = values.as_object().expect("attributes object").iter().map(|(key,value)| {
-            let wrapped = match value {
-                Value::String(text) => json!({"stringValue":text}),
-                Value::Bool(value) => json!({"boolValue":value}),
-                Value::Number(value) => json!({"doubleValue":value.as_f64().unwrap_or_default()}),
-                _ => Value::Null,
-            };
-            json!({"key":key,"value":wrapped})
-        }).collect::<Vec<_>>();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string();
+        let attrs = values
+            .as_object()
+            .expect("attributes object")
+            .iter()
+            .map(|(key, value)| {
+                let wrapped = match value {
+                    Value::String(text) => json!({"stringValue":text}),
+                    Value::Bool(value) => json!({"boolValue":value}),
+                    Value::Number(value) => {
+                        json!({"doubleValue":value.as_f64().unwrap_or_default()})
+                    }
+                    _ => Value::Null,
+                };
+                json!({"key":key,"value":wrapped})
+            })
+            .collect::<Vec<_>>();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_string();
         let payload = json!({"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"sidevoice-core"}}]},
             "scopeMetrics":[{"scope":{"name":"sidevoice.room"},"metrics":[{"name":format!("sidevoice.turn.{stage}"),"unit":"ms",
                 "histogram":{"aggregationTemporality":2,"dataPoints":[{"attributes":attrs,"timeUnixNano":now,
                     "count":"1","sum":milliseconds,"bucketCounts":["1"]}]}}]}]}]});
-        self.client.post(self.endpoint.clone()).json(&payload).send().await?.error_for_status()?;
+        self.client
+            .post(self.endpoint.clone())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload.to_string())
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 }
@@ -109,11 +160,13 @@ mod tests {
 
     #[test]
     fn private_values_and_unlisted_attributes_never_pass() {
-        let kept = attributes(&json!({"sidevoice.thread_id":"x".repeat(500),"sidevoice.duration_ms":23.5,
+        let kept = attributes(
+            &json!({"sidevoice.thread_id":"x".repeat(500),"sidevoice.duration_ms":23.5,
             "sidevoice.transcript":"private", "sidevoice.audio":"private", "authorization":"secret",
-            "sidevoice.reason":null}));
-        assert_eq!(kept["sidevoice.thread_id"].as_str().unwrap().len(),200);
-        assert_eq!(kept["sidevoice.duration_ms"],23.5);
+            "sidevoice.reason":null}),
+        );
+        assert_eq!(kept["sidevoice.thread_id"].as_str().unwrap().len(), 200);
+        assert_eq!(kept["sidevoice.duration_ms"], 23.5);
         assert!(!kept.to_string().contains("private"));
         assert!(!kept.to_string().contains("secret"));
     }
