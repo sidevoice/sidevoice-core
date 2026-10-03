@@ -452,7 +452,7 @@ impl Room {
     pub fn attach(&self, cid: &str, peer: ConnectorPeer) -> Option<ConnectorPeer> {
         let mut inner = self.inner.lock().expect("room lock");
         let old = inner.peers.insert(cid.into(), peer);
-        inner.peer_order.retain(|id|id!=cid);
+        inner.peer_order.retain(|id| id != cid);
         inner.peer_order.push_back(cid.into());
         let ids: Vec<String> = inner
             .bindings
@@ -483,7 +483,7 @@ impl Room {
             return;
         }
         inner.peers.remove(cid);
-        inner.peer_order.retain(|id|id!=cid);
+        inner.peer_order.retain(|id| id != cid);
         let ids: Vec<String> = inner
             .bindings
             .values_mut()
@@ -512,7 +512,11 @@ impl Room {
     }
     pub fn connector_peer(&self) -> Option<ConnectorPeer> {
         let inner = self.inner.lock().expect("room lock");
-        inner.peer_order.iter().rev().find_map(|cid|inner.peers.get(cid).cloned())
+        inner
+            .peer_order
+            .iter()
+            .rev()
+            .find_map(|cid| inner.peers.get(cid).cloned())
     }
     pub fn register(&self, cid: &str, data: &Value) -> Result<Value, RoomError> {
         let thread = field(data, "thread");
@@ -1908,17 +1912,28 @@ mod tests {
 
     #[test]
     fn host_agent_peer_is_latest_live_connection() {
-        let directory=tempfile::tempdir().unwrap();
-        let room=Room::load(PrivateDir::open(directory.path().join("private")).unwrap()).unwrap();
-        for (cid,generation) in [("first","first-1"),("second","second-1"),("first","first-2")] {
-            let (requests,_receiver)=mpsc::channel(1);
-            let (stop,_stopped)=watch::channel(false);
-            room.attach(cid,ConnectorPeer{generation:generation.into(),sender:requests,stop});
-            assert_eq!(room.connector_peer().unwrap().generation,generation);
+        let directory = tempfile::tempdir().unwrap();
+        let room = Room::load(PrivateDir::open(directory.path().join("private")).unwrap()).unwrap();
+        for (cid, generation) in [
+            ("first", "first-1"),
+            ("second", "second-1"),
+            ("first", "first-2"),
+        ] {
+            let (requests, _receiver) = mpsc::channel(1);
+            let (stop, _stopped) = watch::channel(false);
+            room.attach(
+                cid,
+                ConnectorPeer {
+                    generation: generation.into(),
+                    sender: requests,
+                    stop,
+                },
+            );
+            assert_eq!(room.connector_peer().unwrap().generation, generation);
         }
-        room.detach("first","first-1");
-        assert_eq!(room.connector_peer().unwrap().generation,"first-2");
-        room.detach("first","first-2");
-        assert_eq!(room.connector_peer().unwrap().generation,"second-1");
+        room.detach("first", "first-1");
+        assert_eq!(room.connector_peer().unwrap().generation, "first-2");
+        room.detach("first", "first-2");
+        assert_eq!(room.connector_peer().unwrap().generation, "second-1");
     }
 }
