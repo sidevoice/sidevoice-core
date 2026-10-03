@@ -48,6 +48,7 @@ jobs:
             found=1
             test_binary_rel="${test_binary#"$GITHUB_WORKSPACE"/}"
             docker run --rm --network none --read-only --tmpfs /tmp \
+              -e RUSTVANI_CACHE_DIR=/models -v "$RUSTVANI_CACHE_DIR:/models:ro" \
               -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
               -v "$ssl_cert_file:/etc/ssl/certs/ca-certificates.crt:ro" \
               -v "$GITHUB_WORKSPACE:/workspace:ro" \

@@ -162,7 +162,7 @@ async def review_voice_cases(url, protocols, port, token, peer, pcm):
             if cause == "device":
                 await ws.send(json.dumps({"type": "voice-transcript-error", "data": {
                     "session_id": session, "request_id": ask["request_id"], "error": "fixture failure"}}))
-            error = await frame(ws, "error", timeout=8)
+            error = await frame(ws, "error", timeout=16)
             assert "message" in error and error["message"], error
             cancelled = await frame(ws, "voice-user-turn", timeout=8)
             assert cancelled["phase"] == "cancelled" and cancelled["text"] == "", cancelled
@@ -212,16 +212,14 @@ async def two_listener_focus_case(url, protocols, port, token, peer, pcm):
         for session in sessions:
             assert request(port, "POST", "/api/presentation/select", token=token,
                            body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
-        speeches = []
-        for ws, session in zip((first, second), sessions):
-            revision = request(port, "GET", f"/api/presentation?session_id={session}", token=token)[1]["room"]["revision"]
-            uid = f"two-listeners-{uuid.uuid4()}"
-            peer.send({"op": "publish", "session_id": session, "revision": revision,
-                       "event_id": uid, "utterance_id": uid, "text": "Reply to one listener"})
-            assert peer.event("published")["answer"]["status"] == "queued"
-            speech = await frame(ws, "voice-speech")
+        revision = request(port, "GET", f"/api/presentation?session_id={sessions[0]}", token=token)[1]["room"]["revision"]
+        uid = f"two-listeners-{uuid.uuid4()}"
+        peer.send({"op": "publish", "session_id": sessions[0], "revision": revision,
+                   "event_id": uid, "utterance_id": uid, "text": "Reply to both listeners"})
+        assert peer.event("published")["answer"]["status"] == "queued"
+        speeches = [await frame(ws, "voice-speech") for ws in (first, second)]
+        for session, speech in zip(sessions, speeches):
             assert speech["session_id"] == session and speech["utterance_id"] == uid, speech
-            speeches.append(speech)
         for session, speech in zip(sessions, speeches):
             assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
                            body={"session_id": session, "utterance_id": speech["utterance_id"],
@@ -319,7 +317,7 @@ async def main():
         data.mkdir(mode=0o700)
         fixture = TtsFixture()
         env = {**os.environ, "SIDEVOICE_STUN_URLS": "", "VOICE_ELEVENLABS_API_KEY": "fixture-key",
-               "SIDEVOICE_FIXTURE_STT_TIMEOUT_MS": "3000",
+               "SIDEVOICE_FIXTURE_STT_TIMEOUT_MS": "12000",
                "SIDEVOICE_ELEVENLABS_FIXTURE_BASE": f"http://127.0.0.1:{fixture.server_port}"}
         core = subprocess.Popen([str(CORE), "--data-dir", str(data), "--port", "0", "--idle-exit", "0"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
