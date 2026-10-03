@@ -76,13 +76,30 @@ def validate_name(name):
         raise ValueError(f"Wrong archive root: {name}")
 
 
-def stage_notices(notices):
+def stage_notices(notices, target):
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version", "1"], cwd=ROOT))
-    packages = sorted(({"name": package["name"], "version": package["version"],
-                        "license": package.get("license"), "source": package.get("source")}
-                       for package in metadata["packages"]),
-                      key=lambda package: (package["name"], package["version"]))
+    licenses = notices / "licenses"
+    licenses.mkdir()
+    packages = []
+    for package in metadata["packages"]:
+        source = Path(package["manifest_path"]).parent
+        texts = []
+        for path in sorted(source.iterdir()):
+            if not path.is_file() or not path.name.lower().startswith(("license", "copying", "notice")):
+                continue
+            payload = path.read_bytes()
+            if len(payload) > 1_000_000:
+                raise ValueError(f"Unexpectedly large license: {package['name']} {path.name}")
+            sha = digest(payload)
+            destination = licenses / f"{sha}.txt"
+            if not destination.exists():
+                destination.write_bytes(payload)
+            texts.append({"name": path.name, "sha256": sha})
+        packages.append({"name": package["name"], "version": package["version"],
+                         "license": package.get("license"), "source": package.get("source"),
+                         "license_texts": texts})
+    packages.sort(key=lambda package: (package["name"], package["version"], package["source"] or ""))
     (notices / "rust-dependencies.json").write_bytes(canonical(packages))
     rustvani = next(package for package in metadata["packages"] if package["name"] == "rustvani")
     source = Path(rustvani["manifest_path"]).parent
@@ -100,6 +117,18 @@ def stage_notices(notices):
         "rustvani": "d01f33e671f7a4d8a128e7bfe55dbf0e8963cb21",
         "models": json.loads((ROOT / "assets/rust-models.json").read_text()),
         "license_sha256": {name: sha for name, (_, sha) in LICENSES.items()},
+    }))
+    if target.startswith("linux-"):
+        version = subprocess.check_output(
+            ["dpkg-query", "-W", "-f=${Version}", "libopus0"], text=True).strip()
+        shutil.copyfile("/usr/share/doc/libopus0/copyright",
+                        notices / "libopus-distro-copyright.txt")
+    else:
+        version = subprocess.check_output(["brew", "list", "--versions", "opus"], text=True).strip()
+    (notices / "native-dependencies.json").write_bytes(canonical({
+        "onnxruntime": {"version": "1.22.0", "link": "static"},
+        "opus": {"package": version, "link": "dynamic" if target.startswith("linux-") else "static"},
+        "system_trust_roots": "ca-certificates" if target.startswith("linux-") else "macOS system trust store",
     }))
 
 
@@ -172,7 +201,7 @@ def build(args):
             shutil.copyfile(original, stage / "models" / model["name"])
         shutil.copyfile(ROOT / "tests/fixtures/hola-sala-16k.wav",
                         stage / "checks/detector-16k.wav")
-        stage_notices(stage / "notices")
+        stage_notices(stage / "notices", args.target)
         if args.target.startswith("linux-"):
             links = linux_libraries(binary, stage / "lib")
         else:
@@ -275,12 +304,16 @@ class UnixHTTP(http.client.HTTPConnection):
 
 def verify(args):
     archive = Path(args.archive).resolve()
-    with tempfile.TemporaryDirectory(prefix="T7 relocated tree with spaces ") as temporary:
+    with tempfile.TemporaryDirectory(prefix="T7 relocated tree ", dir="/tmp") as temporary:
         destination = Path(temporary)
         root, inventory = unpack_checked(archive, destination)
         binary = root / ENTRYPOINT
         env = {**os.environ, "RUSTVANI_CACHE_DIR": str(root / "models"), "SIDEVOICE_STUN_URLS": ""}
         env.pop("ORT_DYLIB_PATH", None)
+        if inventory["target"].startswith("linux-"):
+            ca_file = Path("/etc/ssl/certs/ca-certificates.crt")
+            if not ca_file.is_file() or ca_file.stat().st_size == 0:
+                raise ValueError("Linux host has no installed ca-certificates trust bundle")
         detector = run(str(binary), "--self-test", str(root / "checks/detector-16k.wav"),
                        str(root / "models"), env=env, capture_output=True)
         self_test = json.loads(detector.stdout)
@@ -329,6 +362,10 @@ def manifest(args):
     for target in TARGETS:
         name = f"sidevoice-core-rust-{args.source_sha}-{target}.tar.zst"
         path = folder / name
+        with tempfile.TemporaryDirectory(prefix="native-manifest-check-") as temporary:
+            _, inventory = unpack_checked(path, Path(temporary))
+            if inventory["target"] != target or inventory["source_sha"] != args.source_sha:
+                raise ValueError(f"Wrong archive identity: {name}")
         bundles[target] = file_record(path, name)
     value = {"schema": 1, "kind": "rust-native-v1", "source_sha": args.source_sha,
              "cargo_lock_sha256": digest((ROOT / "Cargo.lock").read_bytes()),

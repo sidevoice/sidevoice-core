@@ -54,10 +54,13 @@ jobs:
           file target/release/sidevoice-core-rust
           if [[ "$TARGET" == macos-* ]]; then
             otool -L target/release/sidevoice-core-rust
+            vtool -show-build target/release/sidevoice-core-rust
             find target/release -maxdepth 1 -name '*onnxruntime*.dylib' -print
           else
             ldd target/release/sidevoice-core-rust
             readelf -d target/release/sidevoice-core-rust | grep -E 'NEEDED|RPATH|RUNPATH'
+            readelf --version-info target/release/sidevoice-core-rust \
+              | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1
             find target/release -maxdepth 1 -name '*onnxruntime*.so*' -print
           fi
       - name: Package and relocate verified native archive
@@ -88,11 +91,25 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
             sidevoice-rust-t7-rtc /opt/t7-venv/bin/python \
             tests/rust_t7_rtc_hosted.py /bundle/bin/sidevoice-core-rust
+      - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        if: matrix.target == 'linux-x86_64'
+        with:
+          version: 0.12.9
+      - name: Prove same-state Python rollback after rejected native stage
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          set -euo pipefail
+          uv sync --locked --python 3.12 --no-install-project
+          PYTHONPATH=src .venv/bin/python tests/rust_t7_rollback_hosted.py \
+            .venv/bin/python \
+            "$RUNNER_TEMP/t7-rtc/sidevoice-core-rust/bin/sidevoice-core-rust" \
+            "assets/native/sidevoice-core-rust-${GITHUB_SHA}-linux-x86_64.tar.zst" \
+            tools/rust_native_bundle.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-native-${{ matrix.target }}
           path: assets/native/*.tar.zst
-          retention-days: 14
+          retention-days: 90
           if-no-files-found: error
 
   manifest:
@@ -104,6 +121,10 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install archive verifier
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: rust-native-*
@@ -151,5 +172,5 @@ jobs:
         with:
           name: rust-native-signed-inputs
           path: assets/native/
-          retention-days: 14
+          retention-days: 90
           if-no-files-found: error
