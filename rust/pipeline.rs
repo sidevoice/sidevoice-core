@@ -1,13 +1,13 @@
 //! Rustvani's detector stays behind this application boundary.
 
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::{collections::HashSet, path::Path, sync::{atomic::{AtomicU64, Ordering}, Arc}};
 
 use rustvani::frames::{AudioRawData, Frame, FrameDirection, FrameInner, FrameKind, SystemFrame};
 use rustvani::pipeline::{PipelineParams, PipelineTask};
 use rustvani::turn::{SmartTurnAnalyzer, SmartTurnConfig};
 use rustvani::vad::{SileroVadOrt, VadBackend, VadParams, VadProcessor};
 use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::types::CallSettings;
 
@@ -20,12 +20,28 @@ pub enum CallFrame {
 }
 
 pub struct CallDetector {
+    active: Mutex<DetectorRun>,
+    settings: CallSettings,
+    generation: Arc<AtomicU64>,
+    tx: mpsc::Sender<CallFrame>,
+}
+
+struct DetectorRun {
     task: Arc<PipelineTask>,
     worker: tokio::task::JoinHandle<()>,
+    playing: bool,
 }
 
 impl CallDetector {
     pub fn start(settings: &CallSettings) -> Result<(Self, mpsc::Receiver<CallFrame>), String> {
+        let (tx, rx) = mpsc::channel(128);
+        let generation = Arc::new(AtomicU64::new(0));
+        let active = Self::run(settings, false, tx.clone(), generation.clone(), 0)?;
+        Ok((Self { active: Mutex::new(active), settings: settings.clone(), generation, tx }, rx))
+    }
+
+    fn run(settings: &CallSettings, playing: bool, tx: mpsc::Sender<CallFrame>,
+        generation: Arc<AtomicU64>, current: u64) -> Result<DetectorRun, String> {
         let stop_secs = if settings.turn_end_mode == "smart_turn" {
             settings.smart_turn_min_silence
         } else {
@@ -35,7 +51,7 @@ impl CallDetector {
             16_000,
             VadParams {
                 confidence: settings.vad_confidence,
-                min_volume: settings.vad_min_volume,
+                min_volume: if playing { settings.vad_min_volume.max(0.8) } else { settings.vad_min_volume },
                 start_secs: settings.vad_start_secs,
                 stop_secs,
             },
@@ -61,10 +77,11 @@ impl CallDetector {
             FrameKind::VADUserStartedSpeaking,
             FrameKind::VADUserStoppedSpeaking,
         ]));
-        let (tx, rx) = mpsc::channel(128);
         task.add_on_frame_reached_downstream(move |frame| {
             let tx = tx.clone();
+            let generation = generation.clone();
             Box::pin(async move {
+                if generation.load(Ordering::Acquire) != current { return; }
                 let event = match frame.inner {
                     FrameInner::System(SystemFrame::InputAudioRaw(data)) => {
                         Some(CallFrame::Audio(data.audio.to_vec()))
@@ -86,14 +103,27 @@ impl CallDetector {
         let worker = tokio::spawn(async move {
             let _ = runner.run(rustvani::system_clock(), None).await;
         });
-        Ok((Self { task, worker }, rx))
+        Ok(DetectorRun { task, worker, playing })
+    }
+
+    /// Rustvani currently takes VadParams at construction. Swap its configured
+    /// detector at a playback boundary; the input source remains live throughout.
+    pub async fn listening_bar(&self, playing: bool) {
+        let mut active = self.active.lock().await;
+        if active.playing == playing { return; }
+        let next_generation = self.generation.load(Ordering::Acquire) + 1;
+        let Ok(next) = Self::run(&self.settings, playing, self.tx.clone(),
+            self.generation.clone(), next_generation) else { return; };
+        self.generation.store(next_generation, Ordering::Release);
+        let old = std::mem::replace(&mut *active, next);
+        old.worker.abort();
     }
 
     pub async fn feed(&self, pcm: Vec<u8>) -> Result<(), String> {
         if pcm.len() < 2 || !pcm.len().is_multiple_of(2) {
             return Err("invalid_pcm".to_owned());
         }
-        self.task
+        self.active.lock().await.task
             .push_frame(
                 Frame::input_audio_raw(AudioRawData::new(pcm, 16_000, 1)),
                 FrameDirection::Downstream,
@@ -102,18 +132,11 @@ impl CallDetector {
             .map_err(|error| error.to_string())
     }
 
-    pub async fn close(self) {
-        let _ = self
-            .task
-            .push_frame(Frame::cancel(), FrameDirection::Downstream)
-            .await;
-        self.worker.abort();
-    }
 }
 
 impl Drop for CallDetector {
     fn drop(&mut self) {
-        self.worker.abort();
+        self.active.get_mut().worker.abort();
     }
 }
 

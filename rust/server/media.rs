@@ -10,6 +10,7 @@ use std::{
 };
 
 use base64::Engine;
+use rustvani::audio_process::resamplers::{ResamplerQuality, StreamResampler};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use unicode_script::{Script, UnicodeScript};
@@ -29,6 +30,13 @@ use crate::{
 
 const MAX_TURN_BYTES: usize = 16_000 * 2 * 60;
 const PRE_ROLL_BYTES: usize = 16_000 * 2;
+const MAX_RECOGNITION_QUEUE: usize = 8;
+const CATCHUP_SLICE_BYTES: usize = 128 * 1024;
+const CATCHUP_MAX_SECONDS: usize = 35;
+
+#[derive(Debug)]
+pub enum SttFailure { Timeout, Device, Provider }
+type Recognition = Result<Option<String>, SttFailure>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -39,10 +47,11 @@ pub enum Source {
 pub struct CallMedia {
     detector: CallDetector,
     source: Mutex<Source>,
-    transcripts: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
+    transcripts: Mutex<HashMap<String, oneshot::Sender<Result<Option<String>, ()>>>>,
     rtc_generation: AtomicU64,
     rtc: Mutex<Option<Arc<dyn webrtc::peer_connection::PeerConnection>>>,
     focus_tx: mpsc::Sender<()>,
+    playing_uid: Mutex<Option<String>>,
 }
 
 type MediaStart = (
@@ -63,6 +72,7 @@ impl CallMedia {
                 rtc_generation: AtomicU64::new(0),
                 rtc: Mutex::new(None),
                 focus_tx,
+                playing_uid: Mutex::new(None),
             }),
             events,
             focus_rx,
@@ -131,13 +141,13 @@ impl CallMedia {
             .remove(request);
         if let Some(pending) = pending {
             let text = if error {
-                None
+                Err(())
             } else {
-                data.get("text")
+                Ok(data.get("text")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|text| !text.is_empty())
-                    .map(str::to_owned)
+                    .map(str::to_owned))
             };
             let _ = pending.send(text);
         }
@@ -146,15 +156,24 @@ impl CallMedia {
     async fn recognize(
         &self,
         pcm: Vec<u8>,
+        sample_rate: u32,
         settings: &CallSettings,
         session: &str,
         events: &mpsc::Sender<Value>,
         dir: &PrivateDir,
-    ) -> Option<String> {
-        if !crate::pipeline::has_speech(&pcm).await.ok()? {
-            return None;
+    ) -> Recognition {
+        let gate_pcm = if sample_rate == 16_000 { pcm.clone() } else {
+            let mut resampler = StreamResampler::new(sample_rate, 16_000, ResamplerQuality::Quick);
+            let samples: Vec<f32> = pcm.as_chunks::<2>().0.iter()
+                .map(|pair| i16::from_le_bytes(*pair) as f32 / 32768.0).collect();
+            let mut output = resampler.process(&samples);
+            output.extend(resampler.flush());
+            output.into_iter().flat_map(|sample| ((sample * 32767.0).clamp(-32768.0, 32767.0) as i16).to_le_bytes()).collect()
+        };
+        if !crate::pipeline::has_speech(&gate_pcm).await.map_err(|_| SttFailure::Provider)? {
+            return Ok(None);
         }
-        let wav = wav(&pcm)?;
+        let wav = wav(&pcm, sample_rate).ok_or(SttFailure::Provider)?;
         let (text, confidence) = match settings.stt.place.as_str() {
             "device" => {
                 let request = Uuid::new_v4().to_string();
@@ -173,33 +192,34 @@ impl CallMedia {
                         .lock()
                         .expect("transcripts lock")
                         .remove(&request);
-                    return None;
+                    return Err(SttFailure::Device);
                 }
-                let result = tokio::time::timeout(Duration::from_secs(90), rx)
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .flatten();
+                let result = tokio::time::timeout(Duration::from_secs(90), rx).await;
                 self.transcripts
                     .lock()
                     .expect("transcripts lock")
                     .remove(&request);
-                (result, None)
+                (match result {
+                    Err(_) => return Err(SttFailure::Timeout),
+                    Ok(Err(_)) | Ok(Ok(Err(()))) => return Err(SttFailure::Device),
+                    Ok(Ok(Ok(text))) => text,
+                }, None)
             }
             "openai" => {
-                let key = provider_key(dir, "openai")?;
-                let client = OpenAiTranscriber::new(&key).ok()?;
+                let key = provider_key(dir, "openai").ok_or(SttFailure::Provider)?;
+                let client = OpenAiTranscriber::new(&key).map_err(|_| SttFailure::Provider)?;
                 let language = settings.stt.options.get("language").and_then(Value::as_str);
                 let prompt = settings.stt.options.get("context").and_then(Value::as_str);
                 let result = client
                     .transcribe(&wav, &settings.stt.model, language, prompt)
                     .await
-                    .ok()?;
+                    .map_err(|_| SttFailure::Provider)?;
                 (Some(result.text.trim().to_owned()), result.mean_logprob)
             }
-            _ => return None,
+            _ => return Err(SttFailure::Provider),
         };
-        let text = text?.trim().to_owned();
+        let Some(text) = text else { return Ok(None); };
+        let text = text.trim().to_owned();
         let language = settings
             .stt
             .options
@@ -210,7 +230,7 @@ impl CallMedia {
             && text.chars().any(char::is_alphabetic)
             && !text.chars().any(|letter| letter.script() == Script::Latin)
         {
-            return None;
+            return Ok(None);
         }
         let threshold = if text.split_whitespace().count() <= 2 {
             -3.0
@@ -218,13 +238,33 @@ impl CallMedia {
             -2.0
         };
         if confidence.is_some_and(|value| value < threshold) {
-            return None;
+            return Ok(None);
         }
-        (!text.is_empty()).then_some(text)
+        Ok((!text.is_empty()).then_some(text))
     }
 
     pub fn close(&self) {
         self.transcripts.lock().expect("transcripts lock").clear();
+    }
+
+    pub async fn listening_bar(&self, playing: bool) {
+        if !playing { self.playing_uid.lock().expect("playing lock").take(); }
+        self.detector.listening_bar(playing).await;
+    }
+
+    pub async fn admitted_receipt(&self, uid: &str, status: &str) {
+        let change = {
+            let mut playing = self.playing_uid.lock().expect("playing lock");
+            if status == "playing" {
+                *playing = Some(uid.into());
+                Some(true)
+            } else if playing.as_deref() == Some(uid) && matches!(status,
+                "failed" | "playback_finished" | "cancelled_playing" | "skipped") {
+                *playing = None;
+                Some(false)
+            } else { None }
+        };
+        if let Some(playing) = change { self.detector.listening_bar(playing).await; }
     }
 }
 
@@ -246,7 +286,7 @@ pub(super) fn provider_key(dir: &PrivateDir, name: &str) -> Option<String> {
     .map(str::to_owned)
 }
 
-fn wav(pcm: &[u8]) -> Option<Vec<u8>> {
+fn wav(pcm: &[u8], sample_rate: u32) -> Option<Vec<u8>> {
     if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
         return None;
     }
@@ -256,7 +296,7 @@ fn wav(pcm: &[u8]) -> Option<Vec<u8>> {
         cursor,
         hound::WavSpec {
             channels: 1,
-            sample_rate: 16_000,
+            sample_rate,
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         },
@@ -278,6 +318,26 @@ struct PendingTurn {
     transcribed_at: u64,
 }
 
+struct Catchup {
+    pcm: Vec<u8>,
+    seq: u64,
+    rate: u32,
+    truncated: bool,
+    time: Option<u64>,
+}
+
+enum RecognitionJob {
+    Live { turn: VoiceTurn, pcm: Vec<u8>, closed: u64 },
+    Offline { target: VoiceTurn, row_id: String, pcm: Vec<u8>, rate: u32,
+        truncated: bool, time: Option<u64> },
+}
+
+pub(super) struct RecognitionDone {
+    job: RecognitionJob,
+    result: Recognition,
+    transcribed: u64,
+}
+
 pub struct TurnOwner {
     media: Arc<CallMedia>,
     room: Arc<Room>,
@@ -287,10 +347,14 @@ pub struct TurnOwner {
     dir: PrivateDir,
     recent: VecDeque<u8>,
     speaking: Option<(VoiceTurn, Vec<u8>)>,
-    recognizing: usize,
+    active: Option<tokio::task::JoinHandle<()>>,
+    active_turn: Option<VoiceTurn>,
+    queue: VecDeque<RecognitionJob>,
+    catchup: Option<Catchup>,
+    catchups: u64,
     pending: Option<PendingTurn>,
-    pub finished: mpsc::Receiver<(VoiceTurn, Option<String>, u64, u64, usize)>,
-    finished_tx: mpsc::Sender<(VoiceTurn, Option<String>, u64, u64, usize)>,
+    pub finished: mpsc::Receiver<RecognitionDone>,
+    finished_tx: mpsc::Sender<RecognitionDone>,
 }
 
 impl TurnOwner {
@@ -312,7 +376,11 @@ impl TurnOwner {
             dir,
             recent: VecDeque::new(),
             speaking: None,
-            recognizing: 0,
+            active: None,
+            active_turn: None,
+            queue: VecDeque::new(),
+            catchup: None,
+            catchups: 0,
             pending: None,
             finished,
             finished_tx,
@@ -323,7 +391,7 @@ impl TurnOwner {
         self.pending
             .as_ref()
             // A resumed segment keeps the first transcript open through recognition.
-            .filter(|_| self.speaking.is_none() && self.recognizing == 0)
+            .filter(|_| self.speaking.is_none() && self.active.is_none() && self.queue.is_empty())
             .map(|p| p.deadline)
     }
 
@@ -355,6 +423,7 @@ impl TurnOwner {
             }
             CallFrame::Started => {
                 if self.speaking.is_none() {
+                    self.media.listening_bar(false).await;
                     if let Ok(turn) = self.room.begin_turn(&self.session) {
                         let _ = self.events.send(json!({"type":"voice-user-turn","data":{
                             "phase":"started","revision":turn.revision,"thread_id":turn.thread_id}})).await;
@@ -401,36 +470,38 @@ impl TurnOwner {
                             pcm.len() as f64 / 32.0,
                         );
                     }
-                    let bytes = pcm.len();
-                    let media = self.media.clone();
-                    let settings = self.settings.clone();
-                    let session = self.session.clone();
-                    let events = self.events.clone();
-                    let dir = self.dir.clone();
-                    let finished = self.finished_tx.clone();
-                    self.recognizing += 1;
-                    tokio::spawn(async move {
-                        let text = media
-                            .recognize(pcm, &settings, &session, &events, &dir)
-                            .await;
-                        let _ = finished
-                            .send((turn, text, closed, latency_now_micros(), bytes))
-                            .await;
-                    });
+                    self.enqueue(RecognitionJob::Live { turn, pcm, closed }).await;
                 }
             }
         }
     }
 
-    pub async fn result(
-        &mut self,
-        turn: VoiceTurn,
-        text: Option<String>,
-        closed: u64,
-        transcribed: u64,
-        _bytes: usize,
-    ) {
-        self.recognizing = self.recognizing.saturating_sub(1);
+    pub async fn result(&mut self, done: RecognitionDone) {
+        if let Some(active) = self.active.take() { let _ = active.await; }
+        self.active_turn = None;
+        let RecognitionDone { job, result, transcribed } = done;
+        match job {
+            RecognitionJob::Live { turn, closed, .. } => {
+                self.live_result(turn, result, closed, transcribed).await;
+            }
+            RecognitionJob::Offline { target, row_id, truncated, time, .. } => {
+                match result {
+                    Ok(Some(text)) => {
+                        let offline = if truncated { "truncated" } else { "buffered" };
+                        let _ = self.events.send(json!({"type":"voice-catchup-turn","data":{
+                            "session_id":self.session,"history_id":row_id,"thread_id":target.thread_id,
+                            "text":text,"offline":offline,"time":time}})).await;
+                        let _ = self.room.queue_offline_input(&target, &row_id, &text, offline, time);
+                    }
+                    Err(error) => self.report_error(error, true).await,
+                    Ok(None) => {}
+                }
+            }
+        }
+        self.start_next();
+    }
+
+    async fn live_result(&mut self, turn: VoiceTurn, result: Recognition, closed: u64, transcribed: u64) {
         if let Some(thread) = turn.thread_id.as_deref() {
             self.room.latency_mark(
                 &self.session,
@@ -457,7 +528,10 @@ impl TurnOwner {
                 transcribed.saturating_sub(closed) as f64 / 1000.0,
             );
         }
-        let text = text.unwrap_or_default();
+        let text = match result {
+            Ok(text) => text.unwrap_or_default(),
+            Err(error) => { self.report_error(error, false).await; String::new() }
+        };
         let current = self.room.snapshot(Some(&self.session));
         let revision = current["room"]["revision"].as_u64().unwrap_or(0);
         let same_focus = current["binding"]["thread_id"].as_str() == turn.thread_id.as_deref();
@@ -553,7 +627,107 @@ impl TurnOwner {
         self.room.finish_turn(&self.session, turn.revision);
     }
 
+    async fn report_error(&self, error: SttFailure, offline: bool) {
+        use crate::messages::{render, LocalizedMessage};
+        let key = match (offline, error) {
+            (true, _) => "voice.catchup_transcription_failed",
+            (false, SttFailure::Timeout) => "voice.transcription_timeout",
+            (false, _) => "voice.transcription_failed",
+        };
+        let message = render(&LocalizedMessage::new(key), &self.settings.ui_language);
+        let _ = self.events.send(json!({"type":"error","data":{"message":message}})).await;
+    }
+
+    async fn enqueue(&mut self, job: RecognitionJob) {
+        if self.queue.len() + usize::from(self.active.is_some()) >= MAX_RECOGNITION_QUEUE {
+            if let RecognitionJob::Live { turn, .. } = job {
+                let _ = self.events.send(json!({"type":"voice-user-turn","data":{
+                    "phase":"cancelled","revision":turn.revision,"thread_id":turn.thread_id,"text":""}})).await;
+                self.room.finish_turn(&self.session, turn.revision);
+            }
+            self.report_error(SttFailure::Provider, false).await;
+            return;
+        }
+        self.queue.push_back(job);
+        self.start_next();
+    }
+
+    fn start_next(&mut self) {
+        if self.active.is_some() { return; }
+        let Some(mut job) = self.queue.pop_front() else { return; };
+        self.active_turn = match &job {
+            RecognitionJob::Live { turn, .. } => Some(turn.clone()),
+            RecognitionJob::Offline { .. } => None,
+        };
+        let media = self.media.clone();
+        let settings = self.settings.clone();
+        let session = self.session.clone();
+        let events = self.events.clone();
+        let dir = self.dir.clone();
+        let finished = self.finished_tx.clone();
+        self.active = Some(tokio::spawn(async move {
+            let (pcm, rate) = match &mut job {
+                RecognitionJob::Live { pcm, .. } => (std::mem::take(pcm), 16_000),
+                RecognitionJob::Offline { pcm, rate, .. } => (std::mem::take(pcm), *rate),
+            };
+            let result = media.recognize(pcm, rate, &settings, &session, &events, &dir).await;
+            let _ = finished.send(RecognitionDone { job, result,
+                transcribed: latency_now_micros() }).await;
+        }));
+    }
+
+    pub async fn catchup_slice(&mut self, data: &Value) {
+        let rate = data.get("sample_rate").and_then(Value::as_u64)
+            .filter(|rate| (8_000..=48_000).contains(rate)).map(|rate| rate as u32);
+        let seq = data.get("seq").and_then(Value::as_u64);
+        let (Some(rate), Some(seq)) = (rate, seq) else { self.catchup = None; return; };
+        if seq == 0 {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_millis() as u64;
+            let time = data.get("started_at").and_then(Value::as_u64)
+                .filter(|at| *at >= now.saturating_sub(3_600_000) && *at <= now + 60_000);
+            self.catchup = Some(Catchup { pcm: Vec::new(), seq: 0, rate,
+                truncated: data["truncated"].as_bool().unwrap_or(false), time });
+        }
+        let Some(pending) = &mut self.catchup else { return; };
+        if pending.seq != seq || pending.rate != rate { self.catchup = None; return; }
+        let Some(encoded) = data.get("audio_base64").and_then(Value::as_str) else {
+            self.catchup = None; return;
+        };
+        let Ok(audio) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+            self.catchup = None; return;
+        };
+        if audio.len() > CATCHUP_SLICE_BYTES ||
+            pending.pcm.len() + audio.len() > CATCHUP_MAX_SECONDS * rate as usize * 2 {
+            self.catchup = None;
+            use crate::messages::{render, LocalizedMessage};
+            let message = render(&LocalizedMessage::new("voice.catchup_too_long"), &self.settings.ui_language);
+            let _ = self.events.send(json!({"type":"error","data":{"message":message}})).await;
+            return;
+        }
+        pending.pcm.extend_from_slice(&audio);
+        pending.seq += 1;
+        if data["final"].as_bool() != Some(true) { return; }
+        let pending = self.catchup.take().expect("catchup exists");
+        let Some(target) = self.room.offline_target(&self.session) else { return; };
+        self.catchups += 1;
+        let row_id = format!("{}:user-catchup:{}", self.session, self.catchups);
+        self.enqueue(RecognitionJob::Offline { target, row_id, pcm: pending.pcm,
+            rate, truncated: pending.truncated, time: pending.time }).await;
+    }
+
     pub async fn close(&mut self) {
+        self.media.close();
+        if let Some(active) = self.active.take() { active.abort(); let _ = active.await; }
+        if let Some(turn) = self.active_turn.take() {
+            self.room.finish_turn(&self.session, turn.revision);
+        }
+        for job in self.queue.drain(..) {
+            if let RecognitionJob::Live { turn, .. } = job {
+                self.room.finish_turn(&self.session, turn.revision);
+            }
+        }
+        self.catchup = None;
         if let Some((turn, _)) = self.speaking.take() {
             self.room.finish_turn(&self.session, turn.revision);
         }
@@ -564,12 +738,6 @@ impl TurnOwner {
 
     pub async fn focus_changed(&mut self) {
         if let Some((turn, pcm)) = self.speaking.take() {
-            let media = self.media.clone();
-            let settings = self.settings.clone();
-            let session = self.session.clone();
-            let events = self.events.clone();
-            let dir = self.dir.clone();
-            let finished = self.finished_tx.clone();
             let closed = latency_now_micros();
             if let Some(thread) = turn.thread_id.as_deref() {
                 self.room.latency_mark(
@@ -581,16 +749,7 @@ impl TurnOwner {
                     closed,
                 );
             }
-            let bytes = pcm.len();
-            self.recognizing += 1;
-            tokio::spawn(async move {
-                let text = media
-                    .recognize(pcm, &settings, &session, &events, &dir)
-                    .await;
-                let _ = finished
-                    .send((turn, text, closed, latency_now_micros(), bytes))
-                    .await;
-            });
+            self.enqueue(RecognitionJob::Live { turn, pcm, closed }).await;
             if let Ok(turn) = self.room.begin_turn(&self.session) {
                 let _ = self
                     .events

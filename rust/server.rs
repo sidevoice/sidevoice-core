@@ -628,6 +628,11 @@ async fn presentation_receipt(
         data["status"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
+            let sid = data["session_id"].as_str().unwrap_or("");
+            let uid = data["utterance_id"].as_str().unwrap_or("");
+            let status = data["status"].as_str().unwrap_or("");
+            let media = state.media.lock().expect("media lock").get(sid).cloned();
+            if let Some(media) = media { media.admitted_receipt(uid, status).await; }
             state.room.latency_browser(
                 data["session_id"].as_str().unwrap_or(""),
                 data["utterance_id"].as_str().unwrap_or(""),
@@ -1177,7 +1182,7 @@ async fn socket_loop(
             }
             frame = detector_events.recv() => if let Some(frame) = frame { turns.frame(frame).await; } else { break; },
             focus = focus_events.recv() => if focus.is_some() { turns.focus_changed().await; },
-            result = turns.finished.recv() => if let Some((turn, text, closed, transcribed, bytes)) = result { turns.result(turn,text,closed,transcribed,bytes).await; },
+            result = turns.finished.recv() => if let Some(done) = result { turns.result(done).await; },
             _ = tokio::time::sleep_until(deadline) => { turns.expired().await; },
             rendered = rendered_rx.recv() => if let Some((uid,revision,event)) = rendered {
                 if let Some(event) = event {
@@ -1214,6 +1219,7 @@ async fn socket_loop(
                                 },
                                 Some("voice-transcript")=>call_media.transcript(&data,false,&session),
                                 Some("voice-transcript-error")=>call_media.transcript(&data,true,&session),
+                                Some("voice-catchup")=>turns.catchup_slice(&data).await,
                                 Some("voice-settings")=>{
                                     let loaded=crate::models::settings_from(data.get("settings"),&defaults);
                                     if let Some(issue)=loaded.issue{let _=socket.send(Message::Text(json!({"type":"error","data":{"message":issue}}).to_string().into())).await;}
