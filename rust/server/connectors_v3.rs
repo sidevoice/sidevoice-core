@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use crate::control::room::{ConnectorPeer, PeerError, PeerRequest};
@@ -23,8 +23,9 @@ fn text(v:Value)->Option<Message>{let s=serde_json::to_string(&v).ok()?;(s.len()
 fn close(code:u16)->Message{Message::Close(Some(CloseFrame{code,reason:"".into()}))}
 fn field<'a>(v:&'a Value,k:&str)->&'a str{v.get(k).and_then(Value::as_str).unwrap_or("")}
 
-async fn dispatch(state:Arc<AppState>,cid:String,method:String,params:Value)->Result<Value,(i64,&'static str)>{
+async fn dispatch(state:Arc<AppState>,cid:String,generation:String,method:String,params:Value)->Result<Value,(i64,&'static str)>{
     let room=&state.room;
+    if !room.current_peer(&cid,&generation){return Err((-32001,"room.connector_disconnected"));}
     match method.as_str(){
         "binding.register"=>Ok(room.register(&cid,&params).unwrap_or_else(|e|json!({"error":e.key}))),
         "binding.unregister"=>{room.unregister(&cid,field(&params,"binding_id"));Ok(Value::Null)},
@@ -50,30 +51,31 @@ pub async fn run(state:Arc<AppState>,mut socket:WebSocket){
         if let Some(msg)=text(error(rid,-32002,"Protocol 3 hello is required")){let _=socket.send(msg).await;}let _=socket.send(close(1008)).await;return;}
     if !state.room.authenticate_connector(cid,token,&params){if let Some(msg)=text(error(rid,-32001,"Connector credential refused")){let _=socket.send(msg).await;}let _=socket.send(close(1008)).await;return;}
     let cid=cid.to_owned();let generation=Uuid::new_v4().to_string();
-    let (requests,mut rx)=mpsc::channel::<PeerRequest>(128);let peer=ConnectorPeer{generation:generation.clone(),sender:requests};
+    let (requests,mut rx)=mpsc::channel::<PeerRequest>(128);let (stop,mut stopped)=watch::channel(false);let peer=ConnectorPeer{generation:generation.clone(),sender:requests,stop};
     let old=state.room.attach(&cid,peer);
-    if let Some(old)=old{let _=old.send("connector.replaced",json!({})).await;}
+    if let Some(old)=old{old.disconnect();}
     let (out,mut outgoing)=mpsc::channel::<Value>(128);
     let _=out.send(json!({"jsonrpc":"2.0","id":rid,"result":{"protocol":3}})).await;
     let _=out.send(json!({"jsonrpc":"2.0","method":"connector.welcome","params":{"protocol":3}})).await;
     let mut pending:HashMap<String,oneshot::Sender<Result<Value,PeerError>>>=HashMap::new();
     let mut incoming=HashSet::<String>::new();let (finished,mut completed)=mpsc::channel::<String>(32);let mut seq=0u64;
     loop{tokio::select!{
+        _=stopped.changed()=>{let _=socket.send(close(1000)).await;break;},
         done=completed.recv()=>if let Some(key)=done {incoming.remove(&key);},
         command=rx.recv()=>{let Some(command)=command else{break};if let Some(answer)=command.answer{
             if pending.len()>=128{let _=answer.send(Err(PeerError));continue;}seq+=1;let request_id=format!("s:{seq}");
             pending.insert(request_id.clone(),answer);if out.send(json!({"jsonrpc":"2.0","id":request_id,"method":command.method,"params":command.params})).await.is_err(){break;}
         }else if out.send(json!({"jsonrpc":"2.0","method":command.method,"params":command.params})).await.is_err(){break;}},
         frame=outgoing.recv()=>{let Some(frame)=frame else{break};let Some(msg)=text(frame) else{let _=socket.send(close(1009)).await;break;};if socket.send(msg).await.is_err(){break;}},
-        frame=socket.recv()=>{let Some(Ok(frame))=frame else{break};let Message::Text(raw)=frame else{if matches!(frame,Message::Binary(_)){let _=socket.send(close(1003)).await;break;}continue;};
+        frame=socket.recv()=>{let Some(Ok(frame))=frame else{break};if !state.room.current_peer(&cid,&generation){let _=socket.send(close(1000)).await;break;}let Message::Text(raw)=frame else{if matches!(frame,Message::Binary(_)){let _=socket.send(close(1003)).await;break;}continue;};
             let incoming_frame=match decode(&raw){Ok(v)=>v,Err(code)=>{let _=socket.send(close(code)).await;break;}};
             if incoming_frame.get("method").is_none(){let key=incoming_frame["id"].as_str().map(str::to_owned).unwrap_or_else(||incoming_frame["id"].to_string());
                 if let Some(answer)=pending.remove(&key){let outcome=if incoming_frame.get("error").is_some(){Err(PeerError)}else{Ok(incoming_frame.get("result").cloned().unwrap_or(Value::Null))};let _=answer.send(outcome);}continue;}
             let request_id=incoming_frame.get("id").cloned();let key=request_id.as_ref().map(ToString::to_string).unwrap_or_default();
             if request_id.is_some()&&!incoming.insert(key.clone()){let _=socket.send(close(1002)).await;break;}
             if incoming.len()>32{if let Some(id)=request_id{let _=out.send(error(id,-32000,"Connector request capacity reached")).await;incoming.remove(&key);}continue;}
-            let method=field(&incoming_frame,"method").to_owned();let params=incoming_frame.get("params").cloned().unwrap_or(json!({}));let out=out.clone();let state=state.clone();let cid=cid.clone();
-            let finished=finished.clone();tokio::spawn(async move{let outcome=tokio::time::timeout(Duration::from_secs(60),dispatch(state,cid,method,params)).await;
+            let method=field(&incoming_frame,"method").to_owned();let params=incoming_frame.get("params").cloned().unwrap_or(json!({}));let out=out.clone();let state=state.clone();let cid=cid.clone();let generation=generation.clone();
+            let finished=finished.clone();tokio::spawn(async move{let outcome=tokio::time::timeout(Duration::from_secs(60),dispatch(state,cid,generation,method,params)).await;
                 if let Some(id)=request_id{let frame=match outcome{Ok(Ok(result))=>json!({"jsonrpc":"2.0","id":id,"result":result}),Ok(Err((code,msg)))=>error(id,code,msg),Err(_)=>error(id,-32001,"Request timed out")};let _=out.send(frame).await;let _=finished.send(key).await;}});
         }
     }}

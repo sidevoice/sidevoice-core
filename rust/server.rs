@@ -391,6 +391,7 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .route("/api/presentation/close", post(presentation_close))
         .route("/api/presentation/text", post(presentation_text))
         .route("/api/presentation/browser-receipt", post(presentation_receipt))
+        .route("/api/presentation/client-error", post(presentation_client_error))
         .route("/api/presentation/speak", post(presentation_speak))
         .route("/api/connectors", get(connector_listing))
         .route("/api/host/agents", get(host_agents))
@@ -462,6 +463,11 @@ async fn presentation_receipt(State(state):State<Arc<AppState>>,headers:HeaderMa
     match state.room.receipt(data["session_id"].as_str().unwrap_or(""),data["utterance_id"].as_str().unwrap_or(""),
         data["revision"].as_u64().unwrap_or(u64::MAX),data["status"].as_str().unwrap_or("")){
         Ok(v)=>Json(v).into_response(),Err(e)=>room_failure(e,&headers)}
+}
+async fn presentation_client_error(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
+    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
+    let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
+    Json(state.room.report_client_error(&data)).into_response()
 }
 async fn presentation_speak(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
     if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
@@ -779,7 +785,28 @@ async fn socket_loop(
             event = output.recv() => if let Some(event) = event {
                 if socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
             } else { break; },
-            message = socket.recv() => if matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) { break; },
+            message = socket.recv() => match message {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                Some(Ok(Message::Ping(bytes))) => {let _=socket.send(Message::Pong(bytes)).await;},
+                Some(Ok(Message::Text(raw))) if raw.len()<=1024*1024 => {
+                    if let Ok(value)=serde_json::from_str::<Value>(&raw){
+                        let data=value.get("data").filter(|v|v.is_object()).cloned().unwrap_or_default();
+                        if data.get("session_id").and_then(Value::as_str)==Some(session.as_str()){
+                            match value.get("type").and_then(Value::as_str){
+                                Some("voice-client-error")=>{state.room.report_client_error(&data);},
+                                Some("voice-settings")=>{
+                                    let loaded=crate::models::settings_from(data.get("settings"),&defaults);
+                                    if let Some(issue)=loaded.issue{let _=socket.send(Message::Text(json!({"type":"error","data":{"message":issue}}).to_string().into())).await;}
+                                    else if let Some(refusal)=crate::models::unavailable(&loaded.settings,|_|false){let _=socket.send(Message::Text(json!({"type":"error","data":crate::messages::render_refusal(&refusal,&loaded.settings.ui_language)}).to_string().into())).await;}
+                                    else{state.room.set_language(&session,&loaded.settings.ui_language);}
+                                },
+                                _=>{}
+                            }
+                        }
+                    }
+                },
+                _=>{},
+            },
         }
     }
     state.room.leave(&session);

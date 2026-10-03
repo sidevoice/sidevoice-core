@@ -130,11 +130,16 @@ class BridgeHandler(socketserver.BaseRequestHandler):
 
 async def frame(ws, kind, *, status=None, timeout=6):
     deadline = time.monotonic() + timeout
+    seen = []
     while time.monotonic() < deadline:
-        value = json.loads(await asyncio.wait_for(ws.recv(), deadline-time.monotonic()))
+        try:
+            value = json.loads(await asyncio.wait_for(ws.recv(), deadline-time.monotonic()))
+        except TimeoutError as error:
+            raise AssertionError(f"missing {kind}/{status}; frames={seen}") from error
+        seen.append(value)
         if value.get("type") == kind and (status is None or value.get("data", {}).get("status") == status):
             return value["data"]
-    raise AssertionError(f"missing {kind}/{status}")
+    raise AssertionError(f"missing {kind}/{status}; frames={seen}")
 
 
 class ProofIPC:
@@ -282,7 +287,13 @@ async def main():
                                           "thread_id": "t3-rust-thread", "binding_id": focus, "message_id": str(uuid.uuid4())})
                 assert rust_text[0] == 200, rust_text
                 await frame(ws, "voice-input-receipt", status="pending")
-                await frame(ws, "voice-input-receipt", status="delivered")
+                try:
+                    await frame(ws, "voice-input-receipt", status="delivered")
+                except AssertionError as error:
+                    history = request(port, "GET", "/api/presentation/history?thread_id=t3-rust-thread", token=token)
+                    proof.send_signal(signal.SIGINT)
+                    proof.wait(timeout=5)
+                    raise AssertionError(f"{error}; history={history}; Rust peer: {proof.stderr.read()}") from error
                 result = ipc.call("publish", {"client_ref": "t3-rust", "session_id": session, "revision": revision,
                                               "text": "Reply from actual Rust v3", "event_id": "t3-rust-event",
                                               "utterance_id": "t3-rust-utterance"})

@@ -8,12 +8,13 @@ use base64::Engine;
 use rand::RngCore;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use crate::storage::PrivateDir;
 
 const MAX_HISTORY: usize = 2000;
+const MAX_UTTERANCES: usize = 2048;
 const MAX_BROWSERS: usize = 8;
 const INPUT_TTL: u64 = 600;
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
@@ -39,8 +40,9 @@ impl RoomError { fn new(status: u16, key: &'static str) -> Self { Self { status,
 pub struct PeerError;
 pub struct PeerRequest { pub method: String, pub params: Value, pub answer: Option<oneshot::Sender<Result<Value, PeerError>>> }
 #[derive(Clone)]
-pub struct ConnectorPeer { pub generation: String, pub sender: mpsc::Sender<PeerRequest> }
+pub struct ConnectorPeer { pub generation: String, pub sender: mpsc::Sender<PeerRequest>, pub stop: watch::Sender<bool> }
 impl ConnectorPeer {
+    pub fn disconnect(&self){let _=self.stop.send(true);}
     pub async fn send(&self, method: &str, params: Value) -> Result<(), PeerError> {
         self.sender.send(PeerRequest { method: method.into(), params, answer: None }).await.map_err(|_| PeerError)
     }
@@ -76,7 +78,7 @@ impl Row {
 struct UtteranceRecord { row_id: String, clients: HashMap<String, (u64, String)> }
 struct Inner { connectors: Map<String, Value>, pairing: HashMap<String, u64>, peers: HashMap<String, ConnectorPeer>,
     bindings: HashMap<String, Binding>, browsers: HashMap<String, Browser>, sessions: VecDeque<String>,
-    rows: VecDeque<Row>, utterances: HashMap<String, UtteranceRecord>, seq: u64,
+    rows: VecDeque<Row>, utterances: HashMap<String, UtteranceRecord>, client_errors: VecDeque<Value>, seq: u64,
     working: HashMap<String, bool>, inflight: HashMap<String, String> }
 
 pub struct Room { dir: PrivateDir, inner: Mutex<Inner> }
@@ -85,7 +87,7 @@ impl Room {
         let state = match dir.read_json("room-state.json")? { Some(v) => v, None => dir.import_legacy_connectors()? };
         let connectors = state.get("connectors").and_then(Value::as_object).cloned().unwrap_or_default();
         Ok(Self { dir, inner: Mutex::new(Inner { connectors, pairing: HashMap::new(), peers: HashMap::new(),
-            bindings: HashMap::new(), browsers: HashMap::new(), sessions: VecDeque::new(), rows: VecDeque::new(), utterances: HashMap::new(),
+            bindings: HashMap::new(), browsers: HashMap::new(), sessions: VecDeque::new(), rows: VecDeque::new(), utterances: HashMap::new(), client_errors:VecDeque::new(),
             seq: 0, working: HashMap::new(), inflight: HashMap::new() }) })
     }
     fn save(&self, inner: &Inner) -> io::Result<()> {
@@ -174,6 +176,7 @@ impl Room {
         let ids: Vec<String> = inner.bindings.values_mut().filter(|b| b.connector == cid).map(|b| { b.live=false; b.id.clone() }).collect();
         for bid in ids { if let Some(row_id) = inner.inflight.remove(&bid) { if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id) { row.status="pending".into(); row.next_attempt=0; } } }
     }
+    pub fn current_peer(&self,cid:&str,generation:&str)->bool{self.inner.lock().expect("room lock").peers.get(cid).is_some_and(|peer|peer.generation==generation)}
     pub fn connector_peer(&self) -> Option<ConnectorPeer> {
         let inner = self.inner.lock().expect("room lock");
         inner.peers.values().next().cloned()
@@ -244,7 +247,15 @@ impl Room {
         let sid=id(); inner.sessions.push_back(sid.clone()); if inner.sessions.len()>64 {inner.sessions.pop_front();}
         inner.browsers.insert(sid.clone(),Browser { device,language,sender,target:None,revision:0,turn_revision:0,speaking:false,sent:0,active:None }); Ok(sid)
     }
-    pub fn leave(&self, sid: &str) { self.inner.lock().expect("room lock").browsers.remove(sid); }
+    pub fn leave(&self, sid: &str) {let mut inner=self.inner.lock().expect("room lock");inner.browsers.remove(sid);interrupt_client(&mut inner,sid,"call_ended");}
+    pub fn set_language(&self,sid:&str,language:&str){if let Some(browser)=self.inner.lock().expect("room lock").browsers.get_mut(sid){browser.language=language.to_owned();}}
+    pub fn report_client_error(&self,report:&Value)->Value{
+        let mut inner=self.inner.lock().expect("room lock");
+        let clipped=|key:&str,max:usize|field(report,key).chars().take(max).collect::<String>();
+        inner.client_errors.push_back(json!({"session_id":clipped("session_id",100),"kind":clipped("kind",40),"message":clipped("message",200),"at":millis()}));
+        while inner.client_errors.len()>20{inner.client_errors.pop_front();}
+        json!({"status":"recorded"})
+    }
     pub fn admission(&self,language:&str) -> Value { let inner=self.inner.lock().expect("room lock"); let max=std::env::var("VOICE_MAX_BROWSERS").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(MAX_BROWSERS).max(1);
         json!({"admitted":inner.browsers.len()<max,"reason":if inner.browsers.len()>=max {Some("room_is_full")} else {None},
         "message":if inner.browsers.len()>=max {Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.full"),language))} else {None},"clients":inner.browsers.len(),"max":max}) }
@@ -255,14 +266,26 @@ impl Room {
         let title=binding.title.clone(); let Some(client)=inner.browsers.get_mut(sid) else {return Err(RoomError::new(409,"room.browser_absent"));};
         if client.target.as_ref().is_some_and(|t|t.thread==thread) {return Ok(json!({"status":"already_active","binding":client.target.as_ref().map(Target::view)}));}
         client.revision+=1; client.active=None; client.speaking=false; client.sent=0;
-        let target=Target{thread:thread.into(),title,binding_id:id()}; let view=target.view(); client.target=Some(target);
+        let _=client.sender.try_send(json!({"type":"voice-cancel","data":{"session_id":sid,"revision":client.revision}}));
+        let target=Target{thread:thread.into(),title,binding_id:id()}; let view=target.view(); client.target=Some(target);interrupt_client(&mut inner,sid,"focus_changed");
         Ok(json!({"status":"activated","binding":view}))
     }
     pub fn deselect(&self,sid:&str,bid:&str)->Result<Value,RoomError>{let mut inner=self.inner.lock().expect("room lock"); let Some(c)=inner.browsers.get_mut(sid) else{return Err(RoomError::new(409,"room.browser_absent"));};
         if c.target.as_ref().is_none_or(|t|t.binding_id!=bid){return Err(RoomError::new(409,"room.focus_changed"));}
-        c.revision+=1;c.active=None;c.speaking=false;let target=Target{thread:String::new(),title:None,binding_id:id()};let view=target.view();c.target=Some(target);Ok(json!({"status":"activated","binding":view}))}
-    pub fn begin_turn(&self,sid:&str)->Result<(u64,Option<String>),RoomError>{let mut inner=self.inner.lock().expect("room lock");let Some(c)=inner.browsers.get_mut(sid) else{return Err(RoomError::new(409,"room.browser_absent"));};c.revision+=1;c.turn_revision=c.revision;c.speaking=true;c.active=None;Ok((c.revision,c.target.as_ref().map(|t|t.thread.clone())))}
-    pub fn finish_turn(&self,sid:&str,revision:u64){if let Some(c)=self.inner.lock().expect("room lock").browsers.get_mut(sid){if c.turn_revision==revision{c.speaking=false;}}}
+        c.revision+=1;c.active=None;c.speaking=false;let _=c.sender.try_send(json!({"type":"voice-cancel","data":{"session_id":sid,"revision":c.revision}}));let target=Target{thread:String::new(),title:None,binding_id:id()};let view=target.view();c.target=Some(target);interrupt_client(&mut inner,sid,"focus_changed");Ok(json!({"status":"activated","binding":view}))}
+    pub fn begin_turn(&self,sid:&str)->Result<(u64,Option<String>),RoomError>{let mut inner=self.inner.lock().expect("room lock");let Some(c)=inner.browsers.get_mut(sid) else{return Err(RoomError::new(409,"room.browser_absent"));};c.revision+=1;c.turn_revision=c.revision;c.speaking=true;c.active=None;let _=c.sender.try_send(json!({"type":"voice-cancel","data":{"session_id":sid,"revision":c.revision}}));let result=(c.revision,c.target.as_ref().map(|t|t.thread.clone()));interrupt_client(&mut inner,sid,"newer_turn");Ok(result)}
+    pub fn finish_turn(&self,sid:&str,revision:u64){let mut inner=self.inner.lock().expect("room lock");if let Some(c)=inner.browsers.get_mut(sid){if c.turn_revision==revision{c.speaking=false;}}
+        let waiting:Vec<(String,String)>=inner.utterances.iter().filter(|(_,u)|u.clients.get(sid).is_some_and(|(rev,status)|*rev==revision&&status=="waiting_for_turn")).map(|(uid,u)|(uid.clone(),u.row_id.clone())).collect();
+        for (uid,row_id) in waiting {
+            let Some(row)=inner.rows.iter().find(|r|r.id==row_id) else{continue;};
+            let (thread,text,language,reply_revision)=(row.thread.clone(),row.text.clone(),row.language.clone(),row.revision);
+            let Some(browser)=inner.browsers.get(sid) else{continue;};
+            if browser.speaking||browser.revision!=revision||browser.target.as_ref().is_none_or(|t|t.thread!=thread){continue;}
+            let _=browser.sender.try_send(json!({"type":"voice-speech","data":{"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":reply_revision,"thread_id":thread,"text":text,"language":language,"history_id":row_id}}));
+            if let Some(record)=inner.utterances.get_mut(&uid){if let Some(entry)=record.clients.get_mut(sid){entry.1="queued".into();}}
+            if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){row.status="queued".into();row.reason=None;}
+        }
+    }
     pub fn send_text(&self,text:&str,sid:&str,thread:&str,bid:&str,message_id:&str)->Result<Value,RoomError>{
         let row_id=format!("{sid}:user-text:{message_id}");let mut inner=self.inner.lock().expect("room lock");
         if let Some(row)=inner.rows.iter().find(|r|r.id==row_id){return if row.text==text&&row.thread==thread {Ok(json!({"accepted":true,"id":row_id,"revision":row.revision}))} else {Err(RoomError::new(409,"room.message_conflict"))};}
@@ -276,22 +299,53 @@ impl Room {
     }
     pub fn history(&self,thread:Option<&str>)->Value{let inner=self.inner.lock().expect("room lock");json!({"messages":inner.rows.iter().filter(|r|thread.is_none_or(|t|r.thread==t)).rev().take(1000).collect::<Vec<_>>().into_iter().rev().map(Row::view).collect::<Vec<_>>()})}
     pub fn reply_language(&self,row_id:&str)->Option<String>{self.inner.lock().expect("room lock").rows.iter().find(|r|r.id==row_id).and_then(|r|r.language.clone())}
-    pub fn snapshot(&self,sid:Option<&str>)->Value{let inner=self.inner.lock().expect("room lock");let c=sid.and_then(|s|inner.browsers.get(s));json!({"binding":c.and_then(|b|b.target.as_ref()).filter(|t|!t.thread.is_empty()).map(Target::view),
-        "room":{"revision":c.map_or(0,|b|b.revision),"speaking":c.is_some_and(|b|b.speaking),"switching":false,"clients":inner.browsers.len(),"utterances":[],"audio_reports":[],"client_errors":[]},
+    pub fn snapshot(&self,sid:Option<&str>)->Value{let inner=self.inner.lock().expect("room lock");let c=sid.and_then(|s|inner.browsers.get(s));
+        let mut utterances:Vec<(u64,Value,Option<Value>)>=inner.utterances.iter().filter_map(|(uid,record)|{
+            let row=inner.rows.iter().find(|r|r.id==record.row_id)?;
+            let clients:Map<String,Value>=record.clients.iter().map(|(id,(_,status))|(id.clone(),json!(status))).collect();
+            let own=sid.and_then(|id|record.clients.get(id)).map(|(_,status)|json!({"utterance_id":uid,"revision":row.revision,"session_id":sid,"status":status}));
+            Some((row.seq,json!({"utterance_id":uid,"revision":row.revision,"thread_id":row.thread,"status":row.status,"replay_of":Value::Null,"clients":clients}),own))
+        }).collect();utterances.sort_by_key(|entry|entry.0);
+        let room_utterances:Vec<Value>=utterances.iter().map(|entry|entry.1.clone()).collect();
+        let call_utterances:Vec<Value>=utterances.into_iter().filter_map(|entry|entry.2).collect();
+        json!({"binding":c.and_then(|b|b.target.as_ref()).filter(|t|!t.thread.is_empty()).map(Target::view),
+        "room":{"revision":c.map_or(0,|b|b.revision),"speaking":c.is_some_and(|b|b.speaking),"switching":false,"clients":inner.browsers.len(),"utterances":room_utterances,"audio_reports":[],"client_errors":inner.client_errors},
         "clients":inner.browsers.iter().map(|(id,b)|json!({"id":id,"device_id":b.device,"connected":true,"user_speaking":b.speaking,"turn_revision":b.turn_revision,"transport":"pcm","transcription":Value::Null})).collect::<Vec<_>>(),
-        "call":c.map(|b|json!({"id":sid,"target":b.target.as_ref().map(Target::view).unwrap_or(json!({})),"connected":true,"user_speaking":b.speaking,"error":Value::Null,"sent":b.sent,"last_delivery":Value::Null,"revision":b.revision,"utterances":[],"mic":Value::Null,"mic_settings":Value::Null,"transcription":Value::Null,"audio_health":Value::Null,"speech_filter":{}}))})}
+        "call":c.map(|b|json!({"id":sid,"target":b.target.as_ref().map(Target::view).unwrap_or(json!({})),"connected":true,"user_speaking":b.speaking,"error":Value::Null,"sent":b.sent,"last_delivery":Value::Null,"revision":b.revision,"utterances":call_utterances,"mic":Value::Null,"mic_settings":Value::Null,"transcription":Value::Null,"audio_health":Value::Null,"speech_filter":{}}))})}
     pub fn publish(&self,p:&Value,v3:bool)->Value{
-        let sid=field(p,"session_id");let thread=field(p,"thread_id");let uid=field(p,"utterance_id");let text=field(p,"text");let revision=p.get("revision").and_then(Value::as_u64).unwrap_or(0);
-        let mut inner=self.inner.lock().expect("room lock");let row_id=format!("{sid}:voice:{uid}");
-        if let Some(row)=inner.rows.iter().find(|r|r.id==row_id){return json!({"status":row.status,"text_saved":true,"utterance_id":uid});}
-        if text.is_empty()||text.len()>6000||thread.is_empty(){return json!({"status":"rejected","error":"room.speech_invalid","terminal":v3,"reason_code":"application_refusal"});}
+        let original_sid=field(p,"session_id");let thread=field(p,"thread_id");let requested_uid=field(p,"utterance_id");let text=field(p,"text");
+        let generated=id();let uid=if requested_uid.is_empty()&&!v3{generated.as_str()}else{requested_uid};
+        let mut revision=p.get("revision").and_then(Value::as_u64).unwrap_or(0);
+        if text.is_empty()||text.len()>6000||uid.len()>200||!valid_thread(thread)||p.get("revision").and_then(Value::as_u64).is_none()
+            ||p.get("language").and_then(Value::as_str).is_some_and(|language|!["es","en","fr","it","pt","hi"].contains(&language)){
+            return json!({"status":"rejected","error":"room.speech_invalid","terminal":v3,"reason_code":"application_refusal"});
+        }
+        let mut inner=self.inner.lock().expect("room lock");
+        if let Some(record)=inner.utterances.get(uid){if let Some(row)=inner.rows.iter().find(|r|r.id==record.row_id){
+            return if row.text==text&&row.thread==thread{json!({"status":row.status,"text_saved":true,"utterance_id":uid})}
+                else{json!({"status":"rejected","error":"room.speech_invalid","terminal":v3,"reason_code":"application_refusal"})};}}
         let audience:Vec<String>=inner.browsers.iter().filter(|(_,b)|b.target.as_ref().is_some_and(|t|t.thread==thread)).map(|(id,_)|id.clone()).collect();
-        let asker=inner.browsers.get(sid);let known=inner.sessions.iter().any(|s|s==sid);
+        let mut sid=original_sid.to_owned();
+        if !inner.browsers.contains_key(original_sid){if let Some(replacement)=inner.sessions.iter().rev().find(|candidate|audience.contains(candidate)){
+            sid=replacement.clone();revision=inner.browsers.get(&sid).map_or(revision,|b|b.revision);
+        }}
+        let row_id=format!("{sid}:voice:{uid}");
+        if let Some(row)=inner.rows.iter().find(|r|r.id==row_id){return if row.text==text&&row.thread==thread{json!({"status":row.status,"text_saved":true,"utterance_id":uid})}
+            else{json!({"status":"rejected","error":"room.speech_invalid","terminal":v3,"reason_code":"application_refusal"})};}
+        let asker=inner.browsers.get(&sid);let known=inner.sessions.iter().any(|s|s==&sid);
         let reason=if !known {Some("session_changed")} else if asker.is_none(){Some("call_ended")} else if asker.is_some_and(|b|b.target.as_ref().is_none_or(|t|t.thread!=thread)){Some("focus_changed")} else if asker.is_some_and(|b|b.revision!=revision){Some("newer_turn")} else if asker.is_some_and(|b|b.speaking){Some("user_speaking")} else {None};
-        let status=if reason.is_some_and(|r|!["newer_turn","user_speaking"].contains(&r))||audience.is_empty(){"text_only"}else{"queued"};
-        inner.seq+=1;let seq=inner.seq;inner.rows.push_back(Row{seq,id:row_id.clone(),thread:thread.into(),role:"assistant",text:text.into(),name:None,session:sid.into(),revision,time:millis(),status:status.into(),reason:reason.map(str::to_owned),language:p.get("language").and_then(Value::as_str).map(str::to_owned),offline:None,payload:None,queued_at:seconds(),attempts:0,next_attempt:0});trim_rows(&mut inner);
-        if status=="queued" {let mut clients=HashMap::new();for listener in audience { if let Some(c)=inner.browsers.get(&listener){let _=c.sender.try_send(json!({"type":"voice-speech","data":{"session_id":listener,"utterance_id":uid,"revision":c.revision,"reply_revision":revision,"thread_id":thread,"text":text,"language":p.get("language"),"history_id":row_id}}));clients.insert(listener,(c.revision,"queued".into()));}}inner.utterances.insert(uid.into(),UtteranceRecord{row_id,clients});}
-        if status=="text_only" {json!({"status":"text_only","text_saved":true,"reason":reason.unwrap_or("call_ended")})}else{json!({"status":"queued","utterance_id":uid,"session_id":sid,"revision":revision,"text_saved":true})}
+        let capacity=inner.utterances.len()>=MAX_UTTERANCES;
+        let can_speak=reason.is_none_or(|r|["newer_turn","user_speaking"].contains(&r))&&!audience.is_empty()&&!capacity;
+        let waiting=can_speak&&asker.is_some_and(|b|b.speaking);
+        let status=if !can_speak{"text_only"}else if waiting{"waiting_for_turn"}else{"queued"};
+        let spoken_revision=if reason.is_some_and(|r|["newer_turn","user_speaking"].contains(&r)){asker.map_or(revision,|b|b.revision)}else{revision};
+        let reason=if capacity{Some("queue_full")}else{reason};
+        let name=inner.bindings.values().filter(|b|b.thread==thread&&b.active).max_by_key(|b|b.created).and_then(|b|b.title.clone())
+            .or_else(||asker.and_then(|b|b.target.as_ref()).and_then(|t|t.title.clone()))
+            .or_else(||Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.conversation_title").with_param("id",thread.chars().take(8).collect::<String>()),asker.map_or("en",|b|b.language.as_str()))));
+        inner.seq+=1;let seq=inner.seq;inner.rows.push_back(Row{seq,id:row_id.clone(),thread:thread.into(),role:"assistant",text:text.into(),name,session:sid.clone(),revision,time:millis(),status:status.into(),reason:reason.map(str::to_owned),language:p.get("language").and_then(Value::as_str).map(str::to_owned),offline:None,payload:None,queued_at:seconds(),attempts:0,next_attempt:0});trim_rows(&mut inner);
+        if can_speak {let mut clients=HashMap::new();for listener in audience { if let Some(c)=inner.browsers.get(&listener){let client_status=if c.speaking{"waiting_for_turn"}else{"queued"};if !c.speaking{let _=c.sender.try_send(json!({"type":"voice-speech","data":{"session_id":listener,"utterance_id":uid,"revision":c.revision,"reply_revision":revision,"thread_id":thread,"text":text,"language":p.get("language"),"history_id":row_id}}));}clients.insert(listener,(c.revision,client_status.into()));}}inner.utterances.insert(uid.into(),UtteranceRecord{row_id,clients});}
+        if status=="text_only" {json!({"status":"text_only","text_saved":true,"reason":reason.unwrap_or("call_ended")})}else{json!({"status":status,"utterance_id":uid,"session_id":sid,"revision":spoken_revision,"text_saved":true})}
     }
     pub fn connector_speech(&self,cid:&str,p:&Value,v3:bool)->Value{
         let bid=field(p,"binding_id");
@@ -335,7 +389,17 @@ impl Room {
         let sid=row.session.clone();let payload=row.payload.clone().unwrap_or_default();if let Some(c)=inner.browsers.get_mut(&sid){if new_status=="delivered"{c.sent+=1;}let _=c.sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":payload["revision"],"history_id":rid,"thread_id":payload["thread_id"],"session_id":sid,"status":new_status}}));}}
     pub async fn pump(self: std::sync::Arc<Self>) {loop{for (bid,rid,peer,data) in self.pending_delivery(){let room=self.clone();tokio::spawn(async move{let answer=peer.request("input.deliver",data,ACK_TIMEOUT).await;room.settle_delivery(&bid,&rid,&peer.generation,answer);});}tokio::time::sleep(Duration::from_millis(250)).await;}}
 }
-fn trim_rows(inner:&mut Inner){while inner.rows.len()>MAX_HISTORY&&inner.rows.front().is_some_and(|r|!matches!(r.status.as_str(),"pending"|"sending")){inner.rows.pop_front();}}
+fn trim_rows(inner:&mut Inner){while inner.rows.len()>MAX_HISTORY&&inner.rows.front().is_some_and(|r|!matches!(r.status.as_str(),"pending"|"sending")){if let Some(row)=inner.rows.pop_front(){inner.utterances.retain(|_,u|u.row_id!=row.id);}}}
+fn interrupt_client(inner:&mut Inner,sid:&str,reason:&str){
+    let mut rows=Vec::new();
+    for record in inner.utterances.values_mut(){if let Some(entry)=record.clients.get_mut(sid){
+        if matches!(entry.1.as_str(),"queued"|"waiting_for_turn"|"playing"){
+            entry.1="interrupted".into();
+            if record.clients.values().all(|(_,status)|!matches!(status.as_str(),"queued"|"waiting_for_turn"|"playing")){rows.push(record.row_id.clone());}
+        }
+    }}
+    for row_id in rows{if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){if row.status!="playback_finished"{row.status="interrupted".into();row.reason=Some(reason.into());}}}
+}
 fn engine(value:Option<&Value>)->Option<Value>{let obj=value?.as_object()?;let mut out=Map::new();for key in ["model","effort","thinking"]{if let Some(v)=obj.get(key).filter(|v|!v.is_null()&&v.as_str()!=Some("")){out.insert(key.into(),json!(v.as_str().map(str::to_owned).unwrap_or_else(||v.to_string()).chars().take(60).collect::<String>()));}}(!out.is_empty()).then_some(Value::Object(out))}
 fn capabilities(value:Option<&Value>,experimental:Option<&Value>)->Value{let mut result=Map::new();for key in ["deliver","inspectInbound","working","endOfTurn","sessionIdentity"]{let status=value.and_then(|v|v.get(key)).and_then(Value::as_str).filter(|s|["supported","unsupported"].contains(s)).unwrap_or("unknown");result.insert(key.into(),json!(status));}
     let marked=experimental.or_else(||value.and_then(|v|v.get("experimental"))).and_then(Value::as_array);if let Some(marked)=marked{let names:Vec<&str>=["deliver","inspectInbound","working","endOfTurn","sessionIdentity"].into_iter().filter(|key|result[*key]=="supported"&&marked.iter().any(|v|v.as_str()==Some(key))).collect();if !names.is_empty(){result.insert("experimental".into(),json!(names));}}Value::Object(result)}
