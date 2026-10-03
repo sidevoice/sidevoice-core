@@ -47,9 +47,12 @@ jobs:
           test "$(git -C peer/connector-js rev-parse HEAD)" = ddb4bd1e0c95e7997787fe4ab98e7d812fbe2390
           npm ci --prefix peer/connector-js
           docker build -f tests/rust_t5.Dockerfile -t sidevoice-rust-t5 .
-      - name: Exercise recorded call and actual media transport without network
+      - name: Exercise recorded call and actual media transport without external network
         run: |
-          docker run --rm --network none --read-only --tmpfs /tmp \
+          docker network create --internal sidevoice-rust-t5 >/dev/null
+          trap 'docker network rm sidevoice-rust-t5 >/dev/null' EXIT
+          test "$(docker network inspect --format '{{.Internal}}' sidevoice-rust-t5)" = true
+          docker run --rm --network sidevoice-rust-t5 --read-only --tmpfs /tmp \
             -e RUSTVANI_CACHE_DIR=/models \
             -v "$RUSTVANI_CACHE_DIR:/models:ro" \
             -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
