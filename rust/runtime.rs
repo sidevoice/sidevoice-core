@@ -349,8 +349,10 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         .map_err(|_| StartFailure::new("identity", "identity.unreadable"))?;
     let registry = DeviceRegistry::load(dir.clone())
         .map_err(|_| StartFailure::new("start", "start.failed"))?;
-    let room = std::sync::Arc::new(crate::control::room::Room::load(dir.clone())
-        .map_err(|_| StartFailure::new("start", "start.failed"))?);
+    let room = std::sync::Arc::new(
+        crate::control::room::Room::load(dir.clone())
+            .map_err(|_| StartFailure::new("start", "start.failed"))?,
+    );
     let (connector_id, token) = room
         .local_credential()
         .map_err(|_| StartFailure::new("start", "start.failed"))?;

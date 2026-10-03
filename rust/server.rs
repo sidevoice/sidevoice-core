@@ -385,17 +385,29 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .route("/api/presentation", get(presentation_state))
         .route("/api/presentation/admission", get(presentation_admission))
         .route("/api/presentation/history", get(presentation_history))
-        .route("/api/presentation/participants", get(presentation_participants))
+        .route(
+            "/api/presentation/participants",
+            get(presentation_participants),
+        )
         .route("/api/presentation/select", post(presentation_select))
         .route("/api/presentation/leave", post(presentation_leave))
         .route("/api/presentation/close", post(presentation_close))
         .route("/api/presentation/text", post(presentation_text))
-        .route("/api/presentation/browser-receipt", post(presentation_receipt))
-        .route("/api/presentation/client-error", post(presentation_client_error))
+        .route(
+            "/api/presentation/browser-receipt",
+            post(presentation_receipt),
+        )
+        .route(
+            "/api/presentation/client-error",
+            post(presentation_client_error),
+        )
         .route("/api/presentation/speak", post(presentation_speak))
         .route("/api/connectors", get(connector_listing))
         .route("/api/host/agents", get(host_agents))
-        .route("/api/host/agents/{agent_id}/{action}", post(host_agent_action));
+        .route(
+            "/api/host/agents/{agent_id}/{action}",
+            post(host_agent_action),
+        );
     if local {
         router = router
             .route("/api/local/health", get(health))
@@ -403,103 +415,332 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             .route("/api/device/local", axum::routing::delete(unpair_local));
         router = router.route("/api/connectors/v3", get(connector_v3));
     }
-    let router = router
-        .fallback(not_found)
-        .with_state(state.clone())
-        .layer(middleware::from_fn_with_state((state.clone(), local), guard));
-    if local { connectors_v2::layer(router, state) } else { router }
+    let router =
+        router
+            .fallback(not_found)
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(
+                (state.clone(), local),
+                guard,
+            ));
+    if local {
+        connectors_v2::layer(router, state)
+    } else {
+        router
+    }
 }
 
 fn room_failure(error: crate::control::room::RoomError, headers: &HeaderMap) -> Response {
-    failure(error.key, StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_REQUEST), headers)
+    failure(
+        error.key,
+        StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_REQUEST),
+        headers,
+    )
 }
-fn payload(body: &axum::body::Bytes) -> Option<Value> { serde_json::from_slice(body).ok().filter(Value::is_object) }
+fn payload(body: &axum::body::Bytes) -> Option<Value> {
+    serde_json::from_slice(body).ok().filter(Value::is_object)
+}
 fn query(uri: &axum::http::Uri, name: &str) -> Option<String> {
-    uri.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k,_)| k==name).map(|(_,v)|v.into_owned()))
+    uri.query().and_then(|q| {
+        url::form_urlencoded::parse(q.as_bytes())
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    })
 }
-async fn presentation_state(State(state):State<Arc<AppState>>, uri:axum::http::Uri) -> Json<Value> {
-    Json(state.room.snapshot(query(&uri,"session_id").as_deref()))
+async fn presentation_state(
+    State(state): State<Arc<AppState>>,
+    uri: axum::http::Uri,
+) -> Json<Value> {
+    Json(state.room.snapshot(query(&uri, "session_id").as_deref()))
 }
-async fn presentation_admission(State(state):State<Arc<AppState>>,headers:HeaderMap) -> Json<Value> {
-    Json(state.room.admission(headers.get(header::ACCEPT_LANGUAGE).and_then(|v|v.to_str().ok()).unwrap_or("en")))
+async fn presentation_admission(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Json<Value> {
+    Json(
+        state.room.admission(
+            headers
+                .get(header::ACCEPT_LANGUAGE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("en"),
+        ),
+    )
 }
-async fn presentation_history(State(state):State<Arc<AppState>>, uri:axum::http::Uri, headers:HeaderMap) -> Response {
-    if !origin_allowed(&headers) {return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    Json(state.room.history(query(&uri,"thread_id").as_deref())).into_response()
+async fn presentation_history(
+    State(state): State<Arc<AppState>>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    Json(state.room.history(query(&uri, "thread_id").as_deref())).into_response()
 }
-async fn presentation_participants(State(state):State<Arc<AppState>>, uri:axum::http::Uri) -> Json<Value> {
+async fn presentation_participants(
+    State(state): State<Arc<AppState>>,
+    uri: axum::http::Uri,
+) -> Json<Value> {
     Json(json!({"participants":state.room.participants(query(&uri,"session_id").as_deref())}))
 }
-async fn presentation_select(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
-    match state.room.select(data["session_id"].as_str().unwrap_or(""),data["thread_id"].as_str().unwrap_or("")){
-        Ok(v)=>Json(v).into_response(),Err(e)=>room_failure(e,&headers)}
+async fn presentation_select(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(data) = payload(&body) else {
+        return failure("room.request_invalid", StatusCode::BAD_REQUEST, &headers);
+    };
+    match state.room.select(
+        data["session_id"].as_str().unwrap_or(""),
+        data["thread_id"].as_str().unwrap_or(""),
+    ) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => room_failure(e, &headers),
+    }
 }
-async fn presentation_leave(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
-    match state.room.deselect(data["session_id"].as_str().unwrap_or(""),data["binding_id"].as_str().unwrap_or("")){
-        Ok(v)=>Json(v).into_response(),Err(e)=>room_failure(e,&headers)}
+async fn presentation_leave(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(data) = payload(&body) else {
+        return failure("room.request_invalid", StatusCode::BAD_REQUEST, &headers);
+    };
+    match state.room.deselect(
+        data["session_id"].as_str().unwrap_or(""),
+        data["binding_id"].as_str().unwrap_or(""),
+    ) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => room_failure(e, &headers),
+    }
 }
-async fn presentation_close(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
-    match state.room.close_channel(data["thread_id"].as_str().unwrap_or("")){
-        Ok((result,notify))=>{if let Some((peer,params))=notify{let _=peer.send("binding.close",params).await;}Json(result).into_response()},
-        Err(e)=>room_failure(e,&headers)}
+async fn presentation_close(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(data) = payload(&body) else {
+        return failure("room.request_invalid", StatusCode::BAD_REQUEST, &headers);
+    };
+    match state
+        .room
+        .close_channel(data["thread_id"].as_str().unwrap_or(""))
+    {
+        Ok((result, notify)) => {
+            if let Some((peer, params)) = notify {
+                let _ = peer.send("binding.close", params).await;
+            }
+            Json(result).into_response()
+        }
+        Err(e) => room_failure(e, &headers),
+    }
 }
-async fn presentation_text(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
-    let text=data["text"].as_str().unwrap_or("");let mid=data["message_id"].as_str().unwrap_or("");
-    if text.len()>12000||Uuid::parse_str(mid).is_err(){return failure("room.request_invalid",StatusCode::UNPROCESSABLE_ENTITY,&headers)}
-    match state.room.send_text(text,data["session_id"].as_str().unwrap_or(""),data["thread_id"].as_str().unwrap_or(""),
-        data["binding_id"].as_str().unwrap_or(""),mid){Ok(v)=>Json(v).into_response(),Err(e)=>room_failure(e,&headers)}
+async fn presentation_text(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(data) = payload(&body) else {
+        return failure("room.request_invalid", StatusCode::BAD_REQUEST, &headers);
+    };
+    let text = data["text"].as_str().unwrap_or("");
+    let mid = data["message_id"].as_str().unwrap_or("");
+    if text.len() > 12000 || Uuid::parse_str(mid).is_err() {
+        return failure(
+            "room.request_invalid",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+        );
+    }
+    match state.room.send_text(
+        text,
+        data["session_id"].as_str().unwrap_or(""),
+        data["thread_id"].as_str().unwrap_or(""),
+        data["binding_id"].as_str().unwrap_or(""),
+        mid,
+    ) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => room_failure(e, &headers),
+    }
 }
-async fn presentation_receipt(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
-    match state.room.receipt(data["session_id"].as_str().unwrap_or(""),data["utterance_id"].as_str().unwrap_or(""),
-        data["revision"].as_u64().unwrap_or(u64::MAX),data["status"].as_str().unwrap_or("")){
-        Ok(v)=>Json(v).into_response(),Err(e)=>room_failure(e,&headers)}
+async fn presentation_receipt(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(data) = payload(&body) else {
+        return failure("room.request_invalid", StatusCode::BAD_REQUEST, &headers);
+    };
+    match state.room.receipt(
+        data["session_id"].as_str().unwrap_or(""),
+        data["utterance_id"].as_str().unwrap_or(""),
+        data["revision"].as_u64().unwrap_or(u64::MAX),
+        data["status"].as_str().unwrap_or(""),
+    ) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => room_failure(e, &headers),
+    }
 }
-async fn presentation_client_error(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
+async fn presentation_client_error(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(data) = payload(&body) else {
+        return failure("room.request_invalid", StatusCode::BAD_REQUEST, &headers);
+    };
     Json(state.room.report_client_error(&data)).into_response()
 }
-async fn presentation_speak(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
-    Json(state.room.publish(&data,false)).into_response()
+async fn presentation_speak(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(data) = payload(&body) else {
+        return failure("room.request_invalid", StatusCode::BAD_REQUEST, &headers);
+    };
+    Json(state.room.publish(&data, false)).into_response()
 }
-async fn connector_listing(State(state):State<Arc<AppState>>,headers:HeaderMap)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    Json(json!({"connectors":state.room.paired_connectors(),"bindings":state.room.binding_views()})).into_response()
+async fn connector_listing(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    Json(json!({"connectors":state.room.paired_connectors(),"bindings":state.room.binding_views()}))
+        .into_response()
 }
-async fn connector_v3(State(state):State<Arc<AppState>>,ws:WebSocketUpgrade)->Response{
-    ws.on_upgrade(move |socket| connectors_v3::run(state,socket)).into_response()
+async fn connector_v3(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| connectors_v3::run(state, socket))
+        .into_response()
 }
-async fn host_agents(State(state):State<Arc<AppState>>,headers:HeaderMap,uri:axum::http::Uri)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    let rescan=query(&uri,"rescan").unwrap_or_default();let force=match rescan.to_ascii_lowercase().as_str(){""|"0"|"false"=>false,"1"|"true"=>true,_=>return (StatusCode::BAD_REQUEST,Json(json!({"key":"invalid-rescan"}))).into_response()};
-    let watch=query(&uri,"watch");if watch.as_ref().is_some_and(|s|s.is_empty()||s.len()>100||!s.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b"._-".contains(&b))){return (StatusCode::BAD_REQUEST,Json(json!({"key":"invalid-agent-id"}))).into_response()}
-    let Some(peer)=state.room.connector_peer()else{return (StatusCode::SERVICE_UNAVAILABLE,Json(json!({"key":"no-connector"}))).into_response()};
-    let mut params=json!({"rescan":force});if let Some(watch)=watch{params["watch"]=json!(watch)}
-    host_agent_response(peer.request("agents.list",params,std::time::Duration::from_secs(20)).await)
+async fn host_agents(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let rescan = query(&uri, "rescan").unwrap_or_default();
+    let force = match rescan.to_ascii_lowercase().as_str() {
+        "" | "0" | "false" => false,
+        "1" | "true" => true,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"key":"invalid-rescan"})),
+            )
+                .into_response()
+        }
+    };
+    let watch = query(&uri, "watch");
+    if watch.as_ref().is_some_and(|s| {
+        s.is_empty()
+            || s.len() > 100
+            || !s
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+    }) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"key":"invalid-agent-id"})),
+        )
+            .into_response();
+    }
+    let Some(peer) = state.room.connector_peer() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"key":"no-connector"})),
+        )
+            .into_response();
+    };
+    let mut params = json!({"rescan":force});
+    if let Some(watch) = watch {
+        params["watch"] = json!(watch)
+    }
+    host_agent_response(
+        peer.request("agents.list", params, std::time::Duration::from_secs(20))
+            .await,
+    )
 }
-fn agent_id_valid(id:&str)->bool{!id.is_empty()&&id.len()<=100&&id.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b"._-".contains(&b))}
-fn host_agent_response(answer:Result<Value,crate::control::room::PeerError>)->Response{match answer{
-    Ok(v) if v["agents"].is_array()&&v["custom"].is_object()=>Json(json!({"agents":v["agents"],"scanned_at":v.get("scanned_at"),"custom":v["custom"]})).into_response(),
-    Ok(_)=>(StatusCode::BAD_GATEWAY,Json(json!({"key":"invalid-connector-response"}))).into_response(),
-    Err(_)=>(StatusCode::GATEWAY_TIMEOUT,Json(json!({"key":"connector-timeout"}))).into_response()}}
-async fn host_agent_action(State(state):State<Arc<AppState>>,Path((agent_id,action)):Path<(String,String)>,headers:HeaderMap)->Response{
-    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    if !agent_id_valid(&agent_id){return (StatusCode::BAD_REQUEST,Json(json!({"key":"invalid-agent-id"}))).into_response()}
-    if !["connect","disconnect","dismiss"].contains(&action.as_str()){return failure("request.not_found",StatusCode::NOT_FOUND,&headers)}
-    let Some(peer)=state.room.connector_peer()else{return (StatusCode::SERVICE_UNAVAILABLE,Json(json!({"key":"no-connector"}))).into_response()};
-    host_agent_response(peer.request(&format!("agents.{action}"),json!({"id":agent_id}),std::time::Duration::from_secs(20)).await)
+fn agent_id_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 100
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+}
+fn host_agent_response(answer: Result<Value, crate::control::room::PeerError>) -> Response {
+    match answer {
+        Ok(v) if v["agents"].is_array() && v["custom"].is_object() => Json(
+            json!({"agents":v["agents"],"scanned_at":v.get("scanned_at"),"custom":v["custom"]}),
+        )
+        .into_response(),
+        Ok(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"key":"invalid-connector-response"})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({"key":"connector-timeout"})),
+        )
+            .into_response(),
+    }
+}
+async fn host_agent_action(
+    State(state): State<Arc<AppState>>,
+    Path((agent_id, action)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    if !agent_id_valid(&agent_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"key":"invalid-agent-id"})),
+        )
+            .into_response();
+    }
+    if !["connect", "disconnect", "dismiss"].contains(&action.as_str()) {
+        return failure("request.not_found", StatusCode::NOT_FOUND, &headers);
+    }
+    let Some(peer) = state.room.connector_peer() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"key":"no-connector"})),
+        )
+            .into_response();
+    };
+    host_agent_response(
+        peer.request(
+            &format!("agents.{action}"),
+            json!({"id":agent_id}),
+            std::time::Duration::from_secs(20),
+        )
+        .await,
+    )
 }
 
 async fn not_found(headers: HeaderMap) -> Response {
@@ -756,22 +997,40 @@ async fn socket_loop(
             }
         }
     };
-    let Some(hello) = hello else { unregister_call(&state, &id); return; };
+    let Some(hello) = hello else {
+        unregister_call(&state, &id);
+        return;
+    };
     let defaults = crate::models::default_settings(Some(&crate::runtime::system_language()), None);
-    let loaded = crate::models::settings_from(hello.get("data").and_then(|v| v.get("settings")), &defaults);
+    let loaded =
+        crate::models::settings_from(hello.get("data").and_then(|v| v.get("settings")), &defaults);
     if let Some(refusal) = crate::models::unavailable(&loaded.settings, |_| false) {
         let _ = socket.send(Message::Text(json!({"type":"error","data":crate::messages::render_refusal(&refusal,&loaded.settings.ui_language)}).to_string().into())).await;
-        let _ = socket.send(Message::Close(Some(CloseFrame { code: 1008, reason: "".into() }))).await;
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 1008,
+                reason: "".into(),
+            })))
+            .await;
         unregister_call(&state, &id);
         return;
     }
-    let session = match state.room.join(id.clone(), loaded.settings.ui_language.clone(), events) {
+    let session = match state
+        .room
+        .join(id.clone(), loaded.settings.ui_language.clone(), events)
+    {
         Ok(session) => session,
         Err(_) => {
-            let admission=state.room.admission(&loaded.settings.ui_language);
+            let admission = state.room.admission(&loaded.settings.ui_language);
             let _=socket.send(Message::Text(json!({"type":"error","data":{"message":admission["message"],"reason":admission["reason"]}}).to_string().into())).await;
-            let _ = socket.send(Message::Close(Some(CloseFrame { code: 1013, reason: "".into() }))).await;
-            unregister_call(&state, &id); return;
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 1013,
+                    reason: "".into(),
+                })))
+                .await;
+            unregister_call(&state, &id);
+            return;
         }
     };
     let room_info = json!({"api": API, "version": env!("CARGO_PKG_VERSION")});

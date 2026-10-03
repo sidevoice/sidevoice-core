@@ -77,5 +77,8 @@
   "connector-timeout": "The connector did not answer in time.",
   "room.speech_invalid": "The reply is invalid.",
   "room.conversation_title": "Conversation {id}",
+  "room.reach_offline": "That conversation is not connected to the room. Ask it to connect.",
+  "room.reach_holding": "The connected harness is holding incoming messages.",
+  "room.reach_unsupported": "This conversation cannot receive your messages through its harness.",
   "room.you": "You"
 }

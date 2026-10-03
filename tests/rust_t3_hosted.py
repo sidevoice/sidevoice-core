@@ -233,6 +233,31 @@ async def main():
                 history = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
                 assert [row["seq"] for row in history] == [1, 2], history
                 assert history[0]["status"] == "read" and history[1]["status"] == "playback_finished", history
+                # One browser hears replies in order; a queued reply waits for the
+                # preceding playback receipt even when the connector published both.
+                for index in (2, 3):
+                    js.send({"op": "publish", "session_id": session, "revision": revision,
+                             "event_id": f"t3-queue-event-{index}", "utterance_id": f"t3-queue-{index}",
+                             "text": f"Queued reply {index}"})
+                    assert js.event("published")["answer"]["status"] == "queued"
+                    if index == 2:
+                        queued = await frame(ws, "voice-speech")
+                        assert queued["utterance_id"] == "t3-queue-2", queued
+                try:
+                    unexpected = await asyncio.wait_for(ws.recv(), 0.35)
+                except TimeoutError:
+                    pass
+                else:
+                    raise AssertionError(f"reply bypassed per-browser receipt: {unexpected}")
+                assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                               body={"session_id": session, "utterance_id": "t3-queue-2",
+                                     "revision": revision, "status": "playback_finished"})[0] == 200
+                assert (await frame(ws, "voice-speech"))["utterance_id"] == "t3-queue-3"
+                assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                               body={"session_id": session, "utterance_id": "t3-queue-3",
+                                     "revision": revision, "status": "skipped"})[0] == 200
+                queued_history = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
+                assert [row["status"] for row in queued_history[-2:]] == ["playback_finished", "interrupted"], queued_history
                 # A slow host scan has its own ACK; the input receipt must arrive while it waits.
                 agent_result = queue.Queue()
                 threading.Thread(target=lambda: agent_result.put(request(port, "GET", "/api/host/agents?rescan=1", token=token)), daemon=True).start()
