@@ -20,7 +20,7 @@ base64 = "=0.22.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 elevenlabs-sdk = "=0.1.0"
 fs2 = "0.4"
-futures-util = "=0.3.31"
+futures-util = "=0.3.32"
 hostname = "0.4"
 hound = "3.5.1"
 httpdate = "=1.0.3"
