@@ -262,6 +262,7 @@ async def serve(arguments):
         write_ready(ready, {'pid': os.getpid(), 'port': port, 'url': f'http://127.0.0.1:{port}',
                             'socket': str(socket_path), 'launch_id': arguments.launch_id,
                             'version': version(), 'api': API, 'protocol': PROTOCOL,
+                            'connector_protocols': [PROTOCOL, 3],
                             'connector_id': connector_id, 'token': token})
         is_ready = True
         logger.info('Sidevoice core {} listening on {}:{} and {} (data in {}, launch {})', version(), arguments.host,

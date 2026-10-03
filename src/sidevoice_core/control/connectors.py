@@ -26,6 +26,30 @@ ACK_TIMEOUT_SECONDS = 60.0
 THREAD_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{1,200}$')
 HARNESS_CAPABILITIES = ('deliver', 'inspectInbound', 'working', 'endOfTurn', 'sessionIdentity')
 CAPABILITY_STATES = {'supported', 'unsupported'}
+DELIVERY_ACK_STATUSES = {'accepted', 'unknown', 'unsupported', 'failed', 'unknown_binding'}
+
+
+class InvalidConnectorAcknowledgement(Exception):
+    """A connector answered a delivery with a result the room cannot settle."""
+
+
+def validate_delivery_acknowledgement(value):
+    """The bounded delivery outcome shared by Socket.IO and the v3 WebSocket peer."""
+    status = value.get('status') if isinstance(value, dict) else None
+    if not isinstance(status, str) or status not in DELIVERY_ACK_STATUSES:
+        raise InvalidConnectorAcknowledgement('Invalid input.deliver result')
+    if set(value) - {'status', 'detail', 'error'}:
+        raise InvalidConnectorAcknowledgement('Invalid input.deliver result fields')
+    for field in ('detail', 'error'):
+        if field in value and (not isinstance(value[field], str) or len(value[field]) > 1000):
+            raise InvalidConnectorAcknowledgement('Invalid input.deliver result text')
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode('utf8')
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise InvalidConnectorAcknowledgement('Invalid input.deliver result') from error
+    if len(encoded) > 4096:
+        raise InvalidConnectorAcknowledgement('Oversized input.deliver result')
+    return value
 
 
 def engine_of(value):
@@ -224,8 +248,18 @@ class ConnectorControl:
         event_id = data['event_id']
         try:
             acknowledgement = await peer.request('input.deliver', data, timeout=self.ack_timeout)
+            validate_delivery_acknowledgement(acknowledgement)
         except asyncio.CancelledError:
             raise
+        except InvalidConnectorAcknowledgement as error:
+            entry = self.inflight.get(binding['id'])
+            if entry and entry[0] == event_id:
+                self.drop_inflight(binding['id'])
+                self.journal.defer(event_id)
+                self.hub.delivery_status(event_id, 'pending')
+                redelivered(binding['thread'], binding.get('harness'))
+            logger.warning('Invalid acknowledgement for input delivery ({})', type(error).__name__)
+            return
         except Exception as error:
             entry = self.inflight.get(binding['id'])
             if entry and entry[0] == event_id:
@@ -236,8 +270,7 @@ class ConnectorControl:
                     self.journal.defer(event_id, immediate=True)
                     redelivered(binding['thread'], binding.get('harness'))
             return
-        if acknowledgement:
-            await self.acknowledge(connector_id, event_id, acknowledgement)
+        await self.acknowledge(connector_id, event_id, acknowledgement)
 
     async def acknowledge(self, connector_id, event_id, message):
         """What one delivery's acknowledgement means. Which delivery it answers is the transport's
@@ -359,24 +392,41 @@ class ConnectorControl:
             if inflight:
                 self.journal.defer(inflight[0], immediate=True)
 
-    async def speech(self, connector_id, message):
+    async def speech(self, connector_id, message, *, protocol=PROTOCOL):
         """Returns what acknowledges `speech.publish`. A refusal is that same answer with a status,
         not an error: the connector's outbox must be able to stop holding what the room will never
         take."""
-        from .room import Speech
+        is_v3 = protocol == 3
+        if is_v3:
+            utterance_id = message.get('utterance_id')
+            if not isinstance(utterance_id, str) or not utterance_id or len(utterance_id) > 200:
+                utterance_id = str(uuid.uuid4())
+        else:
+            utterance_id = str(message.get('utterance_id') or uuid.uuid4())
         reply = {'event_id': message.get('event_id')}
+        v3_reply = {**reply, 'utterance_id': utterance_id}
         binding = self.journal.binding(message.get('binding_id'))
         if not binding or self.live.get(binding['id']) != connector_id:
+            if is_v3:
+                return {**v3_reply, 'status': 'unknown_binding'}
             return {**reply, 'status': 'rejected', 'error': 'Unknown binding'}
+        from .room import Speech
         try:
             speech = Speech(thread_id=binding['thread'], session_id=str(message.get('session_id') or ''),
                             revision=int(message.get('revision') or 0), text=str(message.get('text') or ''),
-                            utterance_id=str(message.get('utterance_id') or uuid.uuid4()), language=message.get('language'))
-            return {**reply, **await self.hub.publish(speech)}
+                            utterance_id=utterance_id, language=message.get('language'))
+            result = await self.hub.publish(speech)
+            if is_v3:
+                return {**(result if isinstance(result, dict) else {}), **v3_reply}
+            return {**reply, **(result if isinstance(result, dict) else {})}
         except Refusal as error:
-            return {**reply, 'status': 'rejected', 'error': str(error.detail)}
-        except Exception as error:
-            return {**reply, 'status': 'rejected', 'error': str(error) or type(error).__name__}
+            if not is_v3:
+                return {**reply, 'status': 'rejected', 'error': str(error.detail)}
+            # Room.publish marks refusals raised after its journal.put; only the earlier ones are terminal.
+            response = {**v3_reply, 'status': 'rejected', 'error': str(error.detail)[:1000]}
+            if error.status_code in {400, 404, 409, 410, 422} and not error.text_saved:
+                response.update(terminal=True, reason_code='application_refusal')
+            return response
 
 
 def local_credential(journal, path):
