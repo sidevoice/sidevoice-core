@@ -460,7 +460,7 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         .await;
         return Err(error);
     }
-    let rendezvous_task = tokio::spawn(rendezvous.clone().run());
+    let mut rendezvous_task = tokio::spawn(rendezvous.clone().run());
     let crashed = tokio::select! {
         _ = stop_signal() => false,
         _ = &mut tcp_task => true,
@@ -469,7 +469,10 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
     };
     let _ = stopping.send(true);
     rendezvous.stop();
-    let _ = tokio::time::timeout(Duration::from_secs(10), rendezvous_task).await;
+    if tokio::time::timeout(Duration::from_secs(10), &mut rendezvous_task).await.is_err() {
+        rendezvous_task.abort();
+        let _ = rendezvous_task.await;
+    }
     let _ = tokio::time::timeout(Duration::from_secs(10), async {
         if !tcp_task.is_finished() {
             let _ = tcp_task.await;

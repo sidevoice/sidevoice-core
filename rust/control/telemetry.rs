@@ -1,9 +1,11 @@
 //! Opt-in OTLP stage export from Room-owned immutable latency observations.
 //! An unset endpoint constructs no client and cannot start an export task.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
+use tokio::sync::Semaphore;
 use url::Url;
 
 pub const STAGES: [&str; 10] = [
@@ -68,6 +70,7 @@ pub fn attributes(values: &Value) -> Value {
 pub struct Telemetry {
     endpoint: Url,
     client: reqwest::Client,
+    pending: Arc<Semaphore>,
 }
 
 impl Telemetry {
@@ -88,12 +91,34 @@ impl Telemetry {
         endpoint.set_fragment(None);
         Some(Self {
             endpoint,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .ok()?,
+            pending: Arc::new(Semaphore::new(16)),
         })
     }
 
     pub fn from_env() -> Option<Self> {
         Self::configured(std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().as_deref())
+    }
+
+    /// Submit from a call path without waiting for the collector. Saturation
+    /// drops diagnostics rather than delaying the call.
+    pub fn try_observe(self: &Arc<Self>, stage: &str, milliseconds: f64, values: &Value) {
+        if !STAGES.contains(&stage) || !milliseconds.is_finite() || !(0.0..=3_600_000.0).contains(&milliseconds) {
+            return;
+        }
+        let Ok(permit) = self.pending.clone().try_acquire_owned() else {
+            return;
+        };
+        let exporter = self.clone();
+        let stage = stage.to_owned();
+        let values = attributes(values);
+        tokio::spawn(async move {
+            let _permit = permit;
+            let _ = exporter.observe(&stage, milliseconds, &values).await;
+        });
     }
 
     /// Export one finished stage as an OTLP histogram data point. Caller passes

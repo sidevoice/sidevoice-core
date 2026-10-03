@@ -14,7 +14,7 @@ use socketioxide::{
     handler::ConnectHandler,
     SocketIo,
 };
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
 use url::Url;
 
 use crate::control::room::Room;
@@ -61,7 +61,7 @@ pub struct Rendezvous {
     state: StdMutex<LinkState>,
     dialled: Mutex<std::collections::HashMap<String, SocketRef>>,
     changed: Notify,
-    stopping: Notify,
+    stopping: watch::Sender<bool>,
 }
 
 impl Rendezvous {
@@ -87,7 +87,7 @@ impl Rendezvous {
             }),
             dialled: Mutex::new(std::collections::HashMap::new()),
             changed: Notify::new(),
-            stopping: Notify::new(),
+            stopping: watch::channel(false).0,
         })
     }
 
@@ -183,14 +183,18 @@ impl Rendezvous {
         self.changed.notify_waiters();
     }
     pub fn stop(&self) {
-        self.stopping.notify_waiters();
+        self.stopping.send_replace(true);
         self.changed.notify_waiters();
     }
 
     pub async fn run(self: Arc<Self>) {
+        let mut stopping = self.stopping.subscribe();
         let mut seen: Option<Pairing> = None;
         let mut delay = Duration::from_millis(250);
         loop {
+            if *stopping.borrow() {
+                break;
+            }
             let pairing = self.current_pairing();
             if pairing != seen {
                 seen = pairing.clone();
@@ -228,7 +232,7 @@ impl Rendezvous {
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {},
                         _ = self.changed.notified() => {},
-                        _ = self.stopping.notified() => break,
+                        _ = stopping.changed() => break,
                     }
                     delay = (delay * 2).min(Duration::from_secs(10));
                     continue;
@@ -237,7 +241,7 @@ impl Rendezvous {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {},
                 _ = self.changed.notified() => {},
-                _ = self.stopping.notified() => break,
+                _ = stopping.changed() => break,
             }
         }
         let sockets = std::mem::take(&mut *self.dialled.lock().await);
@@ -286,13 +290,14 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
     let (outbound, mut output) = mpsc::channel::<(&'static str, Part)>(128);
     let relay = Arc::new(Relay::new(rv.base.clone(), outbound));
     let emitted = socket.clone();
-    tokio::spawn(async move {
+    let output_task = tokio::spawn(async move {
         while let Some((event, part)) = output.recv().await {
             if emitted.emit(event, &to_rmpv(part)).is_err() {
                 break;
             }
         }
     });
+    let output_abort = output_task.abort_handle();
     for event in ["relay.http", "relay.open", "relay.data", "relay.close"] {
         let relay = relay.clone();
         socket.on(
@@ -332,6 +337,7 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
         let rv = disconnected.clone();
         let relay = gone_relay.clone();
         let sid = sid.clone();
+        output_abort.abort();
         async move {
             relay.shutdown().await;
             rv.dialled.lock().await.remove(&sid);
@@ -349,7 +355,7 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
             .emit_with_ack::<_, Value>("node.hello", &proof);
         match answer {
             Ok(answer) => match answer.await {
-                Ok(answer) if !answer.get("error").is_some_and(|v| !v.is_null()) => {
+                Ok(answer) if valid_hello(&answer) => {
                     rv.connected("dial", None).await
                 }
                 Ok(answer) => {
@@ -365,6 +371,10 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
             }
         }
     });
+}
+
+fn valid_hello(answer: &Value) -> bool {
+    answer.is_object() && !answer.get("error").is_some_and(|value| !value.is_null())
 }
 
 pub fn layer(app: Router, state: Arc<AppState>) -> Router {
@@ -510,6 +520,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(Pairing::read(&path).unwrap().origin, "http://[::1]:8768");
+    }
+
+    #[test]
+    fn dial_hello_requires_an_object_without_error() {
+        assert!(valid_hello(&serde_json::json!({"protocol": 3})));
+        assert!(valid_hello(&serde_json::json!({"error": null})));
+        for answer in [serde_json::Value::Null, serde_json::json!("bad"), serde_json::json!([]), serde_json::json!({"error":"rejected"})] {
+            assert!(!valid_hello(&answer));
+        }
     }
 
     #[test]

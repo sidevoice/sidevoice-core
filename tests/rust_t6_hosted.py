@@ -62,6 +62,7 @@ class RoomPeer:
         self.sid = None
         self.frames = []
         self.closed = []
+        self.disconnections = []
         self.connections = 0
 
         @self.server.event(namespace="/nodes")
@@ -71,6 +72,10 @@ class RoomPeer:
             self.sid = sid
             await self.server.emit("node.welcome", {"protocol": 3, "public_url": "https://room.example"},
                                    to=sid, namespace="/nodes")
+
+        @self.server.event(namespace="/nodes")
+        async def disconnect(sid, *args):
+            self.disconnections.append(sid)
 
         @self.server.on("relay.data", namespace="/nodes")
         async def relay_data(sid, data):
@@ -206,6 +211,33 @@ async def main():
             finally:
                 await dial.disconnect()
 
+            malformed = socketio.AsyncClient(reconnection=False)
+            malformed_hello = asyncio.Event()
+            malformed_gone = asyncio.Event()
+
+            @malformed.on("node.hello", namespace="/room")
+            async def malformed_node_hello(data):
+                malformed_hello.set()
+                return "malformed"
+
+            @malformed.event(namespace="/room")
+            async def disconnect():
+                malformed_gone.set()
+
+            try:
+                try:
+                    await malformed.connect(f"http://127.0.0.1:{core_port}",
+                                            socketio_path="/api/rendezvous/link", namespaces=["/room"],
+                                            transports=["websocket"],
+                                            auth={"connector_id": "node-1", "dial_key": "fixture-dial-key"},
+                                            wait_timeout=5)
+                except socketio.exceptions.ConnectionError:
+                    pass
+                await asyncio.wait_for(malformed_hello.wait(), 10)
+                await asyncio.wait_for(malformed_gone.wait(), 10)
+            finally:
+                await malformed.disconnect()
+
             # A server-side disconnect must lead to another authenticated /nodes session.
             previous = peer.sid
             await peer.server.disconnect(previous, namespace="/nodes")
@@ -223,8 +255,25 @@ async def main():
             await until(lambda: peer.connections > refused_connections and
                         peer.auth["token"] == "rotated-room-token", timeout=20)
             await admission()
+            # Connector-owned edits must retire an otherwise healthy link.
+            prior = peer.sid
+            count = peer.connections
+            pairing.write_text(json.dumps({"url": f"http://127.0.0.1:{room_port}",
+                                           "connector_id": "node-1", "token": "live-rotated-token",
+                                           "dial_key": "fixture-dial-key", "protocol": 3}))
+            await until(lambda: prior in peer.disconnections and peer.connections > count and
+                        peer.auth["token"] == "live-rotated-token", timeout=20)
+            await admission()
+            prior = peer.sid
+            count = peer.connections
+            pairing.unlink()
+            await until(lambda: prior in peer.disconnections, timeout=20)
+            await asyncio.sleep(3)
+            assert peer.connections == count, "removed pairing redialled"
             print(json.dumps({"ok": True, "peer": "python-socketio==5.17.0", "parallel_acks": 16,
                               "http_binary": True, "ws_binary": True, "dial_ack": True,
+                              "malformed_dial_rejected": True, "live_pairing_change": True,
+                              "live_pairing_removal": True,
                               "reconnected": True, "revoked_and_repaired": True,
                               "telemetry_endpoint": "unset"}))
         finally:

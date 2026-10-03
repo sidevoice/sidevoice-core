@@ -10,6 +10,8 @@ use sioc::marker::{AckMarker, HasAck, HasBinary, NoAck, NoBinary};
 use sioc::packet::{Directive, DynEvent, Signal};
 use sioc::prelude::{AckType, TransportStrategy};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio::time::{Duration, MissedTickBehavior};
 
 use super::packet::{decode, encode, Part};
 use super::relay::Relay;
@@ -140,8 +142,17 @@ pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()>
     let (outbound, mut output) = mpsc::channel::<(&'static str, Part)>(128);
     let relay = Arc::new(Relay::new(rv.base.clone(), outbound));
     let mut welcomed = false;
+    let mut requests = JoinSet::new();
+    let mut pairing_check = tokio::time::interval(Duration::from_secs(2));
+    pairing_check.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    pairing_check.tick().await;
+    let mut stopping = rv.stopping.subscribe();
     loop {
         tokio::select! {
+            _ = pairing_check.tick() => {
+                if rv.current_pairing().as_ref() != Some(&pairing) { break; }
+            },
+            finished = requests.join_next(), if !requests.is_empty() => { let _ = finished; },
             signal = receiver.recv() => match signal {
                 Some(Signal::Connect(_)) => {},
                 Some(Signal::ConnectError(error)) => {
@@ -167,13 +178,20 @@ pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()>
                             break;
                         }
                         "relay.http" | "relay.open" => {
-                            let relay = relay.clone();
-                            let sender = sender.clone();
-                            tokio::spawn(async move {
-                                if let Some(answer) = relay.handle(&name, data).await {
-                                    if let Some(id) = id { acknowledge(&sender, id, answer).await; }
+                            if requests.len() >= 32 {
+                                if let Some(id) = id {
+                                    let answer = Relay::busy(&name);
+                                    let _ = tokio::time::timeout(Duration::from_secs(1), acknowledge(&sender, id, answer)).await;
                                 }
-                            });
+                            } else {
+                                let relay = relay.clone();
+                                let sender = sender.clone();
+                                requests.spawn(async move {
+                                    if let Some(answer) = relay.handle(&name, data).await {
+                                        if let Some(id) = id { acknowledge(&sender, id, answer).await; }
+                                    }
+                                });
+                            }
                         }
                         "relay.data" | "relay.close" => { let _ = relay.handle(&name, data).await; }
                         _ => {},
@@ -185,9 +203,11 @@ pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()>
                 None => break,
             },
             _ = rv.changed.notified() => break,
-            _ = rv.stopping.notified() => break,
+            _ = stopping.changed() => break,
         }
     }
+    requests.abort_all();
+    while requests.join_next().await.is_some() {}
     relay.shutdown().await;
     sender.disconnect().await;
     if welcomed {
