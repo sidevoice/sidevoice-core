@@ -8,6 +8,7 @@ const { roomLink } = await import(pathToFileURL(source));
 const print = value => process.stdout.write(JSON.stringify(value) + '\n');
 let binding = null;
 let deliveryDelay = 0;
+let hostError = false;
 const link = roomLink({ origin, connector_id, token, protocol: 2,
   identity: { host: 't3-js-peer', platform: 'linux', version: 'pinned-v2', harnesses: ['fixture'] },
   onConnected: async welcome => {
@@ -28,6 +29,8 @@ const link = roomLink({ origin, connector_id, token, protocol: 2,
       return { status: 'accepted', detail: 'accepted by pinned JS peer' };
     }
     if (event === 'agents.list') {
+      if (hostError) return { error: { key: 'host.agent-unavailable', message: 'Bundle-derived connector message',
+        params: { agent: 'fixture', raw_output: 'private output' } } };
       await new Promise(resolve => setTimeout(resolve, 1500));
       return { agents: [], custom: {}, scanned_at: null };
     }
@@ -52,6 +55,9 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     link.send('input.read', { binding_id: binding.binding_id, message_id: command.message_id });
   } else if (command.op === 'delay') {
     deliveryDelay = command.ms;
+  } else if (command.op === 'host_error') {
+    hostError = true;
+    print({ event: 'host_error_ready' });
   } else if (command.op === 'close') {
     link.close();
     break;

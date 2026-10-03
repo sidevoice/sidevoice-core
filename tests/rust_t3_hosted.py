@@ -292,6 +292,11 @@ async def main():
                 assert js.event("from-core")["method"] == "input.deliver"
                 await frame(ws, "voice-input-receipt", status="delivered", timeout=1.2)
                 assert agent_result.get(timeout=4)[0] == 200
+                js.send({"op": "host_error"})
+                js.event("host_error_ready")
+                host_error = request(port, "GET", "/api/host/agents", token=token)
+                assert host_error[0] == 409 and host_error[1]["error"]["key"] == "host.agent-unavailable", host_error
+                assert host_error[1]["error"]["params"] == {"agent": "fixture"}, host_error
                 js.send({"op": "close"})
                 js.stop()
                 until(lambda: request(port, "GET", "/api/presentation/participants", token=token)[1]["participants"][0]["available"] is False)
