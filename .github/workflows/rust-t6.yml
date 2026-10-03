@@ -20,6 +20,7 @@ jobs:
         run: |
           set -euo pipefail
           rustup toolchain install 1.98.1 --profile minimal
+          rustup component add --toolchain 1.98.1 rustfmt clippy
           python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
       - name: Generate candidate lockfile and formatting on hosted runner
         run: |
