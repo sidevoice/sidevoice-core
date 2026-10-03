@@ -259,6 +259,56 @@ async def two_listener_focus_case(url, protocols, port, token, peer, pcm):
         assert any(row["text"] == "After focus" and row["session"] == sessions[0] for row in new_rows)
 
 
+async def playback_gate_case(url, protocols, port, token, peer, pcm):
+    async with websockets.connect(url, subprotocols=protocols) as ws:
+        await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {
+            "turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0}}}))
+        session = (await frame(ws, "voice-session"))["session_id"]
+        assert request(port, "POST", "/api/presentation/select", token=token,
+                       body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
+
+        async def reply_playing():
+            revision = request(port, "GET", f"/api/presentation?session_id={session}", token=token)[1]["room"]["revision"]
+            uid = f"playback-gate-{uuid.uuid4()}"
+            peer.send({"op": "publish", "session_id": session, "revision": revision,
+                       "event_id": uid, "utterance_id": uid, "text": "Speaker output"})
+            assert peer.event("published")["answer"]["status"] == "queued"
+            speech = await frame(ws, "voice-speech")
+            assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                           body={"session_id": session, "utterance_id": uid,
+                                 "revision": speech["revision"], "status": "playing"})[0] == 200
+            return uid, speech["revision"]
+
+        uid, revision = await reply_playing()
+        await send_pcm(ws, pcm)
+        await send_pcm(ws, b"\0" * 16_000 * 2 * 2)
+        await no_transcription(ws)
+        assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                       body={"session_id": session, "utterance_id": uid,
+                             "revision": revision, "status": "playback_finished"})[0] == 200
+        await send_pcm(ws, pcm)
+        await send_pcm(ws, b"\0" * 16_000 * 2 * 2)
+        ask = await frame(ws, "voice-transcribe", timeout=20)
+        await ws.send(json.dumps({"type": "voice-transcript", "data": {
+            "session_id": session, "request_id": ask["request_id"], "text": "Normal voice after playback"}}))
+        assert (await frame(ws, "voice-user-turn", timeout=10))["phase"] == "finished"
+        await frame(ws, "voice-input-receipt", status="pending")
+
+        uid, revision = await reply_playing()
+        loud = np.clip(np.frombuffer(pcm, dtype=np.int16).astype(np.int32) * 8,
+                       -32768, 32767).astype(np.int16).tobytes()
+        await send_pcm(ws, loud)
+        await send_pcm(ws, b"\0" * 16_000 * 2 * 2)
+        await frame(ws, "voice-cancel", timeout=15)
+        ask = await frame(ws, "voice-transcribe", timeout=20)
+        assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                       body={"session_id": session, "utterance_id": uid,
+                             "revision": revision, "status": "playing"})[0] == 409
+        await ws.send(json.dumps({"type": "voice-transcript", "data": {
+            "session_id": session, "request_id": ask["request_id"], "text": "Louder barge in"}}))
+        assert (await frame(ws, "voice-user-turn", timeout=10))["phase"] == "finished"
+
+
 async def main():
     with wave.open(str(SPEECH), "rb") as recording:
         assert recording.getframerate() == 16000 and recording.getnchannels() == 1
@@ -378,6 +428,7 @@ async def main():
                 assert (await frame(ws, "voice-input-receipt", status="pending"))["revision"] == merged["revision"]
             await review_voice_cases(url, protocols, port, token, peer, pcm)
             await two_listener_focus_case(url, protocols, port, token, peer, pcm)
+            await playback_gate_case(url, protocols, port, token, peer, pcm)
             async with websockets.connect(url, subprotocols=protocols) as ws:
                 await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {
                     "turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0}}}))

@@ -41,6 +41,7 @@ pub enum SttFailure {
     Provider,
 }
 type Recognition = Result<Option<String>, SttFailure>;
+type PendingTranscripts = HashMap<String, oneshot::Sender<Result<Option<String>, ()>>>;
 
 fn device_timeout() -> Duration {
     #[cfg(feature = "hosted-fixtures")]
@@ -63,7 +64,7 @@ pub enum Source {
 pub struct CallMedia {
     detector: CallDetector,
     source: Mutex<Source>,
-    transcripts: Mutex<HashMap<String, oneshot::Sender<Result<Option<String>, ()>>>>,
+    transcripts: Mutex<PendingTranscripts>,
     rtc_generation: AtomicU64,
     rtc: Mutex<Option<Arc<dyn webrtc::peer_connection::PeerConnection>>>,
     focus_tx: mpsc::Sender<()>,
@@ -1014,4 +1015,32 @@ pub async fn speech_event(
         latency_now_micros(),
     );
     Some(json!({"type":"voice-speech-audio","data":message}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn recognition_queue_is_bounded_and_drained_on_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = PrivateDir::open(directory.path().join("private")).unwrap();
+        let room = Arc::new(Room::load(dir.clone()).unwrap());
+        let (events, _received) = mpsc::channel(64);
+        let sid = room.join("device".into(), "en".into(), events.clone()).unwrap();
+        let mut settings = crate::models::default_settings(None, None);
+        settings.turn_end_mode = "timer".into();
+        let (media, _frames, _focus) = CallMedia::start(&settings).unwrap();
+        let mut owner = TurnOwner::new(media, room.clone(), settings, sid.clone(), events, dir);
+        for _ in 0..MAX_RECOGNITION_QUEUE + 3 {
+            owner.frame(CallFrame::Audio(vec![0; 2048])).await;
+            owner.frame(CallFrame::Started).await;
+            owner.frame(CallFrame::Stopped { stop_secs: 0.5 }).await;
+        }
+        assert!(owner.active.is_some());
+        assert_eq!(owner.queue.len(), MAX_RECOGNITION_QUEUE - 1);
+        owner.close().await;
+        assert!(owner.active.is_none() && owner.queue.is_empty());
+        assert!(room.history(None)["messages"].as_array().unwrap().is_empty());
+    }
 }
