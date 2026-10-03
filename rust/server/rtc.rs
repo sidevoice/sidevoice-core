@@ -12,6 +12,8 @@ use opus::{Channels, Decoder};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
+#[cfg(feature = "hosted-fixtures")]
+use webrtc::peer_connection::SettingEngineBuilder;
 use webrtc::{
     media_stream::track_remote::{TrackRemote, TrackRemoteEvent},
     peer_connection::{
@@ -20,8 +22,6 @@ use webrtc::{
         RTCSessionDescription, Registry,
     },
 };
-#[cfg(feature = "hosted-fixtures")]
-use webrtc::peer_connection::SettingEngineBuilder;
 
 use super::{failure, media::CallMedia, AppState, AuthenticatedDevice};
 
