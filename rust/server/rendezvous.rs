@@ -1,7 +1,4 @@
-//! Shared, transport-independent rules for the existing room rendezvous link.
-//!
-//! The Socket.IO adapter and loopback forwarding are composed with the server
-//! after the T3/T4 integration owner assigns the shared route and dependencies.
+//! Existing room rendezvous link, with Socket.IO and loopback forwarding.
 
 use std::fs;
 use std::path::Path;
@@ -407,7 +404,12 @@ impl Pairing {
             "wss" | "https" => "https",
             _ => return None,
         };
-        let mut origin = format!("{scheme}://{host}");
+        let authority_host = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.to_owned()
+        };
+        let mut origin = format!("{scheme}://{authority_host}");
         if let Some(port) = parsed.port() {
             origin.push_str(&format!(":{port}"));
         }
@@ -502,6 +504,12 @@ mod tests {
         )
         .unwrap();
         assert!(Pairing::read(&path).is_none());
+        fs::write(
+            &path,
+            r#"{"url":"ws://[::1]:8768/link","connector_id":"node-1","token":"secret"}"#,
+        )
+        .unwrap();
+        assert_eq!(Pairing::read(&path).unwrap().origin, "http://[::1]:8768");
     }
 
     #[test]

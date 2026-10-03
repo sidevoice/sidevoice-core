@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use super::packet::{decode, encode, Part};
 use super::relay::Relay;
 use super::{Pairing, Rendezvous, OUTBOUND_NAMESPACE, OUTBOUND_PATH};
+use crate::messages::{render, LocalizedMessage};
 
 struct TextEvent(String);
 impl Emit<NoAck, NoBinary> for TextEvent {
@@ -157,7 +158,12 @@ pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()>
                             rv.connected("outbound", public).await;
                         }
                         "node.revoked" => {
-                            rv.refused(data.get("reason").and_then(Part::text).unwrap_or("relay.revoked").to_owned()).await;
+                            let reason = data
+                                .get("reason")
+                                .and_then(Part::text)
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| render(&LocalizedMessage::new("relay.revoked"), "en"));
+                            rv.refused(reason).await;
                             break;
                         }
                         "relay.http" | "relay.open" => {
