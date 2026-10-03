@@ -592,10 +592,14 @@ struct OptionFailure {
 #[derive(Clone, Debug)]
 enum OptionFailureKind {
     Unknown,
-    Language { value: String },
-    TextTooLong { max: usize },
+    Language { shown: String },
+    TextInvalid { max: usize },
     Range(Box<(Value, Value)>),
-    VoiceLanguage { voice: String, language: String },
+    VoiceShape,
+    VoiceSpeechLanguage { shown: String },
+    ModelVoice { shown: String },
+    VoiceLanguage { shown: String, language: String },
+    ProviderVoice,
     Other,
 }
 
@@ -604,12 +608,12 @@ impl OptionFailure {
         match &self.kind {
             OptionFailureKind::Unknown => LocalizedMessage::new("settings.option_unknown")
                 .with_param("name", self.name.clone()),
-            OptionFailureKind::Language { value } => {
+            OptionFailureKind::Language { shown } => {
                 LocalizedMessage::new("settings.option_language_invalid")
                     .with_param("name", self.name.clone())
-                    .with_param("value", value.clone())
+                    .with_param("value", shown.clone())
             }
-            OptionFailureKind::TextTooLong { max } => {
+            OptionFailureKind::TextInvalid { max } => {
                 LocalizedMessage::new("settings.option_text_too_long")
                     .with_param("name", self.name.clone())
                     .with_param("max", *max)
@@ -618,11 +622,29 @@ impl OptionFailure {
                 .with_param("name", self.name.clone())
                 .with_param("min", bounds.0.clone())
                 .with_param("max", bounds.1.clone()),
-            OptionFailureKind::VoiceLanguage { voice, language } => {
+            OptionFailureKind::VoiceShape => LocalizedMessage::new("settings.option_voice_shape")
+                .with_param("name", self.name.clone())
+                .with_param("example", "{language: voice}"),
+            OptionFailureKind::VoiceSpeechLanguage { shown } => {
+                LocalizedMessage::new("settings.option_voice_speech_language")
+                    .with_param("name", self.name.clone())
+                    .with_param("value", shown.clone())
+            }
+            OptionFailureKind::ModelVoice { shown } => {
+                LocalizedMessage::new("settings.option_model_voice_invalid")
+                    .with_param("name", self.name.clone())
+                    .with_param("value", shown.clone())
+            }
+            OptionFailureKind::VoiceLanguage { shown, language } => {
                 LocalizedMessage::new("settings.option_voice_language")
                     .with_param("name", self.name.clone())
-                    .with_param("voice", voice.clone())
+                    .with_param("voice", shown.clone())
                     .with_param("language", language.clone())
+            }
+            OptionFailureKind::ProviderVoice => {
+                LocalizedMessage::new("settings.option_provider_voice_invalid")
+                    .with_param("name", self.name.clone())
+                    .with_param("max", 120)
             }
             OptionFailureKind::Other => LocalizedMessage::new("settings.stage_invalid"),
         }
@@ -1265,6 +1287,59 @@ fn validate_options(
     Ok(result)
 }
 
+// Python settings.py uses repr(value), then caps the displayed representation at 40 characters.
+fn shown(value: &Value) -> String {
+    let representation = python_repr(value);
+    if representation.chars().count() <= 40 {
+        representation
+    } else {
+        representation.chars().take(39).collect::<String>() + "…"
+    }
+}
+
+fn python_repr(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(number) => number.to_string(),
+        Value::String(value) => {
+            let quote = if value.contains('\'') && !value.contains('"') { '"' } else { '\'' };
+            let mut result = String::from(quote);
+            for character in value.chars() {
+                match character {
+                    '\\' => result.push_str("\\\\"),
+                    '\n' => result.push_str("\\n"),
+                    '\r' => result.push_str("\\r"),
+                    '\t' => result.push_str("\\t"),
+                    character if character == quote => {
+                        result.push('\\');
+                        result.push(character);
+                    }
+                    character if character.is_control() || (character.is_whitespace() && character != ' ') => {
+                        let code = character as u32;
+                        if code <= 0xff {
+                            result.push_str(&format!("\\x{code:02x}"));
+                        } else if code <= 0xffff {
+                            result.push_str(&format!("\\u{code:04x}"));
+                        } else {
+                            result.push_str(&format!("\\U{code:08x}"));
+                        }
+                    }
+                    character => result.push(character),
+                }
+            }
+            result.push(quote);
+            result
+        }
+        Value::Array(items) => format!("[{}]", items.iter().map(python_repr).collect::<Vec<_>>().join(", ")),
+        Value::Object(items) => format!(
+            "{{{}}}",
+            items.iter().map(|(key, value)| format!("{}: {}", python_repr(&Value::String(key.clone())), python_repr(value))).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
 fn option_value(
     option: &Value,
     name: &str,
@@ -1274,33 +1349,29 @@ fn option_value(
     let other = || OptionFailure::new(name, OptionFailureKind::Other);
     match field_str(option, "kind") {
         Some("language") => {
-            let Some(language) = value.as_str() else {
-                return Err(other());
-            };
-            if strings(option.get("values")).any(|candidate| candidate == language)
-                || (language == "auto" && option.get("auto").and_then(Value::as_bool) == Some(true))
+            if value.as_str().is_some_and(|language| {
+                strings(option.get("values")).any(|candidate| candidate == language)
+                    || (language == "auto" && option.get("auto").and_then(Value::as_bool) == Some(true))
+            })
             {
-                Ok(Value::String(language.to_owned()))
+                Ok(value.clone())
             } else {
                 Err(OptionFailure::new(
                     name,
                     OptionFailureKind::Language {
-                        value: language.to_owned(),
+                        shown: shown(value),
                     },
                 ))
             }
         }
         Some("text") => {
-            let Some(text) = value.as_str() else {
-                return Err(other());
-            };
             let max = option.get("max").and_then(Value::as_u64).unwrap_or(1000) as usize;
-            if text.chars().count() <= max {
+            if value.as_str().is_some_and(|text| text.chars().count() <= max) {
                 Ok(value.clone())
             } else {
                 Err(OptionFailure::new(
                     name,
-                    OptionFailureKind::TextTooLong { max },
+                    OptionFailureKind::TextInvalid { max },
                 ))
             }
         }
@@ -1329,12 +1400,17 @@ fn option_value(
         Some("voice") => {
             if option.get("per_language").and_then(Value::as_bool) == Some(true) {
                 let Some(voices) = value.as_object() else {
-                    return Err(other());
+                    return Err(OptionFailure::new(name, OptionFailureKind::VoiceShape));
                 };
                 let mut result = Map::new();
                 for (language, voice) in voices {
                     if !speech_catalogue_language(language) {
-                        return Err(other());
+                        return Err(OptionFailure::new(
+                            name,
+                            OptionFailureKind::VoiceSpeechLanguage {
+                                shown: shown(&Value::String(language.clone())),
+                            },
+                        ));
                     }
                     result.insert(
                         language.clone(),
@@ -1357,21 +1433,21 @@ fn voice_id(
     model: Option<&Value>,
     language: Option<&str>,
 ) -> Result<String, OptionFailure> {
-    let voice = voice
-        .as_str()
-        .ok_or_else(|| OptionFailure::new(name, OptionFailureKind::Other))?;
     if field_str(option, "from") == Some("model.voices") {
-        let Some(model) = model else {
-            return Err(OptionFailure::new(name, OptionFailureKind::Other));
-        };
-        let found = model
-            .get("voices")
-            .into_iter()
-            .flat_map(values)
-            .find(|candidate| field_str(candidate, "id") == Some(voice));
+        let found = voice.as_str().and_then(|voice_id| {
+            model
+                .and_then(|model| model.get("voices"))
+                .into_iter()
+                .flat_map(values)
+                .find(|candidate| field_str(candidate, "id") == Some(voice_id))
+        });
         let Some(found) = found else {
-            return Err(OptionFailure::new(name, OptionFailureKind::Other));
+            return Err(OptionFailure::new(
+                name,
+                OptionFailureKind::ModelVoice { shown: shown(voice) },
+            ));
         };
+        let voice = voice.as_str().expect("matched catalogue voice is a string");
         if let Some(language) = language {
             let speaks =
                 field_str(found, "language").unwrap_or("").split('-').next() == Some(language);
@@ -1379,17 +1455,17 @@ fn voice_id(
                 return Err(OptionFailure::new(
                     name,
                     OptionFailureKind::VoiceLanguage {
-                        voice: voice.to_owned(),
+                        shown: shown(&Value::String(voice.to_owned())),
                         language: language.to_owned(),
                     },
                 ));
             }
         }
         Ok(voice.to_owned())
-    } else if !voice.trim().is_empty() && voice.chars().count() <= 120 {
-        Ok(voice.to_owned())
+    } else if voice.as_str().is_some_and(|voice| !voice.trim().is_empty() && voice.chars().count() <= 120) {
+        Ok(voice.as_str().unwrap().to_owned())
     } else {
-        Err(OptionFailure::new(name, OptionFailureKind::Other))
+        Err(OptionFailure::new(name, OptionFailureKind::ProviderVoice))
     }
 }
 
@@ -2029,28 +2105,132 @@ mod tests {
     fn known_option_diagnostics_match_pinned_python_and_keep_atomic_stage_fallback() {
         let defaults = default_settings(None, None);
         let overlong_context = "x".repeat(401);
+        let overlong_voice = "x".repeat(121);
         let cases = [
             (
                 json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"de"}}}),
-                "Some device settings were not valid and use their defaults: stt Value error, language: 'de' is not one of its languages",
+                "language: 'de' is not one of its languages",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":5}}}),
+                "language: 5 is not one of its languages",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":null}}}),
+                "language: None is not one of its languages",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":true}}}),
+                "language: True is not one of its languages",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":["de"]}}}),
+                "language: ['de'] is not one of its languages",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"isn't"}}}),
+                "language: \"isn't\" is not one of its languages",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"a\nb"}}}),
+                "language: 'a\\nb' is not one of its languages",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"x".repeat(50)}}}),
+                "language: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… is not one of its languages",
                 "stt",
             ),
             (
                 json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"context":overlong_context}}}),
-                "Some device settings were not valid and use their defaults: stt Value error, context: text of at most 400 characters",
+                "context: text of at most 400 characters",
                 "stt",
             ),
             (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"context":7}}}),
+                "context: text of at most 400 characters",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"context":["a"]}}}),
+                "context: text of at most 400 characters",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"context":null}}}),
+                "context: text of at most 400 characters",
+                "stt",
+            ),
+            (
+                json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"voice":"af_heart"}}}),
+                "voice: one voice per speech language, as {language: voice}",
+                "tts",
+            ),
+            (
+                json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"voice":{"de":"af_heart"}}}}),
+                "voice: 'de' is not a speech language",
+                "tts",
+            ),
+            (
+                json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"voice":{"en":"no-such-voice"}}}}),
+                "voice: 'no-such-voice' is not a voice of this model",
+                "tts",
+            ),
+            (
+                json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"voice":{"en":5}}}}),
+                "voice: 5 is not a voice of this model",
+                "tts",
+            ),
+            (
                 json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"voice":{"en":"em_alex"}}}}),
-                "Some device settings were not valid and use their defaults: tts Value error, voice: 'em_alex' does not speak en",
+                "voice: 'em_alex' does not speak en",
+                "tts",
+            ),
+            (
+                json!({"tts":{"place":"elevenlabs", "model":"eleven_v3", "options":{"voice":"v"}}}),
+                "voice: one voice per speech language, as {language: voice}",
+                "tts",
+            ),
+            (
+                json!({"tts":{"place":"elevenlabs", "model":"eleven_v3", "options":{"voice":{"xx":"v"}}}}),
+                "voice: 'xx' is not a speech language",
+                "tts",
+            ),
+            (
+                json!({"tts":{"place":"elevenlabs", "model":"eleven_v3", "options":{"voice":{"en":""}}}}),
+                "voice: a voice id is a non-empty string of at most 120 characters",
+                "tts",
+            ),
+            (
+                json!({"tts":{"place":"elevenlabs", "model":"eleven_v3", "options":{"voice":{"en":"   "}}}}),
+                "voice: a voice id is a non-empty string of at most 120 characters",
+                "tts",
+            ),
+            (
+                json!({"tts":{"place":"elevenlabs", "model":"eleven_v3", "options":{"voice":{"en":overlong_voice}}}}),
+                "voice: a voice id is a non-empty string of at most 120 characters",
+                "tts",
+            ),
+            (
+                json!({"tts":{"place":"elevenlabs", "model":"eleven_v3", "options":{"voice":{"en":null}}}}),
+                "voice: a voice id is a non-empty string of at most 120 characters",
                 "tts",
             ),
         ];
-        for (input, expected, task) in cases {
+        for (input, reason, task) in cases {
+            let expected = format!(
+                "Some device settings were not valid and use their defaults: {task} Value error, {reason}"
+            );
             let loaded = settings_from(Some(&input), &defaults);
             assert_eq!(
                 loaded.issue.as_deref(),
-                Some(expected),
+                Some(expected.as_str()),
                 "Pinned Python settings.py output for {task} option in {input}"
             );
             if task == "stt" {
@@ -2063,6 +2243,14 @@ mod tests {
                 assert_eq!(loaded.settings.tts.options, defaults.tts.options);
             }
         }
+    }
+
+    #[test]
+    fn shown_matches_python_repr_at_the_display_limit() {
+        assert_eq!(super::shown(&json!("x".repeat(38))), format!("'{}'", "x".repeat(38)));
+        assert_eq!(super::shown(&json!("x".repeat(39))), format!("'{}…", "x".repeat(38)));
+        assert_eq!(super::shown(&json!("a'b\"c")), "'a\\'b\"c'");
+        assert_eq!(super::shown(&json!("a\\b")), "'a\\\\b'");
     }
 
     #[test]
