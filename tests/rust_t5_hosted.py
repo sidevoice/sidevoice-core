@@ -37,7 +37,7 @@ class TtsFixture(http.server.ThreadingHTTPServer):
 
 class TtsHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        assert self.path.startswith("/v1/text-to-speech/fixture-voice/stream/with-timestamps")
+        assert self.path.startswith("/v1/text-to-speech/fixturevoice/stream/with-timestamps")
         assert self.headers["xi-api-key"] == "fixture-key"
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         self.server.requests.append(body)
@@ -190,7 +190,7 @@ async def main():
                 await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {
                     "turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0,
                     "tts": {"place": "elevenlabs", "model": "eleven_v3",
-                            "options": {"voice": {"en": "fixture-voice"}}}}}}))
+                            "options": {"voice": {"en": "fixturevoice"}}}}}}))
                 session = (await frame(ws, "voice-session"))["session_id"]
                 assert request(port, "POST", "/api/presentation/select", token=token,
                                body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
