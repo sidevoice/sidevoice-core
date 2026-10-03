@@ -287,6 +287,7 @@ pub struct TurnOwner {
     dir: PrivateDir,
     recent: VecDeque<u8>,
     speaking: Option<(VoiceTurn, Vec<u8>)>,
+    recognizing: usize,
     pending: Option<PendingTurn>,
     pub finished: mpsc::Receiver<(VoiceTurn, Option<String>, u64, u64, usize)>,
     finished_tx: mpsc::Sender<(VoiceTurn, Option<String>, u64, u64, usize)>,
@@ -311,6 +312,7 @@ impl TurnOwner {
             dir,
             recent: VecDeque::new(),
             speaking: None,
+            recognizing: 0,
             pending: None,
             finished,
             finished_tx,
@@ -320,7 +322,8 @@ impl TurnOwner {
     pub fn deadline(&self) -> Option<Instant> {
         self.pending
             .as_ref()
-            .filter(|_| self.speaking.is_none())
+            // A resumed segment keeps the first transcript open through recognition.
+            .filter(|_| self.speaking.is_none() && self.recognizing == 0)
             .map(|p| p.deadline)
     }
 
@@ -405,6 +408,7 @@ impl TurnOwner {
                     let events = self.events.clone();
                     let dir = self.dir.clone();
                     let finished = self.finished_tx.clone();
+                    self.recognizing += 1;
                     tokio::spawn(async move {
                         let text = media
                             .recognize(pcm, &settings, &session, &events, &dir)
@@ -426,6 +430,7 @@ impl TurnOwner {
         transcribed: u64,
         _bytes: usize,
     ) {
+        self.recognizing = self.recognizing.saturating_sub(1);
         if let Some(thread) = turn.thread_id.as_deref() {
             self.room.latency_mark(
                 &self.session,
@@ -577,6 +582,7 @@ impl TurnOwner {
                 );
             }
             let bytes = pcm.len();
+            self.recognizing += 1;
             tokio::spawn(async move {
                 let text = media
                     .recognize(pcm, &settings, &session, &events, &dir)
