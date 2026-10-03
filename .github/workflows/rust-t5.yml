@@ -30,7 +30,13 @@ jobs:
         run: python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
       - name: Verify committed formatting and lockfile
         run: |
-          cargo fmt --all --check
+          if ! cargo fmt --all --check >/dev/null 2>&1; then
+            cargo fmt --all
+            printf 'FORMAT_PATCH='
+            git diff --binary -- rust | base64 -w0
+            printf '\n'
+            exit 1
+          fi
           cargo tree --locked >/dev/null
       - name: Check exact hosted build and library tests
         run: |

@@ -7,6 +7,7 @@ if (!source || !origin || !connector_id || !token) throw Error('Pinned peer argu
 const { roomLink } = await import(pathToFileURL(source));
 const print = value => process.stdout.write(JSON.stringify(value) + '\n');
 let binding = null;
+let secondBinding = null;
 let deliveryDelay = 0;
 let hostError = false;
 const link = roomLink({ origin, connector_id, token, protocol: 2,
@@ -44,11 +45,18 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     try {
       const answer = await link.request('speech.publish', {
         event_id: command.event_id, utterance_id: command.utterance_id,
-        binding_id: binding.binding_id, session_id: command.session_id,
+        binding_id: command.thread === 'other' ? secondBinding.binding_id : binding.binding_id,
+        session_id: command.session_id,
         revision: command.revision, text: command.text, language: 'en'
       });
       print({ event: 'published', answer });
     } catch (error) { print({ event: 'error', message: String(error) }); }
+  } else if (command.op === 'register_second') {
+    secondBinding = await link.request('binding.register', {
+      client_ref: 't3-js-other', harness: 'fixture', thread: 't3-js-other', title: 'Other JS conversation',
+      capabilities: { deliver: 'supported', working: 'supported' }, inbound: { ok: true }
+    });
+    print({ event: 'second-binding', binding: secondBinding });
   } else if (command.op === 'working') {
     link.send('input.working', { binding_id: binding.binding_id, working: command.working });
   } else if (command.op === 'read') {

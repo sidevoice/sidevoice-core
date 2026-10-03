@@ -38,6 +38,15 @@ const CATCHUP_MAX_SECONDS: usize = 35;
 pub enum SttFailure { Timeout, Device, Provider }
 type Recognition = Result<Option<String>, SttFailure>;
 
+fn device_timeout() -> Duration {
+    #[cfg(feature = "hosted-fixtures")]
+    if let Some(milliseconds) = std::env::var("SIDEVOICE_FIXTURE_STT_TIMEOUT_MS").ok()
+        .and_then(|value| value.parse::<u64>().ok()).filter(|value| (100..=90_000).contains(value)) {
+        return Duration::from_millis(milliseconds);
+    }
+    Duration::from_secs(90)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Socket,
@@ -194,7 +203,7 @@ impl CallMedia {
                         .remove(&request);
                     return Err(SttFailure::Device);
                 }
-                let result = tokio::time::timeout(Duration::from_secs(90), rx).await;
+                let result = tokio::time::timeout(device_timeout(), rx).await;
                 self.transcripts
                     .lock()
                     .expect("transcripts lock")

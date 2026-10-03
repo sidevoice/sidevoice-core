@@ -111,6 +111,154 @@ async def complete_device_turn(ws, session, pcm, *, socket_audio=True):
     return finished, receipt
 
 
+async def no_transcription(ws, seconds=0.7):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            event = json.loads(await asyncio.wait_for(ws.recv(), deadline - time.monotonic()))
+        except TimeoutError:
+            return
+        assert event["type"] != "voice-transcribe", event
+
+
+async def review_voice_cases(url, protocols, port, token, peer, pcm):
+    settings = {"turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0}
+    async with websockets.connect(url, subprotocols=protocols) as ws:
+        await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": settings}}))
+        session = (await frame(ws, "voice-session"))["session_id"]
+        assert request(port, "POST", "/api/presentation/select", token=token,
+                       body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
+        revision = request(port, "GET", f"/api/presentation?session_id={session}", token=token)[1]["room"]["revision"]
+        started = int(time.time() * 1000) - 1000
+        for seq, part in enumerate((pcm[:40000], pcm[40000:])):
+            await ws.send(json.dumps({"type": "voice-catchup", "data": {
+                "session_id": session, "sample_rate": 16000, "seq": seq,
+                "audio_base64": base64.b64encode(part).decode(), "started_at": started,
+                "final": seq == 1}}))
+        ask = await frame(ws, "voice-transcribe", timeout=15)
+        assert wave.open(__import__("io").BytesIO(base64.b64decode(ask["audio_base64"]))).getframerate() == 16000
+        await ws.send(json.dumps({"type": "voice-transcript", "data": {
+            "session_id": session, "request_id": ask["request_id"], "text": "Words recorded offline"}}))
+        catchup = await frame(ws, "voice-catchup-turn")
+        assert catchup["history_id"] == f"{session}:user-catchup:1" and catchup["time"] == started, catchup
+        assert catchup["offline"] == "buffered" and catchup["thread_id"] == "t3-js-thread", catchup
+        assert (await frame(ws, "voice-input-receipt", status="pending"))["revision"] == 0
+        row = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"][-1]
+        assert (row["offline"], row["time"], row["revision"]) == ("buffered", started, 0), row
+        assert request(port, "GET", f"/api/presentation?session_id={session}", token=token)[1]["room"]["revision"] == revision
+        for seq in (0, 2):
+            await ws.send(json.dumps({"type": "voice-catchup", "data": {
+                "session_id": session, "sample_rate": 16000, "seq": seq,
+                "audio_base64": base64.b64encode(pcm[:16000]).decode(), "final": seq == 2}}))
+        await no_transcription(ws)
+        own = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
+        assert len([row for row in own if row["session"] == session]) == 1
+
+
+        for cause in ("device", "timeout"):
+            await send_pcm(ws, pcm)
+            await send_pcm(ws, b"\0" * 16_000 * 2 * 4)
+            ask = await frame(ws, "voice-transcribe", timeout=20)
+            if cause == "device":
+                await ws.send(json.dumps({"type": "voice-transcript-error", "data": {
+                    "session_id": session, "request_id": ask["request_id"], "error": "fixture failure"}}))
+            error = await frame(ws, "error", timeout=8)
+            assert "message" in error and error["message"], error
+            cancelled = await frame(ws, "voice-user-turn", timeout=8)
+            assert cancelled["phase"] == "cancelled" and cancelled["text"] == "", cancelled
+        own = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
+        assert len([row for row in own if row["session"] == session]) == 1
+
+    async with websockets.connect(url, subprotocols=protocols) as ws:
+        await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {
+            **settings, "merge_window_secs": 2.0}}}))
+        session = (await frame(ws, "voice-session"))["session_id"]
+        assert request(port, "POST", "/api/presentation/select", token=token,
+                       body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
+        await send_pcm(ws, pcm)
+        await send_pcm(ws, b"\0" * 16_000 * 2 * 2)
+        first = await frame(ws, "voice-transcribe", timeout=20)
+        await send_pcm(ws, pcm)
+        await send_pcm(ws, b"\0" * 16_000 * 2 * 2)
+        await no_transcription(ws, 0.4)
+        await ws.send(json.dumps({"type": "voice-transcript", "data": {
+            "session_id": session, "request_id": first["request_id"], "text": "First spoken"}}))
+        second = await frame(ws, "voice-transcribe", timeout=20)
+        await ws.send(json.dumps({"type": "voice-transcript", "data": {
+            "session_id": session, "request_id": second["request_id"], "text": "Second spoken"}}))
+        turn = await frame(ws, "voice-user-turn", timeout=10)
+        while turn["phase"] != "finished":
+            turn = await frame(ws, "voice-user-turn", timeout=10)
+        assert turn["text"] == "First spoken Second spoken", turn
+        await frame(ws, "voice-input-receipt", status="pending")
+        await send_pcm(ws, pcm)
+        await send_pcm(ws, b"\0" * 16_000 * 2 * 2)
+        await frame(ws, "voice-transcribe", timeout=20)
+        await ws.close()
+        await asyncio.sleep(0.2)
+        own = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
+        assert len([row for row in own if row["session"] == session]) == 1
+
+
+async def two_listener_focus_case(url, protocols, port, token, peer, pcm):
+    peer.send({"op": "register_second"})
+    assert peer.event("second-binding")["binding"]["binding_id"]
+    async with websockets.connect(url, subprotocols=protocols) as first, \
+               websockets.connect(url, subprotocols=protocols) as second:
+        settings = {"turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0}
+        for ws in (first, second):
+            await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": settings}}))
+        sessions = [(await frame(ws, "voice-session"))["session_id"] for ws in (first, second)]
+        for session in sessions:
+            assert request(port, "POST", "/api/presentation/select", token=token,
+                           body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
+        speeches = []
+        for ws, session in zip((first, second), sessions):
+            revision = request(port, "GET", f"/api/presentation?session_id={session}", token=token)[1]["room"]["revision"]
+            uid = f"two-listeners-{uuid.uuid4()}"
+            peer.send({"op": "publish", "session_id": session, "revision": revision,
+                       "event_id": uid, "utterance_id": uid, "text": "Reply to one listener"})
+            assert peer.event("published")["answer"]["status"] == "queued"
+            speech = await frame(ws, "voice-speech")
+            assert speech["session_id"] == session and speech["utterance_id"] == uid, speech
+            speeches.append(speech)
+        for session, speech in zip(sessions, speeches):
+            assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                           body={"session_id": session, "utterance_id": speech["utterance_id"],
+                                 "revision": speech["revision"], "status": "playing"})[0] == 200
+        for session, speech in zip(sessions, speeches):
+            assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                           body={"session_id": session, "utterance_id": speech["utterance_id"],
+                                 "revision": speech["revision"], "status": "playback_finished"})[0] == 200
+
+        stream = asyncio.create_task(send_pcm(first, pcm + pcm + b"\0" * 16_000 * 2 * 2))
+        started = await frame(first, "voice-user-turn", timeout=15)
+        assert started["phase"] == "started" and started["thread_id"] == "t3-js-thread", started
+        await asyncio.sleep(1.3)
+        assert request(port, "POST", "/api/presentation/select", token=token,
+                       body={"session_id": sessions[0], "thread_id": "t3-js-other"})[0] == 200
+        await stream
+        old = await frame(first, "voice-transcribe", timeout=20)
+        await first.send(json.dumps({"type": "voice-transcript", "data": {
+            "session_id": sessions[0], "request_id": old["request_id"], "text": "Before focus"}}))
+        old_turn = await frame(first, "voice-user-turn", timeout=10)
+        while old_turn["phase"] != "finished":
+            old_turn = await frame(first, "voice-user-turn", timeout=10)
+        new = await frame(first, "voice-transcribe", timeout=20)
+        await first.send(json.dumps({"type": "voice-transcript", "data": {
+            "session_id": sessions[0], "request_id": new["request_id"], "text": "After focus"}}))
+        new_turn = await frame(first, "voice-user-turn", timeout=10)
+        while new_turn["phase"] != "finished":
+            new_turn = await frame(first, "voice-user-turn", timeout=10)
+        completed = [old_turn, new_turn]
+        assert [(turn["thread_id"], turn["text"]) for turn in completed] == [
+            ("t3-js-thread", "Before focus"), ("t3-js-other", "After focus")], completed
+        old_rows = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
+        new_rows = request(port, "GET", "/api/presentation/history?thread_id=t3-js-other", token=token)[1]["messages"]
+        assert any(row["text"] == "Before focus" and row["session"] == sessions[0] for row in old_rows)
+        assert any(row["text"] == "After focus" and row["session"] == sessions[0] for row in new_rows)
+
+
 async def main():
     with wave.open(str(SPEECH), "rb") as recording:
         assert recording.getframerate() == 16000 and recording.getnchannels() == 1
@@ -121,6 +269,7 @@ async def main():
         data.mkdir(mode=0o700)
         fixture = TtsFixture()
         env = {**os.environ, "SIDEVOICE_STUN_URLS": "", "VOICE_ELEVENLABS_API_KEY": "fixture-key",
+               "SIDEVOICE_FIXTURE_STT_TIMEOUT_MS": "3000",
                "SIDEVOICE_ELEVENLABS_FIXTURE_BASE": f"http://127.0.0.1:{fixture.server_port}"}
         core = subprocess.Popen([str(CORE), "--data-dir", str(data), "--port", "0", "--idle-exit", "0"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
@@ -227,6 +376,8 @@ async def main():
                     merged = await frame(ws, "voice-user-turn", timeout=10)
                 assert merged["phase"] == "finished" and merged["text"] == "First thought continued thought", merged
                 assert (await frame(ws, "voice-input-receipt", status="pending"))["revision"] == merged["revision"]
+            await review_voice_cases(url, protocols, port, token, peer, pcm)
+            await two_listener_focus_case(url, protocols, port, token, peer, pcm)
             async with websockets.connect(url, subprotocols=protocols) as ws:
                 await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {
                     "turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0}}}))
