@@ -594,7 +594,7 @@ enum OptionFailureKind {
     Unknown,
     Language { value: String },
     TextTooLong { max: usize },
-    Range { min: Value, max: Value },
+    Range(Box<(Value, Value)>),
     VoiceLanguage { voice: String, language: String },
     Other,
 }
@@ -614,10 +614,10 @@ impl OptionFailure {
                     .with_param("name", self.name.clone())
                     .with_param("max", *max)
             }
-            OptionFailureKind::Range { min, max } => LocalizedMessage::new("settings.stage_range")
+            OptionFailureKind::Range(bounds) => LocalizedMessage::new("settings.stage_range")
                 .with_param("name", self.name.clone())
-                .with_param("min", min.clone())
-                .with_param("max", max.clone()),
+                .with_param("min", bounds.0.clone())
+                .with_param("max", bounds.1.clone()),
             OptionFailureKind::VoiceLanguage { voice, language } => {
                 LocalizedMessage::new("settings.option_voice_language")
                     .with_param("name", self.name.clone())
@@ -1310,10 +1310,7 @@ fn option_value(
             let range_failure = || {
                 OptionFailure::new(
                     name,
-                    OptionFailureKind::Range {
-                        min: minimum.clone(),
-                        max: maximum.clone(),
-                    },
+                    OptionFailureKind::Range(Box::new((minimum.clone(), maximum.clone()))),
                 )
             };
             let Some(number) = value.as_f64() else {
