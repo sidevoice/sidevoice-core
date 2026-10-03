@@ -60,6 +60,8 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --network none --read-only --tmpfs /tmp \
+            -e RUSTVANI_CACHE_DIR=/models \
+            -v "$RUSTVANI_CACHE_DIR:/models:ro" \
             -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
             sidevoice-rust-t3 /opt/t3-venv/bin/python tests/rust_t3_hosted.py \
             /workspace/target/debug/sidevoice-core-rust \

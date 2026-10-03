@@ -172,6 +172,12 @@ async def main():
                 finally:
                     await browser.close()
             print("T5 PASS: recorded speech through native SmartTurn and timer, device STT/TTS, pinned JS reply, real WebRTC to WS switch")
+        except Exception:
+            if core.poll() is None:
+                core.terminate()
+                core.wait(timeout=10)
+            print(core.stderr.read()[-4000:], file=sys.stderr)
+            raise
         finally:
             if peer:
                 peer.stop()

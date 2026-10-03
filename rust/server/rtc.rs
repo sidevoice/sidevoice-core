@@ -193,7 +193,7 @@ pub async fn offer(
         .with_media_engine(engine)
         .with_interceptor_registry(registry)
         .with_handler(handler)
-        .with_udp_addrs(vec!["0.0.0.0:0".to_owned()])
+        .with_udp_addrs(vec!["0.0.0.0:0".to_owned(), "127.0.0.1:0".to_owned()])
         .build()
         .await
     {
@@ -207,24 +207,29 @@ pub async fn offer(
         }
     };
     let answer = async {
-        let offer = RTCSessionDescription::offer(offer.sdp).ok()?;
-        peer.set_remote_description(offer).await.ok()?;
-        let answer = peer.create_answer(None).await.ok()?;
-        peer.set_local_description(answer).await.ok()?;
-        gathered_rx.await.ok()?;
-        peer.local_description().await
+        let offer = RTCSessionDescription::offer(offer.sdp)
+            .map_err(|error| format!("offer_parse: {error}"))?;
+        peer.set_remote_description(offer).await
+            .map_err(|error| format!("remote_description: {error}"))?;
+        let answer = peer.create_answer(None).await
+            .map_err(|error| format!("create_answer: {error}"))?;
+        peer.set_local_description(answer).await
+            .map_err(|error| format!("local_description: {error}"))?;
+        gathered_rx.await.map_err(|error| format!("ice_gathering: {error}"))?;
+        peer.local_description().await.ok_or_else(|| "gathered_description_missing".to_owned())
     };
-    let Some(answer) = tokio::time::timeout(std::time::Duration::from_secs(20), answer)
-        .await
-        .ok()
-        .flatten()
-    else {
-        let _ = peer.close().await;
-        return failure(
-            "voice.rtc_answer_failed",
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &headers,
-        );
+    let answer = match tokio::time::timeout(std::time::Duration::from_secs(20), answer).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(error)) => {
+            eprintln!("WebRTC answer failed: {error}");
+            let _ = peer.close().await;
+            return failure("voice.rtc_answer_failed", StatusCode::UNPROCESSABLE_ENTITY, &headers);
+        }
+        Err(_) => {
+            eprintln!("WebRTC answer failed: gathered ICE timed out");
+            let _ = peer.close().await;
+            return failure("voice.rtc_answer_failed", StatusCode::UNPROCESSABLE_ENTITY, &headers);
+        }
     };
     call.set_rtc(generation, peer).await;
     Json(json!({"sdp":answer.sdp,"type":"answer"})).into_response()
