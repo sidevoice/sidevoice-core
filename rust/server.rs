@@ -46,6 +46,7 @@ pub struct AppState {
 struct AuthenticatedDevice(String);
 
 impl AppState {
+    #[expect(clippy::too_many_arguments, reason = "shared application owners are explicit at construction")]
     pub fn new(
         dir: PrivateDir,
         identity: NodeIdentity,

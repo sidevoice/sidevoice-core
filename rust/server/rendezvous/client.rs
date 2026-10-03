@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use super::packet::{decode, encode, Part};
 use super::relay::Relay;
-use super::{Pairing, Rendezvous, OUTBOUND_NAMESPACE};
+use super::{Pairing, Rendezvous, OUTBOUND_NAMESPACE, OUTBOUND_PATH};
 
 struct TextEvent(String);
 impl Emit<NoAck, NoBinary> for TextEvent {
@@ -127,7 +127,7 @@ fn parse(event: DynEvent) -> Option<(String, Part, Option<u64>)> {
 pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()> {
     let url = url::Url::parse(&pairing.origin).map_err(|_| ())?;
     let client = ClientBuilder::new(url)
-        .path("api/connectors/link")
+        .path(OUTBOUND_PATH.trim_start_matches('/'))
         .transport(TransportStrategy::WebSocket)
         .open()
         .map_err(|_| ())?;
