@@ -14,7 +14,9 @@ from pathlib import Path
 from sidevoice_core.control.devices import DeviceRegistry, NodeIdentity
 
 
-PYTHON = Path(sys.argv[1]).resolve()
+# A venv interpreter is commonly a symlink to its base executable; resolving
+# that symlink would silently drop the venv's installed packages.
+PYTHON = Path(sys.argv[1]).absolute()
 RUST = Path(sys.argv[2]).resolve()
 ARCHIVE = Path(sys.argv[3]).resolve()
 VERIFY = Path(sys.argv[4]).resolve()

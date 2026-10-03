@@ -100,6 +100,11 @@ jobs:
         run: |
           set -euo pipefail
           uv sync --locked --python 3.12 --no-install-project
+          VOICE_STT_API_KEY=fixture-no-call VOICE_ELEVENLABS_API_KEY=fixture-no-call \
+            .venv/bin/python tools/manual_cloud_smoke.py --check-only \
+            --wav tests/fixtures/hola-sala-16k.wav --voice-id fixturevoice \
+            --tts-text 'Fixture only' --receipt "$RUNNER_TEMP/cloud-smoke-unused.json"
+          test ! -e "$RUNNER_TEMP/cloud-smoke-unused.json"
           PYTHONPATH=src .venv/bin/python tests/rust_t7_rollback_hosted.py \
             .venv/bin/python \
             "$RUNNER_TEMP/t7-rtc/sidevoice-core-rust/bin/sidevoice-core-rust" \
@@ -168,6 +173,17 @@ jobs:
         env:
           BUNDLE: ${{ steps.attest-linux-aarch64.outputs.bundle-path }}
         run: cp "$BUNDLE" assets/native/sidevoice-core-rust-${GITHUB_SHA}-linux-aarch64.tar.zst.sigstore.json
+      - name: Verify source-bound attestation subjects
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for asset in assets/native/native-core-manifest.json assets/native/*.tar.zst; do
+            gh attestation verify "$asset" --bundle "${asset}.sigstore.json" \
+              --repo sidevoice/sidevoice-core \
+              --signer-workflow sidevoice/sidevoice-core/.github/workflows/rust-t7.yml \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" >/dev/null
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-native-signed-inputs

@@ -19,6 +19,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ("linux-aarch64", "linux-x86_64", "macos-aarch64")
+ORT_TARGETS = {"linux-aarch64": "aarch64-unknown-linux-gnu",
+               "linux-x86_64": "x86_64-unknown-linux-gnu",
+               "macos-aarch64": "aarch64-apple-darwin"}
 ENTRYPOINT = "bin/sidevoice-core-rust"
 LICENSES = {
     "onnxruntime-license.txt": (
@@ -112,11 +115,25 @@ def stage_notices(notices, target):
         if digest(payload) != expected:
             raise ValueError(f"Pinned notice digest changed: {name}")
         (notices / name).write_bytes(payload)
+    ort_sys = next(package for package in metadata["packages"] if package["name"] == "ort-sys")
+    if ort_sys["version"] != "2.0.0-rc.10":
+        raise ValueError("Unexpected ONNX Runtime binding version")
+    dist = (Path(ort_sys["manifest_path"]).parent / "dist.txt").read_text().splitlines()
+    ort_archive = None
+    for row in dist:
+        fields = row.split("\t")
+        if len(fields) == 4 and fields[:2] == ["none", ORT_TARGETS[target]]:
+            ort_archive = {"url": fields[2], "sha256": fields[3].lower()}
+            break
+    if ort_archive is None:
+        raise ValueError("Pinned ONNX Runtime archive is missing")
     (notices / "sources.json").write_bytes(canonical({
         "ort": "onnxruntime 1.22.0 selected by ort-sys 2.0.0-rc.10",
+        "ort_archive": ort_archive,
         "rustvani": "d01f33e671f7a4d8a128e7bfe55dbf0e8963cb21",
         "models": json.loads((ROOT / "assets/rust-models.json").read_text()),
-        "license_sha256": {name: sha for name, (_, sha) in LICENSES.items()},
+        "license_sources": {name: {"url": url, "sha256": sha}
+                            for name, (url, sha) in LICENSES.items()},
     }))
     if target.startswith("linux-"):
         version = subprocess.check_output(
@@ -238,14 +255,30 @@ def build(args):
 
 
 def unpack_checked(archive_path, destination):
+    if archive_path.stat().st_size > 250_000_000:
+        raise ValueError("Native compressed archive exceeds bound")
     raw_tar = destination / "bundle.tar"
+    decompressor = subprocess.Popen(["zstd", "-q", "-d", "-c", str(archive_path)],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    raw_size = 0
     with raw_tar.open("wb") as output:
-        run("zstd", "-q", "-d", "-c", str(archive_path), stdout=output)
+        while block := decompressor.stdout.read(1_048_576):
+            raw_size += len(block)
+            if raw_size > 1_000_000_000:
+                decompressor.kill()
+                decompressor.wait()
+                raise ValueError("Native decompressed archive exceeds bound")
+            output.write(block)
+    if decompressor.wait() != 0:
+        raise ValueError(f"Invalid zstd archive: {decompressor.stderr.read().decode(errors='replace')}")
     seen = set()
     directories = set()
+    total_bytes = 0
     with tarfile.open(raw_tar, "r") as archive:
         for member in archive:
             name = member.name.removesuffix("/")
+            if len(name) > 240 or len(seen) >= 2_000:
+                raise ValueError("Native archive path or entry count exceeds bound")
             if name != "sidevoice-core-rust":
                 validate_name(name)
             elif not member.isdir():
@@ -258,6 +291,9 @@ def unpack_checked(archive_path, destination):
                 directories.add(name)
                 target.mkdir(parents=True, exist_ok=True)
             else:
+                total_bytes += member.size
+                if member.size < 0 or member.size > 500_000_000 or total_bytes > 1_000_000_000:
+                    raise ValueError("Native archive size exceeds bound")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with target.open("wb") as output:
                     shutil.copyfileobj(archive.extractfile(member), output)
