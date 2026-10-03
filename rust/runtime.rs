@@ -349,8 +349,10 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         .map_err(|_| StartFailure::new("identity", "identity.unreadable"))?;
     let registry = DeviceRegistry::load(dir.clone())
         .map_err(|_| StartFailure::new("start", "start.failed"))?;
-    let (connector_id, token) = dir
-        .connector_credential()
+    let room = std::sync::Arc::new(crate::control::room::Room::load(dir.clone())
+        .map_err(|_| StartFailure::new("start", "start.failed"))?);
+    let (connector_id, token) = room
+        .local_credential()
         .map_err(|_| StartFailure::new("start", "start.failed"))?;
     let tcp = TcpListener::bind((config.host.as_str(), config.port))
         .await
@@ -391,7 +393,9 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         config.launch_id.clone(),
         machine_host,
         port,
+        room.clone(),
     ));
+    let delivery_task = tokio::spawn(room.pump());
     let ready = json!({"pid": std::process::id(), "port": port, "url": format!("http://127.0.0.1:{port}"),
         "socket": config.socket, "launch_id": config.launch_id, "version": env!("CARGO_PKG_VERSION"),
         "api": API, "protocol": CONNECTOR_PROTOCOL, "connector_protocols": [CONNECTOR_PROTOCOL, 3],
@@ -464,6 +468,7 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
     .await;
     remove_own_ready(&config.ready_file);
     drop(cleanup);
+    delivery_task.abort();
     if crashed {
         Err(StartFailure {
             step: "run",

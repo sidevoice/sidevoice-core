@@ -5,11 +5,8 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use base64::Engine;
 use fs2::FileExt;
-use rand::RngCore;
 use serde_json::Value;
-use sha2::Digest;
 use tempfile::NamedTempFile;
 
 #[derive(Clone, Debug)]
@@ -122,71 +119,7 @@ impl PrivateDir {
         }
     }
 
-    pub fn connector_credential(&self) -> io::Result<(String, String)> {
-        let mut state = match self.read_json("room-state.json")? {
-            Some(value) => value,
-            None => self.import_legacy_connectors()?,
-        };
-        let saved = self.read_json("connector-credential.json").ok().flatten();
-        if let Some(saved) = saved {
-            if let (Some(id), Some(token)) = (
-                saved.get("connector_id").and_then(Value::as_str),
-                saved.get("token").and_then(Value::as_str),
-            ) {
-                let expected = state
-                    .pointer(&format!(
-                        "/connectors/{}",
-                        id.replace('~', "~0").replace('/', "~1")
-                    ))
-                    .and_then(|row| row.get("token_hash"))
-                    .and_then(Value::as_str);
-                let revoked = state
-                    .pointer(&format!(
-                        "/connectors/{}",
-                        id.replace('~', "~0").replace('/', "~1")
-                    ))
-                    .and_then(|row| row.get("revoked"))
-                    .is_some_and(|value| {
-                        value.as_bool().unwrap_or(false) || value.as_i64().unwrap_or_default() != 0
-                    });
-                let hash = format!("{:x}", sha2::Sha256::digest(token.as_bytes()));
-                if expected == Some(hash.as_str()) && !revoked {
-                    return Ok((id.to_owned(), token.to_owned()));
-                }
-            }
-        }
-        let id = uuid::Uuid::new_v4().to_string();
-        let mut bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-        let hash = format!("{:x}", sha2::Sha256::digest(token.as_bytes()));
-        if !state.is_object() {
-            state = serde_json::json!({"connectors": {}});
-        }
-        let connectors = state
-            .as_object_mut()
-            .expect("object")
-            .entry("connectors")
-            .or_insert_with(|| serde_json::json!({}));
-        if !connectors.is_object() {
-            *connectors = serde_json::json!({});
-        }
-        let at = crate::control::devices::now();
-        connectors.as_object_mut().expect("object").insert(
-            id.clone(),
-            serde_json::json!({
-                "token_hash": hash, "created": at, "last_seen": at, "revoked": 0
-            }),
-        );
-        self.write_json("room-state.json", &state)?;
-        self.write_json(
-            "connector-credential.json",
-            &serde_json::json!({"connector_id": id, "token": token}),
-        )?;
-        Ok((id, token))
-    }
-
-    fn import_legacy_connectors(&self) -> io::Result<Value> {
+    pub(crate) fn import_legacy_connectors(&self) -> io::Result<Value> {
         let path = self.file("room-history.sqlite3");
         match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {

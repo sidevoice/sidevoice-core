@@ -29,6 +29,7 @@ rustvani = { git = "https://github.com/Allenmylath/rustvani.git", rev = "d01f33e
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+socketioxide = { version = "0.18.7", features = ["state"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "io-util"] }
 unicode-normalization = "0.1"

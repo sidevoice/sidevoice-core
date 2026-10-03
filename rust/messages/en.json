@@ -56,5 +56,19 @@
   "check_duration": "The model produced {seconds_display} s of audio for a phrase that takes about five.",
   "provider_key_refused": "{provider_label} refused the key.",
   "provider_unreachable": "{provider_label} could not be reached.",
-  "provider_failed": "{provider_label} failed: {detail}."
+  "provider_failed": "{provider_label} failed: {detail}.",
+  "room.full": "The room already has the maximum number of browsers connected.",
+  "room.thread_invalid": "Invalid conversation identifier.",
+  "room.connector_disconnected": "The connector is not connected.",
+  "room.binding_foreign": "Unknown or foreign binding.",
+  "room.conversation_disconnected": "That conversation is not connected. Enable voice from its task.",
+  "room.browser_absent": "That browser is not in the room.",
+  "room.focus_changed": "The connection or conversation changed. The text was not sent.",
+  "room.message_conflict": "That identifier already belongs to another message.",
+  "room.text_empty": "Write a message.",
+  "room.request_invalid": "Invalid room request.",
+  "room.stale_utterance": "Stale utterance.",
+  "room.speech_invalid": "The reply is invalid.",
+  "room.conversation_title": "Conversation {id}",
+  "room.you": "You"
 }
