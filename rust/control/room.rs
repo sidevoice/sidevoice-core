@@ -166,7 +166,8 @@ impl Room {
     pub fn attach(&self, cid: &str, peer: ConnectorPeer) -> Option<ConnectorPeer> {
         let mut inner = self.inner.lock().expect("room lock");
         let old = inner.peers.insert(cid.into(), peer);
-        for binding in inner.bindings.values_mut().filter(|b| b.connector == cid && b.active) { binding.live = false; }
+        let ids:Vec<String>=inner.bindings.values_mut().filter(|b| b.connector == cid && b.active).map(|b|{b.live=false;b.id.clone()}).collect();
+        for bid in ids{if let Some(row_id)=inner.inflight.remove(&bid){if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){row.status="pending".into();row.next_attempt=0;}}}
         old
     }
     pub fn detach(&self, cid: &str, generation: &str) {

@@ -260,14 +260,32 @@ async def main():
                 assert js2.event("binding")["binding"]["binding_id"] == binding["binding_id"]
                 assert js2.event("from-core")["method"] == "input.deliver"
                 await frame(ws, "voice-input-receipt", status="delivered")
-                js2.send({"op": "close"})
+                # Replace a peer while its ACK is delayed. Its eventual ACK cannot settle the new generation.
+                js2.send({"op": "delay", "ms": 1500})
+                late_id = str(uuid.uuid4())
+                assert request(port, "POST", "/api/presentation/text", token=token,
+                               body={"text": "Late old-generation ACK", "session_id": session, "thread_id": "t3-js-thread",
+                                     "binding_id": focus, "message_id": late_id})[0] == 200
+                await frame(ws, "voice-input-receipt", status="pending")
+                assert js2.event("from-core")["method"] == "input.deliver"
+                js3 = LineProcess(["node", str(Path(__file__).with_name("rust_t3_v2_peer.mjs")),
+                                   str(JS_LINK), origin, ready["connector_id"], ready["token"]])
+                peers.append(js3)
+                js3.event("welcome")
+                assert js3.event("binding")["binding"]["binding_id"] == binding["binding_id"]
+                assert js3.event("from-core")["method"] == "input.deliver"
+                await frame(ws, "voice-input-receipt", status="delivered")
+                await asyncio.sleep(1.6)
+                history = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
+                assert next(row for row in history if row["id"].endswith(late_id))["status"] == "delivered", history
                 js2.stop()
+                js3.send({"op": "close"})
+                js3.stop()
                 until(lambda: request(port, "GET", "/api/presentation/participants", token=token)[1]["participants"][0]["available"] is False)
                 # The pinned Rust proof reads Core's real ready file and opens the symmetric v3 UDS link.
-                mock = root / "codex-queue"
-                mock.write_text("#!/bin/sh\nexit 0\n")
-                mock.chmod(0o700)
-                env = {**os.environ, "SIDEVOICE_DATA_DIR": str(data), "CODEX_HOME": str(codex), "SIDEVOICE_CODEX_BIN": str(mock)}
+                # The proof invokes a deterministic local queue command. /bin/true is on the
+                # execution image, so the test does not depend on /tmp allowing executable files.
+                env = {**os.environ, "SIDEVOICE_DATA_DIR": str(data), "CODEX_HOME": str(codex), "SIDEVOICE_CODEX_BIN": "/bin/true"}
                 proof = subprocess.Popen([str(RUST_PEER), "connector"], env=env, stdout=subprocess.DEVNULL,
                                          stderr=subprocess.PIPE, text=True)
                 peers.append(proof)
