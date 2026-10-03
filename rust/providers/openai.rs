@@ -3,7 +3,9 @@ use async_openai::{
     config::OpenAIConfig,
     error::OpenAIError,
     middleware::{HttpRequestFactory, ReqwestService},
-    types::audio::{AudioInput, AudioResponseFormat, CreateTranscriptionRequest, TranscriptionInclude},
+    types::audio::{
+        AudioInput, AudioResponseFormat, CreateTranscriptionRequest, TranscriptionInclude,
+    },
     Client,
 };
 use rand::Rng;
@@ -84,10 +86,8 @@ impl OpenAiTranscriber {
             .create_raw(request)
             .await
             .map_err(map_openai_error)?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| {
-                ProviderError::new(ProviderErrorKind::MalformedResponse, None)
-            })?;
+        let value: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|_| ProviderError::new(ProviderErrorKind::MalformedResponse, None))?;
         let text = value
             .get("text")
             .and_then(serde_json::Value::as_str)
@@ -103,21 +103,12 @@ impl OpenAiTranscriber {
             .collect();
         let mean_logprob = (!probabilities.is_empty())
             .then(|| probabilities.iter().sum::<f64>() / probabilities.len() as f64);
-        Ok(Transcription {
-            text,
-            mean_logprob,
-        })
+        Ok(Transcription { text, mean_logprob })
     }
 }
 
 pub async fn verify_openai_key(api_key: &str) -> Result<(), ProviderError> {
-    let client = build_client(
-        api_key,
-        OPENAI_API_BASE,
-        VERIFY_TIMEOUT,
-        VERIFY_TIMEOUT,
-        0,
-    )?;
+    let client = build_client(api_key, OPENAI_API_BASE, VERIFY_TIMEOUT, VERIFY_TIMEOUT, 0)?;
     verify_client(&client).await?;
     Ok(())
 }
@@ -308,7 +299,11 @@ mod tests {
         "/tests/rust_t4/openai_models.json"
     ));
 
-    fn local_transcriber(server: &MockServer, timeout: Duration, retries: usize) -> OpenAiTranscriber {
+    fn local_transcriber(
+        server: &MockServer,
+        timeout: Duration,
+        retries: usize,
+    ) -> OpenAiTranscriber {
         OpenAiTranscriber {
             client: build_client(
                 "test-key",
@@ -336,15 +331,15 @@ mod tests {
     #[tokio::test]
     async fn sends_wav_and_python_options_through_async_openai_audio_sdk() {
         let server = MockServer::start().await;
-        reply_json(
-            &server,
-            "/v1/audio/transcriptions",
-            JSON_TRANSCRIPTION,
-        )
-        .await;
+        reply_json(&server, "/v1/audio/transcriptions", JSON_TRANSCRIPTION).await;
         let transcriber = local_transcriber(&server, Duration::from_secs(5), 0);
         let result = transcriber
-            .transcribe(b"RIFFWAVE-local-fixture", "gpt-4o-transcribe", Some("es"), Some("contexto"))
+            .transcribe(
+                b"RIFFWAVE-local-fixture",
+                "gpt-4o-transcribe",
+                Some("es"),
+                Some("contexto"),
+            )
             .await
             .unwrap();
         assert_eq!(result.text, "Hola mundo");
@@ -363,7 +358,10 @@ mod tests {
             "name=\"response_format\"\r\n\r\njson",
             "name=\"include[]\"\r\n\r\nlogprobs",
         ] {
-            assert!(multipart.contains(expected), "multipart did not contain {expected:?}");
+            assert!(
+                multipart.contains(expected),
+                "multipart did not contain {expected:?}"
+            );
         }
         assert!(!multipart.contains("Content-Type: audio/wav"));
     }
@@ -371,12 +369,7 @@ mod tests {
     #[tokio::test]
     async fn whisper_uses_verbose_json_without_logprobs_and_transcription_is_trimmed() {
         let server = MockServer::start().await;
-        reply_json(
-            &server,
-            "/v1/audio/transcriptions",
-            VERBOSE_TRANSCRIPTION,
-        )
-        .await;
+        reply_json(&server, "/v1/audio/transcriptions", VERBOSE_TRANSCRIPTION).await;
         let result = local_transcriber(&server, Duration::from_secs(5), 0)
             .transcribe(b"RIFFWAVE", "whisper-1", None, None)
             .await
@@ -423,12 +416,7 @@ mod tests {
             .up_to_n_times(1)
             .mount(&server)
             .await;
-        reply_json(
-            &server,
-            "/v1/audio/transcriptions",
-            JSON_TRANSCRIPTION,
-        )
-        .await;
+        reply_json(&server, "/v1/audio/transcriptions", JSON_TRANSCRIPTION).await;
         let result = local_transcriber(&server, Duration::from_secs(5), 2)
             .transcribe(b"RIFFWAVE", "gpt-4o-transcribe", None, None)
             .await

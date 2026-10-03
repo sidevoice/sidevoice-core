@@ -1,8 +1,8 @@
 //! Stateless cloud-provider SDK adapters and the bounded shared synthesis cache.
 
+pub mod cache;
 mod elevenlabs;
 mod openai;
-pub mod cache;
 
 pub use elevenlabs::{
     verify_elevenlabs_key, CloudSpeech, ElevenLabsCatalog, ElevenLabsModel, ElevenLabsTts,

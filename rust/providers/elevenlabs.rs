@@ -5,8 +5,7 @@ use elevenlabs_sdk::{
     error::ElevenLabsError,
     types::{
         CharacterAlignment, GetModelsResponse, GetVoicesResponse, GetVoicesV2Response, Model,
-        OutputFormat, StreamingAudioChunkWithTimestamps, TextToSpeechRequest, Voice,
-        VoiceSettings,
+        OutputFormat, StreamingAudioChunkWithTimestamps, TextToSpeechRequest, Voice, VoiceSettings,
     },
     ClientConfig, ElevenLabsClient,
 };
@@ -138,12 +137,7 @@ impl ElevenLabsTts {
             let mut stream = self
                 .client
                 .text_to_speech()
-                .convert_stream_with_timestamps(
-                    &encoded_voice,
-                    &request,
-                    Some(output_format),
-                    None,
-                )
+                .convert_stream_with_timestamps(&encoded_voice, &request, Some(output_format), None)
                 .await
                 .map_err(map_elevenlabs_error)?;
             // These are observations at the SDK stream boundary: method return after successful
@@ -157,9 +151,8 @@ impl ElevenLabsTts {
             let mut body = Vec::new();
             let mut first_chunk_recorded = false;
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| {
-                    ProviderError::new(ProviderErrorKind::Transport, None)
-                })?;
+                let chunk =
+                    chunk.map_err(|_| ProviderError::new(ProviderErrorKind::Transport, None))?;
                 if !chunk.is_empty() {
                     if !first_chunk_recorded {
                         first_chunk_recorded = true;
@@ -190,9 +183,8 @@ impl ElevenLabsTts {
             let mut audio = Vec::new();
             let mut first_chunk_recorded = false;
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| {
-                    ProviderError::new(ProviderErrorKind::Transport, None)
-                })?;
+                let chunk =
+                    chunk.map_err(|_| ProviderError::new(ProviderErrorKind::Transport, None))?;
                 if !chunk.is_empty() {
                     if !first_chunk_recorded {
                         first_chunk_recorded = true;
@@ -266,8 +258,8 @@ async fn load_models(client: &ElevenLabsClient) -> Result<Vec<ElevenLabsModel>, 
 }
 
 fn model_entry(model: Model) -> ElevenLabsModel {
-    let description = (!model.description.trim().is_empty())
-        .then(|| model.description.trim().to_owned());
+    let description =
+        (!model.description.trim().is_empty()).then(|| model.description.trim().to_owned());
     ElevenLabsModel {
         id: model.model_id.clone(),
         label: if model.name.is_empty() {
@@ -357,7 +349,11 @@ fn language_code(value: &str) -> Option<String> {
 
 fn fallback_models(language: &str) -> Vec<ElevenLabsModel> {
     [
-        ("eleven_flash_v2_5", "Eleven Flash v2.5", "catalog.elevenlabs.fast"),
+        (
+            "eleven_flash_v2_5",
+            "Eleven Flash v2.5",
+            "catalog.elevenlabs.fast",
+        ),
         (
             "eleven_multilingual_v2",
             "Eleven Multilingual v2",
@@ -380,11 +376,11 @@ fn decode_timestamp_stream(body: &[u8]) -> Result<(Vec<u8>, Option<Value>), Prov
     let mut characters = Vec::new();
     let mut starts = Vec::new();
     let mut ends = Vec::new();
-    let chunks = serde_json::Deserializer::from_slice(body)
-        .into_iter::<StreamingAudioChunkWithTimestamps>();
+    let chunks =
+        serde_json::Deserializer::from_slice(body).into_iter::<StreamingAudioChunkWithTimestamps>();
     for chunk in chunks {
-        let chunk = chunk
-            .map_err(|_| ProviderError::new(ProviderErrorKind::MalformedResponse, None))?;
+        let chunk =
+            chunk.map_err(|_| ProviderError::new(ProviderErrorKind::MalformedResponse, None))?;
         audio.extend(
             STANDARD
                 .decode(chunk.audio_base64)
@@ -417,9 +413,8 @@ fn append_alignment(
 }
 
 fn output_format_from_str(value: &str) -> Result<OutputFormat, ProviderError> {
-    serde_json::from_value(Value::String(value.to_owned())).map_err(|_| {
-        ProviderError::new(ProviderErrorKind::InvalidConfiguration, None)
-    })
+    serde_json::from_value(Value::String(value.to_owned()))
+        .map_err(|_| ProviderError::new(ProviderErrorKind::InvalidConfiguration, None))
 }
 
 fn mime_type(format: OutputFormat) -> String {
@@ -436,9 +431,7 @@ fn mime_type(format: OutputFormat) -> String {
 fn map_elevenlabs_error(error: ElevenLabsError) -> ProviderError {
     match error {
         ElevenLabsError::Api { status, .. } => ProviderError::from_status(status),
-        ElevenLabsError::Auth(_) => {
-            ProviderError::new(ProviderErrorKind::Unauthorized, Some(401))
-        }
+        ElevenLabsError::Auth(_) => ProviderError::new(ProviderErrorKind::Unauthorized, Some(401)),
         ElevenLabsError::RateLimited { .. } => {
             ProviderError::new(ProviderErrorKind::RateLimited, Some(429))
         }
@@ -461,7 +454,11 @@ mod tests {
     use crate::providers::ProviderErrorKind;
     use serde_json::Value;
     use std::{net::SocketAddr, time::Duration};
-    use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener, task::JoinHandle};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
     use wiremock::{
         matchers::{header, method, path, query_param},
         Mock, MockServer, ResponseTemplate,
@@ -566,7 +563,14 @@ mod tests {
             .mount(&server)
             .await;
         let result = local_tts(&server, Duration::from_secs(3))
-            .synthesize("Hi", "eleven_multilingual_v2", "voice123", 1.3, true, "mp3_44100_128")
+            .synthesize(
+                "Hi",
+                "eleven_multilingual_v2",
+                "voice123",
+                1.3,
+                true,
+                "mp3_44100_128",
+            )
             .await
             .unwrap();
         assert_audio(&result, &[1, 2, 3, 4]);
@@ -586,8 +590,12 @@ mod tests {
             assert!(result.timings_ms.contains_key(key), "missing timing {key}");
         }
         let headers = result.timings_ms["request_to_headers_ms"].as_f64().unwrap();
-        let first = result.timings_ms["request_to_first_chunk_ms"].as_f64().unwrap();
-        let complete = result.timings_ms["request_to_complete_ms"].as_f64().unwrap();
+        let first = result.timings_ms["request_to_first_chunk_ms"]
+            .as_f64()
+            .unwrap();
+        let complete = result.timings_ms["request_to_complete_ms"]
+            .as_f64()
+            .unwrap();
         assert!(headers <= first && first <= complete);
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
@@ -600,17 +608,24 @@ mod tests {
     #[tokio::test]
     async fn timestamp_first_chunk_measures_sdk_bytes_before_json_reassembly() {
         let (base_url, server) = split_timestamp_server().await;
-        let tts = ElevenLabsTts::with_config("test-key", &base_url, Duration::from_secs(3))
-            .unwrap();
+        let tts =
+            ElevenLabsTts::with_config("test-key", &base_url, Duration::from_secs(3)).unwrap();
         let speech = tts
-            .synthesize("Hi", "eleven_multilingual_v2", "voice123", 1.0, true, "mp3_44100_128")
+            .synthesize(
+                "Hi",
+                "eleven_multilingual_v2",
+                "voice123",
+                1.0,
+                true,
+                "mp3_44100_128",
+            )
             .await
             .unwrap();
         let request = server.await.unwrap();
         let request_headers = String::from_utf8_lossy(&request);
-        assert!(request_headers.starts_with(
-            "POST /v1/text-to-speech/voice123/stream/with-timestamps?"
-        ));
+        assert!(
+            request_headers.starts_with("POST /v1/text-to-speech/voice123/stream/with-timestamps?")
+        );
         assert_audio(&speech, &[1, 2, 3, 4]);
         assert_eq!(
             speech.alignment.as_ref().unwrap()["characters"],
@@ -638,15 +653,26 @@ mod tests {
             .mount(&server)
             .await;
         let result = local_tts(&server, Duration::from_secs(3))
-            .synthesize("Check", "eleven_flash_v2_5", "voice123", 0.4, false, "pcm_16000")
+            .synthesize(
+                "Check",
+                "eleven_flash_v2_5",
+                "voice123",
+                0.4,
+                false,
+                "pcm_16000",
+            )
             .await
             .unwrap();
         assert_eq!(result.audio, b"pcm-fixture");
         assert_eq!(result.mime_type, "audio/pcm");
         assert!(result.alignment.is_none());
         let headers = result.timings_ms["request_to_headers_ms"].as_f64().unwrap();
-        let first = result.timings_ms["request_to_first_chunk_ms"].as_f64().unwrap();
-        let complete = result.timings_ms["request_to_complete_ms"].as_f64().unwrap();
+        let first = result.timings_ms["request_to_first_chunk_ms"]
+            .as_f64()
+            .unwrap();
+        let complete = result.timings_ms["request_to_complete_ms"]
+            .as_f64()
+            .unwrap();
         assert!(headers <= first && first <= complete);
         let request = &server.received_requests().await.unwrap()[0];
         let body: Value = request.body_json().unwrap();
@@ -671,11 +697,16 @@ mod tests {
             .mount(&server)
             .await;
 
-        let catalog = local_tts(&server, Duration::from_secs(3)).catalog("en").await;
+        let catalog = local_tts(&server, Duration::from_secs(3))
+            .catalog("en")
+            .await;
         assert_eq!(catalog.error, None);
         assert_eq!(catalog.models.len(), 1);
         assert_eq!(catalog.models[0].id, "eleven_multilingual_v2");
-        assert_eq!(catalog.models[0].description.as_deref(), Some("Multilingual model."));
+        assert_eq!(
+            catalog.models[0].description.as_deref(),
+            Some("Multilingual model.")
+        );
         assert_eq!(catalog.voices.len(), 2);
         assert_eq!(catalog.voices[0].languages, ["es"]);
         assert_eq!(catalog.voices[1].languages, ["en", "es"]);
@@ -703,13 +734,17 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(LEGACY_VOICES))
             .mount(&server)
             .await;
-        let catalog = local_tts(&server, Duration::from_secs(3)).catalog("es").await;
+        let catalog = local_tts(&server, Duration::from_secs(3))
+            .catalog("es")
+            .await;
         assert_eq!(catalog.error, None);
         assert_eq!(catalog.voices.len(), 1);
         assert_eq!(catalog.voices[0].id, "legacy-voice");
         assert_eq!(catalog.voices[0].languages, ["en"]);
         let requests = server.received_requests().await.unwrap();
-        assert!(requests.iter().any(|request| request.url.path() == "/v1/voices"));
+        assert!(requests
+            .iter()
+            .any(|request| request.url.path() == "/v1/voices"));
     }
 
     #[tokio::test]
@@ -728,9 +763,14 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests.iter().all(|request| request.method == "GET"));
         assert!(requests.iter().all(|request| {
-            request.headers.get("xi-api-key").is_some_and(|value| value == "test-key")
+            request
+                .headers
+                .get("xi-api-key")
+                .is_some_and(|value| value == "test-key")
         }));
-        assert!(requests.iter().all(|request| !request.url.path().contains("text-to-speech")));
+        assert!(requests
+            .iter()
+            .all(|request| !request.url.path().contains("text-to-speech")));
     }
 
     #[tokio::test]
@@ -746,10 +786,15 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
             .mount(&server)
             .await;
-        let catalog = local_tts(&server, Duration::from_secs(3)).catalog("es-MX").await;
+        let catalog = local_tts(&server, Duration::from_secs(3))
+            .catalog("es-MX")
+            .await;
         assert_eq!(catalog.models.len(), 3);
         assert_eq!(catalog.models[0].description.as_deref(), Some("Rápido"));
-        assert_eq!(catalog.error.as_ref().unwrap().kind, ProviderErrorKind::RateLimited);
+        assert_eq!(
+            catalog.error.as_ref().unwrap().kind,
+            ProviderErrorKind::RateLimited
+        );
         assert_eq!(catalog.error.as_ref().unwrap().status, Some(429));
         assert!(catalog.voices.is_empty());
     }
@@ -843,7 +888,9 @@ mod tests {
             ))
             .mount(&server)
             .await;
-        let catalog = local_tts(&server, Duration::from_secs(3)).catalog("en").await;
+        let catalog = local_tts(&server, Duration::from_secs(3))
+            .catalog("en")
+            .await;
         assert!(catalog.error.is_none());
         let voice_requests = server
             .received_requests()

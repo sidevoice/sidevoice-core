@@ -97,7 +97,10 @@ impl SynthesisCache {
             serde_json::to_string(text).expect("serializing a string cannot fail"),
         );
         let digest = Sha256::digest(material.as_bytes());
-        digest[..16].iter().map(|byte| format!("{byte:02x}")).collect()
+        digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     /// Returns a cached value and marks it most-recently-used, without changing reuse counters.
@@ -107,7 +110,10 @@ impl SynthesisCache {
             .state
             .lock()
             .expect("synthesis cache mutex poisoned");
-        let speech = state.entries.get(key).map(|entry| Arc::clone(&entry.speech));
+        let speech = state
+            .entries
+            .get(key)
+            .map(|entry| Arc::clone(&entry.speech));
         if speech.is_some() {
             touch(&mut state.lru, key);
         }
@@ -135,7 +141,11 @@ impl SynthesisCache {
                 .state
                 .lock()
                 .expect("synthesis cache mutex poisoned");
-            if let Some(speech) = state.entries.get(&key).map(|entry| Arc::clone(&entry.speech)) {
+            if let Some(speech) = state
+                .entries
+                .get(&key)
+                .map(|entry| Arc::clone(&entry.speech))
+            {
                 touch(&mut state.lru, &key);
                 state.reuses += 1;
                 return Ok(CachedSpeech {
@@ -248,9 +258,7 @@ fn remove_lru(lru: &mut VecDeque<String>, key: &str) {
 #[cfg(test)]
 mod tests {
     use super::{CachedSpeech, SynthesisCache, SynthesisChoice};
-    use crate::providers::{
-        CloudSpeech, ProviderError, ProviderErrorKind,
-    };
+    use crate::providers::{CloudSpeech, ProviderError, ProviderErrorKind};
     use serde_json::{Map, Value};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -312,7 +320,9 @@ mod tests {
 
         let (first, second) = tokio::join!(
             cache.obtain(choice("voice-a", 1.0), "hola", render),
-            cache.obtain(choice("voice-a", 1.0), "hola", || async { Ok(speech(9, 4)) }),
+            cache.obtain(choice("voice-a", 1.0), "hola", || async {
+                Ok(speech(9, 4))
+            }),
         );
         let first = first.unwrap();
         let second = second.unwrap();
@@ -342,7 +352,9 @@ mod tests {
         let second_cache = Arc::clone(&cache);
         let second = tokio::spawn(async move {
             second_cache
-                .obtain(choice("voice-a", 1.0), "hola", || async { Ok(speech(8, 4)) })
+                .obtain(choice("voice-a", 1.0), "hola", || async {
+                    Ok(speech(8, 4))
+                })
                 .await
         });
         while cache.stats().reuses == 0 {
@@ -371,7 +383,9 @@ mod tests {
         let read = cache.read(&key_one).unwrap();
         assert!(Arc::ptr_eq(&read, &first.speech));
         let _ = cache
-            .obtain(choice("voice-a", 1.0), "three", || async { Ok(speech(3, 4)) })
+            .obtain(choice("voice-a", 1.0), "three", || async {
+                Ok(speech(3, 4))
+            })
             .await
             .unwrap();
         assert!(cache.read(&key_one).is_some());
@@ -383,11 +397,15 @@ mod tests {
 
         let byte_limited = SynthesisCache::with_limits(8, 9);
         let _ = byte_limited
-            .obtain(choice("voice-a", 1.0), "four", || async { Ok(speech(1, 4)) })
+            .obtain(choice("voice-a", 1.0), "four", || async {
+                Ok(speech(1, 4))
+            })
             .await
             .unwrap();
         let _ = byte_limited
-            .obtain(choice("voice-a", 1.0), "five", || async { Ok(speech(2, 1)) })
+            .obtain(choice("voice-a", 1.0), "five", || async {
+                Ok(speech(2, 1))
+            })
             .await
             .unwrap();
         assert_eq!(byte_limited.stats().items, 1);
@@ -400,9 +418,11 @@ mod tests {
         let error = ProviderError::new(ProviderErrorKind::RateLimited, Some(429));
         assert_eq!(
             cache
-                .obtain(choice("voice-a", 1.0), "hola", move || async move {
-                    Err(error)
-                })
+                .obtain(
+                    choice("voice-a", 1.0),
+                    "hola",
+                    move || async move { Err(error) }
+                )
                 .await
                 .unwrap_err()
                 .kind,
@@ -411,7 +431,9 @@ mod tests {
         assert_eq!(cache.stats().items, 0);
         assert_eq!(cache.stats().renders, 0);
         let _ = cache
-            .obtain(choice("voice-a", 1.0), "hola", || async { Ok(speech(1, 1)) })
+            .obtain(choice("voice-a", 1.0), "hola", || async {
+                Ok(speech(1, 1))
+            })
             .await
             .unwrap();
         assert_eq!(cache.stats().renders, 1);
