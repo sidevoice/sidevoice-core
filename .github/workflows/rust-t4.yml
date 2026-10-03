@@ -34,6 +34,8 @@ jobs:
       - name: Execute SDK fixture tests without external network
         run: |
           set -euo pipefail
+          ssl_cert_file=/etc/ssl/certs/ca-certificates.crt
+          test -s "$ssl_cert_file"
           found=0
           for test_binary in target/debug/deps/sidevoice_core-*; do
             if [[ ! -x "$test_binary" ]]; then
@@ -42,6 +44,8 @@ jobs:
             found=1
             test_binary_rel="${test_binary#"$GITHUB_WORKSPACE"/}"
             docker run --rm --network none --read-only --tmpfs /tmp \
+              -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+              -v "$ssl_cert_file:/etc/ssl/certs/ca-certificates.crt:ro" \
               -v "$GITHUB_WORKSPACE:/workspace:ro" \
               -w /workspace \
               ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe3488d921d038ccd752c61b60 \

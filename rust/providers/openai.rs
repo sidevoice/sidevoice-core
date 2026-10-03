@@ -136,8 +136,6 @@ fn build_client(
         .connect_timeout(connect_timeout)
         .build()
         .map_err(|error| {
-            #[cfg(test)]
-            log_client_build_error(&error);
             ProviderError::new(
                 if error.is_timeout() {
                     ProviderErrorKind::Timeout
@@ -160,18 +158,6 @@ fn build_client(
     Ok(Client::with_config(config)
         .with_http_client(http)
         .with_http_service(service))
-}
-
-#[cfg(test)]
-fn log_client_build_error(error: &reqwest::Error) {
-    use std::error::Error as _;
-
-    eprintln!("reqwest client build failed: {error:?}");
-    let mut source = error.source();
-    while let Some(cause) = source {
-        eprintln!("reqwest client build cause: {cause:?}");
-        source = cause.source();
-    }
 }
 
 fn map_openai_error(error: OpenAIError) -> ProviderError {
