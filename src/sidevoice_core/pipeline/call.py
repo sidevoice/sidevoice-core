@@ -209,6 +209,10 @@ class VoiceCall:
         one answers. A catch-up is audio from before this session existed; it is
         recognised on its own and never reaches this pipeline's detector.
         """
+        if getattr(self.call, 'echo_mode', False):
+            if isinstance(message, dict) and message.get('type') == 'echo.speech-result':
+                self.call.receive_speech_result(message.get('data'))
+            return
         if not isinstance(message, dict) or message.get('type') not in {
                 'voice-stt-ready', 'voice-settings', 'voice-audio-health', 'voice-catchup', 'voice-turn-trace',
                 'voice-client-error'}:
@@ -356,11 +360,12 @@ class VoiceCall:
         call = self.call
         call.user_started()
         call.input_stats['pending'] = 1
-        # The transport already tells the browser about speaking state; this names the turn.
-        self.send({'type': 'voice-user-turn', 'data': {
-            'phase': 'started', 'revision': call.turn_revision,
-            'thread_id': call.turn_target.get('thread_id'),
-        }})
+        if not getattr(call, 'echo_mode', False):
+            # The transport already tells the browser about speaking state; this names the turn.
+            self.send({'type': 'voice-user-turn', 'data': {
+                'phase': 'started', 'revision': call.turn_revision,
+                'thread_id': call.turn_target.get('thread_id'),
+            }})
 
     def turn_stopped(self):
         task = asyncio.create_task(self.finish_turn(self.call.turn_revision, dict(self.call.turn_target), time.monotonic()))
@@ -399,10 +404,12 @@ class VoiceCall:
                 if result is not None:
                     text, metrics = result.text.strip(), dict(result.metrics or {})
             except asyncio.TimeoutError:
-                failed = ('This browser\'s transcription did not answer. If the device cannot run Whisper, '
+                failed = ('echo.transcription-failed' if getattr(call, 'echo_mode', False) else
+                          'This browser\'s transcription did not answer. If the device cannot run Whisper, '
                           'switch the transcription engine to OpenAI in the settings.')
             except Exception as error:
-                failed = 'Could not transcribe your turn: ' + (str(error) or type(error).__name__)
+                failed = ('echo.transcription-failed' if getattr(call, 'echo_mode', False) else
+                          'Could not transcribe your turn: ' + (str(error) or type(error).__name__))
             transcript_at = time.monotonic()
             if text or metrics:
                 # Server-side stages of this turn, on one clock: what the browser measured stays as it came.
@@ -446,14 +453,16 @@ class VoiceCall:
                 # The user started speaking again before this text was delivered: a breath, not a
                 # new message. Hold it for the turn now open instead of sending half a sentence.
                 self.held = text
-                self.send({'type': 'voice-user-turn', 'data': {
-                    'phase': 'cancelled', 'revision': revision, 'thread_id': target.get('thread_id'),
-                    'text': text, 'merged': True}})
+                if not getattr(call, 'echo_mode', False):
+                    self.send({'type': 'voice-user-turn', 'data': {
+                        'phase': 'cancelled', 'revision': revision, 'thread_id': target.get('thread_id'),
+                        'text': text, 'merged': True}})
                 return
-            self.send({'type': 'voice-user-turn', 'data': {
-                'phase': 'cancelled' if cancelled else 'finished', 'revision': revision,
-                'thread_id': target.get('thread_id'), 'text': text,
-            }})
+            if not getattr(call, 'echo_mode', False):
+                self.send({'type': 'voice-user-turn', 'data': {
+                    'phase': 'cancelled' if cancelled else 'finished', 'revision': revision,
+                    'thread_id': target.get('thread_id'), 'text': text,
+                }})
             # The browser must create the final bubble before its receipt arrives.
             if not cancelled:
                 call.enqueue_input(text, target=target, revision=revision)
@@ -467,7 +476,11 @@ class VoiceCall:
                                              delivered=delivered_at, metrics=metrics)
             if failed:
                 call.error = failed
-                self.send({'type': 'error', 'data': {'message': failed}})
+                if getattr(call, 'echo_mode', False):
+                    call.report_error(failed, stage='transcription', provider=call.transcription.get('place'),
+                                      model=call.transcription.get('model'))
+                else:
+                    self.send({'type': 'error', 'data': {'message': failed}})
             if current and not closing:
                 call.input_stats['pending'] = 0
                 await call.finish_user_turn()

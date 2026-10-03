@@ -1,0 +1,14 @@
+{
+  "echo.prefix": "Te he oído: {text}",
+  "echo.unsupported-test": "Esta prueba de llamada no es compatible.",
+  "echo.stage-unavailable": "Un paso necesario no está disponible con esta configuración.",
+  "echo.settings-invalid": "Algunos ajustes de la prueba no eran válidos. Se usan los valores predeterminados.",
+  "echo.transcription-runtime-invalid": "El runtime de transcripción seleccionado no está disponible para esta prueba.",
+  "echo.transcription-failed": "Ha fallado el paso de transcripción durante la prueba.",
+  "echo.voice-unavailable": "No hay una voz disponible para la prueba.",
+  "echo.voice-failed": "Ha fallado el paso de voz durante la prueba.",
+  "echo.voice-timeout": "La salida de voz no terminó durante la prueba.",
+  "echo.microphone-unavailable": "No se recibió audio del micrófono para la prueba.",
+  "echo.silence-timeout": "No se reconoció voz durante la prueba.",
+  "echo.deadline": "La prueba llegó al límite de {seconds} segundos."
+}

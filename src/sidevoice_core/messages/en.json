@@ -1,0 +1,14 @@
+{
+  "echo.prefix": "I heard: {text}",
+  "echo.unsupported-test": "This call test is not supported.",
+  "echo.stage-unavailable": "A required stage is not available with these settings.",
+  "echo.settings-invalid": "Some echo test settings were invalid. Defaults are in use.",
+  "echo.transcription-runtime-invalid": "The selected transcription runtime is not available for this echo test.",
+  "echo.transcription-failed": "The transcription stage failed during the echo test.",
+  "echo.voice-unavailable": "No voice is available for the echo test.",
+  "echo.voice-failed": "The voice stage failed during the echo test.",
+  "echo.voice-timeout": "The voice output did not finish during the echo test.",
+  "echo.microphone-unavailable": "No microphone audio reached the echo test.",
+  "echo.silence-timeout": "No speech was recognized during the echo test.",
+  "echo.deadline": "The echo test reached its {seconds}-second time limit."
+}

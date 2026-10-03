@@ -38,7 +38,7 @@ sidevoice-core = "sidevoice_core.server.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-sidevoice_core = ["pipeline/catalog.json", "models/catalog.json", "models/vectors.json", "models/checks/*"]
+sidevoice_core = ["pipeline/catalog.json", "models/catalog.json", "models/vectors.json", "models/checks/*", "messages/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

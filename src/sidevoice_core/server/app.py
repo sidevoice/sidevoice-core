@@ -82,11 +82,29 @@ async def browser_call(room, websocket, config=None):
         # page blames the room for it (2026-09-22).
         logger.info('A browser opened a socket and left before its first message')
         return
+    echo = False
+    if 'test' in hello:
+        if hello.get('test') != 'echo':
+            from ..i18n import keyed_message
+            await refuse_hello(websocket, keyed_message('echo.unsupported-test'))
+            return
+        echo = True
     settings, problem = settings_from(hello.get('settings'))
     refusal = unavailable(settings, config)
     if refusal:
         logger.info('A browser was refused: {}', refusal['key'])
-        await refuse_hello(websocket, refusal)
+        if echo:
+            from ..i18n import keyed_message
+            provider = refusal.get('provider')
+            if refusal.get('key') == 'place_host_unavailable':
+                stage = 'transcription' if settings.stt.place == 'host' else 'voice'
+            else:
+                stage = 'transcription' if provider == settings.stt.place else 'voice'
+            await refuse_hello(websocket, keyed_message('echo.stage-unavailable', settings.ui_language,
+                                                        stage=stage, reason=refusal['key'],
+                                                        provider=provider or 'host'))
+        else:
+            await refuse_hello(websocket, refusal)
         return
     choice = transcription.resolve(settings, config)
     serializer = BrowserFrameSerializer()
@@ -97,8 +115,12 @@ async def browser_call(room, websocket, config=None):
         await websocket.send_text(json.dumps({'type': 'error', 'data': {'message': message}}))
         await websocket.close(code=1013)  # Try again later.
 
+    async def close_echo_socket():
+        await websocket.close(code=1000)
+
     await run_call(room, transport, serializer, settings=settings, config=config, choice=choice,
-                   hello=hello, refuse=refuse, settings_problem=problem)
+                   hello=hello, refuse=refuse, settings_problem=problem, echo=echo,
+                   close_socket=close_echo_socket if echo else None)
 
 
 def mount_browser_call(app, room, config=None):
