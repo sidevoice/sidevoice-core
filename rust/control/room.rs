@@ -1,8 +1,8 @@
 //! One owner for connector credentials, bindings and process-local conversation state.
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
-use crate::storage::PrivateDir;
 use super::telemetry::Telemetry;
+use crate::storage::PrivateDir;
 
 const MAX_HISTORY: usize = 2000;
 const MAX_UTTERANCES: usize = 2048;
@@ -1005,10 +1005,14 @@ impl Room {
             _ => None,
         };
         if let (Some(stage), Some(telemetry)) = (stage, inner.telemetry.as_ref()) {
-            telemetry.try_observe(stage, milliseconds, &json!({
-                "sidevoice.session_id": sid, "sidevoice.thread_id": thread,
-                "sidevoice.turn_revision": revision, "sidevoice.utterance_id": uid,
-            }));
+            telemetry.try_observe(
+                stage,
+                milliseconds,
+                &json!({
+                    "sidevoice.session_id": sid, "sidevoice.thread_id": thread,
+                    "sidevoice.turn_revision": revision, "sidevoice.utterance_id": uid,
+                }),
+            );
         }
     }
     /// Clone only the authenticated call's bounded records for T6's borrowed snapshot API.
@@ -2136,27 +2140,39 @@ fn mark_latency(
     let stages: &[(&str, LatencyEvent, bool)] = match event {
         LatencyEvent::TurnClosed => &[("endpoint_silence", LatencyEvent::SpeechEnd, false)],
         LatencyEvent::Transcript => &[("recognition", LatencyEvent::TurnClosed, false)],
-        LatencyEvent::TranscriptDelivered => &[("transcript_to_delivery", LatencyEvent::Transcript, false)],
+        LatencyEvent::TranscriptDelivered => {
+            &[("transcript_to_delivery", LatencyEvent::Transcript, false)]
+        }
         LatencyEvent::Read => &[("delivery_to_read", LatencyEvent::DeliveryAccepted, false)],
         LatencyEvent::ReplyReceived => &[
             ("read_to_reply", LatencyEvent::Read, false),
             ("input_queued_to_reply", LatencyEvent::Queued, false),
         ],
-        LatencyEvent::SynthesisStarted => &[("reply_to_synthesis", LatencyEvent::ReplyReceived, true)],
+        LatencyEvent::SynthesisStarted => {
+            &[("reply_to_synthesis", LatencyEvent::ReplyReceived, true)]
+        }
         _ => &[],
     };
-    if let (Some(telemetry), Some(marks)) = (inner.telemetry.as_ref(), inner.latency_marks.get(sid)) {
+    if let (Some(telemetry), Some(marks)) = (inner.telemetry.as_ref(), inner.latency_marks.get(sid))
+    {
         for &(stage, start_event, same_uid) in stages {
             let started = marks.iter().rev().find(|mark| {
-                mark.thread_id == thread && mark.revision == revision
+                mark.thread_id == thread
+                    && mark.revision == revision
                     && mark.event == start_event
                     && mark.utterance_id.as_deref() == if same_uid { uid } else { None }
             });
-            if let Some(milliseconds) = started.and_then(|mark| at_micros.checked_sub(mark.at_micros)) {
-                telemetry.try_observe(stage, milliseconds as f64 / 1000.0, &json!({
-                    "sidevoice.session_id": sid, "sidevoice.thread_id": thread,
-                    "sidevoice.turn_revision": revision, "sidevoice.utterance_id": uid,
-                }));
+            if let Some(milliseconds) =
+                started.and_then(|mark| at_micros.checked_sub(mark.at_micros))
+            {
+                telemetry.try_observe(
+                    stage,
+                    milliseconds as f64 / 1000.0,
+                    &json!({
+                        "sidevoice.session_id": sid, "sidevoice.thread_id": thread,
+                        "sidevoice.turn_revision": revision, "sidevoice.utterance_id": uid,
+                    }),
+                );
             }
         }
     }

@@ -31,8 +31,8 @@ use crate::storage::PrivateDir;
 mod connectors_v2;
 mod connectors_v3;
 mod media;
-mod rtc;
 pub mod rendezvous;
+mod rtc;
 
 pub struct AppState {
     pub dir: PrivateDir,
@@ -494,33 +494,91 @@ async fn presentation_latency(
     let Some((language, marks, replies)) = state.room.latency_records(&sid, &device) else {
         return failure("room.browser_absent", StatusCode::NOT_FOUND, &headers);
     };
-    let input: Vec<Vec<latency::Duration<'_>>> = replies.iter().map(|reply| reply.input_ms.iter().map(|item| latency::Duration { name: &item.name, milliseconds: item.milliseconds }).collect()).collect();
-    let provider: Vec<Vec<latency::Duration<'_>>> = replies.iter().map(|reply| reply.provider_ms.iter().map(|item| latency::Duration { name: &item.name, milliseconds: item.milliseconds }).collect()).collect();
-    let browser: Vec<Vec<latency::Duration<'_>>> = replies.iter().map(|reply| reply.browser_ms.iter().map(|item| latency::Duration { name: &item.name, milliseconds: item.milliseconds }).collect()).collect();
-    let borrowed: Vec<_> = replies.iter().enumerate().map(|(index, reply)| latency::Reply {
-        session_id: &reply.session_id, thread_id: &reply.thread_id, revision: reply.revision,
-        utterance_id: &reply.utterance_id, status: &reply.status,
-        synthesis_attempt: reply.synthesis_attempt, input_ms: &input[index],
-        provider_ms: &provider[index], browser_ms: &browser[index],
-    }).collect();
-    let borrowed_marks: Vec<_> = marks.iter().map(|mark| latency::Mark {
-        session_id: &mark.session_id, thread_id: &mark.thread_id, revision: mark.revision,
-        utterance_id: mark.utterance_id.as_deref(), event: match mark.event {
-            room::LatencyEvent::SpeechEnd => latency::Event::SpeechEnd,
-            room::LatencyEvent::TurnClosed => latency::Event::TurnClosed,
-            room::LatencyEvent::Transcript => latency::Event::Transcript,
-            room::LatencyEvent::TranscriptDelivered => latency::Event::TranscriptDelivered,
-            room::LatencyEvent::Queued => latency::Event::Queued,
-            room::LatencyEvent::DeliveryAccepted => latency::Event::DeliveryAccepted,
-            room::LatencyEvent::Read => latency::Event::Read,
-            room::LatencyEvent::ReplyReceived => latency::Event::ReplyReceived,
-            room::LatencyEvent::SynthesisStarted => latency::Event::SynthesisStarted,
-            room::LatencyEvent::AudioReady => latency::Event::AudioReady,
-            room::LatencyEvent::AudioDispatched => latency::Event::AudioDispatched,
-            room::LatencyEvent::PlayingReceipt => latency::Event::PlayingReceipt,
-        }, at_micros: mark.at_micros,
-    }).collect();
-    Json(latency::snapshot(&sid, &language, &borrowed_marks, &borrowed)).into_response()
+    let input: Vec<Vec<latency::Duration<'_>>> = replies
+        .iter()
+        .map(|reply| {
+            reply
+                .input_ms
+                .iter()
+                .map(|item| latency::Duration {
+                    name: &item.name,
+                    milliseconds: item.milliseconds,
+                })
+                .collect()
+        })
+        .collect();
+    let provider: Vec<Vec<latency::Duration<'_>>> = replies
+        .iter()
+        .map(|reply| {
+            reply
+                .provider_ms
+                .iter()
+                .map(|item| latency::Duration {
+                    name: &item.name,
+                    milliseconds: item.milliseconds,
+                })
+                .collect()
+        })
+        .collect();
+    let browser: Vec<Vec<latency::Duration<'_>>> = replies
+        .iter()
+        .map(|reply| {
+            reply
+                .browser_ms
+                .iter()
+                .map(|item| latency::Duration {
+                    name: &item.name,
+                    milliseconds: item.milliseconds,
+                })
+                .collect()
+        })
+        .collect();
+    let borrowed: Vec<_> = replies
+        .iter()
+        .enumerate()
+        .map(|(index, reply)| latency::Reply {
+            session_id: &reply.session_id,
+            thread_id: &reply.thread_id,
+            revision: reply.revision,
+            utterance_id: &reply.utterance_id,
+            status: &reply.status,
+            synthesis_attempt: reply.synthesis_attempt,
+            input_ms: &input[index],
+            provider_ms: &provider[index],
+            browser_ms: &browser[index],
+        })
+        .collect();
+    let borrowed_marks: Vec<_> = marks
+        .iter()
+        .map(|mark| latency::Mark {
+            session_id: &mark.session_id,
+            thread_id: &mark.thread_id,
+            revision: mark.revision,
+            utterance_id: mark.utterance_id.as_deref(),
+            event: match mark.event {
+                room::LatencyEvent::SpeechEnd => latency::Event::SpeechEnd,
+                room::LatencyEvent::TurnClosed => latency::Event::TurnClosed,
+                room::LatencyEvent::Transcript => latency::Event::Transcript,
+                room::LatencyEvent::TranscriptDelivered => latency::Event::TranscriptDelivered,
+                room::LatencyEvent::Queued => latency::Event::Queued,
+                room::LatencyEvent::DeliveryAccepted => latency::Event::DeliveryAccepted,
+                room::LatencyEvent::Read => latency::Event::Read,
+                room::LatencyEvent::ReplyReceived => latency::Event::ReplyReceived,
+                room::LatencyEvent::SynthesisStarted => latency::Event::SynthesisStarted,
+                room::LatencyEvent::AudioReady => latency::Event::AudioReady,
+                room::LatencyEvent::AudioDispatched => latency::Event::AudioDispatched,
+                room::LatencyEvent::PlayingReceipt => latency::Event::PlayingReceipt,
+            },
+            at_micros: mark.at_micros,
+        })
+        .collect();
+    Json(latency::snapshot(
+        &sid,
+        &language,
+        &borrowed_marks,
+        &borrowed,
+    ))
+    .into_response()
 }
 async fn presentation_admission(
     State(state): State<Arc<AppState>>,

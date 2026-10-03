@@ -24,18 +24,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libopus-dev pkg-config
           python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
-      - name: Bootstrap combined lock and formatting on hosted runner
-        run: |
-          cargo metadata --format-version 1 >/dev/null
-          cargo fmt --all
-          git diff --binary > /tmp/composition.patch
-          test -s /tmp/composition.patch
-      - name: Upload generated composition patch
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: composition-generated-patch
-          path: /tmp/composition.patch
-          if-no-files-found: error
       - name: Check Rust and build Core
         run: |
           set -euo pipefail
