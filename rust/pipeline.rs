@@ -1,6 +1,13 @@
 //! Rustvani's detector stays behind this application boundary.
 
-use std::{collections::HashSet, path::Path, sync::{atomic::{AtomicU64, Ordering}, Arc}};
+use std::{
+    collections::HashSet,
+    path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use rustvani::frames::{AudioRawData, Frame, FrameDirection, FrameInner, FrameKind, SystemFrame};
 use rustvani::pipeline::{PipelineParams, PipelineTask};
@@ -30,6 +37,8 @@ struct DetectorRun {
     task: Arc<PipelineTask>,
     worker: tokio::task::JoinHandle<()>,
     playing: bool,
+    #[cfg(test)]
+    min_volume: f32,
 }
 
 impl CallDetector {
@@ -37,21 +46,39 @@ impl CallDetector {
         let (tx, rx) = mpsc::channel(128);
         let generation = Arc::new(AtomicU64::new(0));
         let active = Self::run(settings, false, tx.clone(), generation.clone(), 0)?;
-        Ok((Self { active: Mutex::new(active), settings: settings.clone(), generation, tx }, rx))
+        Ok((
+            Self {
+                active: Mutex::new(active),
+                settings: settings.clone(),
+                generation,
+                tx,
+            },
+            rx,
+        ))
     }
 
-    fn run(settings: &CallSettings, playing: bool, tx: mpsc::Sender<CallFrame>,
-        generation: Arc<AtomicU64>, current: u64) -> Result<DetectorRun, String> {
+    fn run(
+        settings: &CallSettings,
+        playing: bool,
+        tx: mpsc::Sender<CallFrame>,
+        generation: Arc<AtomicU64>,
+        current: u64,
+    ) -> Result<DetectorRun, String> {
         let stop_secs = if settings.turn_end_mode == "smart_turn" {
             settings.smart_turn_min_silence
         } else {
             settings.user_speech_timeout
         };
+        let min_volume = if playing {
+            settings.vad_min_volume.max(0.8)
+        } else {
+            settings.vad_min_volume
+        };
         let vad = VadProcessor::new(
             16_000,
             VadParams {
                 confidence: settings.vad_confidence,
-                min_volume: if playing { settings.vad_min_volume.max(0.8) } else { settings.vad_min_volume },
+                min_volume,
                 start_secs: settings.vad_start_secs,
                 stop_secs,
             },
@@ -81,7 +108,9 @@ impl CallDetector {
             let tx = tx.clone();
             let generation = generation.clone();
             Box::pin(async move {
-                if generation.load(Ordering::Acquire) != current { return; }
+                if generation.load(Ordering::Acquire) != current {
+                    return;
+                }
                 let event = match frame.inner {
                     FrameInner::System(SystemFrame::InputAudioRaw(data)) => {
                         Some(CallFrame::Audio(data.audio.to_vec()))
@@ -103,17 +132,26 @@ impl CallDetector {
         let worker = tokio::spawn(async move {
             let _ = runner.run(rustvani::system_clock(), None).await;
         });
-        Ok(DetectorRun { task, worker, playing })
+        Ok(DetectorRun { task, worker, playing, #[cfg(test)] min_volume })
     }
 
     /// Rustvani currently takes VadParams at construction. Swap its configured
     /// detector at a playback boundary; the input source remains live throughout.
     pub async fn listening_bar(&self, playing: bool) {
         let mut active = self.active.lock().await;
-        if active.playing == playing { return; }
+        if active.playing == playing {
+            return;
+        }
         let next_generation = self.generation.load(Ordering::Acquire) + 1;
-        let Ok(next) = Self::run(&self.settings, playing, self.tx.clone(),
-            self.generation.clone(), next_generation) else { return; };
+        let Ok(next) = Self::run(
+            &self.settings,
+            playing,
+            self.tx.clone(),
+            self.generation.clone(),
+            next_generation,
+        ) else {
+            return;
+        };
         self.generation.store(next_generation, Ordering::Release);
         let old = std::mem::replace(&mut *active, next);
         old.worker.abort();
@@ -123,7 +161,10 @@ impl CallDetector {
         if pcm.len() < 2 || !pcm.len().is_multiple_of(2) {
             return Err("invalid_pcm".to_owned());
         }
-        self.active.lock().await.task
+        self.active
+            .lock()
+            .await
+            .task
             .push_frame(
                 Frame::input_audio_raw(AudioRawData::new(pcm, 16_000, 1)),
                 FrameDirection::Downstream,
@@ -131,7 +172,6 @@ impl CallDetector {
             .await
             .map_err(|error| error.to_string())
     }
-
 }
 
 impl Drop for CallDetector {
@@ -236,4 +276,26 @@ pub async fn has_speech(pcm: &[u8]) -> Result<bool, String> {
         }
     }
     Ok(speech_frames >= 3 && peak >= 0.9)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn playback_bar_uses_rustvani_threshold_and_restores_settings() {
+        let mut settings = crate::models::default_settings(None, None);
+        settings.turn_end_mode = "timer".into();
+        let (detector, _events) = CallDetector::start(&settings).unwrap();
+        assert_eq!(detector.active.lock().await.min_volume, settings.vad_min_volume);
+        detector.listening_bar(true).await;
+        let active = detector.active.lock().await;
+        assert!(active.playing);
+        assert_eq!(active.min_volume, 0.8);
+        drop(active);
+        detector.listening_bar(false).await;
+        let active = detector.active.lock().await;
+        assert!(!active.playing);
+        assert_eq!(active.min_volume, settings.vad_min_volume);
+    }
 }

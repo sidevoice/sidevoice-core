@@ -632,7 +632,9 @@ async fn presentation_receipt(
             let uid = data["utterance_id"].as_str().unwrap_or("");
             let status = data["status"].as_str().unwrap_or("");
             let media = state.media.lock().expect("media lock").get(sid).cloned();
-            if let Some(media) = media { media.admitted_receipt(uid, status).await; }
+            if let Some(media) = media {
+                media.admitted_receipt(uid, status).await;
+            }
             state.room.latency_browser(
                 data["session_id"].as_str().unwrap_or(""),
                 data["utterance_id"].as_str().unwrap_or(""),

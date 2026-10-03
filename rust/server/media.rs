@@ -35,13 +35,20 @@ const CATCHUP_SLICE_BYTES: usize = 128 * 1024;
 const CATCHUP_MAX_SECONDS: usize = 35;
 
 #[derive(Debug)]
-pub enum SttFailure { Timeout, Device, Provider }
+pub enum SttFailure {
+    Timeout,
+    Device,
+    Provider,
+}
 type Recognition = Result<Option<String>, SttFailure>;
 
 fn device_timeout() -> Duration {
     #[cfg(feature = "hosted-fixtures")]
-    if let Some(milliseconds) = std::env::var("SIDEVOICE_FIXTURE_STT_TIMEOUT_MS").ok()
-        .and_then(|value| value.parse::<u64>().ok()).filter(|value| (100..=90_000).contains(value)) {
+    if let Some(milliseconds) = std::env::var("SIDEVOICE_FIXTURE_STT_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| (100..=90_000).contains(value))
+    {
         return Duration::from_millis(milliseconds);
     }
     Duration::from_secs(90)
@@ -152,7 +159,8 @@ impl CallMedia {
             let text = if error {
                 Err(())
             } else {
-                Ok(data.get("text")
+                Ok(data
+                    .get("text")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|text| !text.is_empty())
@@ -171,15 +179,29 @@ impl CallMedia {
         events: &mpsc::Sender<Value>,
         dir: &PrivateDir,
     ) -> Recognition {
-        let gate_pcm = if sample_rate == 16_000 { pcm.clone() } else {
+        let gate_pcm = if sample_rate == 16_000 {
+            pcm.clone()
+        } else {
             let mut resampler = StreamResampler::new(sample_rate, 16_000, ResamplerQuality::Quick);
-            let samples: Vec<f32> = pcm.as_chunks::<2>().0.iter()
-                .map(|pair| i16::from_le_bytes(*pair) as f32 / 32768.0).collect();
+            let samples: Vec<f32> = pcm
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| i16::from_le_bytes(*pair) as f32 / 32768.0)
+                .collect();
             let mut output = resampler.process(&samples);
             output.extend(resampler.flush());
-            output.into_iter().flat_map(|sample| ((sample * 32767.0).clamp(-32768.0, 32767.0) as i16).to_le_bytes()).collect()
+            output
+                .into_iter()
+                .flat_map(|sample| {
+                    ((sample * 32767.0).clamp(-32768.0, 32767.0) as i16).to_le_bytes()
+                })
+                .collect()
         };
-        if !crate::pipeline::has_speech(&gate_pcm).await.map_err(|_| SttFailure::Provider)? {
+        if !crate::pipeline::has_speech(&gate_pcm)
+            .await
+            .map_err(|_| SttFailure::Provider)?
+        {
             return Ok(None);
         }
         let wav = wav(&pcm, sample_rate).ok_or(SttFailure::Provider)?;
@@ -208,11 +230,14 @@ impl CallMedia {
                     .lock()
                     .expect("transcripts lock")
                     .remove(&request);
-                (match result {
-                    Err(_) => return Err(SttFailure::Timeout),
-                    Ok(Err(_)) | Ok(Ok(Err(()))) => return Err(SttFailure::Device),
-                    Ok(Ok(Ok(text))) => text,
-                }, None)
+                (
+                    match result {
+                        Err(_) => return Err(SttFailure::Timeout),
+                        Ok(Err(_)) | Ok(Ok(Err(()))) => return Err(SttFailure::Device),
+                        Ok(Ok(Ok(text))) => text,
+                    },
+                    None,
+                )
             }
             "openai" => {
                 let key = provider_key(dir, "openai").ok_or(SttFailure::Provider)?;
@@ -227,7 +252,9 @@ impl CallMedia {
             }
             _ => return Err(SttFailure::Provider),
         };
-        let Some(text) = text else { return Ok(None); };
+        let Some(text) = text else {
+            return Ok(None);
+        };
         let text = text.trim().to_owned();
         let language = settings
             .stt
@@ -257,7 +284,9 @@ impl CallMedia {
     }
 
     pub async fn listening_bar(&self, playing: bool) {
-        if !playing { self.playing_uid.lock().expect("playing lock").take(); }
+        if !playing {
+            self.playing_uid.lock().expect("playing lock").take();
+        }
         self.detector.listening_bar(playing).await;
     }
 
@@ -267,13 +296,21 @@ impl CallMedia {
             if status == "playing" {
                 *playing = Some(uid.into());
                 Some(true)
-            } else if playing.as_deref() == Some(uid) && matches!(status,
-                "failed" | "playback_finished" | "cancelled_playing" | "skipped") {
+            } else if playing.as_deref() == Some(uid)
+                && matches!(
+                    status,
+                    "failed" | "playback_finished" | "cancelled_playing" | "skipped"
+                )
+            {
                 *playing = None;
                 Some(false)
-            } else { None }
+            } else {
+                None
+            }
         };
-        if let Some(playing) = change { self.detector.listening_bar(playing).await; }
+        if let Some(playing) = change {
+            self.detector.listening_bar(playing).await;
+        }
     }
 }
 
@@ -336,9 +373,19 @@ struct Catchup {
 }
 
 enum RecognitionJob {
-    Live { turn: VoiceTurn, pcm: Vec<u8>, closed: u64 },
-    Offline { target: VoiceTurn, row_id: String, pcm: Vec<u8>, rate: u32,
-        truncated: bool, time: Option<u64> },
+    Live {
+        turn: VoiceTurn,
+        pcm: Vec<u8>,
+        closed: u64,
+    },
+    Offline {
+        target: VoiceTurn,
+        row_id: String,
+        pcm: Vec<u8>,
+        rate: u32,
+        truncated: bool,
+        time: Option<u64>,
+    },
 }
 
 pub(super) struct RecognitionDone {
@@ -479,38 +526,57 @@ impl TurnOwner {
                             pcm.len() as f64 / 32.0,
                         );
                     }
-                    self.enqueue(RecognitionJob::Live { turn, pcm, closed }).await;
+                    self.enqueue(RecognitionJob::Live { turn, pcm, closed })
+                        .await;
                 }
             }
         }
     }
 
     pub async fn result(&mut self, done: RecognitionDone) {
-        if let Some(active) = self.active.take() { let _ = active.await; }
+        if let Some(active) = self.active.take() {
+            let _ = active.await;
+        }
         self.active_turn = None;
-        let RecognitionDone { job, result, transcribed } = done;
+        let RecognitionDone {
+            job,
+            result,
+            transcribed,
+        } = done;
         match job {
             RecognitionJob::Live { turn, closed, .. } => {
                 self.live_result(turn, result, closed, transcribed).await;
             }
-            RecognitionJob::Offline { target, row_id, truncated, time, .. } => {
-                match result {
-                    Ok(Some(text)) => {
-                        let offline = if truncated { "truncated" } else { "buffered" };
-                        let _ = self.events.send(json!({"type":"voice-catchup-turn","data":{
+            RecognitionJob::Offline {
+                target,
+                row_id,
+                truncated,
+                time,
+                ..
+            } => match result {
+                Ok(Some(text)) => {
+                    let offline = if truncated { "truncated" } else { "buffered" };
+                    let _ = self.events.send(json!({"type":"voice-catchup-turn","data":{
                             "session_id":self.session,"history_id":row_id,"thread_id":target.thread_id,
                             "text":text,"offline":offline,"time":time}})).await;
-                        let _ = self.room.queue_offline_input(&target, &row_id, &text, offline, time);
-                    }
-                    Err(error) => self.report_error(error, true).await,
-                    Ok(None) => {}
+                    let _ = self
+                        .room
+                        .queue_offline_input(&target, &row_id, &text, offline, time);
                 }
-            }
+                Err(error) => self.report_error(error, true).await,
+                Ok(None) => {}
+            },
         }
         self.start_next();
     }
 
-    async fn live_result(&mut self, turn: VoiceTurn, result: Recognition, closed: u64, transcribed: u64) {
+    async fn live_result(
+        &mut self,
+        turn: VoiceTurn,
+        result: Recognition,
+        closed: u64,
+        transcribed: u64,
+    ) {
         if let Some(thread) = turn.thread_id.as_deref() {
             self.room.latency_mark(
                 &self.session,
@@ -539,7 +605,10 @@ impl TurnOwner {
         }
         let text = match result {
             Ok(text) => text.unwrap_or_default(),
-            Err(error) => { self.report_error(error, false).await; String::new() }
+            Err(error) => {
+                self.report_error(error, false).await;
+                String::new()
+            }
         };
         let current = self.room.snapshot(Some(&self.session));
         let revision = current["room"]["revision"].as_u64().unwrap_or(0);
@@ -644,7 +713,10 @@ impl TurnOwner {
             (false, _) => "voice.transcription_failed",
         };
         let message = render(&LocalizedMessage::new(key), &self.settings.ui_language);
-        let _ = self.events.send(json!({"type":"error","data":{"message":message}})).await;
+        let _ = self
+            .events
+            .send(json!({"type":"error","data":{"message":message}}))
+            .await;
     }
 
     async fn enqueue(&mut self, job: RecognitionJob) {
@@ -662,8 +734,12 @@ impl TurnOwner {
     }
 
     fn start_next(&mut self) {
-        if self.active.is_some() { return; }
-        let Some(mut job) = self.queue.pop_front() else { return; };
+        if self.active.is_some() {
+            return;
+        }
+        let Some(mut job) = self.queue.pop_front() else {
+            return;
+        };
         self.active_turn = match &job {
             RecognitionJob::Live { turn, .. } => Some(turn.clone()),
             RecognitionJob::Offline { .. } => None,
@@ -679,55 +755,110 @@ impl TurnOwner {
                 RecognitionJob::Live { pcm, .. } => (std::mem::take(pcm), 16_000),
                 RecognitionJob::Offline { pcm, rate, .. } => (std::mem::take(pcm), *rate),
             };
-            let result = media.recognize(pcm, rate, &settings, &session, &events, &dir).await;
-            let _ = finished.send(RecognitionDone { job, result,
-                transcribed: latency_now_micros() }).await;
+            let result = media
+                .recognize(pcm, rate, &settings, &session, &events, &dir)
+                .await;
+            let _ = finished
+                .send(RecognitionDone {
+                    job,
+                    result,
+                    transcribed: latency_now_micros(),
+                })
+                .await;
         }));
     }
 
     pub async fn catchup_slice(&mut self, data: &Value) {
-        let rate = data.get("sample_rate").and_then(Value::as_u64)
-            .filter(|rate| (8_000..=48_000).contains(rate)).map(|rate| rate as u32);
+        let rate = data
+            .get("sample_rate")
+            .and_then(Value::as_u64)
+            .filter(|rate| (8_000..=48_000).contains(rate))
+            .map(|rate| rate as u32);
         let seq = data.get("seq").and_then(Value::as_u64);
-        let (Some(rate), Some(seq)) = (rate, seq) else { self.catchup = None; return; };
+        let (Some(rate), Some(seq)) = (rate, seq) else {
+            self.catchup = None;
+            return;
+        };
         if seq == 0 {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default().as_millis() as u64;
-            let time = data.get("started_at").and_then(Value::as_u64)
-                .filter(|at| *at >= now.saturating_sub(3_600_000) && *at <= now + 60_000);
-            self.catchup = Some(Catchup { pcm: Vec::new(), seq: 0, rate,
-                truncated: data["truncated"].as_bool().unwrap_or(false), time });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let time = data
+                .get("started_at")
+                .and_then(Value::as_f64)
+                .filter(|at| {
+                    at.is_finite()
+                        && *at >= now.saturating_sub(3_600_000) as f64
+                        && *at <= (now + 60_000) as f64
+                })
+                .map(|at| at as u64);
+            self.catchup = Some(Catchup {
+                pcm: Vec::new(),
+                seq: 0,
+                rate,
+                truncated: data["truncated"].as_bool().unwrap_or(false),
+                time,
+            });
         }
-        let Some(pending) = &mut self.catchup else { return; };
-        if pending.seq != seq || pending.rate != rate { self.catchup = None; return; }
+        let Some(pending) = &mut self.catchup else {
+            return;
+        };
+        if pending.seq != seq || pending.rate != rate {
+            self.catchup = None;
+            return;
+        }
         let Some(encoded) = data.get("audio_base64").and_then(Value::as_str) else {
-            self.catchup = None; return;
+            self.catchup = None;
+            return;
         };
         let Ok(audio) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-            self.catchup = None; return;
+            self.catchup = None;
+            return;
         };
-        if audio.len() > CATCHUP_SLICE_BYTES ||
-            pending.pcm.len() + audio.len() > CATCHUP_MAX_SECONDS * rate as usize * 2 {
+        if audio.len() > CATCHUP_SLICE_BYTES
+            || pending.pcm.len() + audio.len() > CATCHUP_MAX_SECONDS * rate as usize * 2
+        {
             self.catchup = None;
             use crate::messages::{render, LocalizedMessage};
-            let message = render(&LocalizedMessage::new("voice.catchup_too_long"), &self.settings.ui_language);
-            let _ = self.events.send(json!({"type":"error","data":{"message":message}})).await;
+            let message = render(
+                &LocalizedMessage::new("voice.catchup_too_long"),
+                &self.settings.ui_language,
+            );
+            let _ = self
+                .events
+                .send(json!({"type":"error","data":{"message":message}}))
+                .await;
             return;
         }
         pending.pcm.extend_from_slice(&audio);
         pending.seq += 1;
-        if data["final"].as_bool() != Some(true) { return; }
+        if data["final"].as_bool() != Some(true) {
+            return;
+        }
         let pending = self.catchup.take().expect("catchup exists");
-        let Some(target) = self.room.offline_target(&self.session) else { return; };
+        let Some(target) = self.room.offline_target(&self.session) else {
+            return;
+        };
         self.catchups += 1;
         let row_id = format!("{}:user-catchup:{}", self.session, self.catchups);
-        self.enqueue(RecognitionJob::Offline { target, row_id, pcm: pending.pcm,
-            rate, truncated: pending.truncated, time: pending.time }).await;
+        self.enqueue(RecognitionJob::Offline {
+            target,
+            row_id,
+            pcm: pending.pcm,
+            rate,
+            truncated: pending.truncated,
+            time: pending.time,
+        })
+        .await;
     }
 
     pub async fn close(&mut self) {
         self.media.close();
-        if let Some(active) = self.active.take() { active.abort(); let _ = active.await; }
+        if let Some(active) = self.active.take() {
+            active.abort();
+            let _ = active.await;
+        }
         if let Some(turn) = self.active_turn.take() {
             self.room.finish_turn(&self.session, turn.revision);
         }
@@ -758,7 +889,8 @@ impl TurnOwner {
                     closed,
                 );
             }
-            self.enqueue(RecognitionJob::Live { turn, pcm, closed }).await;
+            self.enqueue(RecognitionJob::Live { turn, pcm, closed })
+                .await;
             if let Ok(turn) = self.room.begin_turn(&self.session) {
                 let _ = self
                     .events

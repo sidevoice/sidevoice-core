@@ -946,14 +946,22 @@ impl Room {
                 }
             }
             // The input index only serves recent reply rows; a long call must not retain every turn.
-            while inner.latency_input.keys().filter(|(session, _, _)| session == sid).count()
+            while inner
+                .latency_input
+                .keys()
+                .filter(|(session, _, _)| session == sid)
+                .count()
                 > MAX_LATENCY_REPLIES
             {
-                let oldest = inner.latency_input.keys()
+                let oldest = inner
+                    .latency_input
+                    .keys()
                     .filter(|(session, _, _)| session == sid)
                     .min_by_key(|(_, _, revision)| revision)
                     .cloned();
-                if let Some(oldest) = oldest { inner.latency_input.remove(&oldest); }
+                if let Some(oldest) = oldest {
+                    inner.latency_input.remove(&oldest);
+                }
             }
         }
     }
@@ -1263,29 +1271,62 @@ impl Room {
     pub fn offline_target(&self, sid: &str) -> Option<VoiceTurn> {
         let inner = self.inner.lock().expect("room lock");
         let browser = inner.browsers.get(sid)?;
-        let target = browser.target.as_ref().filter(|target| !target.thread.is_empty())?;
-        Some(VoiceTurn { session_id: sid.into(), revision: 0,
-            thread_id: Some(target.thread.clone()), binding_id: Some(target.binding_id.clone()),
-            title: target.title.clone(), language: browser.language.clone() })
+        let target = browser
+            .target
+            .as_ref()
+            .filter(|target| !target.thread.is_empty());
+        Some(VoiceTurn {
+            session_id: sid.into(),
+            revision: 0,
+            thread_id: target.map(|target| target.thread.clone()),
+            binding_id: target.map(|target| target.binding_id.clone()),
+            title: target.and_then(|target| target.title.clone()),
+            language: browser.language.clone(),
+        })
     }
-    pub fn queue_offline_input(&self, target: &VoiceTurn, row_id: &str, text: &str,
-        offline: &str, time: Option<u64>) -> Result<Value, RoomError> {
-        if text.trim().is_empty() { return Err(RoomError::new(422, "room.text_empty")); }
+    pub fn queue_offline_input(
+        &self,
+        target: &VoiceTurn,
+        row_id: &str,
+        text: &str,
+        offline: &str,
+        time: Option<u64>,
+    ) -> Result<Value, RoomError> {
+        if text.trim().is_empty() {
+            return Err(RoomError::new(422, "room.text_empty"));
+        }
         let mut inner = self.inner.lock().expect("room lock");
         let sid = target.session_id.as_str();
         if !inner.browsers.contains_key(sid) {
             return Err(RoomError::new(409, "room.browser_absent"));
         }
-        let (Some(thread), Some(binding)) = (target.thread_id.as_deref(), target.binding_id.as_deref()) else {
-            return Err(RoomError::new(409, "room.focus_changed"));
+        let (Some(thread), Some(binding)) =
+            (target.thread_id.as_deref(), target.binding_id.as_deref())
+        else {
+            if let Some(browser) = inner.browsers.get(sid) {
+                let _ = browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
+                    "revision":0,"history_id":row_id,"thread_id":Value::Null,
+                    "session_id":sid,"status":"not_sent"}}));
+            }
+            return Ok(json!({"accepted":false,"id":row_id,"revision":0,"status":"not_sent"}));
         };
         let message_id = id();
-        Ok(queue_input_locked(&mut inner, InputDraft {
-            row_id: row_id.into(), text, session_id: sid, revision: 0,
-            thread_id: thread, binding_id: binding, title: target.title.clone(),
-            language: &target.language, message_id: &message_id,
-            offline: Some(offline), time,
-        }))
+        Ok(queue_input_locked(
+            &mut inner,
+            InputDraft {
+                row_id: row_id.into(),
+                text,
+                session_id: sid,
+                revision: 0,
+                thread_id: thread,
+                binding_id: binding,
+                title: target.title.clone(),
+                language: &target.language,
+                message_id: &message_id,
+                offline: Some(offline),
+                time,
+            },
+        ))
     }
     pub fn history(&self, thread: Option<&str>) -> Value {
         let inner = self.inner.lock().expect("room lock");
@@ -2322,10 +2363,15 @@ mod tests {
         }
         let mut inner = room.inner.lock().unwrap();
         assert_eq!(inner.latency_input.len(), MAX_LATENCY_REPLIES);
-        assert!(!inner.latency_input.contains_key(&(sid.clone(), "thread".into(), 1)));
+        assert!(!inner
+            .latency_input
+            .contains_key(&(sid.clone(), "thread".into(), 1)));
         let newest = MAX_LATENCY_REPLIES as u64 + 3;
         register_latency_reply(&mut inner, &sid, "thread", newest, "reply", "queued");
-        assert_eq!(inner.latency_replies[&sid].back().unwrap().input_ms[0].milliseconds, newest as f64);
+        assert_eq!(
+            inner.latency_replies[&sid].back().unwrap().input_ms[0].milliseconds,
+            newest as f64
+        );
     }
 
     #[test]
