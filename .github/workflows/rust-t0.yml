@@ -29,6 +29,14 @@ jobs:
           cargo test --locked
       - name: Build selected feature set
         run: cargo build --locked --bin sidevoice-core-rust
+      - name: Run synthetic Python/Rust state and trust contract without network
+        run: |
+          set -euo pipefail
+          docker build -f tests/rust_t1.Dockerfile -t sidevoice-rust-t1 .
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
+            sidevoice-rust-t1 /opt/t1-venv/bin/python tests/rust_t1_hosted.py \
+            /workspace/target/debug/sidevoice-core-rust
       - name: Execute real detectors without network
         run: |
           set -euo pipefail
@@ -46,5 +54,6 @@ jobs:
           assert data['frames'] > 10
           assert data['max_voice_confidence'] > 0.5, data
           assert 0 <= data['smart_turn_probability'] <= 1, data
+          assert data['smart_turn_complete'] is True, data
           print(data)
           PY

@@ -10,7 +10,7 @@ interoperability, which begins in T3 and T5:
 
 | Repository | Revision | Boundary to preserve |
 |---|---|---|
-| sidevoice-web | `140115fd5122c9652763b0c5e47105f21f4cee95` | Browser Socket.IO and device STT/TTS messages |
+| sidevoice-web | `140115fd5122c9652763b0c5e47105f21f4cee95` | Browser raw WebSocket (`/api/presentation/ws`) and device STT/TTS messages |
 | sidevoice-desktop | `1b3e4946620ea02eb9a1724c19033cfae5af8d40` | Native shell and bundled web client |
 | sidevoice-connector | `ddb4bd1e0c95e7997787fe4ab98e7d812fbe2390` | Connector link v2 and local JSON-RPC v3 |
 
