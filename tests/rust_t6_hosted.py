@@ -157,7 +157,7 @@ async def main():
                                                    "protocols": ["sidevoice", f"sidevoice.token.{token}"]})
             assert opened == {"ok": True}, opened
             await peer.tell("relay.data", {"channel": "t6-call", "data": json.dumps({
-                "type": "client-ready", "data": {"settings": {"turn_end_mode": "timer"}})})
+                "type": "client-ready", "data": {"settings": {"turn_end_mode": "timer"}}})})
             await until(lambda: any(isinstance(frame.get("data"), str) and
                                     json.loads(frame["data"]).get("type") == "voice-session"
                                     for frame in peer.frames))

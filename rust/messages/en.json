@@ -1,5 +1,10 @@
 {
   "device.unpaired": "This device is not paired with the core.",
+  "latency.note_clocks": "Durations only; server and browser clocks are never subtracted.",
+  "latency.note_delivery": "Delivery acceptance is not model execution or reading.",
+  "latency.note_playback": "Playing means Web Audio scheduled playback, not Bluetooth audibility.",
+  "latency.note_input": "Input durations are measured in the browser from the last voiced microphone frame.",
+  "latency.note_missing": "Missing measurements are omitted, not zero. Data expires with the call.",
   "device.secret_invalid": "The pairing secret is invalid.",
   "device.nonce_invalid": "The identity challenge is invalid.",
   "device.not_found": "The paired device was not found.",
