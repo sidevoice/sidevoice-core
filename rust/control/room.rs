@@ -812,6 +812,17 @@ impl Room {
         self.inner.lock().expect("room lock").browsers.get(sid)
             .is_some_and(|browser| browser.device == device)
     }
+    pub fn speech_current(&self, sid: &str, uid: &str, revision: u64) -> bool {
+        let inner = self.inner.lock().expect("room lock");
+        inner.browsers.get(sid).is_some_and(|browser| {
+            browser.revision == revision && !browser.speaking
+                && browser.active.as_deref() == Some(uid)
+        }) && inner.utterances.get(uid).and_then(|record| record.clients.get(sid))
+            .is_some_and(|(entry_revision, status)| {
+                *entry_revision == revision
+                    && !matches!(status.as_str(), "interrupted" | "failed" | "playback_finished")
+            })
+    }
     pub fn latency_mark(&self, sid: &str, thread: &str, revision: u64,
                         uid: Option<&str>, event: LatencyEvent, at_micros: u64) {
         let mut inner = self.inner.lock().expect("room lock");

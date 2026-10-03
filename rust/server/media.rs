@@ -5,6 +5,7 @@ use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicU64, Ordering}
 use base64::Engine;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
+use unicode_script::{Script, UnicodeScript};
 use uuid::Uuid;
 
 use crate::{
@@ -28,21 +29,25 @@ pub struct CallMedia {
     transcripts: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
     rtc_generation: AtomicU64,
     rtc: Mutex<Option<Arc<dyn webrtc::peer_connection::PeerConnection>>>,
+    focus_tx: mpsc::Sender<()>,
 }
 
 impl CallMedia {
-    pub fn start(settings: &CallSettings) -> Result<(Arc<Self>, mpsc::Receiver<CallFrame>), String> {
+    pub fn start(settings: &CallSettings) -> Result<(Arc<Self>, mpsc::Receiver<CallFrame>, mpsc::Receiver<()>), String> {
         let (detector, events) = CallDetector::start(settings)?;
+        let (focus_tx, focus_rx) = mpsc::channel(8);
         Ok((Arc::new(Self {
             detector,
             source: Mutex::new(Source::Socket),
             transcripts: Mutex::new(HashMap::new()),
             rtc_generation: AtomicU64::new(0),
             rtc: Mutex::new(None),
-        }), events))
+            focus_tx,
+        }), events, focus_rx))
     }
 
     pub fn select(&self, source: Source) { *self.source.lock().expect("source lock") = source; }
+    pub async fn focus_changed(&self) { let _ = self.focus_tx.send(()).await; }
 
     pub async fn feed(&self, source: Source, pcm: Vec<u8>) {
         if *self.source.lock().expect("source lock") == source {
@@ -87,8 +92,9 @@ impl CallMedia {
 
     async fn recognize(&self, pcm: Vec<u8>, settings: &CallSettings, session: &str,
                        events: &mpsc::Sender<Value>, dir: &PrivateDir) -> Option<String> {
+        if !crate::pipeline::has_speech(&pcm).await.ok()? { return None; }
         let wav = wav(&pcm)?;
-        match settings.stt.place.as_str() {
+        let (text, confidence) = match settings.stt.place.as_str() {
             "device" => {
                 let request = Uuid::new_v4().to_string();
                 let (tx, rx) = oneshot::channel();
@@ -101,17 +107,25 @@ impl CallMedia {
                 if events.send(message).await.is_err() { self.transcripts.lock().expect("transcripts lock").remove(&request); return None; }
                 let result = tokio::time::timeout(Duration::from_secs(90), rx).await.ok().and_then(Result::ok).flatten();
                 self.transcripts.lock().expect("transcripts lock").remove(&request);
-                result
+                (result, None)
             }
             "openai" => {
                 let key = provider_key(dir, "openai")?;
                 let client = OpenAiTranscriber::new(&key).ok()?;
                 let language = settings.stt.options.get("language").and_then(Value::as_str);
                 let prompt = settings.stt.options.get("context").and_then(Value::as_str);
-                client.transcribe(&wav, &settings.stt.model, language, prompt).await.ok().map(|result| result.text.trim().to_owned())
+                let result = client.transcribe(&wav, &settings.stt.model, language, prompt).await.ok()?;
+                (Some(result.text.trim().to_owned()), result.mean_logprob)
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        let text = text?.trim().to_owned();
+        let language = settings.stt.options.get("language").and_then(Value::as_str).unwrap_or(&settings.ui_language);
+        if language != "hi" && text.chars().any(char::is_alphabetic)
+            && !text.chars().any(|letter| letter.script() == Script::Latin) { return None; }
+        let threshold = if text.split_whitespace().count() <= 2 { -3.0 } else { -2.0 };
+        if confidence.is_some_and(|value| value < threshold) { return None; }
+        (!text.is_empty()).then_some(text)
     }
 
     pub fn close(&self) { self.transcripts.lock().expect("transcripts lock").clear(); }
@@ -125,14 +139,14 @@ pub(super) fn provider_key(dir: &PrivateDir, name: &str) -> Option<String> {
 }
 
 fn wav(pcm: &[u8]) -> Option<Vec<u8>> {
-    if pcm.is_empty() || pcm.len() % 2 != 0 { return None; }
+    if pcm.is_empty() || !pcm.len().is_multiple_of(2) { return None; }
     let mut bytes = Vec::new();
     let cursor = std::io::Cursor::new(&mut bytes);
     let mut writer = hound::WavWriter::new(cursor, hound::WavSpec {
         channels: 1, sample_rate: 16_000, bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     }).ok()?;
-    for sample in pcm.chunks_exact(2) {
+    for sample in pcm.as_chunks::<2>().0 {
         writer.write_sample(i16::from_le_bytes([sample[0], sample[1]])).ok()?;
     }
     writer.finalize().ok()?;
@@ -217,8 +231,6 @@ impl TurnOwner {
         }
     }
 
-    pub async fn next_result(&mut self) { if let Some((turn, text, closed, transcribed, bytes)) = self.finished.recv().await { self.result(turn, text, closed, transcribed, bytes).await; } }
-
     pub async fn result(&mut self, turn: VoiceTurn, text: Option<String>, closed: u64, transcribed: u64, _bytes: usize) {
         if let Some(thread) = turn.thread_id.as_deref() {
             self.room.latency_mark(&self.session,thread,turn.revision,None,LatencyEvent::Transcript,transcribed);
@@ -285,7 +297,32 @@ impl TurnOwner {
 
     pub async fn close(&mut self) {
         if let Some((turn, _)) = self.speaking.take() { self.room.finish_turn(&self.session, turn.revision); }
-        if let Some(pending) = self.pending.take() { self.deliver(pending.turn, pending.text, pending.transcribed_at).await; }
+        if let Some(pending) = self.pending.take() { self.room.finish_turn(&self.session, pending.turn.revision); }
+    }
+
+    pub async fn focus_changed(&mut self) {
+        if let Some((turn, pcm)) = self.speaking.take() {
+            let media = self.media.clone();
+            let settings = self.settings.clone();
+            let session = self.session.clone();
+            let events = self.events.clone();
+            let dir = self.dir.clone();
+            let finished = self.finished_tx.clone();
+            let closed = latency_now_micros();
+            if let Some(thread) = turn.thread_id.as_deref() {
+                self.room.latency_mark(&self.session,thread,turn.revision,None,LatencyEvent::TurnClosed,closed);
+            }
+            let bytes = pcm.len();
+            tokio::spawn(async move {
+                let text = media.recognize(pcm,&settings,&session,&events,&dir).await;
+                let _ = finished.send((turn,text,closed,latency_now_micros(),bytes)).await;
+            });
+            if let Ok(turn) = self.room.begin_turn(&self.session) {
+                let _ = self.events.send(json!({"type":"voice-user-turn","data":{
+                    "phase":"started","revision":turn.revision,"thread_id":turn.thread_id}})).await;
+                self.speaking = Some((turn,Vec::new()));
+            }
+        }
     }
 }
 
@@ -307,6 +344,7 @@ pub async fn speech_event(room: Arc<Room>, session: &str, settings: &CallSetting
     object.insert("speed".into(), json!(voice.speed));
     object.insert("language".into(), json!(&voice.language));
     if voice.place == "device" {
+        if !room.speech_current(session, uid, revision) { return None; }
         room.latency_mark(session,thread,reply_revision,Some(uid),LatencyEvent::AudioDispatched,latency_now_micros());
         return Some(json!({"type":"voice-speech","data":message}));
     }
@@ -320,12 +358,7 @@ pub async fn speech_event(room: Arc<Room>, session: &str, settings: &CallSetting
         client.synthesize(&text_owned, &model, &voice_id, voice.speed, true, "mp3_44100_128").await
     }).await.ok()?;
     room.latency_mark(session,thread,reply_revision,Some(uid),LatencyEvent::AudioReady,latency_now_micros());
-    let snapshot = room.snapshot(Some(session));
-    if snapshot["room"]["revision"].as_u64() != Some(revision)
-        || snapshot["room"]["speaking"].as_bool() == Some(true)
-        || !snapshot["call"]["utterances"].as_array().is_some_and(|rows| rows.iter().any(|row| row["utterance_id"] == uid && !matches!(row["status"].as_str(), Some("interrupted" | "failed" | "playback_finished")))) {
-        return None;
-    }
+    if !room.speech_current(session, uid, revision) { return None; }
     object.insert("mime_type".into(), json!(&result.speech.mime_type));
     object.insert("audio_base64".into(), json!(base64::engine::general_purpose::STANDARD.encode(&result.speech.audio)));
     object.insert("alignment".into(), json!(result.speech.alignment));

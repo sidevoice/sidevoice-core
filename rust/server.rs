@@ -506,7 +506,14 @@ async fn presentation_select(
         data["session_id"].as_str().unwrap_or(""),
         data["thread_id"].as_str().unwrap_or(""),
     ) {
-        Ok(v) => Json(v).into_response(),
+        Ok(v) => {
+            let call = { state.media.lock().expect("media lock")
+                .get(data["session_id"].as_str().unwrap_or("")).cloned() };
+            if let Some(call) = call {
+                call.focus_changed().await;
+            }
+            Json(v).into_response()
+        },
         Err(e) => room_failure(e, &headers),
     }
 }
@@ -525,7 +532,12 @@ async fn presentation_leave(
         data["session_id"].as_str().unwrap_or(""),
         data["binding_id"].as_str().unwrap_or(""),
     ) {
-        Ok(v) => Json(v).into_response(),
+        Ok(v) => {
+            let call = { state.media.lock().expect("media lock")
+                .get(data["session_id"].as_str().unwrap_or("")).cloned() };
+            if let Some(call) = call { call.focus_changed().await; }
+            Json(v).into_response()
+        },
         Err(e) => room_failure(e, &headers),
     }
 }
@@ -1106,7 +1118,7 @@ async fn socket_loop(
             return;
         }
     };
-    let (call_media, mut detector_events) = match media::CallMedia::start(&loaded.settings) {
+    let (call_media, mut detector_events, mut focus_events) = match media::CallMedia::start(&loaded.settings) {
         Ok(result) => result,
         Err(_) => {
             state.room.leave(&session);
@@ -1117,6 +1129,7 @@ async fn socket_loop(
     state.media.lock().expect("media lock").insert(session.clone(), call_media.clone());
     let mut turns = media::TurnOwner::new(call_media.clone(), state.room.clone(), loaded.settings.clone(), session.clone(),
         control, state.dir.clone());
+    let mut call_settings = loaded.settings.clone();
     let (rendered_tx, mut rendered_rx) = tokio::sync::mpsc::channel::<(String,u64,Option<Value>)>(16);
     let room_info = json!({"api": API, "version": env!("CARGO_PKG_VERSION")});
     let _ = socket.send(Message::Text(json!({"type":"voice-session","data":{"session_id":session,"sample_rate":16000,"channels":1,"room":room_info}}).to_string().into())).await;
@@ -1129,11 +1142,13 @@ async fn socket_loop(
                 break;
             }
             frame = detector_events.recv() => if let Some(frame) = frame { turns.frame(frame).await; } else { break; },
+            focus = focus_events.recv() => if focus.is_some() { turns.focus_changed().await; },
             result = turns.finished.recv() => if let Some((turn, text, closed, transcribed, bytes)) = result { turns.result(turn,text,closed,transcribed,bytes).await; },
             _ = tokio::time::sleep_until(deadline) => { turns.expired().await; },
             rendered = rendered_rx.recv() => if let Some((uid,revision,event)) = rendered {
                 if let Some(event) = event {
-                    if socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
+                    if state.room.speech_current(&session,&uid,revision)
+                        && socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
                 } else { let _ = state.room.receipt(&session,&uid,revision,"failed"); }
             },
             event = output.recv() => if let Some(event) = event {
@@ -1141,7 +1156,7 @@ async fn socket_loop(
                     let uid=event["data"]["utterance_id"].as_str().unwrap_or("").to_owned();
                     let revision=event["data"]["revision"].as_u64().unwrap_or(0);
                     let room=state.room.clone(); let dir=state.dir.clone(); let cache=state.synthesis.clone();
-                    let settings=loaded.settings.clone(); let sid=session.clone(); let rendered=rendered_tx.clone();
+                    let settings=call_settings.clone(); let sid=session.clone(); let rendered=rendered_tx.clone();
                     tokio::spawn(async move {
                         let result=media::speech_event(room,&sid,&settings,&dir,cache,event).await;
                         let _=rendered.send((uid,revision,result)).await;
@@ -1159,7 +1174,7 @@ async fn socket_loop(
                             match value.get("type").and_then(Value::as_str){
                                 Some("voice-client-error")=>{state.room.report_client_error(&data);},
                                 Some("voice-media")=>match data.get("path").and_then(Value::as_str){
-                                    Some("socket")=>call_media.select(media::Source::Socket),
+                                    Some("socket")=>{call_media.select(media::Source::Socket);call_media.close_rtc().await;},
                                     Some("webrtc")=>call_media.select(media::Source::WebRtc),
                                     _=>{},
                                 },
@@ -1169,7 +1184,13 @@ async fn socket_loop(
                                     let loaded=crate::models::settings_from(data.get("settings"),&defaults);
                                     if let Some(issue)=loaded.issue{let _=socket.send(Message::Text(json!({"type":"error","data":{"message":issue}}).to_string().into())).await;}
                                     else if let Some(refusal)=crate::models::unavailable(&loaded.settings,|place|media::provider_key(&state.dir,place).is_some()){let _=socket.send(Message::Text(json!({"type":"error","data":crate::messages::render_refusal(&refusal,&loaded.settings.ui_language)}).to_string().into())).await;}
-                                    else{state.room.set_language(&session,&loaded.settings.ui_language);}
+                                    else{
+                                        state.room.set_language(&session,&loaded.settings.ui_language);
+                                        call_settings.tts=loaded.settings.tts;
+                                        call_settings.ui_language=loaded.settings.ui_language;
+                                        call_settings.audio_grace_seconds=loaded.settings.audio_grace_seconds;
+                                        call_settings.replay_on_return_seconds=loaded.settings.replay_on_return_seconds;
+                                    }
                                 },
                                 _=>{}
                             }

@@ -41,6 +41,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "io-util"] }
 tower = { version = "=0.5.3", features = ["retry", "util"] }
 unicode-normalization = "0.1"
+unicode-script = "=0.5.8"
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 webrtc = "=0.21.0"
