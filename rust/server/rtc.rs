@@ -160,7 +160,8 @@ pub async fn offer(
         gathered: Mutex::new(Some(gathered_tx)),
     });
     let mut engine = MediaEngine::default();
-    if engine.register_default_codecs().is_err() {
+    if let Err(error) = engine.register_default_codecs() {
+        eprintln!("WebRTC codec registration failed: {error}");
         return failure(
             "voice.rtc_answer_failed",
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -169,7 +170,8 @@ pub async fn offer(
     }
     let registry = match register_default_interceptors(Registry::new(), &mut engine) {
         Ok(registry) => registry,
-        Err(_) => {
+        Err(error) => {
+            eprintln!("WebRTC interceptor registration failed: {error}");
             return failure(
                 "voice.rtc_answer_failed",
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -198,7 +200,8 @@ pub async fn offer(
         .await
     {
         Ok(peer) => Arc::new(peer) as Arc<dyn PeerConnection>,
-        Err(_) => {
+        Err(error) => {
+            eprintln!("WebRTC peer construction failed: {error}");
             return failure(
                 "voice.rtc_answer_failed",
                 StatusCode::UNPROCESSABLE_ENTITY,
