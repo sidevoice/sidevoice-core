@@ -300,6 +300,7 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
     let output_task = tokio::spawn(async move {
         while let Some((event, part)) = output.recv().await {
             if emitted.emit(event, &to_rmpv(part)).is_err() {
+                let _ = emitted.disconnect();
                 break;
             }
         }
