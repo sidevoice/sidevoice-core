@@ -1027,7 +1027,9 @@ mod tests {
         let dir = PrivateDir::open(directory.path().join("private")).unwrap();
         let room = Arc::new(Room::load(dir.clone()).unwrap());
         let (events, _received) = mpsc::channel(64);
-        let sid = room.join("device".into(), "en".into(), events.clone()).unwrap();
+        let sid = room
+            .join("device".into(), "en".into(), events.clone())
+            .unwrap();
         let mut settings = crate::models::default_settings(None, None);
         settings.turn_end_mode = "timer".into();
         let (media, _frames, _focus) = CallMedia::start(&settings).unwrap();
@@ -1041,6 +1043,9 @@ mod tests {
         assert_eq!(owner.queue.len(), MAX_RECOGNITION_QUEUE - 1);
         owner.close().await;
         assert!(owner.active.is_none() && owner.queue.is_empty());
-        assert!(room.history(None)["messages"].as_array().unwrap().is_empty());
+        assert!(room.history(None)["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 }
