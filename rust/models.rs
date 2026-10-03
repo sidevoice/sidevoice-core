@@ -474,7 +474,8 @@ pub fn offers(
             ))
         });
 
-        let (_, best, accelerators, package) = fitting[0];
+        let (_, best, accelerators, package) = &fitting[0];
+        let package = *package;
         let model_id = field_str(model, "id").unwrap_or("");
         let family =
             field_str(model, "family").and_then(|family| catalog.get("families")?.get(family));
@@ -482,7 +483,9 @@ pub fn offers(
             .and_then(|family| field_str(family, "task"))
             .unwrap_or("");
         let engine = field_str(best, "engine").unwrap_or("");
-        let accelerator = &accelerators[0];
+        let accelerator = accelerators
+            .first()
+            .expect("a fitting build has at least one accelerator");
         let rank = best.get("rank").and_then(|rank| rank.get(&platform));
         let reason = if fitting.len() == 1 {
             "the only build that runs here".to_owned()
