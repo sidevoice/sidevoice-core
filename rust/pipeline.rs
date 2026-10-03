@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use rustvani::turn::{SmartTurnAnalyzer, SmartTurnConfig};
-use rustvani::vad::{SileroVadOrt, VadAnalyzer};
+use rustvani::vad::SileroVadOrt;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -43,7 +43,8 @@ pub async fn probe_detectors(
 
     let mut max_voice_confidence = 0.0_f32;
     let mut frames = 0;
-    for chunk in samples.chunks_exact(512) {
+    let (chunks, _) = samples.as_chunks::<512>();
+    for chunk in chunks {
         let mut pcm = Vec::with_capacity(1024);
         for sample in chunk {
             pcm.extend_from_slice(&sample.to_le_bytes());
