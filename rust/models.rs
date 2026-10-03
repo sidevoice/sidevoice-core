@@ -1918,7 +1918,7 @@ mod tests {
                 11.0,
                 "Some device settings were not valid and use their defaults: audio_grace_seconds Input should be less than or equal to 10",
             ),
-        ];
+        ] {
             let mut input = Map::new();
             input.insert(name.to_owned(), json!(invalid));
             assert_eq!(
@@ -1955,7 +1955,7 @@ mod tests {
                 json!({"tts":{"place":"device", "model":"missing"}}),
                 "Some device settings were not valid and use their defaults: tts Value error, 'missing' is not a tts model of the catalogue",
             ),
-        ] {
+        ];
         for (input, expected) in cases {
             let loaded = settings_from(Some(&input), &defaults);
             assert_eq!(
