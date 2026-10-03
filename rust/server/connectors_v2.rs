@@ -6,7 +6,7 @@ use serde_json::{json,Value};
 use socketioxide::{SocketIo, extract::{SocketRef, TryData, AckSender, State}};
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use crate::control::room::{ConnectorPeer, PeerRequest};
+use crate::control::room::{ConnectorPeer, PeerError, PeerRequest};
 use super::AppState;
 fn field<'a>(v:&'a Value,k:&str)->&'a str{v.get(k).and_then(Value::as_str).unwrap_or("")}
 
@@ -26,9 +26,13 @@ async fn connect(socket:SocketRef,State(state):State<Arc<AppState>>,TryData(auth
     let old=state.room.attach(&cid,peer);if let Some(old)=old{let _=old.send("connector.replaced",json!({})).await;}
     let _=socket.emit("connector.welcome",&json!({"protocol":2}));
     let dispatch_socket=socket.clone();tokio::spawn(async move{while let Some(PeerRequest{method,params,answer})=rx.recv().await{
-        if let Some(answer)=answer{let outcome=dispatch_socket.timeout(Duration::from_secs(60)).emit_with_ack::<_,Value>(&method,&params)
-            .map_err(|_|()).and_then(|stream|Ok(stream));
-            match outcome{Ok(stream)=>{let _=answer.send(stream.await.map_err(|_|()));},Err(error)=>{let _=answer.send(Err(error));}}
+        if let Some(answer)=answer{
+            let dispatch_socket=dispatch_socket.clone();
+            tokio::spawn(async move {
+                let outcome=dispatch_socket.timeout(Duration::from_secs(60)).emit_with_ack::<_,Value>(&method,&params);
+                let result=match outcome {Ok(stream)=>stream.await.map_err(|_|PeerError),Err(_)=>Err(PeerError)};
+                let _=answer.send(result);
+            });
         }else{let _=dispatch_socket.emit(&method,&params);}
     }});
     let disconnected=state.clone();let gone_cid=cid.clone();let gone_gen=generation.clone();

@@ -388,11 +388,13 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .route("/api/presentation/participants", get(presentation_participants))
         .route("/api/presentation/select", post(presentation_select))
         .route("/api/presentation/leave", post(presentation_leave))
+        .route("/api/presentation/close", post(presentation_close))
         .route("/api/presentation/text", post(presentation_text))
         .route("/api/presentation/browser-receipt", post(presentation_receipt))
         .route("/api/presentation/speak", post(presentation_speak))
         .route("/api/connectors", get(connector_listing))
-        .route("/api/host/agents", get(host_agents));
+        .route("/api/host/agents", get(host_agents))
+        .route("/api/host/agents/{agent_id}/{action}", post(host_agent_action));
     if local {
         router = router
             .route("/api/local/health", get(health))
@@ -437,6 +439,13 @@ async fn presentation_leave(State(state):State<Arc<AppState>>,headers:HeaderMap,
     match state.room.deselect(data["session_id"].as_str().unwrap_or(""),data["binding_id"].as_str().unwrap_or("")){
         Ok(v)=>Json(v).into_response(),Err(e)=>room_failure(e,&headers)}
 }
+async fn presentation_close(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
+    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
+    let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
+    match state.room.close_channel(data["thread_id"].as_str().unwrap_or("")){
+        Ok((result,notify))=>{if let Some((peer,params))=notify{let _=peer.send("binding.close",params).await;}Json(result).into_response()},
+        Err(e)=>room_failure(e,&headers)}
+}
 async fn presentation_text(State(state):State<Arc<AppState>>,headers:HeaderMap,body:axum::body::Bytes)->Response{
     if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
     let Some(data)=payload(&body)else{return failure("room.request_invalid",StatusCode::BAD_REQUEST,&headers)};
@@ -459,7 +468,7 @@ async fn presentation_speak(State(state):State<Arc<AppState>>,headers:HeaderMap,
 }
 async fn connector_listing(State(state):State<Arc<AppState>>,headers:HeaderMap)->Response{
     if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
-    Json(json!({"connectors":state.room.paired_connectors(),"bindings":state.room.participants(None)})).into_response()
+    Json(json!({"connectors":state.room.paired_connectors(),"bindings":state.room.binding_views()})).into_response()
 }
 async fn connector_v3(State(state):State<Arc<AppState>>,ws:WebSocketUpgrade)->Response{
     ws.on_upgrade(move |socket| connectors_v3::run(state,socket)).into_response()
@@ -470,10 +479,19 @@ async fn host_agents(State(state):State<Arc<AppState>>,headers:HeaderMap,uri:axu
     let watch=query(&uri,"watch");if watch.as_ref().is_some_and(|s|s.is_empty()||s.len()>100||!s.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b"._-".contains(&b))){return (StatusCode::BAD_REQUEST,Json(json!({"key":"invalid-agent-id"}))).into_response()}
     let Some(peer)=state.room.connector_peer()else{return (StatusCode::SERVICE_UNAVAILABLE,Json(json!({"key":"no-connector"}))).into_response()};
     let mut params=json!({"rescan":force});if let Some(watch)=watch{params["watch"]=json!(watch)}
-    match peer.request("agents.list",params,std::time::Duration::from_secs(20)).await{
-        Ok(v) if v["agents"].is_array()&&v["custom"].is_object()=>Json(json!({"agents":v["agents"],"scanned_at":v.get("scanned_at"),"custom":v["custom"]})).into_response(),
-        Ok(_)=>(StatusCode::BAD_GATEWAY,Json(json!({"key":"invalid-connector-response"}))).into_response(),
-        Err(_)=>(StatusCode::GATEWAY_TIMEOUT,Json(json!({"key":"connector-timeout"}))).into_response()}
+    host_agent_response(peer.request("agents.list",params,std::time::Duration::from_secs(20)).await)
+}
+fn agent_id_valid(id:&str)->bool{!id.is_empty()&&id.len()<=100&&id.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b"._-".contains(&b))}
+fn host_agent_response(answer:Result<Value,crate::control::room::PeerError>)->Response{match answer{
+    Ok(v) if v["agents"].is_array()&&v["custom"].is_object()=>Json(json!({"agents":v["agents"],"scanned_at":v.get("scanned_at"),"custom":v["custom"]})).into_response(),
+    Ok(_)=>(StatusCode::BAD_GATEWAY,Json(json!({"key":"invalid-connector-response"}))).into_response(),
+    Err(_)=>(StatusCode::GATEWAY_TIMEOUT,Json(json!({"key":"connector-timeout"}))).into_response()}}
+async fn host_agent_action(State(state):State<Arc<AppState>>,Path((agent_id,action)):Path<(String,String)>,headers:HeaderMap)->Response{
+    if !origin_allowed(&headers){return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
+    if !agent_id_valid(&agent_id){return (StatusCode::BAD_REQUEST,Json(json!({"key":"invalid-agent-id"}))).into_response()}
+    if !["connect","disconnect","dismiss"].contains(&action.as_str()){return failure("request.not_found",StatusCode::NOT_FOUND,&headers)}
+    let Some(peer)=state.room.connector_peer()else{return (StatusCode::SERVICE_UNAVAILABLE,Json(json!({"key":"no-connector"}))).into_response()};
+    host_agent_response(peer.request(&format!("agents.{action}"),json!({"id":agent_id}),std::time::Duration::from_secs(20)).await)
 }
 
 async fn not_found(headers: HeaderMap) -> Response {
