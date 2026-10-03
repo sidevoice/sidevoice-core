@@ -20,6 +20,8 @@ use webrtc::{
         RTCSessionDescription, Registry,
     },
 };
+#[cfg(feature = "hosted-fixtures")]
+use webrtc::peer_connection::SettingEngineBuilder;
 
 use super::{failure, media::CallMedia, AppState, AuthenticatedDevice};
 
@@ -190,15 +192,20 @@ pub async fn offer(
             }]
         })
         .build();
-    let peer = match PeerConnectionBuilder::new()
+    let builder = PeerConnectionBuilder::new()
         .with_configuration(config)
         .with_media_engine(engine)
         .with_interceptor_registry(registry)
         .with_handler(handler)
-        .with_udp_addrs(vec!["0.0.0.0:0".to_owned(), "127.0.0.1:0".to_owned()])
-        .build()
-        .await
-    {
+        .with_udp_addrs(vec!["0.0.0.0:0".to_owned(), "127.0.0.1:0".to_owned()]);
+    // The hosted network has no multicast route; aiortc offers numeric host candidates.
+    #[cfg(feature = "hosted-fixtures")]
+    let builder = builder.with_setting_engine(
+        SettingEngineBuilder::new()
+            .with_multicast_dns_mode(rtc::ice::mdns::MulticastDnsMode::Disabled)
+            .build(),
+    );
+    let peer = match builder.build().await {
         Ok(peer) => Arc::new(peer) as Arc<dyn PeerConnection>,
         Err(error) => {
             eprintln!("WebRTC peer construction failed: {error}");

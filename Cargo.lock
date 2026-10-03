@@ -4106,6 +4106,7 @@ dependencies = [
  "percent-encoding",
  "rand 0.8.8",
  "reqwest 0.13.0",
+ "rtc",
  "rusqlite",
  "rustix",
  "rustvani",
