@@ -150,8 +150,16 @@ impl ElevenLabsTts {
             let mut body = Vec::new();
             let mut first_chunk_recorded = false;
             while let Some(chunk) = stream.next().await {
-                let chunk =
-                    chunk.map_err(|_| ProviderError::new(ProviderErrorKind::Transport, None))?;
+                let chunk = chunk.map_err(|error| {
+                    ProviderError::new(
+                        if error.is_timeout() {
+                            ProviderErrorKind::Timeout
+                        } else {
+                            ProviderErrorKind::Transport
+                        },
+                        None,
+                    )
+                })?;
                 if !chunk.is_empty() {
                     if !first_chunk_recorded {
                         first_chunk_recorded = true;
@@ -181,8 +189,16 @@ impl ElevenLabsTts {
             let mut audio = Vec::new();
             let mut first_chunk_recorded = false;
             while let Some(chunk) = stream.next().await {
-                let chunk =
-                    chunk.map_err(|_| ProviderError::new(ProviderErrorKind::Transport, None))?;
+                let chunk = chunk.map_err(|error| {
+                    ProviderError::new(
+                        if error.is_timeout() {
+                            ProviderErrorKind::Timeout
+                        } else {
+                            ProviderErrorKind::Transport
+                        },
+                        None,
+                    )
+                })?;
                 if !chunk.is_empty() {
                     if !first_chunk_recorded {
                         first_chunk_recorded = true;
@@ -258,13 +274,14 @@ async fn load_models(client: &ElevenLabsClient) -> Result<Vec<ElevenLabsModel>, 
 fn model_entry(model: Model) -> ElevenLabsModel {
     let description =
         (!model.description.trim().is_empty()).then(|| model.description.trim().to_owned());
+    let label = if model.name.is_empty() {
+        model.model_id.clone()
+    } else {
+        model.name
+    };
     ElevenLabsModel {
-        id: model.model_id.clone(),
-        label: if model.name.is_empty() {
-            model.model_id
-        } else {
-            model.name
-        },
+        id: model.model_id,
+        label,
         description,
     }
 }
@@ -307,10 +324,13 @@ fn voice_entry(voice: Voice) -> Option<ElevenLabsVoice> {
     if voice.voice_id.is_empty() {
         return None;
     }
-    let primary = voice
+    let primary_language = voice
         .labels
         .get("language")
-        .and_then(|language| language_code(language));
+        .map(String::as_str)
+        .filter(|language| !language.is_empty())
+        .or(voice.language.as_deref());
+    let primary = primary_language.and_then(language_code);
     let languages = if let Some(primary) = primary {
         vec![primary]
     } else {
@@ -323,9 +343,11 @@ fn voice_entry(voice: Voice) -> Option<ElevenLabsVoice> {
             .into_iter()
             .collect()
     };
-    let category = serde_json::to_value(voice.category)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned));
+    let category = voice
+        .category
+        .and_then(|category| serde_json::to_value(category).ok())
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .or_else(|| voice.voice_type.filter(|value| !value.is_empty()));
     Some(ElevenLabsVoice {
         id: voice.voice_id.clone(),
         label: if voice.name.is_empty() {
@@ -466,6 +488,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/rust_t4/eleven_models.json"
     ));
+    const SPARSE_MODELS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/rust_t4/eleven_models_sparse.json"
+    ));
     const VOICES_ONE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/rust_t4/eleven_voices_page_one.json"
@@ -473,6 +499,10 @@ mod tests {
     const VOICES_TWO: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/rust_t4/eleven_voices_page_two.json"
+    ));
+    const SPARSE_VOICES: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/rust_t4/eleven_voices_sparse.json"
     ));
     const LEGACY_VOICES: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -522,6 +552,43 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(60)).await;
             write_http_chunk(&mut socket, &body[first_record_end..]).await;
             socket.write_all(b"0\r\n\r\n").await.unwrap();
+            request
+        });
+        (base_url, task)
+    }
+
+    async fn delayed_body_server(timestamped: bool) -> (String, JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address: SocketAddr = listener.local_addr().unwrap();
+        let base_url = format!("http://{address}");
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0, "SDK closed before sending request headers");
+                request.extend_from_slice(&buffer[..read]);
+            }
+
+            if timestamped {
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                write_http_chunk(&mut socket, b"{\"audio_base64\":").await;
+            } else {
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 32\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                socket.write_all(b"mp3").await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(600)).await;
             request
         });
         (base_url, task)
@@ -718,6 +785,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sparse_catalog_uses_sdk_defaults_and_voice_primary_language_precedence() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("xi-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SPARSE_MODELS))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/voices"))
+            .and(header("xi-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SPARSE_VOICES))
+            .mount(&server)
+            .await;
+
+        let client = super::client("test-key", &server.uri(), Duration::from_secs(3)).unwrap();
+        verify_client(&client).await.unwrap();
+        let catalog = local_tts(&server, Duration::from_secs(3))
+            .catalog("en")
+            .await;
+
+        assert_eq!(catalog.error, None);
+        assert_eq!(catalog.models.len(), 1);
+        assert_eq!(catalog.models[0].id, "sparse-model");
+        assert_eq!(catalog.models[0].label, "sparse-model");
+        assert_eq!(catalog.models[0].description, None);
+        assert_eq!(catalog.voices.len(), 1);
+        assert_eq!(catalog.voices[0].languages, ["es"]);
+        assert_eq!(
+            catalog.voices[0].description.as_deref(),
+            Some("legacy-category")
+        );
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.path() == "/v1/models")
+                .count(),
+            2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.path() == "/v2/voices")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn first_page_not_found_falls_back_to_legacy_voice_list() {
         let server = MockServer::start().await;
         mount_models(&server).await;
@@ -845,6 +964,39 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind, ProviderErrorKind::Timeout);
         assert_eq!(slow.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn body_stream_timeouts_keep_timeout_kind_for_audio_and_timestamp_streams() {
+        for timestamped in [false, true] {
+            let (base_url, server) = delayed_body_server(timestamped).await;
+            let tts = ElevenLabsTts::with_config(
+                "test-key",
+                &base_url,
+                Duration::from_millis(300),
+            )
+            .unwrap();
+            let error = tts
+                .synthesize(
+                    "Hi",
+                    "eleven_multilingual_v2",
+                    "voice123",
+                    1.0,
+                    timestamped,
+                    "mp3_44100_128",
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, ProviderErrorKind::Timeout);
+
+            let request = String::from_utf8_lossy(&server.await.unwrap()).into_owned();
+            let expected_path = if timestamped {
+                "/v1/text-to-speech/voice123/stream/with-timestamps?"
+            } else {
+                "/v1/text-to-speech/voice123/stream?"
+            };
+            assert!(request.starts_with(&format!("POST {expected_path}")));
+        }
     }
 
     #[tokio::test]

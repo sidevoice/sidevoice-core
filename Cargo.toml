@@ -32,3 +32,6 @@ unicode-normalization = "0.1"
 
 [dev-dependencies]
 wiremock = "=0.6.5"
+
+[patch.crates-io]
+elevenlabs-sdk = { path = "vendor/elevenlabs-sdk" }
