@@ -66,6 +66,8 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   } else if (command.op === 'host_error') {
     hostError = true;
     print({ event: 'host_error_ready' });
+  } else if (command.op === 'issue_code') {
+    print({ event: 'pairing-code', answer: await link.request('device.pairing_code', {}) });
   } else if (command.op === 'close') {
     link.close();
     break;

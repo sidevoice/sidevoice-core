@@ -407,8 +407,10 @@ async def main():
                     row = next(row for row in trace["replies"] if row["utterance_id"] == uid)
                     assert row["input_ms"]["audio_ms"] > 0 and row["server_ms"]["input_queued_to_reply_received_ms"] >= 0, row
                     assert request(port, "GET", f"/api/presentation/latency?session_id={session}")[0] == 401
-                    second = request(port, "POST", "/api/device/local/pair", unix=data / "local.sock",
-                                     body={"name": "Other T5 browser"})[1]["token"]
+                    peer.send({"op": "issue_code"})
+                    secret = peer.event("pairing-code")["answer"]["payload"]["secret"]
+                    second = request(port, "POST", "/api/device/pair",
+                                     body={"secret": secret, "name": "Other T5 browser"})[1]["token"]
                     assert request(port, "GET", f"/api/presentation/latency?session_id={session}", token=second)[0] == 404
                     if mode == "timer":
                         stale_uid = f"t5-barge-{uuid.uuid4()}"

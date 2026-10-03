@@ -365,7 +365,7 @@ async def main():
                 peers.append(js2)
                 js2.event("welcome")
                 assert js2.event("binding")["binding"]["binding_id"] == binding["binding_id"]
-                assert js2.event("from-core")["method"] == "input.deliver"
+                js2.method("input.deliver")
                 await frame(ws, "voice-input-receipt", status="delivered")
                 # Replace a peer while its ACK is delayed. Its eventual ACK cannot settle the new generation.
                 js2.send({"op": "delay", "ms": 1500})
@@ -374,13 +374,13 @@ async def main():
                                body={"text": "Late old-generation ACK", "session_id": session, "thread_id": "t3-js-thread",
                                      "binding_id": focus, "message_id": late_id})[0] == 200
                 await frame(ws, "voice-input-receipt", status="pending")
-                assert js2.event("from-core")["method"] == "input.deliver"
+                js2.method("input.deliver")
                 js3 = LineProcess(["node", str(Path(__file__).with_name("rust_t3_v2_peer.mjs")),
                                    str(JS_LINK), origin, ready["connector_id"], ready["token"]])
                 peers.append(js3)
                 js3.event("welcome")
                 assert js3.event("binding")["binding"]["binding_id"] == binding["binding_id"]
-                assert js3.event("from-core")["method"] == "input.deliver"
+                js3.method("input.deliver")
                 await frame(ws, "voice-input-receipt", status="delivered")
                 await asyncio.sleep(1.6)
                 history = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
