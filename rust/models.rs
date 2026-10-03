@@ -1304,7 +1304,11 @@ fn python_repr(value: &Value) -> String {
         Value::Bool(false) => "False".to_owned(),
         Value::Number(number) => number.to_string(),
         Value::String(value) => {
-            let quote = if value.contains('\'') && !value.contains('"') { '"' } else { '\'' };
+            let quote = if value.contains('\'') && !value.contains('"') {
+                '"'
+            } else {
+                '\''
+            };
             let mut result = String::from(quote);
             for character in value.chars() {
                 match character {
@@ -1316,7 +1320,10 @@ fn python_repr(value: &Value) -> String {
                         result.push('\\');
                         result.push(character);
                     }
-                    character if character.is_control() || (character.is_whitespace() && character != ' ') => {
+                    character
+                        if character.is_control()
+                            || (character.is_whitespace() && character != ' ') =>
+                    {
                         let code = character as u32;
                         if code <= 0xff {
                             result.push_str(&format!("\\x{code:02x}"));
@@ -1332,10 +1339,21 @@ fn python_repr(value: &Value) -> String {
             result.push(quote);
             result
         }
-        Value::Array(items) => format!("[{}]", items.iter().map(python_repr).collect::<Vec<_>>().join(", ")),
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(python_repr).collect::<Vec<_>>().join(", ")
+        ),
         Value::Object(items) => format!(
             "{{{}}}",
-            items.iter().map(|(key, value)| format!("{}: {}", python_repr(&Value::String(key.clone())), python_repr(value))).collect::<Vec<_>>().join(", ")
+            items
+                .iter()
+                .map(|(key, value)| format!(
+                    "{}: {}",
+                    python_repr(&Value::String(key.clone())),
+                    python_repr(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }
@@ -1351,9 +1369,9 @@ fn option_value(
         Some("language") => {
             if value.as_str().is_some_and(|language| {
                 strings(option.get("values")).any(|candidate| candidate == language)
-                    || (language == "auto" && option.get("auto").and_then(Value::as_bool) == Some(true))
-            })
-            {
+                    || (language == "auto"
+                        && option.get("auto").and_then(Value::as_bool) == Some(true))
+            }) {
                 Ok(value.clone())
             } else {
                 Err(OptionFailure::new(
@@ -1366,7 +1384,10 @@ fn option_value(
         }
         Some("text") => {
             let max = option.get("max").and_then(Value::as_u64).unwrap_or(1000) as usize;
-            if value.as_str().is_some_and(|text| text.chars().count() <= max) {
+            if value
+                .as_str()
+                .is_some_and(|text| text.chars().count() <= max)
+            {
                 Ok(value.clone())
             } else {
                 Err(OptionFailure::new(
@@ -1444,7 +1465,9 @@ fn voice_id(
         let Some(found) = found else {
             return Err(OptionFailure::new(
                 name,
-                OptionFailureKind::ModelVoice { shown: shown(voice) },
+                OptionFailureKind::ModelVoice {
+                    shown: shown(voice),
+                },
             ));
         };
         let voice = voice.as_str().expect("matched catalogue voice is a string");
@@ -1462,7 +1485,10 @@ fn voice_id(
             }
         }
         Ok(voice.to_owned())
-    } else if voice.as_str().is_some_and(|voice| !voice.trim().is_empty() && voice.chars().count() <= 120) {
+    } else if voice
+        .as_str()
+        .is_some_and(|voice| !voice.trim().is_empty() && voice.chars().count() <= 120)
+    {
         Ok(voice.as_str().unwrap().to_owned())
     } else {
         Err(OptionFailure::new(name, OptionFailureKind::ProviderVoice))
@@ -2247,8 +2273,14 @@ mod tests {
 
     #[test]
     fn shown_matches_python_repr_at_the_display_limit() {
-        assert_eq!(super::shown(&json!("x".repeat(38))), format!("'{}'", "x".repeat(38)));
-        assert_eq!(super::shown(&json!("x".repeat(39))), format!("'{}…", "x".repeat(38)));
+        assert_eq!(
+            super::shown(&json!("x".repeat(38))),
+            format!("'{}'", "x".repeat(38))
+        );
+        assert_eq!(
+            super::shown(&json!("x".repeat(39))),
+            format!("'{}…", "x".repeat(38))
+        );
         assert_eq!(super::shown(&json!("a'b\"c")), "'a\\'b\"c'");
         assert_eq!(super::shown(&json!("a\\b")), "'a\\\\b'");
     }
