@@ -103,9 +103,10 @@ impl Config {
         let data_dir = absolute(data_dir)?;
         let socket = absolute(socket.unwrap_or_else(|| data_dir.join("local.sock")))?;
         let ready_file = absolute(ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;
-        let log_file = absolute(log_file.unwrap_or_else(|| {
-            data_dir.parent().unwrap_or(Path::new(".")).join("core.log")
-        }))?;
+        let log_file = absolute(
+            log_file
+                .unwrap_or_else(|| data_dir.parent().unwrap_or(Path::new(".")).join("core.log")),
+        )?;
         Ok(Self {
             data_dir,
             socket,
@@ -251,8 +252,11 @@ async fn await_serving_tcp(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let probe_address = if address.ip().is_unspecified() {
         std::net::SocketAddr::new(
-            if address.is_ipv4() { std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) }
-            else { std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST) },
+            if address.is_ipv4() {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            } else {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+            },
             address.port(),
         )
     } else {
@@ -263,8 +267,11 @@ async fn await_serving_tcp(
             return Err(StartFailure::new("start", "start.failed"));
         }
         if let Ok(Ok(mut stream)) = tokio::time::timeout(
-            Duration::from_millis(250), TcpStream::connect(probe_address)
-        ).await {
+            Duration::from_millis(250),
+            TcpStream::connect(probe_address),
+        )
+        .await
+        {
             if probe_http(&mut stream, "/api/rendezvous").await && !task.is_finished() {
                 return Ok(());
             }
@@ -282,9 +289,9 @@ async fn await_serving_local(
         if task.is_finished() || tokio::time::Instant::now() >= deadline {
             return Err(StartFailure::new("start", "start.failed"));
         }
-        if let Ok(Ok(mut stream)) = tokio::time::timeout(
-            Duration::from_millis(250), UnixStream::connect(path)
-        ).await {
+        if let Ok(Ok(mut stream)) =
+            tokio::time::timeout(Duration::from_millis(250), UnixStream::connect(path)).await
+        {
             if probe_http(&mut stream, "/api/local/health").await && !task.is_finished() {
                 return Ok(());
             }
@@ -390,7 +397,9 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         "api": API, "protocol": CONNECTOR_PROTOCOL, "connector_protocols": [CONNECTOR_PROTOCOL, 3],
         "connector_id": connector_id, "token": token});
     let (stopping, receiver) = watch::channel(false);
-    let tcp_address = tcp.local_addr().map_err(|_| StartFailure::new("start", "start.failed"))?;
+    let tcp_address = tcp
+        .local_addr()
+        .map_err(|_| StartFailure::new("start", "start.failed"))?;
     let tcp_app = server::router(state.clone(), false);
     let local_app = server::router(state.clone(), true);
     let tcp_receiver = receiver.clone();
@@ -426,13 +435,15 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
             .map_err(|_| StartFailure::new("start", "start.failed"))?;
         let _ = log_event(config, "runtime.log_ready", None);
         Ok::<_, StartFailure>(())
-    }.await;
+    }
+    .await;
     if let Err(error) = startup {
         let _ = stopping.send(true);
         let _ = tokio::time::timeout(Duration::from_secs(10), async {
             let _ = tcp_task.await;
             let _ = local_task.await;
-        }).await;
+        })
+        .await;
         return Err(error);
     }
     let crashed = tokio::select! {

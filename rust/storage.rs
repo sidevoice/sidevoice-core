@@ -188,8 +188,18 @@ impl PrivateDir {
 
     fn import_legacy_connectors(&self) -> io::Result<Value> {
         let path = self.file("room-history.sqlite3");
-        if !path.exists() {
-            return Ok(serde_json::json!({"connectors": {}}));
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(serde_json::json!({"connectors": {}}));
+            }
+            Err(error) => return Err(error),
+            Ok(meta) if !meta.file_type().is_file() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "legacy SQLite path is not a file",
+                ));
+            }
+            Ok(_) => {}
         }
         let sqlite_error = |error| io::Error::new(io::ErrorKind::InvalidData, error);
         let connection =

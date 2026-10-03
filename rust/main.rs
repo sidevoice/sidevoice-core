@@ -12,11 +12,23 @@ async fn main() {
         .map(|arg| arg.to_str().map(str::to_owned))
         .collect()
     else {
-        eprintln!("{}", render(&LocalizedMessage::new("runtime.arguments"), &runtime::system_language()));
+        eprintln!(
+            "{}",
+            render(
+                &LocalizedMessage::new("runtime.arguments"),
+                &runtime::system_language()
+            )
+        );
         std::process::exit(2);
     };
     if flags.iter().any(|flag| flag == "--help" || flag == "-h") {
-        println!("{}", render(&LocalizedMessage::new("runtime.help"), &runtime::system_language()));
+        println!(
+            "{}",
+            render(
+                &LocalizedMessage::new("runtime.help"),
+                &runtime::system_language()
+            )
+        );
         return;
     }
     if flags.first().map(String::as_str) == Some("--self-test") {
@@ -47,7 +59,13 @@ async fn main() {
     let config = match Config::from_args(&flags) {
         Ok(config) => config,
         Err(_) => {
-            eprintln!("{}", render(&LocalizedMessage::new("runtime.arguments"), &runtime::system_language()));
+            eprintln!(
+                "{}",
+                render(
+                    &LocalizedMessage::new("runtime.arguments"),
+                    &runtime::system_language()
+                )
+            );
             std::process::exit(2);
         }
     };
