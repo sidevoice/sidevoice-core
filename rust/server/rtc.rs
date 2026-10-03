@@ -209,26 +209,42 @@ pub async fn offer(
     let answer = async {
         let offer = RTCSessionDescription::offer(offer.sdp)
             .map_err(|error| format!("offer_parse: {error}"))?;
-        peer.set_remote_description(offer).await
+        peer.set_remote_description(offer)
+            .await
             .map_err(|error| format!("remote_description: {error}"))?;
-        let answer = peer.create_answer(None).await
+        let answer = peer
+            .create_answer(None)
+            .await
             .map_err(|error| format!("create_answer: {error}"))?;
-        peer.set_local_description(answer).await
+        peer.set_local_description(answer)
+            .await
             .map_err(|error| format!("local_description: {error}"))?;
-        gathered_rx.await.map_err(|error| format!("ice_gathering: {error}"))?;
-        peer.local_description().await.ok_or_else(|| "gathered_description_missing".to_owned())
+        gathered_rx
+            .await
+            .map_err(|error| format!("ice_gathering: {error}"))?;
+        peer.local_description()
+            .await
+            .ok_or_else(|| "gathered_description_missing".to_owned())
     };
     let answer = match tokio::time::timeout(std::time::Duration::from_secs(20), answer).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(error)) => {
             eprintln!("WebRTC answer failed: {error}");
             let _ = peer.close().await;
-            return failure("voice.rtc_answer_failed", StatusCode::UNPROCESSABLE_ENTITY, &headers);
+            return failure(
+                "voice.rtc_answer_failed",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &headers,
+            );
         }
         Err(_) => {
             eprintln!("WebRTC answer failed: gathered ICE timed out");
             let _ = peer.close().await;
-            return failure("voice.rtc_answer_failed", StatusCode::UNPROCESSABLE_ENTITY, &headers);
+            return failure(
+                "voice.rtc_answer_failed",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &headers,
+            );
         }
     };
     call.set_rtc(generation, peer).await;
