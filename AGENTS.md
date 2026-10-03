@@ -17,3 +17,7 @@ Rules for any coding agent (and person) working in this repository.
 
 Read `README.md`. Refusals and errors that a person will read must be translatable: a stable key with its parameters, rendered by
 the client, or whatever sidevoice/sidevoice-web#17 settles — never a finished sentence in one language.
+
+## Public product information
+
+For changes to user-visible behavior, supported platforms/models, setup, security/privacy practices, availability, limitations, or release/download details, follow the shared [public-information process](https://github.com/sidevoice/landing/blob/main/AGENTS.md#keep-public-product-information-current). Record the landing change/PR or a linked `sidevoice/landing` issue in the PR checklist. Landing issues are the follow-up triage queue.
