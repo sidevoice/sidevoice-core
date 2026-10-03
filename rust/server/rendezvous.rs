@@ -12,7 +12,11 @@ use std::time::Duration;
 use axum::Router;
 use percent_encoding::percent_decode_str;
 use serde_json::{json, Value};
-use socketioxide::{extract::{AckSender, SocketRef, State, TryData}, handler::ConnectHandler, SocketIo};
+use socketioxide::{
+    extract::{AckSender, SocketRef, State, TryData},
+    handler::ConnectHandler,
+    SocketIo,
+};
 use tokio::sync::{mpsc, Mutex, Notify};
 use url::Url;
 
@@ -28,8 +32,8 @@ pub(crate) const DIAL_PATH: &str = "/api/rendezvous/link";
 pub(crate) const DIAL_NAMESPACE: &str = "/room";
 pub(crate) const CALL_SOCKET: &str = "/api/presentation/ws";
 
-mod packet;
 mod client;
+mod packet;
 mod relay;
 
 use packet::{from_rmpv, to_rmpv, Part};
@@ -64,13 +68,29 @@ pub struct Rendezvous {
 }
 
 impl Rendezvous {
-    pub fn new(pairing_path: Option<PathBuf>, base: Url, host: String, room: Arc<Room>) -> Arc<Self> {
+    pub fn new(
+        pairing_path: Option<PathBuf>,
+        base: Url,
+        host: String,
+        room: Arc<Room>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            pairing_path, base, host, room,
-            state: StdMutex::new(LinkState { room: None, connected: false, via: None,
-                error: None, refused: None, public_url: None, linked: None }),
+            pairing_path,
+            base,
+            host,
+            room,
+            state: StdMutex::new(LinkState {
+                room: None,
+                connected: false,
+                via: None,
+                error: None,
+                refused: None,
+                public_url: None,
+                linked: None,
+            }),
             dialled: Mutex::new(std::collections::HashMap::new()),
-            changed: Notify::new(), stopping: Notify::new(),
+            changed: Notify::new(),
+            stopping: Notify::new(),
         })
     }
 
@@ -79,8 +99,15 @@ impl Rendezvous {
     }
 
     fn identity(&self, pairing: &Pairing) -> Value {
-        let mut fields = self.room.latest_connector_identity().as_object().cloned().unwrap_or_default();
-        fields.entry("host".to_owned()).or_insert_with(|| json!(self.host));
+        let mut fields = self
+            .room
+            .latest_connector_identity()
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        fields
+            .entry("host".to_owned())
+            .or_insert_with(|| json!(self.host));
         fields.insert("connector_id".to_owned(), json!(pairing.connector_id));
         fields.insert("token".to_owned(), json!(pairing.token));
         fields.insert("protocol".to_owned(), json!(PROTOCOL));
@@ -88,13 +115,16 @@ impl Rendezvous {
         Value::Object(fields)
     }
 
-    pub fn snapshot(&self) -> Value { self.state.lock().expect("rendezvous state lock").view() }
+    pub fn snapshot(&self) -> Value {
+        self.state.lock().expect("rendezvous state lock").view()
+    }
 
     pub fn room_for_devices(&self) -> Option<Value> {
         let pairing = self.current_pairing()?;
         let state = self.state.lock().expect("rendezvous state lock");
         let public = (state.linked.as_ref() == Some(&pairing))
-            .then(|| state.public_url.as_deref()).flatten();
+            .then(|| state.public_url.as_deref())
+            .flatten();
         Some(pairing.room_for_devices(public))
     }
 
@@ -103,51 +133,62 @@ impl Rendezvous {
     }
 
     async fn connected(&self, via: &'static str, public_url: Option<String>) {
-        let mut state = self.state.lock().expect("rendezvous state lock");
-        state.connected = true;
-        state.via = Some(via);
-        state.error = None;
-        state.refused = None;
-        state.public_url = public_url;
-        state.linked = self.current_pairing();
-        drop(state);
+        {
+            let mut state = self.state.lock().expect("rendezvous state lock");
+            state.connected = true;
+            state.via = Some(via);
+            state.error = None;
+            state.refused = None;
+            state.public_url = public_url;
+            state.linked = self.current_pairing();
+        }
         self.report().await;
     }
 
     async fn disconnected(&self, via: &'static str) {
-        let mut state = self.state.lock().expect("rendezvous state lock");
-        if state.via != Some(via) { return; }
-        state.connected = false;
-        state.via = None;
-        state.public_url = None;
-        state.linked = None;
-        drop(state);
+        {
+            let mut state = self.state.lock().expect("rendezvous state lock");
+            if state.via != Some(via) {
+                return;
+            }
+            state.connected = false;
+            state.via = None;
+            state.public_url = None;
+            state.linked = None;
+        }
         self.report().await;
     }
 
     async fn refused(&self, reason: String) {
-        let mut state = self.state.lock().expect("rendezvous state lock");
-        state.connected = false;
-        state.refused = Some(reason.chars().take(200).collect());
-        state.error = None;
-        state.via = None;
-        state.public_url = None;
-        state.linked = None;
-        drop(state);
+        {
+            let mut state = self.state.lock().expect("rendezvous state lock");
+            state.connected = false;
+            state.refused = Some(reason.chars().take(200).collect());
+            state.error = None;
+            state.via = None;
+            state.public_url = None;
+            state.linked = None;
+        }
         self.report().await;
     }
 
     async fn error(&self, key: &'static str) {
-        let mut state = self.state.lock().expect("rendezvous state lock");
-        state.error = Some(render(&LocalizedMessage::new(key), "en"));
-        state.connected = false;
-        state.via = None;
-        drop(state);
+        {
+            let mut state = self.state.lock().expect("rendezvous state lock");
+            state.error = Some(render(&LocalizedMessage::new(key), "en"));
+            state.connected = false;
+            state.via = None;
+        }
         self.report().await;
     }
 
-    pub fn poke(&self) { self.changed.notify_waiters(); }
-    pub fn stop(&self) { self.stopping.notify_waiters(); self.changed.notify_waiters(); }
+    pub fn poke(&self) {
+        self.changed.notify_waiters();
+    }
+    pub fn stop(&self) {
+        self.stopping.notify_waiters();
+        self.changed.notify_waiters();
+    }
 
     pub async fn run(self: Arc<Self>) {
         let mut seen: Option<Pairing> = None;
@@ -158,21 +199,29 @@ impl Rendezvous {
                 seen = pairing.clone();
                 delay = Duration::from_millis(250);
                 let sockets = std::mem::take(&mut *self.dialled.lock().await);
-                for (_, socket) in sockets { let _ = socket.disconnect(); }
-                let mut state = self.state.lock().expect("rendezvous state lock");
-                state.room = pairing.as_ref().map(|p| p.origin.clone());
-                state.connected = false;
-                state.via = None;
-                state.error = None;
-                state.refused = None;
-                state.public_url = None;
-                state.linked = None;
-                drop(state);
+                for (_, socket) in sockets {
+                    let _ = socket.disconnect();
+                }
+                {
+                    let mut state = self.state.lock().expect("rendezvous state lock");
+                    state.room = pairing.as_ref().map(|p| p.origin.clone());
+                    state.connected = false;
+                    state.via = None;
+                    state.error = None;
+                    state.refused = None;
+                    state.public_url = None;
+                    state.linked = None;
+                }
                 self.report().await;
             }
             if let Some(pairing) = pairing {
                 let dialled = !self.dialled.lock().await.is_empty();
-                let refused = self.state.lock().expect("rendezvous state lock").refused.is_some();
+                let refused = self
+                    .state
+                    .lock()
+                    .expect("rendezvous state lock")
+                    .refused
+                    .is_some();
                 if !dialled && !refused {
                     if !super::safe_url(&pairing.origin) {
                         self.error("relay.credential_transport").await;
@@ -195,7 +244,9 @@ impl Rendezvous {
             }
         }
         let sockets = std::mem::take(&mut *self.dialled.lock().await);
-        for (_, socket) in sockets { let _ = socket.disconnect(); }
+        for (_, socket) in sockets {
+            let _ = socket.disconnect();
+        }
     }
 }
 
@@ -203,24 +254,35 @@ fn field<'a>(data: &'a Value, name: &str) -> &'a str {
     data.get(name).and_then(Value::as_str).unwrap_or("")
 }
 
-async fn authenticate(State(state): State<Arc<AppState>>, TryData(auth): TryData<Value>) -> Result<(), String> {
+async fn authenticate(
+    State(state): State<Arc<AppState>>,
+    TryData(auth): TryData<Value>,
+) -> Result<(), String> {
     let pairing = state.rendezvous.current_pairing();
-    let accepted = pairing.as_ref().zip(auth.ok()).is_some_and(|(pairing, auth)| {
-        let told_key = field(&auth, "dial_key");
-        field(&auth, "connector_id") == pairing.connector_id
-            && pairing.dial_key.as_deref().is_some_and(|key| {
-                use subtle::ConstantTimeEq;
-                key.as_bytes().ct_eq(told_key.as_bytes()).into()
-            })
-    });
-    if accepted { Ok(()) } else {
+    let accepted = pairing
+        .as_ref()
+        .zip(auth.ok())
+        .is_some_and(|(pairing, auth)| {
+            let told_key = field(&auth, "dial_key");
+            field(&auth, "connector_id") == pairing.connector_id
+                && pairing.dial_key.as_deref().is_some_and(|key| {
+                    use subtle::ConstantTimeEq;
+                    key.as_bytes().ct_eq(told_key.as_bytes()).into()
+                })
+        });
+    if accepted {
+        Ok(())
+    } else {
         Err(render(&LocalizedMessage::new("relay.dial_refused"), "en"))
     }
 }
 
 async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
     let rv = state.rendezvous.clone();
-    let Some(pairing) = rv.current_pairing() else { let _ = socket.disconnect(); return; };
+    let Some(pairing) = rv.current_pairing() else {
+        let _ = socket.disconnect();
+        return;
+    };
     let sid = socket.id.to_string();
     rv.dialled.lock().await.insert(sid.clone(), socket.clone());
     rv.changed.notify_waiters();
@@ -229,34 +291,44 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
     let emitted = socket.clone();
     tokio::spawn(async move {
         while let Some((event, part)) = output.recv().await {
-            if emitted.emit(event, &to_rmpv(part)).is_err() { break; }
+            if emitted.emit(event, &to_rmpv(part)).is_err() {
+                break;
+            }
         }
     });
     for event in ["relay.http", "relay.open", "relay.data", "relay.close"] {
         let relay = relay.clone();
-        socket.on(event, move |TryData(data): TryData<rmpv::Value>, ack: AckSender| {
-            let relay = relay.clone();
-            async move {
-                if let Ok(data) = data {
-                    if let Some(data) = from_rmpv(data) {
-                        if let Some(answer) = relay.handle(event, data).await {
-                            let _ = ack.send(&to_rmpv(answer));
+        socket.on(
+            event,
+            move |TryData(data): TryData<rmpv::Value>, ack: AckSender| {
+                let relay = relay.clone();
+                async move {
+                    if let Ok(data) = data {
+                        if let Some(data) = from_rmpv(data) {
+                            if let Some(answer) = relay.handle(event, data).await {
+                                let _ = ack.send(&to_rmpv(answer));
+                            }
                         }
                     }
                 }
-            }
-        });
+            },
+        );
     }
     let revoked = rv.clone();
-    socket.on("node.revoked", move |TryData(data): TryData<Value>, socket: SocketRef| {
-        let rv = revoked.clone();
-        async move {
-            let reason = data.ok().and_then(|d| d.get("reason").and_then(Value::as_str).map(str::to_owned))
-                .unwrap_or_else(|| render(&LocalizedMessage::new("relay.revoked"), "en"));
-            rv.refused(reason).await;
-            let _ = socket.disconnect();
-        }
-    });
+    socket.on(
+        "node.revoked",
+        move |TryData(data): TryData<Value>, socket: SocketRef| {
+            let rv = revoked.clone();
+            async move {
+                let reason = data
+                    .ok()
+                    .and_then(|d| d.get("reason").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_else(|| render(&LocalizedMessage::new("relay.revoked"), "en"));
+                rv.refused(reason).await;
+                let _ = socket.disconnect();
+            }
+        },
+    );
     let disconnected = rv.clone();
     let gone_relay = relay.clone();
     socket.on_disconnect(move |_: SocketRef| {
@@ -266,24 +338,34 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
         async move {
             relay.shutdown().await;
             rv.dialled.lock().await.remove(&sid);
-            if rv.dialled.lock().await.is_empty() { rv.disconnected("dial").await; }
+            if rv.dialled.lock().await.is_empty() {
+                rv.disconnected("dial").await;
+            }
             rv.changed.notify_waiters();
         }
     });
     let proof = rv.identity(&pairing);
     let socket_greet = socket.clone();
     tokio::spawn(async move {
-        let answer = socket_greet.timeout(Duration::from_secs(10)).emit_with_ack::<_, Value>("node.hello", &proof);
+        let answer = socket_greet
+            .timeout(Duration::from_secs(10))
+            .emit_with_ack::<_, Value>("node.hello", &proof);
         match answer {
             Ok(answer) => match answer.await {
-                Ok(answer) if !answer.get("error").is_some_and(|v| !v.is_null()) => rv.connected("dial", None).await,
+                Ok(answer) if !answer.get("error").is_some_and(|v| !v.is_null()) => {
+                    rv.connected("dial", None).await
+                }
                 Ok(answer) => {
                     rv.refused(field(&answer, "error").to_owned()).await;
                     let _ = socket_greet.disconnect();
                 }
-                Err(_) => { let _ = socket_greet.disconnect(); }
+                Err(_) => {
+                    let _ = socket_greet.disconnect();
+                }
             },
-            Err(_) => { let _ = socket_greet.disconnect(); }
+            Err(_) => {
+                let _ = socket_greet.disconnect();
+            }
         }
     });
 }
@@ -311,7 +393,12 @@ impl Pairing {
     /// indistinguishable from an unpaired machine to the watcher.
     pub(crate) fn read(path: &Path) -> Option<Self> {
         let saved: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-        let field = |name| saved.get(name).and_then(Value::as_str).filter(|s| !s.is_empty());
+        let field = |name| {
+            saved
+                .get(name)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        };
         let url = field("url")?.to_owned();
         let parsed = Url::parse(&url).ok()?;
         let host = parsed.host_str()?;
@@ -351,9 +438,14 @@ pub(crate) fn public_origin(value: &str) -> Option<String> {
 }
 
 fn relayed(path: &str, local_only: impl Fn(&str) -> bool) -> bool {
-    ["/api/presentation", "/api/device", "/api/models", "/api/host"]
-        .iter()
-        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+    [
+        "/api/presentation",
+        "/api/device",
+        "/api/models",
+        "/api/host",
+    ]
+    .iter()
+    .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
         && !local_only(path)
 }
 
@@ -361,7 +453,8 @@ fn relayed(path: &str, local_only: impl Fn(&str) -> bool) -> bool {
 /// actually request. The caller supplies T1's local-only rule, so there is one
 /// owner for the TCP/UDS exclusion policy.
 pub(crate) fn relayable(base: &Url, path: &str, local_only: impl Fn(&str) -> bool) -> bool {
-    if !path.starts_with('/') || path.starts_with("//") || path.contains('?') || path.contains('#') {
+    if !path.starts_with('/') || path.starts_with("//") || path.contains('?') || path.contains('#')
+    {
         return false;
     }
     let mut current = path.to_owned();
@@ -369,13 +462,14 @@ pub(crate) fn relayable(base: &Url, path: &str, local_only: impl Fn(&str) -> boo
         if !relayed(&current, &local_only) || current.contains("..") || current.contains('\\') {
             return false;
         }
-        let next = percent_decode_str(&current).decode_utf8_lossy().into_owned();
+        let next = percent_decode_str(&current)
+            .decode_utf8_lossy()
+            .into_owned();
         if next == current {
             let Ok(final_url) = base.join(path) else {
                 return false;
             };
-            return final_url.origin() == base.origin()
-                && relayed(final_url.path(), local_only);
+            return final_url.origin() == base.origin() && relayed(final_url.path(), local_only);
         }
         current = next;
     }
@@ -394,9 +488,19 @@ mod tests {
         let pairing = Pairing::read(&path).unwrap();
         assert_eq!(pairing.origin, "https://room.example:444");
         assert_eq!(pairing.dial_key.as_deref(), Some("proof"));
-        assert_eq!(pairing.room_for_devices(None), serde_json::json!({"url":"https://room.example:444","node":"node-1"}));
-        assert_eq!(public_origin(" https://room.example/ "), Some("https://room.example".into()));
-        fs::write(&path, r#"{"url":"file:///tmp/key","connector_id":"node-1","token":"secret"}"#).unwrap();
+        assert_eq!(
+            pairing.room_for_devices(None),
+            serde_json::json!({"url":"https://room.example:444","node":"node-1"})
+        );
+        assert_eq!(
+            public_origin(" https://room.example/ "),
+            Some("https://room.example".into())
+        );
+        fs::write(
+            &path,
+            r#"{"url":"file:///tmp/key","connector_id":"node-1","token":"secret"}"#,
+        )
+        .unwrap();
         assert!(Pairing::read(&path).is_none());
     }
 
@@ -404,10 +508,26 @@ mod tests {
     fn relay_path_never_crosses_local_or_rendezvous_boundary() {
         let base = Url::parse("http://127.0.0.1:8768/").unwrap();
         let local_only = |path: &str| path.starts_with("/api/device/local");
-        for path in ["/api/presentation/ws", "/api/models/catalog", "/api/host/agents", "/api/device/identity"] {
+        for path in [
+            "/api/presentation/ws",
+            "/api/models/catalog",
+            "/api/host/agents",
+            "/api/device/identity",
+        ] {
             assert!(relayable(&base, path, local_only), "{path}");
         }
-        for path in ["/api/connectors/link", "/api/rendezvous", "/api/device/local/pair", "/api/device/%2e%2e/connectors/link", "/api/presentation/%252e%252e/connectors", "/api/models/../rendezvous", "/api/device/..%2f..%2fapi/connectors", "/api/device/%5c..%5cconnectors", "//evil.example/api/device", "/api/device?next=/api/connectors"] {
+        for path in [
+            "/api/connectors/link",
+            "/api/rendezvous",
+            "/api/device/local/pair",
+            "/api/device/%2e%2e/connectors/link",
+            "/api/presentation/%252e%252e/connectors",
+            "/api/models/../rendezvous",
+            "/api/device/..%2f..%2fapi/connectors",
+            "/api/device/%5c..%5cconnectors",
+            "//evil.example/api/device",
+            "/api/device?next=/api/connectors",
+        ] {
             assert!(!relayable(&base, path, local_only), "{path}");
         }
     }

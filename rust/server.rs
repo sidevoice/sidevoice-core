@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use base64::Engine;
 use axum::extract::{
     ws::{CloseFrame, Message, WebSocket},
     Extension, Path, Request, State, WebSocketUpgrade,
@@ -13,6 +12,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine;
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -88,7 +88,10 @@ impl AppState {
         if let Some(rv) = self.rendezvous.room_for_devices() {
             code["payload"]["rv"] = rv;
             let payload = serde_json::to_vec(&code["payload"]).expect("pairing payload");
-            code["code"] = json!(format!("SV1.{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)));
+            code["code"] = json!(format!(
+                "SV1.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+            ));
         }
         code
     }
@@ -344,7 +347,8 @@ async fn guard(
     }
     let open = (request.method() == axum::http::Method::GET
         && (matches!(path.as_str(), "/api/rendezvous" | "/api/device/identity")
-            || path == "/api/rendezvous/link" || path == "/api/rendezvous/link/"))
+            || path == "/api/rendezvous/link"
+            || path == "/api/rendezvous/link/"))
         || (request.method() == axum::http::Method::POST && path == "/api/device/pair")
         || (local && local_only(&path));
     let is_ws = request.method() == axum::http::Method::GET
@@ -833,24 +837,44 @@ struct PairRoom {
     code: String,
 }
 
-async fn rendezvous_pair(State(state): State<Arc<AppState>>, headers: HeaderMap,
-    body: axum::body::Bytes) -> Response {
+async fn rendezvous_pair(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     if headers.get(header::ORIGIN).is_none() || !origin_allowed(&headers) {
         return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
     }
     let Ok(input) = serde_json::from_slice::<PairRoom>(&body) else {
-        return failure("relay.pair_invalid", StatusCode::UNPROCESSABLE_ENTITY, &headers);
+        return failure(
+            "relay.pair_invalid",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+        );
     };
     let room = input.room.trim();
     let code = input.code.trim();
     if room.is_empty() || room.len() > 2048 || code.is_empty() || code.len() > 64 {
-        return failure("relay.pair_invalid", StatusCode::UNPROCESSABLE_ENTITY, &headers);
+        return failure(
+            "relay.pair_invalid",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+        );
     }
     let Some(peer) = state.room.connector_peer() else {
-        return failure("relay.connector_unavailable", StatusCode::SERVICE_UNAVAILABLE, &headers);
+        return failure(
+            "relay.connector_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+            &headers,
+        );
     };
-    let answer = peer.request("pair.request", json!({"room":room,"code":code}),
-        std::time::Duration::from_secs(25)).await;
+    let answer = peer
+        .request(
+            "pair.request",
+            json!({"room":room,"code":code}),
+            std::time::Duration::from_secs(25),
+        )
+        .await;
     let Ok(answer) = answer else {
         return failure("relay.pair_timeout", StatusCode::GATEWAY_TIMEOUT, &headers);
     };
@@ -858,7 +882,8 @@ async fn rendezvous_pair(State(state): State<Arc<AppState>>, headers: HeaderMap,
         return failure("relay.pair_failed", StatusCode::BAD_REQUEST, &headers);
     }
     state.rendezvous.poke();
-    Json(json!({"ok":true,"room":answer.get("origin"),"connector_id":answer.get("connector_id")})).into_response()
+    Json(json!({"ok":true,"room":answer.get("origin"),"connector_id":answer.get("connector_id")}))
+        .into_response()
 }
 
 async fn identity(
@@ -1231,8 +1256,12 @@ mod tests {
         let identity = NodeIdentity::load_or_create(&dir).unwrap();
         let registry = DeviceRegistry::load(dir.clone()).unwrap();
         let room = Arc::new(Room::load(dir.clone()).unwrap());
-        let relay = rendezvous::Rendezvous::new(None, Url::parse("http://127.0.0.1:8768/").unwrap(),
-            "fixture-host".to_owned(), room.clone());
+        let relay = rendezvous::Rendezvous::new(
+            None,
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            "fixture-host".to_owned(),
+            room.clone(),
+        );
         let state = Arc::new(AppState::new(
             dir.clone(),
             identity,
@@ -1292,8 +1321,12 @@ mod tests {
         let identity = NodeIdentity::load_or_create(&dir).unwrap();
         let registry = DeviceRegistry::load(dir.clone()).unwrap();
         let room = Arc::new(Room::load(dir.clone()).unwrap());
-        let relay = rendezvous::Rendezvous::new(None, Url::parse("http://127.0.0.1:8768/").unwrap(),
-            "host".to_owned(), room.clone());
+        let relay = rendezvous::Rendezvous::new(
+            None,
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            "host".to_owned(),
+            room.clone(),
+        );
         let state = Arc::new(AppState::new(
             dir.clone(),
             identity,

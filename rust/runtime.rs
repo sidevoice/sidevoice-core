@@ -392,7 +392,9 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         config.room_credential.as_ref().map(PathBuf::from),
         url::Url::parse(&format!("http://127.0.0.1:{port}/"))
             .map_err(|_| StartFailure::new("start", "start.failed"))?,
-        machine_host.clone(), room.clone());
+        machine_host.clone(),
+        room.clone(),
+    );
     let state = Arc::new(AppState::new(
         dir.clone(),
         identity,

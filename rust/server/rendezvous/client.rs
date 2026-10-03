@@ -13,13 +13,20 @@ use tokio::sync::mpsc;
 
 use super::packet::{decode, encode, Part};
 use super::relay::Relay;
-use super::{Pairing, Rendezvous, OUTBOUND_NAMESPACE, PROTOCOL};
+use super::{Pairing, Rendezvous, OUTBOUND_NAMESPACE};
 
 struct TextEvent(String);
 impl Emit<NoAck, NoBinary> for TextEvent {
     type Output = ();
     fn prepare(self) -> Result<(Directive, ()), sioc::error::PayloadError> {
-        Ok((Directive::Event { payload: self.0.into(), tx: None, attachments: None }, ()))
+        Ok((
+            Directive::Event {
+                payload: self.0.into(),
+                tx: None,
+                attachments: None,
+            },
+            (),
+        ))
     }
 }
 
@@ -27,26 +34,45 @@ struct BinaryEvent(String, Vec<Bytes>);
 impl Emit<NoAck, HasBinary> for BinaryEvent {
     type Output = ();
     fn prepare(self) -> Result<(Directive, ()), sioc::error::PayloadError> {
-        Ok((Directive::Event { payload: self.0.into(), tx: None, attachments: Some(self.1) }, ()))
+        Ok((
+            Directive::Event {
+                payload: self.0.into(),
+                tx: None,
+                attachments: Some(self.1),
+            },
+            (),
+        ))
     }
 }
 
 struct TextAck;
-impl AckType for TextAck { type Binary = NoBinary; }
+impl AckType for TextAck {
+    type Binary = NoBinary;
+}
 struct BinaryAck;
-impl AckType for BinaryAck { type Binary = HasBinary; }
+impl AckType for BinaryAck {
+    type Binary = HasBinary;
+}
 
 struct TextAnswer(String);
 impl Acknowledge<TextAck, NoBinary> for TextAnswer {
     fn into_directive(self, id: u64) -> Result<Directive, sioc::error::PayloadError> {
-        Ok(Directive::Ack { payload: self.0.into(), id, attachments: None })
+        Ok(Directive::Ack {
+            payload: self.0.into(),
+            id,
+            attachments: None,
+        })
     }
 }
 
 struct BinaryAnswer(String, Vec<Bytes>);
 impl Acknowledge<BinaryAck, HasBinary> for BinaryAnswer {
     fn into_directive(self, id: u64) -> Result<Directive, sioc::error::PayloadError> {
-        Ok(Directive::Ack { payload: self.0.into(), id, attachments: Some(self.1) })
+        Ok(Directive::Ack {
+            payload: self.0.into(),
+            id,
+            attachments: Some(self.1),
+        })
     }
 }
 
@@ -56,7 +82,12 @@ pub(super) async fn emit(sender: &SocketSender, event: &str, part: Part) {
     if attachments.is_empty() {
         let _ = sender.emit(TextEvent(payload)).await;
     } else {
-        let _ = sender.emit(BinaryEvent(payload, attachments.into_iter().map(Bytes::from).collect())).await;
+        let _ = sender
+            .emit(BinaryEvent(
+                payload,
+                attachments.into_iter().map(Bytes::from).collect(),
+            ))
+            .await;
     }
 }
 
@@ -68,7 +99,12 @@ async fn acknowledge(sender: &SocketSender, id: u64, answer: Part) {
             let _ = sender.acknowledge(id, TextAnswer(payload)).await;
         }
     } else if let Ok(id) = <HasAck<BinaryAck> as AckMarker>::parse(Some(id)) {
-        let _ = sender.acknowledge(id, BinaryAnswer(payload, attachments.into_iter().map(Bytes::from).collect())).await;
+        let _ = sender
+            .acknowledge(
+                id,
+                BinaryAnswer(payload, attachments.into_iter().map(Bytes::from).collect()),
+            )
+            .await;
     }
 }
 
@@ -77,7 +113,12 @@ fn parse(event: DynEvent) -> Option<(String, Part, Option<u64>)> {
     let values = fields.as_array()?;
     let name = values.first()?.as_str()?.to_owned();
     let data = values.get(1).cloned().unwrap_or(Value::Null);
-    let attachments = event.attachments.unwrap_or_default().into_iter().map(|bytes| bytes.to_vec()).collect::<Vec<_>>();
+    let attachments = event
+        .attachments
+        .unwrap_or_default()
+        .into_iter()
+        .map(|bytes| bytes.to_vec())
+        .collect::<Vec<_>>();
     Some((name, decode(data, &attachments)?, event.id))
 }
 
@@ -91,7 +132,10 @@ pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()>
         .open()
         .map_err(|_| ())?;
     let auth = rv.identity(&pairing);
-    let (sender, mut receiver) = client.connect_with(OUTBOUND_NAMESPACE, auth.to_string()).await.map_err(|_| ())?;
+    let (sender, mut receiver) = client
+        .connect_with(OUTBOUND_NAMESPACE, auth.to_string())
+        .await
+        .map_err(|_| ())?;
     let (outbound, mut output) = mpsc::channel::<(&'static str, Part)>(128);
     let relay = Arc::new(Relay::new(rv.base.clone(), outbound));
     let mut welcomed = false;
@@ -140,7 +184,9 @@ pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()>
     }
     relay.shutdown().await;
     sender.disconnect().await;
-    if welcomed { rv.disconnected("outbound").await; }
+    if welcomed {
+        rv.disconnected("outbound").await;
+    }
     drop(client);
     Ok(())
 }

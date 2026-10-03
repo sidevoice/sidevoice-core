@@ -524,19 +524,33 @@ impl Room {
             .find_map(|cid| inner.peers.get(cid).cloned())
     }
     pub async fn rendezvous_changed(&self, state: Value) {
-        let peers: Vec<ConnectorPeer> = self.inner.lock().expect("room lock").peers.values().cloned().collect();
+        let peers: Vec<ConnectorPeer> = self
+            .inner
+            .lock()
+            .expect("room lock")
+            .peers
+            .values()
+            .cloned()
+            .collect();
         for peer in peers {
             let _ = peer.send("node.rendezvous", state.clone()).await;
         }
     }
     pub fn latest_connector_identity(&self) -> Value {
         let inner = self.inner.lock().expect("room lock");
-        let Some(row) = inner.peer_order.iter().rev().find_map(|id| inner.connectors.get(id)) else {
+        let Some(row) = inner
+            .peer_order
+            .iter()
+            .rev()
+            .find_map(|id| inner.connectors.get(id))
+        else {
             return json!({});
         };
         let mut result = Map::new();
         for key in ["host", "platform", "version", "harnesses"] {
-            if let Some(value) = row.get(key) { result.insert(key.to_owned(), value.clone()); }
+            if let Some(value) = row.get(key) {
+                result.insert(key.to_owned(), value.clone());
+            }
         }
         Value::Object(result)
     }
