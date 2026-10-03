@@ -355,9 +355,7 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
             .emit_with_ack::<_, Value>("node.hello", &proof);
         match answer {
             Ok(answer) => match answer.await {
-                Ok(answer) if valid_hello(&answer) => {
-                    rv.connected("dial", None).await
-                }
+                Ok(answer) if valid_hello(&answer) => rv.connected("dial", None).await,
                 Ok(answer) => {
                     rv.refused(field(&answer, "error").to_owned()).await;
                     let _ = socket_greet.disconnect();
@@ -526,7 +524,12 @@ mod tests {
     fn dial_hello_requires_an_object_without_error() {
         assert!(valid_hello(&serde_json::json!({"protocol": 3})));
         assert!(valid_hello(&serde_json::json!({"error": null})));
-        for answer in [serde_json::Value::Null, serde_json::json!("bad"), serde_json::json!([]), serde_json::json!({"error":"rejected"})] {
+        for answer in [
+            serde_json::Value::Null,
+            serde_json::json!("bad"),
+            serde_json::json!([]),
+            serde_json::json!({"error":"rejected"}),
+        ] {
             assert!(!valid_hello(&answer));
         }
     }

@@ -141,9 +141,15 @@ impl Relay {
         let mut request = self.client.request(method, url).headers(headers);
         if let Some(body) = data.get("body") {
             match body {
-                Part::Binary(bytes) if bytes.len() <= 8 * 1024 * 1024 => request = request.body(bytes.clone()),
-                Part::Text(text) if text.len() <= 8 * 1024 * 1024 => request = request.body(text.clone()),
-                Part::Binary(_) | Part::Text(_) => return http_error(502, "relay.node_unavailable"),
+                Part::Binary(bytes) if bytes.len() <= 8 * 1024 * 1024 => {
+                    request = request.body(bytes.clone())
+                }
+                Part::Text(text) if text.len() <= 8 * 1024 * 1024 => {
+                    request = request.body(text.clone())
+                }
+                Part::Binary(_) | Part::Text(_) => {
+                    return http_error(502, "relay.node_unavailable")
+                }
                 _ => {}
             }
         }
@@ -161,7 +167,9 @@ impl Relay {
         let mut body = Vec::new();
         loop {
             match answer.chunk().await {
-                Ok(Some(chunk)) if body.len().saturating_add(chunk.len()) <= 8 * 1024 * 1024 => body.extend_from_slice(&chunk),
+                Ok(Some(chunk)) if body.len().saturating_add(chunk.len()) <= 8 * 1024 * 1024 => {
+                    body.extend_from_slice(&chunk)
+                }
                 Ok(None) => break,
                 _ => return http_error(502, "relay.node_unavailable"),
             }
@@ -179,7 +187,10 @@ impl Relay {
     async fn open(self: &Arc<Self>, data: Part) -> Part {
         let channel = data.get("channel").and_then(Part::text).unwrap_or("");
         let path = data.get("path").and_then(Part::text).unwrap_or("");
-        if channel.is_empty() || path != CALL_SOCKET || self.channels.lock().await.contains_key(channel) {
+        if channel.is_empty()
+            || path != CALL_SOCKET
+            || self.channels.lock().await.contains_key(channel)
+        {
             return open_error(404, "request.not_found");
         }
         if self.channels.lock().await.len() >= 32 {
@@ -228,7 +239,10 @@ impl Relay {
         };
         let (sender, mut receiver) = mpsc::channel::<Message>(128);
         let mut channels = self.channels.lock().await;
-        if self.closed.load(Ordering::Acquire) || channels.len() >= 32 || channels.contains_key(channel) {
+        if self.closed.load(Ordering::Acquire)
+            || channels.len() >= 32
+            || channels.contains_key(channel)
+        {
             return Self::busy("relay.open");
         }
         let self_ref = self.clone();
@@ -256,7 +270,13 @@ impl Relay {
                     },
                 }
             }
-            if self_ref.channels.lock().await.remove(&task_channel).is_some() {
+            if self_ref
+                .channels
+                .lock()
+                .await
+                .remove(&task_channel)
+                .is_some()
+            {
                 let _ = self_ref
                     .outbound
                     .send((
@@ -276,7 +296,12 @@ impl Relay {
 
     async fn data(&self, data: Part) {
         let channel = data.get("channel").and_then(Part::text).unwrap_or("");
-        let sender = self.channels.lock().await.get(channel).map(|entry| entry.sender.clone());
+        let sender = self
+            .channels
+            .lock()
+            .await
+            .get(channel)
+            .map(|entry| entry.sender.clone());
         if let (Some(sender), Some(payload)) = (sender, data.get("data")) {
             let message = match payload {
                 Part::Binary(value) => Some(Message::binary(value.clone())),
@@ -284,7 +309,10 @@ impl Relay {
                 _ => None,
             };
             if let Some(message) = message {
-                if tokio::time::timeout(Duration::from_millis(250), sender.send(message)).await.is_err() {
+                if tokio::time::timeout(Duration::from_millis(250), sender.send(message))
+                    .await
+                    .is_err()
+                {
                     if let Some(entry) = self.channels.lock().await.remove(channel) {
                         entry.task.abort();
                     }
@@ -304,13 +332,19 @@ impl Relay {
                     .unwrap_or(1000) as u16,
                 _ => 1000,
             };
-            let _ = tokio::time::timeout(Duration::from_millis(250), entry.sender
-                .send(Message::Close(Some(CloseFrame {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(250),
+                entry.sender.send(Message::Close(Some(CloseFrame {
                     code: code.into(),
                     reason: "".into(),
-                })))).await;
+                }))),
+            )
+            .await;
             drop(entry.sender);
-            if tokio::time::timeout(Duration::from_secs(1), &mut entry.task).await.is_err() {
+            if tokio::time::timeout(Duration::from_secs(1), &mut entry.task)
+                .await
+                .is_err()
+            {
                 entry.task.abort();
             }
         }
@@ -368,25 +402,51 @@ mod tests {
     #[tokio::test]
     async fn full_channel_and_shutdown_finish_within_a_deadline() {
         let (outbound, _) = mpsc::channel(1);
-        let relay = Arc::new(Relay::new(Url::parse("http://127.0.0.1:8768/").unwrap(), outbound));
+        let relay = Arc::new(Relay::new(
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            outbound,
+        ));
         let (sender, _receiver) = mpsc::channel(1);
         sender.send(Message::text("held")).await.unwrap();
         let task = tokio::spawn(std::future::pending());
-        relay.channels.lock().await.insert("blocked".into(), Channel { sender, task });
-        tokio::time::timeout(Duration::from_secs(1), relay.handle("relay.data", Part::object([
-            ("channel", Part::Text("blocked".into())),
-            ("data", Part::Binary(vec![0, 1])),
-        ]))).await.unwrap();
+        relay
+            .channels
+            .lock()
+            .await
+            .insert("blocked".into(), Channel { sender, task });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            relay.handle(
+                "relay.data",
+                Part::object([
+                    ("channel", Part::Text("blocked".into())),
+                    ("data", Part::Binary(vec![0, 1])),
+                ]),
+            ),
+        )
+        .await
+        .unwrap();
         assert!(relay.channels.lock().await.is_empty());
-        tokio::time::timeout(Duration::from_secs(1), relay.shutdown()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), relay.shutdown())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn in_flight_budget_refuses_excess_and_shutdown_cancels_request() {
         let (outbound, _) = mpsc::channel(1);
-        let relay = Arc::new(Relay::new(Url::parse("http://127.0.0.1:8768/").unwrap(), outbound));
+        let relay = Arc::new(Relay::new(
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            outbound,
+        ));
         let permits = relay.requests.acquire_many(32).await.unwrap();
-        let answer = relay.handle("relay.http", Part::object([("path", Part::Text("/api/presentation".into()))])).await.unwrap();
+        let answer = relay
+            .handle(
+                "relay.http",
+                Part::object([("path", Part::Text("/api/presentation".into()))]),
+            )
+            .await
+            .unwrap();
         assert_eq!(answer.get("status"), Some(&Part::json(json!(503))));
         drop(permits);
         relay.shutdown().await;
@@ -398,12 +458,22 @@ mod tests {
         let relay = Arc::new(Relay::new(base, outbound));
         let request_relay = relay.clone();
         let request = tokio::spawn(async move {
-            request_relay.handle("relay.http", Part::object([
-                ("path", Part::Text("/api/presentation".into())),
-            ])).await
+            request_relay
+                .handle(
+                    "relay.http",
+                    Part::object([("path", Part::Text("/api/presentation".into()))]),
+                )
+                .await
         });
-        let (_socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await.unwrap().unwrap();
+        let (_socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
         relay.shutdown().await;
-        assert!(tokio::time::timeout(Duration::from_secs(1), request).await.unwrap().unwrap().is_none());
+        assert!(tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none());
     }
 }

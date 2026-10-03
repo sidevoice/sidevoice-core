@@ -25,16 +25,10 @@ jobs:
       - name: Check Rust and build Core
         run: |
           set -euo pipefail
-          cargo fmt --all
-          git diff --binary > /tmp/t6-rustfmt.patch
           cargo fmt --all --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
           cargo build --locked --bin sidevoice-core-rust
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: t6-rustfmt-patch
-          path: /tmp/t6-rustfmt.patch
       - name: Prepare pinned local Socket.IO peer
         run: |
           set -euo pipefail

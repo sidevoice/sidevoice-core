@@ -469,7 +469,10 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
     };
     let _ = stopping.send(true);
     rendezvous.stop();
-    if tokio::time::timeout(Duration::from_secs(10), &mut rendezvous_task).await.is_err() {
+    if tokio::time::timeout(Duration::from_secs(10), &mut rendezvous_task)
+        .await
+        .is_err()
+    {
         rendezvous_task.abort();
         let _ = rendezvous_task.await;
     }

@@ -106,7 +106,10 @@ impl Telemetry {
     /// Submit from a call path without waiting for the collector. Saturation
     /// drops diagnostics rather than delaying the call.
     pub fn try_observe(self: &Arc<Self>, stage: &str, milliseconds: f64, values: &Value) {
-        if !STAGES.contains(&stage) || !milliseconds.is_finite() || !(0.0..=3_600_000.0).contains(&milliseconds) {
+        if !STAGES.contains(&stage)
+            || !milliseconds.is_finite()
+            || !(0.0..=3_600_000.0).contains(&milliseconds)
+        {
             return;
         }
         let Ok(permit) = self.pending.clone().try_acquire_owned() else {
