@@ -1,0 +1,65 @@
+name: Rust T3 text and connector contract
+
+on:
+  push:
+    branches: [feat/rust-core-mvp]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pinned-peers:
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      RUSTVANI_CACHE_DIR: /tmp/sidevoice-rustvani-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: sidevoice/sidevoice-connector
+          ref: ddb4bd1e0c95e7997787fe4ab98e7d812fbe2390
+          path: peer/connector-js
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: sidevoice/sidevoice-connector
+          ref: 8c1a3df0c8c88040d9bfeeb880d17c04a1e823f1
+          path: peer/connector-rust
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: sidevoice/sidevoice-web
+          ref: 140115fd5122c9652763b0c5e47105f21f4cee95
+          path: peer/web
+      - name: Verify exact peers and install pinned tools
+        run: |
+          set -euo pipefail
+          test "$(git -C peer/connector-js rev-parse HEAD)" = ddb4bd1e0c95e7997787fe4ab98e7d812fbe2390
+          test "$(git -C peer/connector-rust rev-parse HEAD)" = 8c1a3df0c8c88040d9bfeeb880d17c04a1e823f1
+          test "$(git -C peer/web rev-parse HEAD)" = 140115fd5122c9652763b0c5e47105f21f4cee95
+          rustup toolchain install 1.98.1 --profile minimal
+          npm ci --prefix peer/connector-js
+          npm ci --prefix peer/web
+      - name: Build Core and actual Rust v3 peer
+        run: |
+          set -euo pipefail
+          python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
+          cargo build --locked --bin sidevoice-core-rust
+          cargo build --locked --manifest-path peer/connector-rust/packages/connector-rust/Cargo.toml
+      - name: Build offline execution container
+        run: docker build -f tests/rust_t3.Dockerfile -t sidevoice-rust-t3 .
+      - name: Verify pinned browser contract without external network
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
+            sidevoice-rust-t3 node --test peer/web/apps/web/test/room-session-controller.test.cjs
+      - name: Exercise actual peers and Core text contract without external network
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
+            sidevoice-rust-t3 /opt/t3-venv/bin/python tests/rust_t3_hosted.py \
+            /workspace/target/debug/sidevoice-core-rust \
+            /workspace/peer/connector-js/packages/connector/link.mjs \
+            /workspace/peer/connector-rust/packages/connector-rust/target/debug/sidevoice-rust-proof

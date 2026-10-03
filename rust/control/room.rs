@@ -200,8 +200,8 @@ impl Room {
         binding.harness=harness; binding.active=true; binding.live=true; if title.is_some() { binding.title=title; }
         if inbound.is_some() { binding.inbound=inbound; } binding.capabilities=capabilities;
         if engine.is_some() { binding.engine=engine; } binding.route=route;
-        inner.working.remove(thread);
-        Ok(json!({"client_ref": data.get("client_ref"), "binding_id": bid, "thread": thread}))
+        let actual_thread=binding.thread.clone();inner.working.remove(&actual_thread);
+        Ok(json!({"client_ref": data.get("client_ref"), "binding_id": bid, "thread": actual_thread}))
     }
     pub fn unregister(&self, cid: &str, bid: &str) {
         let mut inner=self.inner.lock().expect("room lock");
