@@ -176,7 +176,7 @@ pub async fn offer(
                 "voice.rtc_answer_failed",
                 StatusCode::UNPROCESSABLE_ENTITY,
                 &headers,
-            )
+            );
         }
     };
     let urls = ice_urls();
@@ -206,7 +206,7 @@ pub async fn offer(
                 "voice.rtc_answer_failed",
                 StatusCode::UNPROCESSABLE_ENTITY,
                 &headers,
-            )
+            );
         }
     };
     let answer = async {
