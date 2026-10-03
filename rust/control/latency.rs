@@ -84,7 +84,12 @@ fn interval(output: &mut Map<String, Value>, name: &str, start: Option<u64>, end
 
 /// Preserve the Python `/api/presentation/latency` response shape. Only the
 /// authenticated session's live Room view may be passed to this formatter.
-pub fn snapshot(session_id: &str, language: &str, marks: &[Mark<'_>], replies: &[Reply<'_>]) -> Value {
+pub fn snapshot(
+    session_id: &str,
+    language: &str,
+    marks: &[Mark<'_>],
+    replies: &[Reply<'_>],
+) -> Value {
     type Key<'a> = (&'a str, u64, Option<&'a str>);
     let mut indexed: HashMap<Key<'_>, HashMap<Event, u64>> = HashMap::new();
     for mark in marks.iter().filter(|mark| mark.session_id == session_id) {
@@ -259,6 +264,9 @@ mod tests {
             .get("reply_received_to_synthesis_started_ms")
             .is_none());
         assert!(!result.to_string().contains("secret"));
-        assert_eq!(snapshot("own", "fr", &marks, &replies)["notes"], result["notes"]);
+        assert_eq!(
+            snapshot("own", "fr", &marks, &replies)["notes"],
+            result["notes"]
+        );
     }
 }

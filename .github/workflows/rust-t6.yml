@@ -44,7 +44,7 @@ jobs:
           set -euo pipefail
           docker build -f tests/rust_t6.Dockerfile -t sidevoice-rust-t6 .
           docker run --rm --network none sidevoice-rust-t6 /opt/t6-venv/bin/python -c \
-            'import importlib.metadata as m; assert m.version("python-socketio") == "5.17.0"'
+            'import importlib.metadata as m; assert m.version("python-socketio") == "5.17.0"; assert m.version("aiohttp") == "3.13.5"'
       - name: Exercise relay and nested binary ACKs without external network
         run: |
           set -euo pipefail
