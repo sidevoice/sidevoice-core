@@ -12,6 +12,7 @@ use crate::{
 };
 
 const CATALOG_JSON: &str = include_str!("../src/sidevoice_core/models/catalog.json");
+#[cfg(test)]
 const VECTORS_JSON: &str = include_str!("../src/sidevoice_core/models/vectors.json");
 const VOICE_CATALOG_JSON: &str = include_str!("../src/sidevoice_core/pipeline/catalog.json");
 const CHECKS_JSON: &str = include_str!("../src/sidevoice_core/models/checks/checks.json");
