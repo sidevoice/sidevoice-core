@@ -26,6 +26,8 @@ jobs:
           test -s tests/fixtures/hola-sala-16k.wav
           cargo fmt --all --check
           cargo clippy --locked --all-targets -- -D warnings
+          test -s /etc/ssl/certs/ca-certificates.crt
+          export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
           cargo test --locked
       - name: Build selected feature set
         run: cargo build --locked --bin sidevoice-core-rust

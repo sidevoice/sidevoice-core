@@ -1,0 +1,7 @@
+{
+  "task": "transcribe",
+  "language": "english",
+  "duration": 1.2,
+  "text": "  Hello there  ",
+  "usage": {"type": "duration", "seconds": 1.2}
+}

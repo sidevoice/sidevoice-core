@@ -1,0 +1,12 @@
+{
+  "voices": [
+    {
+      "voice_id": "legacy-voice",
+      "name": "Legacy",
+      "category": "premade",
+      "labels": {"language":"en"},
+      "available_for_tiers": [],
+      "high_quality_base_model_ids": []
+    }
+  ]
+}

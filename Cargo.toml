@@ -13,28 +13,37 @@ name = "sidevoice-core-rust"
 path = "rust/main.rs"
 
 [dependencies]
+async-openai = { version = "=0.41.0", default-features = false, features = ["audio", "model", "rustls", "middleware"] }
 axum = { version = "0.8", features = ["ws"] }
-base64 = "0.22"
+base64 = "=0.22.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+elevenlabs-sdk = "=0.1.0"
 fs2 = "0.4"
+futures-util = "=0.3.31"
 hostname = "0.4"
 hound = "3.5.1"
+httpdate = "=1.0.3"
 libc = "0.2"
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
-percent-encoding = "2"
+percent-encoding = "=2.3.2"
 rand = "0.8"
+reqwest = { version = "=0.13.0", default-features = false, features = ["json", "multipart", "rustls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", features = ["process"] }
 rustvani = { git = "https://github.com/Allenmylath/rustvani.git", rev = "d01f33e671f7a4d8a128e7bfe55dbf0e8963cb21", default-features = false, features = ["vad-silero-ort"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.10"
+sha2 = "=0.10.9"
 socketioxide = { version = "0.18.7", features = ["state"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "io-util"] }
+tower = { version = "=0.5.3", features = ["retry", "util"] }
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
+wiremock = "=0.6.5"
+
+[patch.crates-io]
+elevenlabs-sdk = { path = "vendor/elevenlabs-sdk" }

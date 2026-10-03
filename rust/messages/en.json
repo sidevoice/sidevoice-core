@@ -80,5 +80,8 @@
   "room.reach_offline": "That conversation is not connected to the room. Ask it to connect.",
   "room.reach_holding": "The connected harness is holding incoming messages.",
   "room.reach_unsupported": "This conversation cannot receive your messages through its harness.",
-  "room.you": "You"
+  "room.you": "You",
+  "catalog.elevenlabs.fast": "Fast",
+  "catalog.elevenlabs.multilingual": "Multilingual quality",
+  "catalog.elevenlabs.expressive": "More expressive"
 }

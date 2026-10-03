@@ -1,0 +1,49 @@
+[package]
+name = "elevenlabs-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Comprehensive async Rust SDK for ElevenLabs API with TTS, STT, voice management, and WebSocket streaming"
+readme = "../../README.md"
+homepage = "https://github.com/longcipher/elevenlabs-sdk-rs"
+documentation = "https://docs.rs/elevenlabs-sdk"
+
+keywords = [
+    "elevenlabs",
+    "tts",
+    "stt",
+    "voice",
+    "websocket",
+]
+categories = [
+    "api-bindings",
+    "asynchronous",
+    "multimedia::audio",
+    "network-programming",
+]
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+futures-core.workspace = true
+hpx = { workspace = true, features = [
+    "rustls-tls",
+    "http1",
+    "http2",
+    "json",
+    "stream",
+] }
+hpx-transport.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+wiremock = { workspace = true }
+
+[lints]
+workspace = true
