@@ -1073,11 +1073,11 @@ pub fn mic_settings(settings: &CallSettings, overrides: Option<&Value>) -> (MicS
         vad_start_secs: defaults.vad_start_secs,
         merge_window_secs: defaults.merge_window_secs,
     };
-    let override = overrides
+    let patience_override = overrides
         .and_then(Value::as_object)
         .and_then(|object| object.get("turn_patience"))
         .and_then(Value::as_str);
-    let patience = override.unwrap_or(&settings.turn_patience);
+    let patience = patience_override.unwrap_or(&settings.turn_patience);
     let mut effective = base.clone();
     match patience {
         "fast" => {
