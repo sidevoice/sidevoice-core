@@ -47,11 +47,14 @@ struct Inner {
     state: Mutex<State>,
 }
 
+type RenderResult = Option<Result<Arc<CloudSpeech>, ProviderError>>;
+type RenderSender = watch::Sender<RenderResult>;
+
 #[derive(Default)]
 struct State {
     entries: HashMap<String, Entry>,
     lru: VecDeque<String>,
-    inflight: HashMap<String, watch::Sender<Option<Result<Arc<CloudSpeech>, ProviderError>>>>,
+    inflight: HashMap<String, RenderSender>,
     bytes: usize,
     renders: u64,
     reuses: u64,
