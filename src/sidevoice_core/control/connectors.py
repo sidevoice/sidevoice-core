@@ -35,7 +35,8 @@ class InvalidConnectorAcknowledgement(Exception):
 
 def validate_delivery_acknowledgement(value):
     """The bounded delivery outcome shared by Socket.IO and the v3 WebSocket peer."""
-    if not isinstance(value, dict) or value.get('status') not in DELIVERY_ACK_STATUSES:
+    status = value.get('status') if isinstance(value, dict) else None
+    if not isinstance(status, str) or status not in DELIVERY_ACK_STATUSES:
         raise InvalidConnectorAcknowledgement('Invalid input.deliver result')
     if set(value) - {'status', 'detail', 'error'}:
         raise InvalidConnectorAcknowledgement('Invalid input.deliver result fields')

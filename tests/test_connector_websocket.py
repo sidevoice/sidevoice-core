@@ -405,7 +405,8 @@ class ConnectorWebSocketTests(unittest.IsolatedAsyncioTestCase):
 
 class DeliveryOutcomeTests(unittest.TestCase):
     def test_only_bounded_known_outcomes_can_settle_input(self):
-        for result in (None, {}, [], 1, {'status': 'other'}, {'status': 'accepted', 'detail': 1},
+        for result in (None, {}, [], 1, {'status': []}, {'status': {}}, {'status': 'other'},
+                       {'status': 'accepted', 'detail': 1},
                        {'status': 'accepted', 'error': 'x' * 1001},
                        {'status': 'accepted', 'detail': 'x' * 4097}):
             with self.subTest(result=result if not isinstance(result, dict) else list(result)):
