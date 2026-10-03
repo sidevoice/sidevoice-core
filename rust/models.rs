@@ -884,7 +884,11 @@ pub fn settings_from(input: Option<&Value>, defaults: &CallSettings) -> Settings
         "merge_window_secs",
     ];
     invalid.sort_by_key(|diagnostic| {
-        let root = diagnostic.path.split('.').next().unwrap_or(&diagnostic.path);
+        let root = diagnostic
+            .path
+            .split('.')
+            .next()
+            .unwrap_or(&diagnostic.path);
         FIELD_ORDER
             .iter()
             .position(|candidate| *candidate == root)
@@ -970,8 +974,10 @@ fn stage_diagnostics(task: &str, field: &str, input: &Value) -> Vec<SettingDiagn
             return missing;
         }
 
-        if !matches!(field, "place" | "model" | "build" | "build.engine" | "options")
-            && !field.starts_with("options.")
+        if !matches!(
+            field,
+            "place" | "model" | "build" | "build.engine" | "options"
+        ) && !field.starts_with("options.")
         {
             return vec![SettingDiagnostic::new(
                 format!("{task}.{field}"),
@@ -988,8 +994,10 @@ fn stage_diagnostics(task: &str, field: &str, input: &Value) -> Vec<SettingDiagn
                             .with_param("model", model),
                     )];
                 }
-                if matches!(object.get("place").and_then(Value::as_str), Some("device" | "host"))
-                    && find_model(model).is_none_or(|model| task_for_model(model) != Some(task))
+                if matches!(
+                    object.get("place").and_then(Value::as_str),
+                    Some("device" | "host")
+                ) && find_model(model).is_none_or(|model| task_for_model(model) != Some(task))
                 {
                     return vec![SettingDiagnostic::new(
                         task,
@@ -1042,8 +1050,7 @@ fn stage_diagnostics(task: &str, field: &str, input: &Value) -> Vec<SettingDiagn
         if !stage_option_known(task, input, option) {
             return vec![SettingDiagnostic::new(
                 task,
-                LocalizedMessage::new("settings.option_unknown")
-                    .with_param("name", option),
+                LocalizedMessage::new("settings.option_unknown").with_param("name", option),
             )];
         }
     }
@@ -1548,8 +1555,7 @@ pub fn mic_settings(
             (
                 base,
                 Some(render(
-                    &LocalizedMessage::new("turn_patience_unknown")
-                        .with_param("patience", shown),
+                    &LocalizedMessage::new("turn_patience_unknown").with_param("patience", shown),
                     &settings.ui_language,
                 )),
             )

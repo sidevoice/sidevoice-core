@@ -58,9 +58,10 @@ pub fn render_refusal(message: &LocalizedMessage, language: &str) -> Map<String,
     let mut refusal = Map::new();
     refusal.insert("key".to_owned(), Value::String(message.key.clone()));
     let wire_fields: &[&str] = match message.key.as_str() {
-        "provider_key_missing" | "voice_missing" | "provider_key_refused" | "provider_unreachable" => {
-            &["provider"]
-        }
+        "provider_key_missing"
+        | "voice_missing"
+        | "provider_key_refused"
+        | "provider_unreachable" => &["provider"],
         "provider_failed" => &["provider", "detail"],
         "check_mismatch" => &["heard"],
         "check_duration" => &["seconds"],
@@ -72,7 +73,10 @@ pub fn render_refusal(message: &LocalizedMessage, language: &str) -> Map<String,
             refusal.insert((*field).to_owned(), value.clone());
         }
     }
-    refusal.insert("message".to_owned(), Value::String(render(message, language)));
+    refusal.insert(
+        "message".to_owned(),
+        Value::String(render(message, language)),
+    );
     refusal
 }
 
@@ -224,7 +228,10 @@ mod tests {
     #[test]
     fn english_templates_retain_the_pinned_python_messages() {
         let expected = [
-            ("speech_language_unsupported", "Unsupported speech language."),
+            (
+                "speech_language_unsupported",
+                "Unsupported speech language.",
+            ),
             ("check_invalid", "The invalid request details."),
             (
                 "check_rate_limited",
@@ -234,26 +241,20 @@ mod tests {
                 "turn_patience_unknown",
                 "Unknown patience; the room's own is used: patient",
             ),
-            (
-                "provider_key_refused",
-                "OpenAI refused the key.",
-            ),
-            (
-                "provider_unreachable",
-                "OpenAI could not be reached.",
-            ),
-            (
-                "provider_failed",
-                "OpenAI failed: timeout.",
-            ),
+            ("provider_key_refused", "OpenAI refused the key."),
+            ("provider_unreachable", "OpenAI could not be reached."),
+            ("provider_failed", "OpenAI failed: timeout."),
         ];
         let messages = [
             LocalizedMessage::new("speech_language_unsupported"),
-            LocalizedMessage::new("check_invalid").with_param("details", json!("The invalid request details.")),
+            LocalizedMessage::new("check_invalid")
+                .with_param("details", json!("The invalid request details.")),
             LocalizedMessage::new("check_rate_limited").with_param("retry_after", json!(4)),
             LocalizedMessage::new("turn_patience_unknown").with_param("patience", json!("patient")),
-            LocalizedMessage::new("provider_key_refused").with_param("provider_label", json!("OpenAI")),
-            LocalizedMessage::new("provider_unreachable").with_param("provider_label", json!("OpenAI")),
+            LocalizedMessage::new("provider_key_refused")
+                .with_param("provider_label", json!("OpenAI")),
+            LocalizedMessage::new("provider_unreachable")
+                .with_param("provider_label", json!("OpenAI")),
             LocalizedMessage::new("provider_failed")
                 .with_param("provider_label", json!("OpenAI"))
                 .with_param("detail", json!("timeout")),
