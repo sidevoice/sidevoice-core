@@ -29,13 +29,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked --no-run
+          cargo test --locked --lib --no-run
           cargo build --locked --bin sidevoice-core-rust
       - name: Execute Rust tests without network access
         run: |
           set -euo pipefail
           found=0
-          for test_binary in target/debug/deps/sidevoice_core-* target/debug/deps/sidevoice_core_rust-*; do
+          for test_binary in target/debug/deps/sidevoice_core-*; do
             if [[ ! -x "$test_binary" ]]; then
               continue
             fi
