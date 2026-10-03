@@ -68,6 +68,7 @@
   "room.text_empty": "Write a message.",
   "room.request_invalid": "Invalid room request.",
   "room.stale_utterance": "Stale utterance.",
+  "room.receipt_invalid": "Invalid playback state.",
   "room.speech_invalid": "The reply is invalid.",
   "room.conversation_title": "Conversation {id}",
   "room.you": "You"

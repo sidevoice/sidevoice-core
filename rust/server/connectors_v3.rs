@@ -13,7 +13,7 @@ use super::AppState;
 
 const MAX_FRAME: usize = 1024 * 1024;
 fn id_valid(id: &Value) -> bool { id.as_str().is_some_and(|s|!s.is_empty()&&s.len()<=100) || id.as_i64().is_some_and(|n|n.abs()<=9_007_199_254_740_991) }
-fn decode(text: &str) -> Result<Value,u16> {if text.len()>MAX_FRAME{return Err(1009)}let v:Value=serde_json::from_str(text).map_err(|_|1002)?;
+fn decode(text: &str) -> Result<Value,u16> {if text.len()>MAX_FRAME{return Err(1009)}let v:Value=serde_json::from_str(text).map_err(|_|1002u16)?;
     if !v.is_object()||v["jsonrpc"]!="2.0"{return Err(1002)}
     if let Some(method)=v.get("method") {if method.as_str().is_none_or(|s|s.is_empty()||s.len()>128)||v.get("result").is_some()||v.get("error").is_some()||v.get("params").is_some_and(|p|!p.is_object())||v.get("id").is_some_and(|i|!id_valid(i)){return Err(1002)}}
     else if v.get("id").is_none_or(|i|!id_valid(i))||v.get("result").is_some()==v.get("error").is_some(){return Err(1002)}

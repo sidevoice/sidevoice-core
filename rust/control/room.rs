@@ -65,9 +65,11 @@ impl Row {
         "text": self.text, "name": self.name, "session": self.session, "revision": self.revision,
         "time": self.time, "status": self.status, "audio_reason": self.reason, "offline": self.offline}) }
 }
+struct UtteranceRecord { row_id: String, clients: HashMap<String, (u64, String)> }
 struct Inner { connectors: Map<String, Value>, pairing: HashMap<String, u64>, peers: HashMap<String, ConnectorPeer>,
     bindings: HashMap<String, Binding>, browsers: HashMap<String, Browser>, sessions: VecDeque<String>,
-    rows: VecDeque<Row>, seq: u64, working: HashMap<String, bool>, inflight: HashMap<String, String> }
+    rows: VecDeque<Row>, utterances: HashMap<String, UtteranceRecord>, seq: u64,
+    working: HashMap<String, bool>, inflight: HashMap<String, String> }
 
 pub struct Room { dir: PrivateDir, inner: Mutex<Inner> }
 impl Room {
@@ -75,7 +77,7 @@ impl Room {
         let state = match dir.read_json("room-state.json")? { Some(v) => v, None => dir.import_legacy_connectors()? };
         let connectors = state.get("connectors").and_then(Value::as_object).cloned().unwrap_or_default();
         Ok(Self { dir, inner: Mutex::new(Inner { connectors, pairing: HashMap::new(), peers: HashMap::new(),
-            bindings: HashMap::new(), browsers: HashMap::new(), sessions: VecDeque::new(), rows: VecDeque::new(),
+            bindings: HashMap::new(), browsers: HashMap::new(), sessions: VecDeque::new(), rows: VecDeque::new(), utterances: HashMap::new(),
             seq: 0, working: HashMap::new(), inflight: HashMap::new() }) })
     }
     fn save(&self, inner: &Inner) -> io::Result<()> {
@@ -255,8 +257,8 @@ impl Room {
         let asker=inner.browsers.get(sid);let known=inner.sessions.iter().any(|s|s==sid);
         let reason=if !known {Some("session_changed")} else if asker.is_none(){Some("call_ended")} else if asker.is_some_and(|b|b.target.as_ref().is_none_or(|t|t.thread!=thread)){Some("focus_changed")} else if asker.is_some_and(|b|b.revision!=revision){Some("newer_turn")} else if asker.is_some_and(|b|b.speaking){Some("user_speaking")} else {None};
         let status=if reason.is_some_and(|r|!["newer_turn","user_speaking"].contains(&r))||audience.is_empty(){"text_only"}else{"queued"};
-        inner.seq+=1;inner.rows.push_back(Row{id:row_id,thread:thread.into(),role:"assistant",text:text.into(),name:None,session:sid.into(),revision,time:millis(),status:status.into(),reason:reason.map(str::to_owned),language:p.get("language").and_then(Value::as_str).map(str::to_owned),offline:None,payload:None,queued_at:seconds(),attempts:0,next_attempt:0});trim_rows(&mut inner);
-        if status=="queued" {for listener in audience { if let Some(c)=inner.browsers.get(&listener){let _=c.sender.try_send(json!({"type":"voice-speech","data":{"session_id":listener,"utterance_id":uid,"revision":c.revision,"reply_revision":revision,"thread_id":thread,"text":text,"language":p.get("language")}}));}}}
+        inner.seq+=1;inner.rows.push_back(Row{id:row_id.clone(),thread:thread.into(),role:"assistant",text:text.into(),name:None,session:sid.into(),revision,time:millis(),status:status.into(),reason:reason.map(str::to_owned),language:p.get("language").and_then(Value::as_str).map(str::to_owned),offline:None,payload:None,queued_at:seconds(),attempts:0,next_attempt:0});trim_rows(&mut inner);
+        if status=="queued" {let mut clients=HashMap::new();for listener in audience { if let Some(c)=inner.browsers.get(&listener){let _=c.sender.try_send(json!({"type":"voice-speech","data":{"session_id":listener,"utterance_id":uid,"revision":c.revision,"reply_revision":revision,"thread_id":thread,"text":text,"language":p.get("language"),"history_id":row_id}}));clients.insert(listener,(c.revision,"queued".into()));}}inner.utterances.insert(uid.into(),UtteranceRecord{row_id,clients});}
         if status=="text_only" {json!({"status":"text_only","text_saved":true,"reason":reason.unwrap_or("call_ended")})}else{json!({"status":"queued","utterance_id":uid,"session_id":sid,"revision":revision,"text_saved":true})}
     }
     pub fn connector_speech(&self,cid:&str,p:&Value,v3:bool)->Value{
@@ -265,9 +267,16 @@ impl Room {
         let Some(thread)=thread else{return if v3{json!({"status":"unknown_binding","event_id":p.get("event_id"),"utterance_id":p.get("utterance_id")})}else{json!({"status":"rejected","error":"room.binding_foreign","event_id":p.get("event_id")})}};
         let mut speech=p.clone();speech["thread_id"]=json!(thread);self.publish(&speech,v3)
     }
-    pub fn receipt(&self,sid:&str,uid:&str,revision:u64,status:&str)->Result<Value,RoomError>{let mut inner=self.inner.lock().expect("room lock");let Some(c)=inner.browsers.get_mut(sid) else{return Err(RoomError::new(409,"room.stale_utterance"));};
-        if c.revision!=revision || !["playing","failed","playback_finished","skipped","cancelled_unplayed","cancelled_playing"].contains(&status){return Err(RoomError::new(409,"room.stale_utterance"));}
-        c.active=Some(uid.into());Ok(json!({"status":status}))}
+    pub fn receipt(&self,sid:&str,uid:&str,revision:u64,status:&str)->Result<Value,RoomError>{let mut inner=self.inner.lock().expect("room lock");
+        if !["playing","failed","playback_finished","skipped","cancelled_unplayed","cancelled_playing"].contains(&status){return Err(RoomError::new(400,"room.receipt_invalid"));}
+        if inner.browsers.get(sid).is_none_or(|c|c.revision!=revision){return Err(RoomError::new(409,"room.stale_utterance"));}
+        let Some(record)=inner.utterances.get_mut(uid) else{return Err(RoomError::new(409,"room.stale_utterance"));};
+        let Some(entry)=record.clients.get_mut(sid) else{return Err(RoomError::new(409,"room.stale_utterance"));};
+        if entry.0!=revision||["failed","playback_finished","skipped","cancelled_unplayed","cancelled_playing"].contains(&entry.1.as_str()){return Err(RoomError::new(409,"room.stale_utterance"));}
+        entry.1=status.into();let row_id=record.row_id.clone();
+        if let Some(c)=inner.browsers.get_mut(sid){c.active=Some(uid.into());}
+        if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){row.status=status.into();}
+        Ok(json!({"status":status}))}
     pub fn working(&self,cid:&str,data:&Value){let bid=field(data,"binding_id");let mut inner=self.inner.lock().expect("room lock");let Some(b)=inner.bindings.get(bid).filter(|b|b.connector==cid&&b.live) else{return;};let thread=b.thread.clone();let Some(working)=data.get("working").and_then(Value::as_bool) else{return;};inner.working.insert(thread.clone(),working);
         for c in inner.browsers.values().filter(|c|c.target.as_ref().is_some_and(|t|t.thread==thread)){let mut out=json!({"thread_id":thread,"working":working});if let Some(obj)=out.as_object_mut(){for key in ["turn_id","turn_phase","session_id","revision"]{if let Some(v)=data.get(key){obj.insert(key.into(),v.clone());}}}let _=c.sender.try_send(json!({"type":"voice-conversation","data":out}));}}
     pub fn engine(&self,cid:&str,data:&Value){let mut inner=self.inner.lock().expect("room lock");if let Some(b)=inner.bindings.get_mut(field(data,"binding_id")).filter(|b|b.connector==cid&&b.live){if let Some(e)=engine(data.get("engine")){if e.get("model").is_some(){b.engine=Some(e);}}}}

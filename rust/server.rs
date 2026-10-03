@@ -764,10 +764,10 @@ async fn socket_loop(
 
 fn unregister_call(state: &AppState, id: &str) {
     let mut calls = state.calls.lock().expect("calls lock");
-    if let Some(senders) = calls.get_mut(&id) {
+    if let Some(senders) = calls.get_mut(id) {
         senders.retain(|sender| sender.receiver_count() > 0);
         if senders.is_empty() {
-            calls.remove(&id);
+            calls.remove(id);
         }
     }
 }
