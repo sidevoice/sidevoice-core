@@ -210,6 +210,17 @@ struct Row {
     attempts: usize,
     next_attempt: u64,
 }
+struct InputDraft<'a> {
+    row_id: String,
+    text: &'a str,
+    session_id: &'a str,
+    revision: u64,
+    thread_id: &'a str,
+    binding_id: &'a str,
+    title: Option<String>,
+    language: &'a str,
+    message_id: &'a str,
+}
 impl Row {
     fn view(&self) -> Value {
         json!({"seq": self.seq, "id": self.id, "thread": self.thread, "role": self.role,
@@ -911,7 +922,8 @@ impl Room {
         let revision = c.revision;
         let language = c.language.clone();
         let title = c.target.as_ref().and_then(|t|t.title.clone());
-        Ok(queue_input_locked(&mut inner,row_id,text,sid,revision,thread,bid,title,&language,message_id))
+        Ok(queue_input_locked(&mut inner,InputDraft{row_id,text,session_id:sid,revision,
+            thread_id:thread,binding_id:bid,title,language:&language,message_id}))
     }
     /// Commit a completed transcript to the same memory journal/outbox as typed input.
     /// The captured focus may differ from today's selection after a mid-turn switch.
@@ -934,8 +946,9 @@ impl Room {
             return Ok(json!({"accepted":false,"id":row_id,"revision":turn.revision,"status":"not_sent"}));
         };
         let message_id=id();
-        Ok(queue_input_locked(&mut inner,row_id,text,&turn.session_id,turn.revision,thread,bid,
-            turn.title.clone(),&turn.language,&message_id))
+        Ok(queue_input_locked(&mut inner,InputDraft{row_id,text,session_id:&turn.session_id,
+            revision:turn.revision,thread_id:thread,binding_id:bid,title:turn.title.clone(),
+            language:&turn.language,message_id:&message_id}))
     }
     pub fn history(&self, thread: Option<&str>) -> Value {
         let inner = self.inner.lock().expect("room lock");
@@ -1481,19 +1494,19 @@ impl Room {
         }
     }
 }
-fn queue_input_locked(inner:&mut Inner,row_id:String,text:&str,sid:&str,revision:u64,
-    thread:&str,bid:&str,title:Option<String>,language:&str,message_id:&str)->Value {
-    let payload=json!({"thread_id":thread,"text":text,"message_id":message_id,"session_id":sid,
-        "history_id":row_id,"revision":revision,"binding_id":bid,"title":title});
+fn queue_input_locked(inner:&mut Inner,draft:InputDraft<'_>)->Value {
+    let InputDraft{row_id,text,session_id,revision,thread_id,binding_id,title,language,message_id}=draft;
+    let payload=json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
+        "history_id":row_id,"revision":revision,"binding_id":binding_id,"title":title});
     inner.seq+=1;
-    inner.rows.push_back(Row {seq:inner.seq,id:row_id.clone(),thread:thread.into(),role:"user",
+    inner.rows.push_back(Row {seq:inner.seq,id:row_id.clone(),thread:thread_id.into(),role:"user",
         text:text.into(),name:Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.you"),language)),
-        session:sid.into(),revision,time:millis(),status:"pending".into(),reason:None,
+        session:session_id.into(),revision,time:millis(),status:"pending".into(),reason:None,
         language:None,offline:None,payload:Some(payload),queued_at:seconds(),attempts:0,next_attempt:0});
     trim_rows(inner);
-    if let Some(browser)=inner.browsers.get(sid) {
+    if let Some(browser)=inner.browsers.get(session_id) {
         let _=browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
-            "revision":revision,"history_id":row_id,"thread_id":thread,"session_id":sid,"status":"pending"}}));
+            "revision":revision,"history_id":row_id,"thread_id":thread_id,"session_id":session_id,"status":"pending"}}));
     }
     json!({"accepted":true,"id":row_id,"revision":revision})
 }
