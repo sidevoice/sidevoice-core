@@ -134,9 +134,8 @@ impl ElevenLabsTts {
         let started = Instant::now();
         let mut timings_ms = Map::new();
         let (audio, alignment) = if with_timestamps {
-            let mut stream = self
-                .client
-                .text_to_speech()
+            let service = self.client.text_to_speech();
+            let mut stream = service
                 .convert_stream_with_timestamps(&encoded_voice, &request, Some(output_format), None)
                 .await
                 .map_err(map_elevenlabs_error)?;
@@ -170,9 +169,8 @@ impl ElevenLabsTts {
             );
             decode_timestamp_stream(&body)?
         } else {
-            let mut stream = self
-                .client
-                .text_to_speech()
+            let service = self.client.text_to_speech();
+            let mut stream = service
                 .convert_stream(&encoded_voice, &request, Some(output_format), None)
                 .await
                 .map_err(map_elevenlabs_error)?;
@@ -450,7 +448,7 @@ fn map_elevenlabs_error(error: ElevenLabsError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CloudSpeech, ElevenLabsTts};
+    use super::{verify_client, CloudSpeech, ElevenLabsTts};
     use crate::providers::ProviderErrorKind;
     use serde_json::Value;
     use std::{net::SocketAddr, time::Duration};

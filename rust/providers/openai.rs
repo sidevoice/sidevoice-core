@@ -82,7 +82,7 @@ impl OpenAiTranscriber {
         let body = self
             .client
             .audio()
-            .transcriptions()
+            .transcription()
             .create_raw(request)
             .await
             .map_err(map_openai_error)?;
@@ -278,7 +278,7 @@ fn retry_after(response: &Response) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_client, OpenAiTranscriber};
+    use super::{build_client, verify_client, OpenAiTranscriber};
     use crate::providers::ProviderErrorKind;
     use std::time::Duration;
     use wiremock::{

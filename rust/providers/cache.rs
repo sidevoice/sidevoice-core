@@ -154,9 +154,9 @@ impl SynthesisCache {
                 });
             }
 
-            if let Some(sender) = state.inflight.get(&key) {
+            if let Some(receiver) = state.inflight.get(&key).map(watch::Sender::subscribe) {
                 state.reuses += 1;
-                (sender.subscribe(), false, None)
+                (receiver, false, None)
             } else {
                 let (sender, receiver) = watch::channel(None);
                 state.inflight.insert(key.clone(), sender.clone());

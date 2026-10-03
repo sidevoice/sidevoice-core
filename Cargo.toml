@@ -25,6 +25,7 @@ reqwest = { version = "=0.13.0", default-features = false, features = ["json", "
 rustvani = { git = "https://github.com/Allenmylath/rustvani.git", rev = "d01f33e671f7a4d8a128e7bfe55dbf0e8963cb21", default-features = false, features = ["vad-silero-ort"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "=0.10.9"
 tower = { version = "=0.5.3", features = ["retry"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
 unicode-normalization = "0.1"
