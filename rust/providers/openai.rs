@@ -161,6 +161,8 @@ fn build_client(
 }
 
 fn map_openai_error(error: OpenAIError) -> ProviderError {
+    #[cfg(test)]
+    eprintln!("async-openai fixture diagnostic: {error:?}");
     match error {
         OpenAIError::ApiError(response) => {
             ProviderError::from_status(response.status_code.as_u16())

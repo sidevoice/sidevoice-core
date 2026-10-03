@@ -396,7 +396,7 @@ mod tests {
             .read(&SynthesisCache::key(choice("voice-a", 1.0), "two"))
             .is_none());
         assert_eq!(cache.stats().items, 2);
-        assert_eq!(cache.stats().bytes, 24); // 4 raw bytes encode to 8 Base64 bytes per entry.
+        assert_eq!(cache.stats().bytes, 16); // Each 4-byte result encodes to 8 Base64 bytes.
 
         let byte_limited = SynthesisCache::with_limits(8, 9);
         let _ = byte_limited

@@ -691,7 +691,10 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/v2/voices"))
             .and(query_param("page_size", "100"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(VOICES_ONE))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"voices":[],"has_more":false,"total_count":0}"#),
+            )
             .mount(&server)
             .await;
 
