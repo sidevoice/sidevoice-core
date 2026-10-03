@@ -970,12 +970,8 @@ mod tests {
     async fn body_stream_timeouts_keep_timeout_kind_for_audio_and_timestamp_streams() {
         for timestamped in [false, true] {
             let (base_url, server) = delayed_body_server(timestamped).await;
-            let tts = ElevenLabsTts::with_config(
-                "test-key",
-                &base_url,
-                Duration::from_millis(300),
-            )
-            .unwrap();
+            let tts = ElevenLabsTts::with_config("test-key", &base_url, Duration::from_millis(300))
+                .unwrap();
             let error = tts
                 .synthesize(
                     "Hi",
