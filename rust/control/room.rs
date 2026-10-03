@@ -2,7 +2,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
 
 use base64::Engine;
 use rand::RngCore;
@@ -31,6 +32,48 @@ fn millis() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+/// One process-wide monotonic origin for Room and call observations. T6 consumes
+/// these microseconds directly; no wall-clock subtraction enters latency.
+pub fn latency_now_micros() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LatencyEvent {
+    SpeechEnd, TurnClosed, Transcript, TranscriptDelivered, Queued,
+    DeliveryAccepted, Read, ReplyReceived, SynthesisStarted, AudioReady,
+    AudioDispatched, PlayingReceipt,
+}
+
+#[derive(Clone, Debug)]
+pub struct LatencyMark {
+    pub session_id: String,
+    pub thread_id: String,
+    pub revision: u64,
+    pub utterance_id: Option<String>,
+    pub event: LatencyEvent,
+    pub at_micros: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct LatencyDuration { pub name: String, pub milliseconds: f64 }
+
+#[derive(Clone, Debug)]
+pub struct LatencyReply {
+    pub session_id: String,
+    pub thread_id: String,
+    pub revision: u64,
+    pub utterance_id: String,
+    pub status: String,
+    pub synthesis_attempt: u32,
+    pub input_ms: Vec<LatencyDuration>,
+    pub provider_ms: Vec<LatencyDuration>,
+    pub browser_ms: Vec<LatencyDuration>,
+}
+
+const MAX_LATENCY_MARKS: usize = 2048;
+const MAX_LATENCY_REPLIES: usize = 128;
 fn hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
@@ -247,6 +290,9 @@ struct Inner {
     seq: u64,
     working: HashMap<String, bool>,
     inflight: HashMap<String, String>,
+    latency_marks: HashMap<String, VecDeque<LatencyMark>>,
+    latency_replies: HashMap<String, VecDeque<LatencyReply>>,
+    latency_input: HashMap<(String, String, u64), Vec<LatencyDuration>>,
 }
 
 pub struct Room {
@@ -280,6 +326,9 @@ impl Room {
                 seq: 0,
                 working: HashMap::new(),
                 inflight: HashMap::new(),
+                latency_marks: HashMap::new(),
+                latency_replies: HashMap::new(),
+                latency_input: HashMap::new(),
             }),
         })
     }
@@ -747,12 +796,74 @@ impl Room {
                 pending: VecDeque::new(),
             },
         );
+        inner.latency_marks.insert(sid.clone(), VecDeque::new());
+        inner.latency_replies.insert(sid.clone(), VecDeque::new());
         Ok(sid)
     }
     pub fn leave(&self, sid: &str) {
         let mut inner = self.inner.lock().expect("room lock");
         inner.browsers.remove(sid);
         interrupt_client(&mut inner, sid, "call_ended");
+        inner.latency_marks.remove(sid);
+        inner.latency_replies.remove(sid);
+        inner.latency_input.retain(|(session, _, _), _| session != sid);
+    }
+    pub fn owns_session(&self, sid: &str, device: &str) -> bool {
+        self.inner.lock().expect("room lock").browsers.get(sid)
+            .is_some_and(|browser| browser.device == device)
+    }
+    pub fn latency_mark(&self, sid: &str, thread: &str, revision: u64,
+                        uid: Option<&str>, event: LatencyEvent, at_micros: u64) {
+        let mut inner = self.inner.lock().expect("room lock");
+        mark_latency(&mut inner, sid, thread, revision, uid, event, at_micros);
+    }
+    pub fn latency_duration(&self, sid: &str, thread: &str, revision: u64,
+                            uid: Option<&str>, name: &str, milliseconds: f64) {
+        if !milliseconds.is_finite() || !(0.0..=3_600_000.0).contains(&milliseconds) { return; }
+        let mut inner = self.inner.lock().expect("room lock");
+        if !inner.browsers.contains_key(sid) { return; }
+        let duration = LatencyDuration { name: name.to_owned(), milliseconds: (milliseconds * 100.0).round() / 100.0 };
+        if let Some(uid) = uid {
+            let Some(replies) = inner.latency_replies.get_mut(sid) else { return; };
+            let Some(reply) = replies.iter_mut().find(|reply| reply.utterance_id == uid && reply.thread_id == thread) else { return; };
+            let target = if matches!(name, "request_to_headers_ms" | "request_to_first_chunk_ms" | "request_to_complete_ms") {
+                &mut reply.provider_ms
+            } else if matches!(name, "audio_received_to_playback_scheduled_ms" | "turn_finished_event_to_playback_scheduled_ms") {
+                &mut reply.browser_ms
+            } else { return; };
+            if let Some(existing) = target.iter_mut().find(|item| item.name == name) { *existing = duration; }
+            else { target.push(duration); }
+        } else {
+            if !matches!(name, "audio_ms" | "endpoint_silence_ms" | "recognition_ms" | "request_to_transcript_ms" | "speech_end_to_transcript_ms" | "transcript_to_delivery_ms") { return; }
+            let target = inner.latency_input.entry((sid.into(),thread.into(),revision)).or_default();
+            if let Some(existing) = target.iter_mut().find(|item| item.name == name) { *existing = duration.clone(); }
+            else { target.push(duration.clone()); }
+            if let Some(replies) = inner.latency_replies.get_mut(sid) {
+                for reply in replies.iter_mut().filter(|reply| reply.thread_id == thread && reply.revision == revision) {
+                    if let Some(existing) = reply.input_ms.iter_mut().find(|item| item.name == name) { *existing = duration.clone(); }
+                    else { reply.input_ms.push(duration.clone()); }
+                }
+            }
+        }
+    }
+    /// Clone only the authenticated call's bounded records for T6's borrowed snapshot API.
+    pub fn latency_records(&self, sid: &str, device: &str) -> Option<(String, Vec<LatencyMark>, Vec<LatencyReply>)> {
+        let inner = self.inner.lock().expect("room lock");
+        let language = inner.browsers.get(sid).filter(|browser| browser.device == device)?.language.clone();
+        Some((language,
+              inner.latency_marks.get(sid).map_or_else(Vec::new, |marks| marks.iter().cloned().collect()),
+              inner.latency_replies.get(sid).map_or_else(Vec::new, |rows| rows.iter().cloned().collect())))
+    }
+    pub fn latency_browser(&self, sid: &str, uid: &str, timings: &Value) {
+        let reply = self.inner.lock().expect("room lock").latency_replies.get(sid)
+            .and_then(|rows| rows.iter().find(|row| row.utterance_id == uid))
+            .map(|row| (row.thread_id.clone(), row.revision));
+        let Some((thread, revision)) = reply else { return; };
+        for name in ["audio_received_to_playback_scheduled_ms", "turn_finished_event_to_playback_scheduled_ms"] {
+            if let Some(milliseconds) = timings.get(name).and_then(Value::as_f64) {
+                self.latency_duration(sid,&thread,revision,Some(uid),name,milliseconds);
+            }
+        }
     }
     pub fn set_language(&self, sid: &str, language: &str) {
         if let Some(browser) = self.inner.lock().expect("room lock").browsers.get_mut(sid) {
@@ -1203,6 +1314,9 @@ impl Room {
                     parked: false,
                 },
             );
+            for listener in &audience {
+                register_latency_reply(&mut inner, listener, thread, revision, uid, status);
+            }
             for listener in audience {
                 if let Some(c) = inner.browsers.get_mut(&listener) {
                     c.pending.push_back(uid.into());
@@ -1346,6 +1460,15 @@ impl Room {
             }
             dispatch_client(&mut inner, sid);
         }
+        status_latency_reply(&mut inner, sid, uid, status);
+        if status == "playing" {
+            if let Some((thread, reply_revision)) = inner.latency_replies.get(sid)
+                .and_then(|rows| rows.iter().find(|row| row.utterance_id == uid))
+                .map(|row| (row.thread_id.clone(), row.revision)) {
+                mark_latency(&mut inner,sid,&thread,reply_revision,Some(uid),
+                    LatencyEvent::PlayingReceipt,latency_now_micros());
+            }
+        }
         Ok(json!({"status":status}))
     }
     pub fn working(&self, cid: &str, data: &Value) {
@@ -1419,6 +1542,9 @@ impl Room {
             let payload = row.payload.clone().unwrap_or_default();
             if let Some(c) = inner.browsers.get(&sid) {
                 let _=c.sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":payload["revision"],"history_id":payload["history_id"],"thread_id":thread,"session_id":sid,"status":"read"}}));
+            }
+            if let Some(revision) = payload["revision"].as_u64() {
+                mark_latency(&mut inner,&sid,&thread,revision,None,LatencyEvent::Read,latency_now_micros());
             }
         }
     }
@@ -1529,6 +1655,11 @@ impl Room {
             }
             let _=c.sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":payload["revision"],"history_id":rid,"thread_id":payload["thread_id"],"session_id":sid,"status":new_status}}));
         }
+        if new_status == "delivered" {
+            if let (Some(thread), Some(revision)) = (payload["thread_id"].as_str(), payload["revision"].as_u64()) {
+                mark_latency(&mut inner,&sid,thread,revision,None,LatencyEvent::DeliveryAccepted,latency_now_micros());
+            }
+        }
     }
     pub async fn pump(self: std::sync::Arc<Self>) {
         loop {
@@ -1588,6 +1719,8 @@ fn queue_input_locked(inner: &mut Inner, draft: InputDraft<'_>) -> Value {
         next_attempt: 0,
     });
     trim_rows(inner);
+    mark_latency(inner, session_id, thread_id, revision, None,
+        LatencyEvent::Queued, latency_now_micros());
     if let Some(browser) = inner.browsers.get(session_id) {
         let _=browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
             "revision":revision,"history_id":row_id,"thread_id":thread_id,"session_id":session_id,"status":"pending"}}));
@@ -1659,6 +1792,40 @@ fn sync_row(inner: &mut Inner, row_id: &str, changed: &str, reason: Option<&str>
         };
     }
 }
+fn mark_latency(inner: &mut Inner, sid: &str, thread: &str, revision: u64,
+                uid: Option<&str>, event: LatencyEvent, at_micros: u64) {
+    if thread.is_empty() || !inner.browsers.contains_key(sid) { return; }
+    let marks = inner.latency_marks.entry(sid.to_owned()).or_default();
+    if marks.iter().any(|mark| mark.thread_id == thread && mark.revision == revision
+        && mark.utterance_id.as_deref() == uid && mark.event == event) { return; }
+    marks.push_back(LatencyMark { session_id: sid.into(), thread_id: thread.into(),
+        revision, utterance_id: uid.map(str::to_owned), event, at_micros });
+    while marks.len() > MAX_LATENCY_MARKS { marks.pop_front(); }
+    if let Some(uid) = uid {
+        if let Some(reply) = inner.latency_replies.get_mut(sid).and_then(|rows| rows.iter_mut().find(|row| row.utterance_id == uid)) {
+            if event == LatencyEvent::SynthesisStarted { reply.synthesis_attempt += 1; reply.provider_ms.clear(); reply.browser_ms.clear(); }
+        }
+    }
+}
+
+fn register_latency_reply(inner: &mut Inner, sid: &str, thread: &str, revision: u64, uid: &str, status: &str) {
+    if !inner.browsers.contains_key(sid) { return; }
+    let input = inner.latency_input.get(&(sid.into(),thread.into(),revision)).cloned().unwrap_or_default();
+    let rows = inner.latency_replies.entry(sid.into()).or_default();
+    if rows.iter().any(|row| row.utterance_id == uid) { return; }
+    rows.push_back(LatencyReply { session_id:sid.into(),thread_id:thread.into(),revision,
+        utterance_id:uid.into(),status:status.into(),synthesis_attempt:0,
+        input_ms:input,provider_ms:Vec::new(),browser_ms:Vec::new() });
+    while rows.len()>MAX_LATENCY_REPLIES { rows.pop_front(); }
+    mark_latency(inner,sid,thread,revision,Some(uid),LatencyEvent::ReplyReceived,latency_now_micros());
+}
+
+fn status_latency_reply(inner: &mut Inner, sid: &str, uid: &str, status: &str) {
+    if let Some(reply) = inner.latency_replies.get_mut(sid).and_then(|rows| rows.iter_mut().find(|row| row.utterance_id == uid)) {
+        reply.status = status.into();
+    }
+}
+
 fn dispatch_client(inner: &mut Inner, sid: &str) {
     loop {
         let Some(browser) = inner.browsers.get(sid) else {
@@ -1732,7 +1899,9 @@ fn dispatch_client(inner: &mut Inner, sid: &str) {
             return;
         }
         browser.pending.pop_front();
-        browser.active = Some(uid);
+        browser.active = Some(uid.clone());
+        mark_latency(inner, sid, &thread, reply_revision, Some(&uid),
+            LatencyEvent::SynthesisStarted, latency_now_micros());
         return;
     }
 }

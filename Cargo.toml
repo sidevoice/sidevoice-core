@@ -14,6 +14,7 @@ path = "rust/main.rs"
 
 [dependencies]
 async-openai = { version = "=0.41.0", default-features = false, features = ["audio", "model", "rustls", "middleware"] }
+async-trait = "=0.1.89"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "=0.22.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -24,6 +25,7 @@ hostname = "0.4"
 hound = "3.5.1"
 httpdate = "=1.0.3"
 libc = "0.2"
+opus = "=0.3.0"
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 percent-encoding = "=2.3.2"
 rand = "0.8"
@@ -41,6 +43,7 @@ tower = { version = "=0.5.3", features = ["retry", "util"] }
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4"] }
 url = "2"
+webrtc = "=0.21.0"
 
 [dev-dependencies]
 wiremock = "=0.6.5"

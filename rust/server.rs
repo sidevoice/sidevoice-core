@@ -24,9 +24,12 @@ use crate::control::room::Room;
 use crate::messages::{render, LocalizedMessage};
 use crate::runtime::API;
 use crate::storage::PrivateDir;
+use crate::providers::cache::SynthesisCache;
 
 mod connectors_v2;
 mod connectors_v3;
+mod media;
+mod rtc;
 
 pub struct AppState {
     pub dir: PrivateDir,
@@ -34,6 +37,8 @@ pub struct AppState {
     pub identity: NodeIdentity,
     registry: Mutex<DeviceRegistry>,
     calls: Mutex<HashMap<String, Vec<watch::Sender<bool>>>>,
+    media: Mutex<HashMap<String, Arc<media::CallMedia>>>,
+    synthesis: Arc<SynthesisCache>,
     launch_id: String,
     host: String,
     port: u16,
@@ -58,6 +63,8 @@ impl AppState {
             identity,
             registry: Mutex::new(registry),
             calls: Mutex::new(HashMap::new()),
+            media: Mutex::new(HashMap::new()),
+            synthesis: Arc::new(SynthesisCache::new()),
             launch_id,
             host,
             port,
@@ -380,7 +387,9 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             "/api/device/devices/{device_id}",
             axum::routing::delete(revoke),
         )
-        .route("/api/presentation/ws", get(call_socket));
+        .route("/api/presentation/ws", get(call_socket))
+        .route("/api/presentation/rtc/config", get(rtc::config))
+        .route("/api/presentation/rtc/offer", post(rtc::offer));
     router = router
         .route("/api/presentation", get(presentation_state))
         .route("/api/presentation/admission", get(presentation_admission))
@@ -592,7 +601,11 @@ async fn presentation_receipt(
         data["revision"].as_u64().unwrap_or(u64::MAX),
         data["status"].as_str().unwrap_or(""),
     ) {
-        Ok(v) => Json(v).into_response(),
+        Ok(v) => {
+            state.room.latency_browser(data["session_id"].as_str().unwrap_or(""),
+                data["utterance_id"].as_str().unwrap_or(""), &data["timings_ms"]);
+            Json(v).into_response()
+        },
         Err(e) => room_failure(e, &headers),
     }
 }
@@ -1044,6 +1057,7 @@ async fn socket_loop(
     };
     let mut registration = CallRegistration::new(state.clone(), id.clone());
     let (events, mut output) = tokio::sync::mpsc::channel::<Value>(128);
+    let control = events.clone();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     let hello = loop {
         tokio::select! {
@@ -1065,7 +1079,7 @@ async fn socket_loop(
     let defaults = crate::models::default_settings(Some(&crate::runtime::system_language()), None);
     let loaded =
         crate::models::settings_from(hello.get("data").and_then(|v| v.get("settings")), &defaults);
-    if let Some(refusal) = crate::models::unavailable(&loaded.settings, |_| false) {
+    if let Some(refusal) = crate::models::unavailable(&loaded.settings, |place| media::provider_key(&state.dir, place).is_some()) {
         let _ = socket.send(Message::Text(json!({"type":"error","data":crate::messages::render_refusal(&refusal,&loaded.settings.ui_language)}).to_string().into())).await;
         let _ = socket
             .send(Message::Close(Some(CloseFrame {
@@ -1092,30 +1106,69 @@ async fn socket_loop(
             return;
         }
     };
+    let (call_media, mut detector_events) = match media::CallMedia::start(&loaded.settings) {
+        Ok(result) => result,
+        Err(_) => {
+            state.room.leave(&session);
+            let _ = socket.send(Message::Text(json!({"type":"error","data":{"key":"voice.media_unavailable","message":render(&LocalizedMessage::new("voice.media_unavailable"),&loaded.settings.ui_language)}}).to_string().into())).await;
+            return;
+        }
+    };
+    state.media.lock().expect("media lock").insert(session.clone(), call_media.clone());
+    let mut turns = media::TurnOwner::new(call_media.clone(), state.room.clone(), loaded.settings.clone(), session.clone(),
+        control, state.dir.clone());
+    let (rendered_tx, mut rendered_rx) = tokio::sync::mpsc::channel::<(String,u64,Option<Value>)>(16);
     let room_info = json!({"api": API, "version": env!("CARGO_PKG_VERSION")});
     let _ = socket.send(Message::Text(json!({"type":"voice-session","data":{"session_id":session,"sample_rate":16000,"channels":1,"room":room_info}}).to_string().into())).await;
     loop {
+        let deadline = turns.deadline().map(tokio::time::Instant::from_std)
+            .unwrap_or_else(|| tokio::time::Instant::now()+std::time::Duration::from_secs(3600));
         tokio::select! {
             _ = registration.changed() => {
                 let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: close_reason.into() }))).await;
                 break;
             }
+            frame = detector_events.recv() => if let Some(frame) = frame { turns.frame(frame).await; } else { break; },
+            result = turns.finished.recv() => if let Some((turn, text, closed, transcribed, bytes)) = result { turns.result(turn,text,closed,transcribed,bytes).await; },
+            _ = tokio::time::sleep_until(deadline) => { turns.expired().await; },
+            rendered = rendered_rx.recv() => if let Some((uid,revision,event)) = rendered {
+                if let Some(event) = event {
+                    if socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
+                } else { let _ = state.room.receipt(&session,&uid,revision,"failed"); }
+            },
             event = output.recv() => if let Some(event) = event {
-                if socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
+                if event.get("type").and_then(Value::as_str)==Some("voice-speech") {
+                    let uid=event["data"]["utterance_id"].as_str().unwrap_or("").to_owned();
+                    let revision=event["data"]["revision"].as_u64().unwrap_or(0);
+                    let room=state.room.clone(); let dir=state.dir.clone(); let cache=state.synthesis.clone();
+                    let settings=loaded.settings.clone(); let sid=session.clone(); let rendered=rendered_tx.clone();
+                    tokio::spawn(async move {
+                        let result=media::speech_event(room,&sid,&settings,&dir,cache,event).await;
+                        let _=rendered.send((uid,revision,result)).await;
+                    });
+                } else if socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
             } else { break; },
             message = socket.recv() => match message {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 Some(Ok(Message::Ping(bytes))) => {let _=socket.send(Message::Pong(bytes)).await;},
+                Some(Ok(Message::Binary(pcm))) => {call_media.feed(media::Source::Socket,pcm.to_vec()).await;},
                 Some(Ok(Message::Text(raw))) if raw.len()<=1024*1024 => {
                     if let Ok(value)=serde_json::from_str::<Value>(&raw){
                         let data=value.get("data").filter(|v|v.is_object()).cloned().unwrap_or_default();
                         if data.get("session_id").and_then(Value::as_str)==Some(session.as_str()){
                             match value.get("type").and_then(Value::as_str){
                                 Some("voice-client-error")=>{state.room.report_client_error(&data);},
+                                Some("voice-media")=>match data.get("path").and_then(Value::as_str){
+                                    Some("socket")=>call_media.select(media::Source::Socket),
+                                    Some("webrtc")=>call_media.select(media::Source::WebRtc),
+                                    _=>{},
+                                },
+                                Some("voice-transcript")=>call_media.transcript(&data,false,&session),
+                                Some("voice-transcript-error")=>call_media.transcript(&data,true,&session),
                                 Some("voice-settings")=>{
                                     let loaded=crate::models::settings_from(data.get("settings"),&defaults);
                                     if let Some(issue)=loaded.issue{let _=socket.send(Message::Text(json!({"type":"error","data":{"message":issue}}).to_string().into())).await;}
-                                    else if let Some(refusal)=crate::models::unavailable(&loaded.settings,|_|false){let _=socket.send(Message::Text(json!({"type":"error","data":crate::messages::render_refusal(&refusal,&loaded.settings.ui_language)}).to_string().into())).await;}
+                                    else if let Some(refusal)=crate::models::unavailable(&loaded.settings,|place|media::provider_key(&state.dir,place).is_some()){let _=socket.send(Message::Text(json!({"type":"error","data":crate::messages::render_refusal(&refusal,&loaded.settings.ui_language)}).to_string().into())).await;}
                                     else{state.room.set_language(&session,&loaded.settings.ui_language);}
                                 },
                                 _=>{}
@@ -1127,6 +1180,10 @@ async fn socket_loop(
             },
         }
     }
+    turns.close().await;
+    call_media.close();
+    call_media.close_rtc().await;
+    state.media.lock().expect("media lock").remove(&session);
     state.room.leave(&session);
 }
 

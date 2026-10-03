@@ -1,10 +1,116 @@
 //! Rustvani's detector stays behind this application boundary.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path, sync::Arc};
 
+use rustvani::frames::{AudioRawData, Frame, FrameDirection, FrameInner, FrameKind, SystemFrame};
+use rustvani::pipeline::{PipelineParams, PipelineTask};
 use rustvani::turn::{SmartTurnAnalyzer, SmartTurnConfig};
-use rustvani::vad::SileroVadOrt;
+use rustvani::vad::{SileroVadOrt, VadBackend, VadParams, VadProcessor};
 use serde::Serialize;
+use tokio::sync::mpsc;
+
+use crate::types::CallSettings;
+
+/// Audio and detector events share the Rustvani downstream order. The call owner
+/// buffers the complete turn from these events and never handles Rustvani types.
+pub enum CallFrame {
+    Audio(Vec<u8>),
+    Started,
+    Stopped { stop_secs: f32 },
+}
+
+pub struct CallDetector {
+    task: Arc<PipelineTask>,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl CallDetector {
+    pub fn start(settings: &CallSettings) -> Result<(Self, mpsc::Receiver<CallFrame>), String> {
+        let stop_secs = if settings.turn_end_mode == "smart_turn" {
+            settings.smart_turn_min_silence
+        } else {
+            settings.user_speech_timeout
+        };
+        let vad = VadProcessor::new(
+            16_000,
+            VadParams {
+                confidence: settings.vad_confidence,
+                min_volume: settings.vad_min_volume,
+                start_secs: settings.vad_start_secs,
+                stop_secs,
+            },
+            VadBackend::Ort,
+        )
+        .map_err(|error| error.to_string())?;
+        let vad = if settings.turn_end_mode == "smart_turn" {
+            let config = SmartTurnConfig {
+                stop_secs: settings.smart_turn_max_silence,
+                ..SmartTurnConfig::default()
+            };
+            vad.with_smart_turn(Some(&config))
+                .map_err(|error| error.to_string())?
+        } else {
+            vad
+        };
+        let task = Arc::new(PipelineTask::new(
+            vec![vad.into_processor()],
+            PipelineParams::default(),
+        ));
+        task.set_downstream_filter(HashSet::from([
+            FrameKind::InputAudioRaw,
+            FrameKind::VADUserStartedSpeaking,
+            FrameKind::VADUserStoppedSpeaking,
+        ]));
+        let (tx, rx) = mpsc::channel(128);
+        task.add_on_frame_reached_downstream(move |frame| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let event = match frame.inner {
+                    FrameInner::System(SystemFrame::InputAudioRaw(data)) => {
+                        Some(CallFrame::Audio(data.audio.to_vec()))
+                    }
+                    FrameInner::System(SystemFrame::VADUserStartedSpeaking { .. }) => {
+                        Some(CallFrame::Started)
+                    }
+                    FrameInner::System(SystemFrame::VADUserStoppedSpeaking { stop_secs, .. }) => {
+                        Some(CallFrame::Stopped { stop_secs })
+                    }
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    let _ = tx.send(event).await;
+                }
+            })
+        });
+        let runner = task.clone();
+        let worker = tokio::spawn(async move {
+            let _ = runner.run(rustvani::system_clock(), None).await;
+        });
+        Ok((Self { task, worker }, rx))
+    }
+
+    pub async fn feed(&self, pcm: Vec<u8>) -> Result<(), String> {
+        if pcm.len() < 2 || pcm.len() % 2 != 0 {
+            return Err("invalid_pcm".to_owned());
+        }
+        self.task
+            .push_frame(
+                Frame::input_audio_raw(AudioRawData::new(pcm, 16_000, 1)),
+                FrameDirection::Downstream,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn close(self) {
+        let _ = self.task.push_frame(Frame::cancel(), FrameDirection::Downstream).await;
+        self.worker.abort();
+    }
+}
+
+impl Drop for CallDetector {
+    fn drop(&mut self) { self.worker.abort(); }
+}
 
 #[derive(Debug, Serialize)]
 pub struct DetectorReadout {
