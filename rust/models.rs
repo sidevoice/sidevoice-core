@@ -1322,7 +1322,10 @@ fn python_repr(value: &Value) -> String {
                     }
                     character
                         if character.is_control()
-                            || (character.is_whitespace() && character != ' ') =>
+                            || (character.is_whitespace() && character != ' ')
+                            || (character.escape_debug().to_string().starts_with("\\u{")
+                                && !is_combining_mark(character)
+                                && !('\u{1f3fb}'..='\u{1f3ff}').contains(&character)) =>
                     {
                         let code = character as u32;
                         if code <= 0xff {
@@ -2169,6 +2172,11 @@ mod tests {
                 "stt",
             ),
             (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"\u{200b}"}}}),
+                "language: '\\u200b' is not one of its languages",
+                "stt",
+            ),
+            (
                 json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"x".repeat(50)}}}),
                 "language: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… is not one of its languages",
                 "stt",
@@ -2283,6 +2291,10 @@ mod tests {
         );
         assert_eq!(super::shown(&json!("a'b\"c")), "'a\\'b\"c'");
         assert_eq!(super::shown(&json!("a\\b")), "'a\\\\b'");
+        assert_eq!(super::shown(&json!("\u{200b}")), "'\\u200b'");
+        assert_eq!(super::shown(&json!("\u{e000}")), "'\\ue000'");
+        assert_eq!(super::shown(&json!("\u{301}")), "'\u{301}'");
+        assert_eq!(super::shown(&json!("\u{1f3fb}")), "'\u{1f3fb}'");
     }
 
     #[test]
