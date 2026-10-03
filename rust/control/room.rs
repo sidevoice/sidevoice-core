@@ -842,9 +842,17 @@ impl Room {
         let result = VoiceTurn {
             session_id: sid.into(),
             revision: c.revision,
-            thread_id: c.target.as_ref().filter(|t|!t.thread.is_empty()).map(|t|t.thread.clone()),
-            binding_id: c.target.as_ref().filter(|t|!t.thread.is_empty()).map(|t|t.binding_id.clone()),
-            title: c.target.as_ref().and_then(|t|t.title.clone()),
+            thread_id: c
+                .target
+                .as_ref()
+                .filter(|t| !t.thread.is_empty())
+                .map(|t| t.thread.clone()),
+            binding_id: c
+                .target
+                .as_ref()
+                .filter(|t| !t.thread.is_empty())
+                .map(|t| t.binding_id.clone()),
+            title: c.target.as_ref().and_then(|t| t.title.clone()),
             language: c.language.clone(),
         };
         hold_client(&mut inner, sid, result.revision);
@@ -921,34 +929,68 @@ impl Room {
         }
         let revision = c.revision;
         let language = c.language.clone();
-        let title = c.target.as_ref().and_then(|t|t.title.clone());
-        Ok(queue_input_locked(&mut inner,InputDraft{row_id,text,session_id:sid,revision,
-            thread_id:thread,binding_id:bid,title,language:&language,message_id}))
+        let title = c.target.as_ref().and_then(|t| t.title.clone());
+        Ok(queue_input_locked(
+            &mut inner,
+            InputDraft {
+                row_id,
+                text,
+                session_id: sid,
+                revision,
+                thread_id: thread,
+                binding_id: bid,
+                title,
+                language: &language,
+                message_id,
+            },
+        ))
     }
     /// Commit a completed transcript to the same memory journal/outbox as typed input.
     /// The captured focus may differ from today's selection after a mid-turn switch.
-    pub fn queue_voice_input(&self, turn:&VoiceTurn, text:&str) -> Result<Value,RoomError> {
-        if text.trim().is_empty() {return Err(RoomError::new(422,"room.text_empty"));}
-        let mut inner=self.inner.lock().expect("room lock");
-        if !inner.sessions.iter().any(|sid|sid==&turn.session_id) {return Err(RoomError::new(409,"room.focus_changed"));}
-        let row_id=format!("{}:user-turn:{}",turn.session_id,turn.revision);
-        if let Some(row)=inner.rows.iter().find(|row|row.id==row_id) {
-            return if row.text==text && turn.thread_id.as_deref()==Some(row.thread.as_str()) {
-                Ok(json!({"accepted":true,"id":row_id,"revision":row.revision}))
-            } else {Err(RoomError::new(409,"room.message_conflict"))};
+    pub fn queue_voice_input(&self, turn: &VoiceTurn, text: &str) -> Result<Value, RoomError> {
+        if text.trim().is_empty() {
+            return Err(RoomError::new(422, "room.text_empty"));
         }
-        let (Some(thread),Some(bid))=(turn.thread_id.as_deref(),turn.binding_id.as_deref()) else {
-            if let Some(browser)=inner.browsers.get(&turn.session_id) {
-                let _=browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
+        let mut inner = self.inner.lock().expect("room lock");
+        if !inner.sessions.iter().any(|sid| sid == &turn.session_id) {
+            return Err(RoomError::new(409, "room.focus_changed"));
+        }
+        let row_id = format!("{}:user-turn:{}", turn.session_id, turn.revision);
+        if let Some(row) = inner.rows.iter().find(|row| row.id == row_id) {
+            return if row.text == text && turn.thread_id.as_deref() == Some(row.thread.as_str()) {
+                Ok(json!({"accepted":true,"id":row_id,"revision":row.revision}))
+            } else {
+                Err(RoomError::new(409, "room.message_conflict"))
+            };
+        }
+        let (Some(thread), Some(bid)) = (turn.thread_id.as_deref(), turn.binding_id.as_deref())
+        else {
+            if let Some(browser) = inner.browsers.get(&turn.session_id) {
+                let _ = browser
+                    .sender
+                    .try_send(json!({"type":"voice-input-receipt","data":{
                     "revision":turn.revision,"history_id":row_id,"thread_id":Value::Null,
                     "session_id":turn.session_id,"status":"not_sent"}}));
             }
-            return Ok(json!({"accepted":false,"id":row_id,"revision":turn.revision,"status":"not_sent"}));
+            return Ok(
+                json!({"accepted":false,"id":row_id,"revision":turn.revision,"status":"not_sent"}),
+            );
         };
-        let message_id=id();
-        Ok(queue_input_locked(&mut inner,InputDraft{row_id,text,session_id:&turn.session_id,
-            revision:turn.revision,thread_id:thread,binding_id:bid,title:turn.title.clone(),
-            language:&turn.language,message_id:&message_id}))
+        let message_id = id();
+        Ok(queue_input_locked(
+            &mut inner,
+            InputDraft {
+                row_id,
+                text,
+                session_id: &turn.session_id,
+                revision: turn.revision,
+                thread_id: thread,
+                binding_id: bid,
+                title: turn.title.clone(),
+                language: &turn.language,
+                message_id: &message_id,
+            },
+        ))
     }
     pub fn history(&self, thread: Option<&str>) -> Value {
         let inner = self.inner.lock().expect("room lock");
@@ -1494,17 +1536,45 @@ impl Room {
         }
     }
 }
-fn queue_input_locked(inner:&mut Inner,draft:InputDraft<'_>)->Value {
-    let InputDraft{row_id,text,session_id,revision,thread_id,binding_id,title,language,message_id}=draft;
-    let payload=json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
+fn queue_input_locked(inner: &mut Inner, draft: InputDraft<'_>) -> Value {
+    let InputDraft {
+        row_id,
+        text,
+        session_id,
+        revision,
+        thread_id,
+        binding_id,
+        title,
+        language,
+        message_id,
+    } = draft;
+    let payload = json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
         "history_id":row_id,"revision":revision,"binding_id":binding_id,"title":title});
-    inner.seq+=1;
-    inner.rows.push_back(Row {seq:inner.seq,id:row_id.clone(),thread:thread_id.into(),role:"user",
-        text:text.into(),name:Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.you"),language)),
-        session:session_id.into(),revision,time:millis(),status:"pending".into(),reason:None,
-        language:None,offline:None,payload:Some(payload),queued_at:seconds(),attempts:0,next_attempt:0});
+    inner.seq += 1;
+    inner.rows.push_back(Row {
+        seq: inner.seq,
+        id: row_id.clone(),
+        thread: thread_id.into(),
+        role: "user",
+        text: text.into(),
+        name: Some(crate::messages::render(
+            &crate::messages::LocalizedMessage::new("room.you"),
+            language,
+        )),
+        session: session_id.into(),
+        revision,
+        time: millis(),
+        status: "pending".into(),
+        reason: None,
+        language: None,
+        offline: None,
+        payload: Some(payload),
+        queued_at: seconds(),
+        attempts: 0,
+        next_attempt: 0,
+    });
     trim_rows(inner);
-    if let Some(browser)=inner.browsers.get(session_id) {
+    if let Some(browser) = inner.browsers.get(session_id) {
         let _=browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
             "revision":revision,"history_id":row_id,"thread_id":thread_id,"session_id":session_id,"status":"pending"}}));
     }
@@ -1553,12 +1623,26 @@ fn status_rank(status: &str) -> u8 {
     }
 }
 fn sync_row(inner: &mut Inner, row_id: &str, changed: &str, reason: Option<&str>) {
-    let best = inner.utterances.values().find(|record| record.row_id == row_id)
-        .and_then(|record| record.clients.values().map(|(_,status)|status.as_str()).max_by_key(|status|status_rank(status)))
-        .unwrap_or(changed).to_owned();
-    if let Some(row)=inner.rows.iter_mut().find(|row|row.id==row_id) {
-        row.status=best.clone();
-        row.reason=if best==changed {reason.map(str::to_owned)} else {None};
+    let best = inner
+        .utterances
+        .values()
+        .find(|record| record.row_id == row_id)
+        .and_then(|record| {
+            record
+                .clients
+                .values()
+                .map(|(_, status)| status.as_str())
+                .max_by_key(|status| status_rank(status))
+        })
+        .unwrap_or(changed)
+        .to_owned();
+    if let Some(row) = inner.rows.iter_mut().find(|row| row.id == row_id) {
+        row.status = best.clone();
+        row.reason = if best == changed {
+            reason.map(str::to_owned)
+        } else {
+            None
+        };
     }
 }
 fn dispatch_client(inner: &mut Inner, sid: &str) {
@@ -1626,7 +1710,7 @@ fn dispatch_client(inner: &mut Inner, sid: &str) {
                     entry.1 = "interrupted".into();
                 }
             }
-            sync_row(inner,&row_id,"interrupted",Some("focus_changed"));
+            sync_row(inner, &row_id, "interrupted", Some("focus_changed"));
             continue;
         }
         let event = json!({"type":"voice-speech","data":{"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":reply_revision,"thread_id":thread,"text":text,"language":language,"history_id":row_id}});
@@ -1692,9 +1776,11 @@ fn hold_client(inner: &mut Inner, sid: &str, revision: u64) {
             }
         }
     }
-    for (_, row_id) in waiting {sync_row(inner,&row_id,"waiting_for_turn",Some("user_speaking"));}
+    for (_, row_id) in waiting {
+        sync_row(inner, &row_id, "waiting_for_turn", Some("user_speaking"));
+    }
     for row_id in interrupted {
-        sync_row(inner,&row_id,"interrupted",Some("newer_turn"));
+        sync_row(inner, &row_id, "interrupted", Some("newer_turn"));
     }
 }
 fn engine(value: Option<&Value>) -> Option<Value> {
@@ -1762,29 +1848,56 @@ mod tests {
 
     #[test]
     fn completed_voice_turn_uses_captured_focus_and_shared_outbox() {
-        let directory=tempfile::tempdir().unwrap();
-        let room=Room::load(PrivateDir::open(directory.path()).unwrap()).unwrap();
-        let (requests,_receiver)=mpsc::channel(4);
-        let (stop,_stopped)=watch::channel(false);
-        room.attach("connector",ConnectorPeer{generation:id(),sender:requests,stop});
-        room.register("connector",&json!({"thread":"old-thread","harness":"codex"})).unwrap();
-        room.register("connector",&json!({"thread":"new-thread","harness":"codex"})).unwrap();
-        let (events,_received)=mpsc::channel(8);
-        let sid=room.join("device".into(),"en".into(),events).unwrap();
-        room.select(&sid,"old-thread").unwrap();
-        let turn=room.begin_turn(&sid).unwrap();
-        assert_eq!(turn.thread_id.as_deref(),Some("old-thread"));
-        room.select(&sid,"new-thread").unwrap();
-        let accepted=room.queue_voice_input(&turn,"Words for the old thread").unwrap();
-        assert_eq!(accepted["accepted"],true);
-        assert_eq!(accepted["id"],format!("{sid}:user-turn:{}",turn.revision));
-        let rows=room.history(Some("old-thread"));
-        assert_eq!(rows["messages"][0]["text"],"Words for the old thread");
-        assert_eq!(rows["messages"][0]["status"],"pending");
-        assert_eq!(room.history(Some("new-thread"))["messages"].as_array().unwrap().len(),0);
-        let delivery=room.pending_delivery();
-        assert_eq!(delivery.len(),1);
-        assert_eq!(delivery[0].3["thread"],"old-thread");
-        assert_eq!(room.queue_voice_input(&turn,"Words for the old thread").unwrap(),accepted);
+        let directory = tempfile::tempdir().unwrap();
+        let room = Room::load(PrivateDir::open(directory.path()).unwrap()).unwrap();
+        let (requests, _receiver) = mpsc::channel(4);
+        let (stop, _stopped) = watch::channel(false);
+        room.attach(
+            "connector",
+            ConnectorPeer {
+                generation: id(),
+                sender: requests,
+                stop,
+            },
+        );
+        room.register(
+            "connector",
+            &json!({"thread":"old-thread","harness":"codex"}),
+        )
+        .unwrap();
+        room.register(
+            "connector",
+            &json!({"thread":"new-thread","harness":"codex"}),
+        )
+        .unwrap();
+        let (events, _received) = mpsc::channel(8);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        room.select(&sid, "old-thread").unwrap();
+        let turn = room.begin_turn(&sid).unwrap();
+        assert_eq!(turn.thread_id.as_deref(), Some("old-thread"));
+        room.select(&sid, "new-thread").unwrap();
+        let accepted = room
+            .queue_voice_input(&turn, "Words for the old thread")
+            .unwrap();
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(accepted["id"], format!("{sid}:user-turn:{}", turn.revision));
+        let rows = room.history(Some("old-thread"));
+        assert_eq!(rows["messages"][0]["text"], "Words for the old thread");
+        assert_eq!(rows["messages"][0]["status"], "pending");
+        assert_eq!(
+            room.history(Some("new-thread"))["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let delivery = room.pending_delivery();
+        assert_eq!(delivery.len(), 1);
+        assert_eq!(delivery[0].3["thread"], "old-thread");
+        assert_eq!(
+            room.queue_voice_input(&turn, "Words for the old thread")
+                .unwrap(),
+            accepted
+        );
     }
 }
