@@ -336,7 +336,7 @@ async fn watch_idle(state: Arc<AppState>, seconds: f64) {
     let quiet = Duration::from_secs_f64(seconds.max(0.01));
     let mut since = tokio::time::Instant::now();
     loop {
-        tokio::time::sleep(Duration::from_secs_f64(seconds.min(5.0).max(0.01))).await;
+        tokio::time::sleep(Duration::from_secs_f64(seconds.clamp(0.01, 5.0))).await;
         if state.open_calls() > 0 {
             since = tokio::time::Instant::now();
         } else if since.elapsed() >= quiet {

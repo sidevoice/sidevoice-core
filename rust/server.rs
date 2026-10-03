@@ -321,9 +321,7 @@ async fn guard(
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| {
-                let mut parts = value.splitn(2, ' ');
-                let scheme = parts.next()?;
-                let token = parts.next()?;
+                let (scheme, token) = value.split_once(' ')?;
                 scheme
                     .eq_ignore_ascii_case("bearer")
                     .then_some(token.trim())
