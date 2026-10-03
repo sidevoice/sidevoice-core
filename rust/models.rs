@@ -1577,7 +1577,7 @@ mod tests {
             .any(|problem| problem.contains("download with sha256")));
         assert!(problems
             .iter()
-            .any(|problem| problem.contains("unknown kind 'colour-wheel'")));
+            .any(|problem| problem.contains("unknown kind \"colour-wheel\"")));
     }
 
     #[test]
