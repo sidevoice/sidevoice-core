@@ -7,7 +7,7 @@ use serde_json::{Map, Number, Value};
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 use crate::{
-    messages::{ui_locale, LocalizedMessage},
+    messages::{render, ui_locale, LocalizedMessage},
     types::{CallSettings, ModelBuild, SpeechStage},
 };
 
@@ -552,7 +552,23 @@ fn package_for<'a>(
 #[derive(Clone, Debug)]
 pub struct SettingsLoad {
     pub settings: CallSettings,
-    pub issue: Option<LocalizedMessage>,
+    /// Existing clients receive the rendered reason string, not an internal message object.
+    pub issue: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SettingDiagnostic {
+    path: String,
+    message: LocalizedMessage,
+}
+
+impl SettingDiagnostic {
+    fn new(path: impl Into<String>, message: LocalizedMessage) -> Self {
+        Self {
+            path: path.into(),
+            message,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -722,7 +738,7 @@ fn speech_catalogue_language(language: &str) -> bool {
 
 /// Validate incoming settings, falling back only the fields that failed and whole stages as one field.
 pub fn settings_from(input: Option<&Value>, defaults: &CallSettings) -> SettingsLoad {
-    let mut settings = copy_settings(defaults);
+    let mut settings = defaults.clone();
     let Some(object) = input
         .and_then(Value::as_object)
         .filter(|object| !object.is_empty())
@@ -732,25 +748,34 @@ pub fn settings_from(input: Option<&Value>, defaults: &CallSettings) -> Settings
             issue: None,
         };
     };
-    let mut invalid = Vec::new();
+    let mut invalid = Vec::<SettingDiagnostic>::new();
 
     if let Some(value) = object.get("ui_language") {
         match value.as_str() {
             Some("en") => settings.ui_language = "en".to_owned(),
             Some("es") => settings.ui_language = "es".to_owned(),
-            _ => invalid.push("ui_language".to_owned()),
+            _ => invalid.push(SettingDiagnostic::new(
+                "ui_language",
+                LocalizedMessage::new("settings.ui_language_invalid"),
+            )),
         }
     }
     if let Some(value) = object.get("turn_patience") {
         match value.as_str() {
             Some(value @ ("fast" | "normal" | "calm")) => settings.turn_patience = value.to_owned(),
-            _ => invalid.push("turn_patience".to_owned()),
+            _ => invalid.push(SettingDiagnostic::new(
+                "turn_patience",
+                LocalizedMessage::new("settings.turn_patience_invalid"),
+            )),
         }
     }
     if let Some(value) = object.get("turn_end_mode") {
         match value.as_str() {
             Some(value @ ("timer" | "smart_turn")) => settings.turn_end_mode = value.to_owned(),
-            _ => invalid.push("turn_end_mode".to_owned()),
+            _ => invalid.push(SettingDiagnostic::new(
+                "turn_end_mode",
+                LocalizedMessage::new("settings.turn_end_mode_invalid"),
+            )),
         }
     }
 
@@ -827,7 +852,7 @@ pub fn settings_from(input: Option<&Value>, defaults: &CallSettings) -> Settings
         &mut invalid,
     );
 
-    for (task, current) in [("stt", &defaults.stt), ("tts", &defaults.tts)] {
+    for task in ["stt", "tts"] {
         if let Some(value) = object.get(task) {
             match parse_stage(task, value) {
                 Ok(stage) => {
@@ -837,12 +862,8 @@ pub fn settings_from(input: Option<&Value>, defaults: &CallSettings) -> Settings
                         settings.tts = stage
                     }
                 }
-                Err(field) => invalid.push(format!("{task}.{field}")),
+                Err(field) => invalid.extend(stage_diagnostics(task, &field, value)),
             }
-        } else if task == "stt" {
-            settings.stt = copy_stage(current);
-        } else {
-            settings.tts = copy_stage(current);
         }
     }
 
@@ -862,72 +883,211 @@ pub fn settings_from(input: Option<&Value>, defaults: &CallSettings) -> Settings
         "vad_start_secs",
         "merge_window_secs",
     ];
-    invalid.sort_by_key(|field| {
-        let root = field.split('.').next().unwrap_or(field);
+    invalid.sort_by_key(|diagnostic| {
+        let root = diagnostic.path.split('.').next().unwrap_or(&diagnostic.path);
         FIELD_ORDER
             .iter()
             .position(|candidate| *candidate == root)
             .unwrap_or(FIELD_ORDER.len())
     });
-    invalid.dedup();
     let issue = if invalid.is_empty() {
         None
     } else {
-        let fields = invalid.into_iter().take(3).collect::<Vec<_>>().join(", ");
-        Some(LocalizedMessage::new("settings.invalid").with_param("fields", fields))
+        let details = invalid
+            .iter()
+            .take(3)
+            .map(|diagnostic| {
+                format!(
+                    "{} {}",
+                    diagnostic.path,
+                    render(&diagnostic.message, &settings.ui_language)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(render(
+            &LocalizedMessage::new("settings.invalid").with_param("details", details),
+            &settings.ui_language,
+        ))
     };
     SettingsLoad { settings, issue }
-}
-
-fn copy_settings(source: &CallSettings) -> CallSettings {
-    CallSettings {
-        stt: copy_stage(&source.stt),
-        tts: copy_stage(&source.tts),
-        ui_language: source.ui_language.clone(),
-        turn_patience: source.turn_patience.clone(),
-        turn_end_mode: source.turn_end_mode.clone(),
-        user_speech_timeout: source.user_speech_timeout,
-        smart_turn_min_silence: source.smart_turn_min_silence,
-        smart_turn_max_silence: source.smart_turn_max_silence,
-        vad_confidence: source.vad_confidence,
-        vad_min_volume: source.vad_min_volume,
-        vad_start_secs: source.vad_start_secs,
-        merge_window_secs: source.merge_window_secs,
-        audio_grace_seconds: source.audio_grace_seconds,
-        replay_on_return_seconds: source.replay_on_return_seconds,
-    }
-}
-
-fn copy_stage(source: &SpeechStage) -> SpeechStage {
-    SpeechStage {
-        place: source.place.clone(),
-        model: source.model.clone(),
-        options: source.options.clone(),
-        build: source.build.as_ref().map(|build| ModelBuild {
-            engine: build.engine.clone(),
-            accelerator: build.accelerator.clone(),
-        }),
-    }
 }
 
 fn float_field(
     object: &Map<String, Value>,
     name: &str,
     default: f32,
-    min: f32,
-    max: f32,
-    invalid: &mut Vec<String>,
+    min: f64,
+    max: f64,
+    invalid: &mut Vec<SettingDiagnostic>,
 ) -> f32 {
     let Some(value) = object.get(name) else {
         return default;
     };
     match numeric_value(value) {
-        Some(value) if value >= min as f64 && value <= max as f64 => value as f32,
+        Some(value) if value >= min && value <= max => value as f32,
+        Some(value) if value < min => {
+            invalid.push(SettingDiagnostic::new(
+                name,
+                LocalizedMessage::new("settings.input_greater_equal")
+                    .with_param("bound", min.to_string()),
+            ));
+            default
+        }
+        Some(_) => {
+            invalid.push(SettingDiagnostic::new(
+                name,
+                LocalizedMessage::new("settings.input_less_equal")
+                    .with_param("bound", max.to_string()),
+            ));
+            default
+        }
         _ => {
-            invalid.push(name.to_owned());
+            let key = if object.get(name).is_some_and(Value::is_string) {
+                "settings.input_number_parse"
+            } else {
+                "settings.input_number"
+            };
+            invalid.push(SettingDiagnostic::new(name, LocalizedMessage::new(key)));
             default
         }
     }
+}
+
+fn stage_diagnostics(task: &str, field: &str, input: &Value) -> Vec<SettingDiagnostic> {
+    if let Some(object) = input.as_object() {
+        let missing = ["place", "model"]
+            .into_iter()
+            .filter(|required| !object.contains_key(*required))
+            .map(|required| {
+                SettingDiagnostic::new(
+                    format!("{task}.{required}"),
+                    LocalizedMessage::new("settings.field_required"),
+                )
+            })
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return missing;
+        }
+
+        if !matches!(field, "place" | "model" | "build" | "build.engine" | "options")
+            && !field.starts_with("options.")
+        {
+            return vec![SettingDiagnostic::new(
+                format!("{task}.{field}"),
+                LocalizedMessage::new("settings.extra_input"),
+            )];
+        }
+
+        if field == "model" {
+            if let Some(model) = object.get("model").and_then(Value::as_str) {
+                if !valid_model_id(model) {
+                    return vec![SettingDiagnostic::new(
+                        task,
+                        LocalizedMessage::new("settings.model_id_invalid")
+                            .with_param("model", model),
+                    )];
+                }
+                if matches!(object.get("place").and_then(Value::as_str), Some("device" | "host"))
+                    && find_model(model).is_none_or(|model| task_for_model(model) != Some(task))
+                {
+                    return vec![SettingDiagnostic::new(
+                        task,
+                        LocalizedMessage::new("settings.model_task_invalid")
+                            .with_param("model", model)
+                            .with_param("task", task),
+                    )];
+                }
+            }
+        }
+
+        if field == "place" {
+            if let Some(place) = object.get("place").and_then(Value::as_str) {
+                if find_provider(place).is_none_or(|provider| {
+                    !strings(provider.get("tasks")).any(|supported| supported == task)
+                }) {
+                    return vec![SettingDiagnostic::new(
+                        task,
+                        LocalizedMessage::new("settings.place_task_invalid")
+                            .with_param("place", place)
+                            .with_param("task", task),
+                    )];
+                }
+            }
+        }
+
+        if field == "build"
+            && object
+                .get("place")
+                .and_then(Value::as_str)
+                .is_some_and(|place| !matches!(place, "device" | "host"))
+        {
+            return vec![SettingDiagnostic::new(
+                task,
+                LocalizedMessage::new("settings.provider_build_invalid"),
+            )];
+        }
+    }
+
+    if let Some(option) = field.strip_prefix("options.") {
+        if let Some((minimum, maximum)) = stage_range_option(task, input, option) {
+            return vec![SettingDiagnostic::new(
+                task,
+                LocalizedMessage::new("settings.stage_range")
+                    .with_param("name", option)
+                    .with_param("min", minimum)
+                    .with_param("max", maximum),
+            )];
+        }
+        if !stage_option_known(task, input, option) {
+            return vec![SettingDiagnostic::new(
+                task,
+                LocalizedMessage::new("settings.option_unknown")
+                    .with_param("name", option),
+            )];
+        }
+    }
+
+    vec![SettingDiagnostic::new(
+        task,
+        LocalizedMessage::new("settings.stage_invalid"),
+    )]
+}
+
+fn stage_schema(task: &str, input: &Value) -> Option<&'static Value> {
+    let stage = input.as_object()?;
+    let place = stage.get("place")?.as_str()?;
+    let model = stage.get("model")?.as_str()?;
+    if matches!(place, "device" | "host") {
+        let model = find_model(model)?;
+        (task_for_model(model) == Some(task)).then(|| model_schema(model))
+    } else {
+        let provider = find_provider(place)?;
+        strings(provider.get("tasks"))
+            .any(|supported| supported == task)
+            .then(|| task_schema(provider, task))?
+    }
+}
+
+fn stage_option_known(task: &str, input: &Value, name: &str) -> bool {
+    stage_schema(task, input).is_some_and(|schema| {
+        values(schema)
+            .iter()
+            .any(|option| field_str(option, "id") == Some(name))
+    })
+}
+
+fn stage_range_option(task: &str, input: &Value, name: &str) -> Option<(Value, Value)> {
+    let schema = stage_schema(task, input)?;
+    let option = values(schema)
+        .iter()
+        .find(|option| field_str(option, "id") == Some(name))?;
+    (field_str(option, "kind") == Some("range")).then(|| {
+        (
+            option.get("min").cloned().unwrap_or(Value::Null),
+            option.get("max").cloned().unwrap_or(Value::Null),
+        )
+    })
 }
 
 fn numeric_value(value: &Value) -> Option<f64> {
@@ -1349,7 +1509,7 @@ pub fn resolve_voice(
 pub fn mic_settings(
     settings: &CallSettings,
     overrides: Option<&Value>,
-) -> (MicSettings, Option<LocalizedMessage>) {
+) -> (MicSettings, Option<String>) {
     let defaults = default_settings(None, None);
     let base = MicSettings {
         turn_end_mode: defaults.turn_end_mode,
@@ -1387,7 +1547,11 @@ pub fn mic_settings(
             let shown = patience.chars().take(40).collect::<String>();
             (
                 base,
-                Some(LocalizedMessage::new("turn_patience_unknown").with_param("patience", shown)),
+                Some(render(
+                    &LocalizedMessage::new("turn_patience_unknown")
+                        .with_param("patience", shown),
+                    &settings.ui_language,
+                )),
             )
         }
     }
@@ -1537,8 +1701,13 @@ pub fn audio_problem(samples: &[f32], sample_rate: f64) -> Option<LocalizedMessa
     let low = bounds.first().and_then(Value::as_f64).unwrap_or(1.5);
     let high = bounds.get(1).and_then(Value::as_f64).unwrap_or(20.0);
     if !(low..=high).contains(&seconds) {
-        let shown = format!("{:.1}", (seconds * 100.0).round() / 100.0);
-        return Some(LocalizedMessage::new("check_duration").with_param("seconds", shown));
+        let rounded = format!("{seconds:.2}").parse::<f64>().unwrap_or(seconds);
+        let display = format!("{seconds:.1}");
+        return Some(
+            LocalizedMessage::new("check_duration")
+                .with_param("seconds", rounded)
+                .with_param("seconds_display", display),
+        );
     }
     None
 }
@@ -1664,15 +1833,10 @@ mod tests {
         assert_eq!(loaded.settings.stt.place, "openai");
         assert_eq!(loaded.settings.stt.options["context"], json!("Sidevoice"));
         assert_eq!(loaded.settings.tts.model, defaults.tts.model);
-        let issue = loaded.issue.unwrap();
-        assert_eq!(issue.key, "settings.invalid");
-        let fields = issue.params["fields"].as_str().unwrap();
-        assert!(fields.contains("ui_language"));
-        assert!(fields.contains("tts.options.speed"));
-        assert!(issue.params["fields"]
-            .as_str()
-            .unwrap()
-            .contains("ui_language"));
+        assert_eq!(
+            loaded.issue.as_deref(),
+            Some("Some device settings were not valid and use their defaults: ui_language Input should be 'es' or 'en'; tts Value error, speed: a number from 0.5 to 2")
+        );
 
         assert!(settings_from(None, &defaults).issue.is_none());
         assert!(settings_from(Some(&json!({"old_setting":true})), &defaults)
@@ -1681,16 +1845,124 @@ mod tests {
     }
 
     #[test]
+    fn settings_diagnostics_match_pinned_python_for_enum_number_and_required_fields() {
+        let defaults = default_settings(None, None);
+        let cases = [
+            (
+                json!({"turn_patience":"patient"}),
+                "Some device settings were not valid and use their defaults: turn_patience Input should be 'fast', 'normal' or 'calm'",
+            ),
+            (
+                json!({"turn_end_mode":"other"}),
+                "Some device settings were not valid and use their defaults: turn_end_mode Input should be 'timer' or 'smart_turn'",
+            ),
+            (
+                json!({"audio_grace_seconds":"abc"}),
+                "Some device settings were not valid and use their defaults: audio_grace_seconds Input should be a valid number, unable to parse string as a number",
+            ),
+            (
+                json!({"tts":{}}),
+                "Some device settings were not valid and use their defaults: tts.place Field required; tts.model Field required",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                settings_from(Some(&input), &defaults).issue.as_deref(),
+                Some(expected),
+                "Python settings.py output for {input}"
+            );
+        }
+
+        let mut spanish_defaults = defaults;
+        spanish_defaults.ui_language = "es".to_owned();
+        assert_eq!(
+            settings_from(Some(&json!({"turn_patience":"patient"})), &spanish_defaults)
+                .issue
+                .as_deref(),
+            Some("Algunos ajustes del dispositivo no eran válidos y usan sus valores predeterminados: turn_patience El valor debe ser 'fast', 'normal' o 'calm'")
+        );
+    }
+
+    #[test]
+    fn inclusive_float_endpoints_match_the_python_settings_contract() {
+        // Python settings.py accepts both inclusive endpoints for every numeric settings field.
+        let endpoints = [
+            ("audio_grace_seconds", 0.0, 10.0),
+            ("replay_on_return_seconds", 0.0, 3600.0),
+            ("user_speech_timeout", 0.5, 15.0),
+            ("smart_turn_min_silence", 0.1, 3.0),
+            ("smart_turn_max_silence", 0.5, 15.0),
+            ("vad_confidence", 0.1, 1.0),
+            ("vad_min_volume", 0.0, 1.0),
+            ("vad_start_secs", 0.05, 1.0),
+            ("merge_window_secs", 0.0, 5.0),
+        ];
+        let defaults = default_settings(None, None);
+        for (name, minimum, maximum) in endpoints {
+            for endpoint in [minimum, maximum] {
+                let mut input = Map::new();
+                input.insert(name.to_owned(), json!(endpoint));
+                let loaded = settings_from(Some(&Value::Object(input)), &defaults);
+                assert!(loaded.issue.is_none(), "{name}={endpoint}");
+            }
+        }
+
+        for (name, invalid, expected) in [
+            (
+                "vad_confidence",
+                0.09,
+                "Some device settings were not valid and use their defaults: vad_confidence Input should be greater than or equal to 0.1",
+            ),
+            (
+                "audio_grace_seconds",
+                11.0,
+                "Some device settings were not valid and use their defaults: audio_grace_seconds Input should be less than or equal to 10",
+            ),
+        ];
+            let mut input = Map::new();
+            input.insert(name.to_owned(), json!(invalid));
+            assert_eq!(
+                settings_from(Some(&Value::Object(input)), &defaults)
+                    .issue
+                    .as_deref(),
+                Some(expected),
+                "Python settings.py diagnostic for {name}"
+            );
+        }
+    }
+
+    #[test]
     fn stage_rules_reject_cross_task_models_provider_builds_and_unknown_options() {
         let defaults = default_settings(None, None);
-        for input in [
-            json!({"stt":{"place":"device", "model":"kokoro-82m-v1.0"}}),
-            json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "build":{"engine":"sherpa-onnx", "accelerator":"cpu"}}}),
-            json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"pitch":1}}}),
-            json!({"stt":{"place":"openai", "model":"bad/id"}}),
+        let cases = [
+            (
+                json!({"stt":{"place":"device", "model":"kokoro-82m-v1.0"}}),
+                "Some device settings were not valid and use their defaults: stt Value error, 'kokoro-82m-v1.0' is not a stt model of the catalogue",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "build":{"engine":"sherpa-onnx", "accelerator":"cpu"}}}),
+                "Some device settings were not valid and use their defaults: stt Value error, a provider runs its own models: a build cannot be chosen",
+            ),
+            (
+                json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"pitch":1}}}),
+                "Some device settings were not valid and use their defaults: tts Value error, unknown options: 'pitch'",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"bad/id"}}),
+                "Some device settings were not valid and use their defaults: stt Value error, 'bad/id' is not a model id",
+            ),
+            (
+                json!({"tts":{"place":"device", "model":"missing"}}),
+                "Some device settings were not valid and use their defaults: tts Value error, 'missing' is not a tts model of the catalogue",
+            ),
         ] {
+        for (input, expected) in cases {
             let loaded = settings_from(Some(&input), &defaults);
-            assert!(loaded.issue.is_some(), "{input}");
+            assert_eq!(
+                loaded.issue.as_deref(),
+                Some(expected),
+                "Pinned Python settings.py output for {input}"
+            );
         }
     }
 
@@ -1708,12 +1980,10 @@ mod tests {
         assert_eq!(loaded.settings.tts.model, defaults.tts.model);
         assert_eq!(loaded.settings.tts.options, defaults.tts.options);
         assert_eq!(loaded.settings.vad_confidence, defaults.vad_confidence);
-        let fields = loaded.issue.unwrap().params["fields"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert!(fields.contains("tts.options.speed"));
-        assert!(fields.contains("vad_confidence"));
+        assert_eq!(
+            loaded.issue.as_deref(),
+            Some("Some device settings were not valid and use their defaults: tts Value error, speed: a number from 0.5 to 2; vad_confidence Input should be less than or equal to 1")
+        );
     }
 
     #[test]
@@ -1825,7 +2095,10 @@ mod tests {
         let (fallback, problem) =
             mic_settings(&defaults, Some(&json!({"turn_patience":"patient"})));
         assert_eq!(fallback.merge_window_secs, defaults.merge_window_secs);
-        assert_eq!(problem.unwrap().key, "turn_patience_unknown");
+        assert_eq!(
+            problem.as_deref(),
+            Some("Unknown patience; the room's own is used: patient")
+        );
     }
 
     #[test]
@@ -1860,6 +2133,17 @@ mod tests {
         assert_eq!(
             audio_problem(&tone[..1_600], 16_000.0).unwrap().key,
             "check_duration"
+        );
+        let duration = audio_problem(&tone[..1_920], 16_000.0).unwrap();
+        assert_eq!(duration.params["seconds"], json!(0.12));
+        assert_eq!(duration.params["seconds_display"], json!("0.1"));
+        assert_eq!(
+            Value::Object(crate::messages::render_refusal(&duration, "en")),
+            json!({
+                "key":"check_duration",
+                "seconds":0.12,
+                "message":"The model produced 0.1 s of audio for a phrase that takes about five."
+            })
         );
         assert_eq!(
             audio_problem(&tone, f64::INFINITY).unwrap().key,
