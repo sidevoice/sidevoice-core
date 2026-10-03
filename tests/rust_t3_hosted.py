@@ -169,7 +169,13 @@ async def main():
         peers = []
         bridge = None
         try:
-            ready = until(lambda: json.loads((core_data / "core.json").read_text()) if (core_data / "core.json").exists() else None)
+            try:
+                ready = until(lambda: json.loads((core_data / "core.json").read_text()) if (core_data / "core.json").exists() else None)
+            except AssertionError as error:
+                if core.poll() is None:
+                    core.terminate()
+                    core.wait(timeout=5)
+                raise AssertionError(f"{error}; Core exited {core.returncode}: {core.stderr.read()}") from error
             port, uds = ready["port"], core_data / "local.sock"
             assert 2 in ready["connector_protocols"] and 3 in ready["connector_protocols"]
             assert request(port, "GET", "/api/connectors/v3")[0] == 404, "TCP gained connector authority"

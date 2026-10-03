@@ -69,6 +69,12 @@
   "room.request_invalid": "Invalid room request.",
   "room.stale_utterance": "Stale utterance.",
   "room.receipt_invalid": "Invalid playback state.",
+  "room.conversation_missing": "That conversation was not found.",
+  "invalid-rescan": "Invalid rescan value.",
+  "invalid-agent-id": "Invalid agent identifier.",
+  "no-connector": "No connector is connected.",
+  "invalid-connector-response": "The connector returned an invalid response.",
+  "connector-timeout": "The connector did not answer in time.",
   "room.speech_invalid": "The reply is invalid.",
   "room.conversation_title": "Conversation {id}",
   "room.you": "You"

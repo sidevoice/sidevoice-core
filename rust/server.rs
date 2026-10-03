@@ -419,7 +419,9 @@ fn query(uri: &axum::http::Uri, name: &str) -> Option<String> {
 async fn presentation_state(State(state):State<Arc<AppState>>, uri:axum::http::Uri) -> Json<Value> {
     Json(state.room.snapshot(query(&uri,"session_id").as_deref()))
 }
-async fn presentation_admission(State(state):State<Arc<AppState>>) -> Json<Value> { Json(state.room.admission()) }
+async fn presentation_admission(State(state):State<Arc<AppState>>,headers:HeaderMap) -> Json<Value> {
+    Json(state.room.admission(headers.get(header::ACCEPT_LANGUAGE).and_then(|v|v.to_str().ok()).unwrap_or("en")))
+}
 async fn presentation_history(State(state):State<Arc<AppState>>, uri:axum::http::Uri, headers:HeaderMap) -> Response {
     if !origin_allowed(&headers) {return failure("request.origin_invalid",StatusCode::FORBIDDEN,&headers)}
     Json(state.room.history(query(&uri,"thread_id").as_deref())).into_response()
@@ -752,14 +754,19 @@ async fn socket_loop(
     let defaults = crate::models::default_settings(Some(&crate::runtime::system_language()), None);
     let loaded = crate::models::settings_from(hello.get("data").and_then(|v| v.get("settings")), &defaults);
     if let Some(refusal) = crate::models::unavailable(&loaded.settings, |_| false) {
-        let _ = socket.send(Message::Text(json!({"type":"error","data":crate::messages::render_refusal(&refusal,"en")}).to_string().into())).await;
+        let _ = socket.send(Message::Text(json!({"type":"error","data":crate::messages::render_refusal(&refusal,&loaded.settings.ui_language)}).to_string().into())).await;
         let _ = socket.send(Message::Close(Some(CloseFrame { code: 1008, reason: "".into() }))).await;
         unregister_call(&state, &id);
         return;
     }
-    let session = match state.room.join(id.clone(), events) {
+    let session = match state.room.join(id.clone(), loaded.settings.ui_language.clone(), events) {
         Ok(session) => session,
-        Err(_) => { let _ = socket.send(Message::Close(Some(CloseFrame { code: 1013, reason: "".into() }))).await; unregister_call(&state, &id); return; }
+        Err(_) => {
+            let admission=state.room.admission(&loaded.settings.ui_language);
+            let _=socket.send(Message::Text(json!({"type":"error","data":{"message":admission["message"],"reason":admission["reason"]}}).to_string().into())).await;
+            let _ = socket.send(Message::Close(Some(CloseFrame { code: 1013, reason: "".into() }))).await;
+            unregister_call(&state, &id); return;
+        }
     };
     let room_info = json!({"api": API, "version": env!("CARGO_PKG_VERSION")});
     let _ = socket.send(Message::Text(json!({"type":"voice-session","data":{"session_id":session,"sample_rate":16000,"channels":1,"room":room_info}}).to_string().into())).await;

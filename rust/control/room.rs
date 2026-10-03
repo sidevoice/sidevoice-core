@@ -51,7 +51,7 @@ impl ConnectorPeer {
     }
 }
 
-struct Browser { device: String, sender: mpsc::Sender<Value>, target: Option<Target>, revision: u64,
+struct Browser { device: String, language: String, sender: mpsc::Sender<Value>, target: Option<Target>, revision: u64,
     turn_revision: u64, speaking: bool, sent: u64, active: Option<String> }
 #[derive(Clone)] struct Target { thread: String, title: Option<String>, binding_id: String }
 impl Target { fn view(&self) -> Value { json!({"thread_id": self.thread, "title": self.title, "binding_id": self.binding_id}) } }
@@ -226,26 +226,28 @@ impl Room {
     }
     pub fn participants(&self, session: Option<&str>) -> Value {
         let inner=self.inner.lock().expect("room lock");
-        let selected= session.and_then(|sid| inner.browsers.get(sid)).and_then(|b| b.target.as_ref()).map(|t| t.thread.as_str());
+        let current=session.and_then(|sid|inner.browsers.get(sid));
+        let selected=current.and_then(|b| b.target.as_ref()).map(|t| t.thread.as_str());
+        let language=current.map_or("en",|b|b.language.as_str());
         json!(inner.bindings.values().filter(|b| b.active).map(|b| {
             let host=inner.connectors.get(&b.connector).and_then(|c| c.get("host"));
-            json!({"thread_id":b.thread,"title":b.title.clone().unwrap_or_else(||crate::messages::render(&crate::messages::LocalizedMessage::new("room.conversation_title").with_param("id",b.thread.chars().take(8).collect::<String>()),"en")),
+            json!({"thread_id":b.thread,"title":b.title.clone().unwrap_or_else(||crate::messages::render(&crate::messages::LocalizedMessage::new("room.conversation_title").with_param("id",b.thread.chars().take(8).collect::<String>()),language)),
                 "harness":b.harness,"available":b.live,"machine":{"id":b.connector,"host":host},
                 "capabilities":b.capabilities,"engine":b.engine,"route":b.route,
                 "reach":{"state":if b.live {"listening"} else {"offline"},"detail":Value::Null},"selected":selected==Some(b.thread.as_str())})
         }).collect::<Vec<_>>())
     }
-    pub fn join(&self, device: String, sender: mpsc::Sender<Value>) -> Result<String, RoomError> {
+    pub fn join(&self, device: String, language: String, sender: mpsc::Sender<Value>) -> Result<String, RoomError> {
         let mut inner=self.inner.lock().expect("room lock");
         let max=std::env::var("VOICE_MAX_BROWSERS").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(MAX_BROWSERS).max(1);
         if inner.browsers.len()>=max { return Err(RoomError::new(429,"room.full")); }
         let sid=id(); inner.sessions.push_back(sid.clone()); if inner.sessions.len()>64 {inner.sessions.pop_front();}
-        inner.browsers.insert(sid.clone(),Browser { device,sender,target:None,revision:0,turn_revision:0,speaking:false,sent:0,active:None }); Ok(sid)
+        inner.browsers.insert(sid.clone(),Browser { device,language,sender,target:None,revision:0,turn_revision:0,speaking:false,sent:0,active:None }); Ok(sid)
     }
     pub fn leave(&self, sid: &str) { self.inner.lock().expect("room lock").browsers.remove(sid); }
-    pub fn admission(&self) -> Value { let inner=self.inner.lock().expect("room lock"); let max=std::env::var("VOICE_MAX_BROWSERS").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(MAX_BROWSERS).max(1);
+    pub fn admission(&self,language:&str) -> Value { let inner=self.inner.lock().expect("room lock"); let max=std::env::var("VOICE_MAX_BROWSERS").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(MAX_BROWSERS).max(1);
         json!({"admitted":inner.browsers.len()<max,"reason":if inner.browsers.len()>=max {Some("room_is_full")} else {None},
-        "message":if inner.browsers.len()>=max {Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.full"),"en"))} else {None},"clients":inner.browsers.len(),"max":max}) }
+        "message":if inner.browsers.len()>=max {Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.full"),language))} else {None},"clients":inner.browsers.len(),"max":max}) }
     pub fn select(&self, sid:&str, thread:&str) -> Result<Value,RoomError> {
         if !valid_thread(thread) {return Err(RoomError::new(400,"room.thread_invalid"));}
         let mut inner=self.inner.lock().expect("room lock");
@@ -267,8 +269,8 @@ impl Room {
         let Some(c)=inner.browsers.get(sid) else{return Err(RoomError::new(409,"room.focus_changed"));};
         if c.target.as_ref().is_none_or(|t|t.thread!=thread||t.binding_id!=bid){return Err(RoomError::new(409,"room.focus_changed"));}
         if text.trim().is_empty(){return Err(RoomError::new(422,"room.text_empty"));}
-        let revision=c.revision;let sender=c.sender.clone();let payload=json!({"thread_id":thread,"text":text,"message_id":message_id,"session_id":sid,"history_id":row_id,"revision":revision,"binding_id":bid,"title":c.target.as_ref().and_then(|t|t.title.clone())});
-        inner.seq+=1;let seq=inner.seq;inner.rows.push_back(Row{seq,id:row_id.clone(),thread:thread.into(),role:"user",text:text.into(),name:Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.you"),"en")),session:sid.into(),revision,time:millis(),status:"pending".into(),reason:None,language:None,offline:None,payload:Some(payload.clone()),queued_at:seconds(),attempts:0,next_attempt:0});trim_rows(&mut inner);
+        let revision=c.revision;let sender=c.sender.clone();let language=c.language.clone();let payload=json!({"thread_id":thread,"text":text,"message_id":message_id,"session_id":sid,"history_id":row_id,"revision":revision,"binding_id":bid,"title":c.target.as_ref().and_then(|t|t.title.clone())});
+        inner.seq+=1;let seq=inner.seq;inner.rows.push_back(Row{seq,id:row_id.clone(),thread:thread.into(),role:"user",text:text.into(),name:Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.you"),&language)),session:sid.into(),revision,time:millis(),status:"pending".into(),reason:None,language:None,offline:None,payload:Some(payload.clone()),queued_at:seconds(),attempts:0,next_attempt:0});trim_rows(&mut inner);
         let _=sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":revision,"history_id":row_id,"thread_id":thread,"session_id":sid,"status":"pending"}}));
         Ok(json!({"accepted":true,"id":row_id,"revision":revision}))
     }
