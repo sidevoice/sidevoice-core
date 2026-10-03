@@ -38,6 +38,8 @@ jobs:
           test "$(git -C peer/connector-rust rev-parse HEAD)" = 8c1a3df0c8c88040d9bfeeb880d17c04a1e823f1
           test "$(git -C peer/web rev-parse HEAD)" = 140115fd5122c9652763b0c5e47105f21f4cee95
           rustup toolchain install 1.98.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev pkg-config
           npm ci --prefix peer/connector-js
           npm ci --prefix peer/web
       - name: Build Core and actual Rust v3 peer

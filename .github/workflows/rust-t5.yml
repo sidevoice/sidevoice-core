@@ -16,6 +16,11 @@ jobs:
       RUSTVANI_CACHE_DIR: /tmp/sidevoice-rustvani-cache
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: sidevoice/sidevoice-connector
+          ref: ddb4bd1e0c95e7997787fe4ab98e7d812fbe2390
+          path: peer/connector-js
       - name: Install pinned toolchain and native codec dependency
         run: |
           rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
@@ -23,18 +28,10 @@ jobs:
           sudo apt-get install -y libopus-dev pkg-config
       - name: Stage verified detector assets
         run: python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
-      - name: Resolve locked dependencies and format in Actions
+      - name: Verify committed formatting and lockfile
         run: |
-          cargo generate-lockfile
-          cargo fmt --all
-      - name: Preserve hosted lock and formatting result
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-t5-hosted-sources
-          path: |
-            Cargo.lock
-            rust/
-          retention-days: 3
+          cargo fmt --all --check
+          cargo tree --locked >/dev/null
       - name: Check exact hosted build and library tests
         run: |
           set -euo pipefail
@@ -43,3 +40,18 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
           cargo build --locked --bin sidevoice-core-rust
+      - name: Prepare pinned client and offline voice fixture
+        run: |
+          test "$(git -C peer/connector-js rev-parse HEAD)" = ddb4bd1e0c95e7997787fe4ab98e7d812fbe2390
+          npm ci --prefix peer/connector-js
+          docker build -f tests/rust_t5.Dockerfile -t sidevoice-rust-t5 .
+      - name: Exercise recorded call and actual media transport without network
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            -e RUSTVANI_CACHE_DIR=/models \
+            -v "$RUSTVANI_CACHE_DIR:/models:ro" \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
+            sidevoice-rust-t5 /opt/t5-venv/bin/python tests/rust_t5_hosted.py \
+            /workspace/target/debug/sidevoice-core-rust \
+            /workspace/peer/connector-js/packages/connector/link.mjs \
+            /workspace/peer/connector-js/packages/connector/link.mjs

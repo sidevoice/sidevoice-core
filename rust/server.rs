@@ -22,9 +22,9 @@ use uuid::Uuid;
 use crate::control::devices::{valid_nonce, DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
 use crate::messages::{render, LocalizedMessage};
+use crate::providers::cache::SynthesisCache;
 use crate::runtime::API;
 use crate::storage::PrivateDir;
-use crate::providers::cache::SynthesisCache;
 
 mod connectors_v2;
 mod connectors_v3;
@@ -507,13 +507,19 @@ async fn presentation_select(
         data["thread_id"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
-            let call = { state.media.lock().expect("media lock")
-                .get(data["session_id"].as_str().unwrap_or("")).cloned() };
+            let call = {
+                state
+                    .media
+                    .lock()
+                    .expect("media lock")
+                    .get(data["session_id"].as_str().unwrap_or(""))
+                    .cloned()
+            };
             if let Some(call) = call {
                 call.focus_changed().await;
             }
             Json(v).into_response()
-        },
+        }
         Err(e) => room_failure(e, &headers),
     }
 }
@@ -533,11 +539,19 @@ async fn presentation_leave(
         data["binding_id"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
-            let call = { state.media.lock().expect("media lock")
-                .get(data["session_id"].as_str().unwrap_or("")).cloned() };
-            if let Some(call) = call { call.focus_changed().await; }
+            let call = {
+                state
+                    .media
+                    .lock()
+                    .expect("media lock")
+                    .get(data["session_id"].as_str().unwrap_or(""))
+                    .cloned()
+            };
+            if let Some(call) = call {
+                call.focus_changed().await;
+            }
             Json(v).into_response()
-        },
+        }
         Err(e) => room_failure(e, &headers),
     }
 }
@@ -614,10 +628,13 @@ async fn presentation_receipt(
         data["status"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
-            state.room.latency_browser(data["session_id"].as_str().unwrap_or(""),
-                data["utterance_id"].as_str().unwrap_or(""), &data["timings_ms"]);
+            state.room.latency_browser(
+                data["session_id"].as_str().unwrap_or(""),
+                data["utterance_id"].as_str().unwrap_or(""),
+                &data["timings_ms"],
+            );
             Json(v).into_response()
-        },
+        }
         Err(e) => room_failure(e, &headers),
     }
 }
@@ -1091,7 +1108,9 @@ async fn socket_loop(
     let defaults = crate::models::default_settings(Some(&crate::runtime::system_language()), None);
     let loaded =
         crate::models::settings_from(hello.get("data").and_then(|v| v.get("settings")), &defaults);
-    if let Some(refusal) = crate::models::unavailable(&loaded.settings, |place| media::provider_key(&state.dir, place).is_some()) {
+    if let Some(refusal) = crate::models::unavailable(&loaded.settings, |place| {
+        media::provider_key(&state.dir, place).is_some()
+    }) {
         let _ = socket.send(Message::Text(json!({"type":"error","data":crate::messages::render_refusal(&refusal,&loaded.settings.ui_language)}).to_string().into())).await;
         let _ = socket
             .send(Message::Close(Some(CloseFrame {
@@ -1118,7 +1137,9 @@ async fn socket_loop(
             return;
         }
     };
-    let (call_media, mut detector_events, mut focus_events) = match media::CallMedia::start(&loaded.settings) {
+    let (call_media, mut detector_events, mut focus_events) = match media::CallMedia::start(
+        &loaded.settings,
+    ) {
         Ok(result) => result,
         Err(_) => {
             state.room.leave(&session);
@@ -1126,16 +1147,29 @@ async fn socket_loop(
             return;
         }
     };
-    state.media.lock().expect("media lock").insert(session.clone(), call_media.clone());
-    let mut turns = media::TurnOwner::new(call_media.clone(), state.room.clone(), loaded.settings.clone(), session.clone(),
-        control, state.dir.clone());
+    state
+        .media
+        .lock()
+        .expect("media lock")
+        .insert(session.clone(), call_media.clone());
+    let mut turns = media::TurnOwner::new(
+        call_media.clone(),
+        state.room.clone(),
+        loaded.settings.clone(),
+        session.clone(),
+        control,
+        state.dir.clone(),
+    );
     let mut call_settings = loaded.settings.clone();
-    let (rendered_tx, mut rendered_rx) = tokio::sync::mpsc::channel::<(String,u64,Option<Value>)>(16);
+    let (rendered_tx, mut rendered_rx) =
+        tokio::sync::mpsc::channel::<(String, u64, Option<Value>)>(16);
     let room_info = json!({"api": API, "version": env!("CARGO_PKG_VERSION")});
     let _ = socket.send(Message::Text(json!({"type":"voice-session","data":{"session_id":session,"sample_rate":16000,"channels":1,"room":room_info}}).to_string().into())).await;
     loop {
-        let deadline = turns.deadline().map(tokio::time::Instant::from_std)
-            .unwrap_or_else(|| tokio::time::Instant::now()+std::time::Duration::from_secs(3600));
+        let deadline = turns
+            .deadline()
+            .map(tokio::time::Instant::from_std)
+            .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(3600));
         tokio::select! {
             _ = registration.changed() => {
                 let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: close_reason.into() }))).await;

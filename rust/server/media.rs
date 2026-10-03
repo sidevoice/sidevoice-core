@@ -1,6 +1,13 @@
 //! One microphone source and one turn lifecycle for an authenticated call.
 
-use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex}, time::{Duration, Instant}};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -12,7 +19,10 @@ use crate::{
     control::room::{latency_now_micros, LatencyEvent, Room, VoiceTurn},
     models::resolve_voice,
     pipeline::{CallDetector, CallFrame},
-    providers::{cache::{SynthesisCache, SynthesisChoice}, ElevenLabsTts, OpenAiTranscriber},
+    providers::{
+        cache::{SynthesisCache, SynthesisChoice},
+        ElevenLabsTts, OpenAiTranscriber,
+    },
     storage::PrivateDir,
     types::CallSettings,
 };
@@ -21,7 +31,10 @@ const MAX_TURN_BYTES: usize = 16_000 * 2 * 60;
 const PRE_ROLL_BYTES: usize = 16_000 * 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Source { Socket, WebRtc }
+pub enum Source {
+    Socket,
+    WebRtc,
+}
 
 pub struct CallMedia {
     detector: CallDetector,
@@ -32,22 +45,32 @@ pub struct CallMedia {
     focus_tx: mpsc::Sender<()>,
 }
 
+type MediaStart = (Arc<CallMedia>, mpsc::Receiver<CallFrame>, mpsc::Receiver<()>);
+
 impl CallMedia {
-    pub fn start(settings: &CallSettings) -> Result<(Arc<Self>, mpsc::Receiver<CallFrame>, mpsc::Receiver<()>), String> {
+    pub fn start(settings: &CallSettings) -> Result<MediaStart, String> {
         let (detector, events) = CallDetector::start(settings)?;
         let (focus_tx, focus_rx) = mpsc::channel(8);
-        Ok((Arc::new(Self {
-            detector,
-            source: Mutex::new(Source::Socket),
-            transcripts: Mutex::new(HashMap::new()),
-            rtc_generation: AtomicU64::new(0),
-            rtc: Mutex::new(None),
-            focus_tx,
-        }), events, focus_rx))
+        Ok((
+            Arc::new(Self {
+                detector,
+                source: Mutex::new(Source::Socket),
+                transcripts: Mutex::new(HashMap::new()),
+                rtc_generation: AtomicU64::new(0),
+                rtc: Mutex::new(None),
+                focus_tx,
+            }),
+            events,
+            focus_rx,
+        ))
     }
 
-    pub fn select(&self, source: Source) { *self.source.lock().expect("source lock") = source; }
-    pub async fn focus_changed(&self) { let _ = self.focus_tx.send(()).await; }
+    pub fn select(&self, source: Source) {
+        *self.source.lock().expect("source lock") = source;
+    }
+    pub async fn focus_changed(&self) {
+        let _ = self.focus_tx.send(()).await;
+    }
 
     pub async fn feed(&self, source: Source, pcm: Vec<u8>) {
         if *self.source.lock().expect("source lock") == source {
@@ -64,49 +87,99 @@ impl CallMedia {
     pub async fn replace_rtc(&self) -> u64 {
         let generation = self.rtc_generation.fetch_add(1, Ordering::AcqRel) + 1;
         let prior = self.rtc.lock().expect("rtc lock").take();
-        if let Some(prior) = prior { let _ = prior.close().await; }
+        if let Some(prior) = prior {
+            let _ = prior.close().await;
+        }
         generation
     }
 
-    pub async fn set_rtc(&self, generation: u64, peer: Arc<dyn webrtc::peer_connection::PeerConnection>) {
+    pub async fn set_rtc(
+        &self,
+        generation: u64,
+        peer: Arc<dyn webrtc::peer_connection::PeerConnection>,
+    ) {
         if self.rtc_generation.load(Ordering::Acquire) == generation {
             self.rtc.lock().expect("rtc lock").replace(peer);
-        } else { let _ = peer.close().await; }
+        } else {
+            let _ = peer.close().await;
+        }
     }
 
     pub async fn close_rtc(&self) {
         self.rtc_generation.fetch_add(1, Ordering::AcqRel);
         let peer = self.rtc.lock().expect("rtc lock").take();
-        if let Some(peer) = peer { let _ = peer.close().await; }
+        if let Some(peer) = peer {
+            let _ = peer.close().await;
+        }
     }
 
     pub fn transcript(&self, data: &Value, error: bool, session: &str) {
-        if data.get("session_id").and_then(Value::as_str) != Some(session) { return; }
-        let Some(request) = data.get("request_id").and_then(Value::as_str) else { return; };
-        let pending = self.transcripts.lock().expect("transcripts lock").remove(request);
+        if data.get("session_id").and_then(Value::as_str) != Some(session) {
+            return;
+        }
+        let Some(request) = data.get("request_id").and_then(Value::as_str) else {
+            return;
+        };
+        let pending = self
+            .transcripts
+            .lock()
+            .expect("transcripts lock")
+            .remove(request);
         if let Some(pending) = pending {
-            let text = if error { None } else { data.get("text").and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty()).map(str::to_owned) };
+            let text = if error {
+                None
+            } else {
+                data.get("text")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned)
+            };
             let _ = pending.send(text);
         }
     }
 
-    async fn recognize(&self, pcm: Vec<u8>, settings: &CallSettings, session: &str,
-                       events: &mpsc::Sender<Value>, dir: &PrivateDir) -> Option<String> {
-        if !crate::pipeline::has_speech(&pcm).await.ok()? { return None; }
+    async fn recognize(
+        &self,
+        pcm: Vec<u8>,
+        settings: &CallSettings,
+        session: &str,
+        events: &mpsc::Sender<Value>,
+        dir: &PrivateDir,
+    ) -> Option<String> {
+        if !crate::pipeline::has_speech(&pcm).await.ok()? {
+            return None;
+        }
         let wav = wav(&pcm)?;
         let (text, confidence) = match settings.stt.place.as_str() {
             "device" => {
                 let request = Uuid::new_v4().to_string();
                 let (tx, rx) = oneshot::channel();
-                self.transcripts.lock().expect("transcripts lock").insert(request.clone(), tx);
+                self.transcripts
+                    .lock()
+                    .expect("transcripts lock")
+                    .insert(request.clone(), tx);
                 let language = settings.stt.options.get("language").and_then(Value::as_str);
                 let message = json!({"type":"voice-transcribe","data":{
                     "session_id":session,"request_id":request,
                     "audio_base64":base64::engine::general_purpose::STANDARD.encode(wav),
                     "language":language}});
-                if events.send(message).await.is_err() { self.transcripts.lock().expect("transcripts lock").remove(&request); return None; }
-                let result = tokio::time::timeout(Duration::from_secs(90), rx).await.ok().and_then(Result::ok).flatten();
-                self.transcripts.lock().expect("transcripts lock").remove(&request);
+                if events.send(message).await.is_err() {
+                    self.transcripts
+                        .lock()
+                        .expect("transcripts lock")
+                        .remove(&request);
+                    return None;
+                }
+                let result = tokio::time::timeout(Duration::from_secs(90), rx)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+                self.transcripts
+                    .lock()
+                    .expect("transcripts lock")
+                    .remove(&request);
                 (result, None)
             }
             "openai" => {
@@ -114,46 +187,92 @@ impl CallMedia {
                 let client = OpenAiTranscriber::new(&key).ok()?;
                 let language = settings.stt.options.get("language").and_then(Value::as_str);
                 let prompt = settings.stt.options.get("context").and_then(Value::as_str);
-                let result = client.transcribe(&wav, &settings.stt.model, language, prompt).await.ok()?;
+                let result = client
+                    .transcribe(&wav, &settings.stt.model, language, prompt)
+                    .await
+                    .ok()?;
                 (Some(result.text.trim().to_owned()), result.mean_logprob)
             }
             _ => return None,
         };
         let text = text?.trim().to_owned();
-        let language = settings.stt.options.get("language").and_then(Value::as_str).unwrap_or(&settings.ui_language);
-        if language != "hi" && text.chars().any(char::is_alphabetic)
-            && !text.chars().any(|letter| letter.script() == Script::Latin) { return None; }
-        let threshold = if text.split_whitespace().count() <= 2 { -3.0 } else { -2.0 };
-        if confidence.is_some_and(|value| value < threshold) { return None; }
+        let language = settings
+            .stt
+            .options
+            .get("language")
+            .and_then(Value::as_str)
+            .unwrap_or(&settings.ui_language);
+        if language != "hi"
+            && text.chars().any(char::is_alphabetic)
+            && !text.chars().any(|letter| letter.script() == Script::Latin)
+        {
+            return None;
+        }
+        let threshold = if text.split_whitespace().count() <= 2 {
+            -3.0
+        } else {
+            -2.0
+        };
+        if confidence.is_some_and(|value| value < threshold) {
+            return None;
+        }
         (!text.is_empty()).then_some(text)
     }
 
-    pub fn close(&self) { self.transcripts.lock().expect("transcripts lock").clear(); }
+    pub fn close(&self) {
+        self.transcripts.lock().expect("transcripts lock").clear();
+    }
 }
 
 pub(super) fn provider_key(dir: &PrivateDir, name: &str) -> Option<String> {
-    let stored = dir.read_json("integrations.json").ok().flatten()
+    let stored = dir
+        .read_json("integrations.json")
+        .ok()
+        .flatten()
         .and_then(|value| value.get(name).and_then(Value::as_str).map(str::to_owned));
-    let environment = match name { "openai" => "VOICE_STT_API_KEY", "elevenlabs" => "VOICE_ELEVENLABS_API_KEY", _ => return None };
-    crate::models::effective_key(stored.as_deref(), std::env::var(environment).ok().as_deref()).map(str::to_owned)
+    let environment = match name {
+        "openai" => "VOICE_STT_API_KEY",
+        "elevenlabs" => "VOICE_ELEVENLABS_API_KEY",
+        _ => return None,
+    };
+    crate::models::effective_key(
+        stored.as_deref(),
+        std::env::var(environment).ok().as_deref(),
+    )
+    .map(str::to_owned)
 }
 
 fn wav(pcm: &[u8]) -> Option<Vec<u8>> {
-    if pcm.is_empty() || !pcm.len().is_multiple_of(2) { return None; }
+    if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
+        return None;
+    }
     let mut bytes = Vec::new();
     let cursor = std::io::Cursor::new(&mut bytes);
-    let mut writer = hound::WavWriter::new(cursor, hound::WavSpec {
-        channels: 1, sample_rate: 16_000, bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    }).ok()?;
+    let mut writer = hound::WavWriter::new(
+        cursor,
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )
+    .ok()?;
     for sample in pcm.as_chunks::<2>().0 {
-        writer.write_sample(i16::from_le_bytes([sample[0], sample[1]])).ok()?;
+        writer
+            .write_sample(i16::from_le_bytes([sample[0], sample[1]]))
+            .ok()?;
     }
     writer.finalize().ok()?;
     Some(bytes)
 }
 
-struct PendingTurn { turn: VoiceTurn, text: String, deadline: Instant, transcribed_at: u64 }
+struct PendingTurn {
+    turn: VoiceTurn,
+    text: String,
+    deadline: Instant,
+    transcribed_at: u64,
+}
 
 pub struct TurnOwner {
     media: Arc<CallMedia>,
@@ -170,18 +289,46 @@ pub struct TurnOwner {
 }
 
 impl TurnOwner {
-    pub fn new(media: Arc<CallMedia>, room: Arc<Room>, settings: CallSettings, session: String,
-               events: mpsc::Sender<Value>, dir: PrivateDir) -> Self {
+    pub fn new(
+        media: Arc<CallMedia>,
+        room: Arc<Room>,
+        settings: CallSettings,
+        session: String,
+        events: mpsc::Sender<Value>,
+        dir: PrivateDir,
+    ) -> Self {
         let (finished_tx, finished) = mpsc::channel(16);
-        Self { media, room, settings, session, events, dir, recent: VecDeque::new(),
-            speaking: None, pending: None, finished, finished_tx }
+        Self {
+            media,
+            room,
+            settings,
+            session,
+            events,
+            dir,
+            recent: VecDeque::new(),
+            speaking: None,
+            pending: None,
+            finished,
+            finished_tx,
+        }
     }
 
-    pub fn deadline(&self) -> Option<Instant> { self.pending.as_ref().filter(|_| self.speaking.is_none()).map(|p| p.deadline) }
+    pub fn deadline(&self) -> Option<Instant> {
+        self.pending
+            .as_ref()
+            .filter(|_| self.speaking.is_none())
+            .map(|p| p.deadline)
+    }
 
     pub async fn expired(&mut self) {
-        if self.deadline().is_some_and(|deadline| Instant::now() >= deadline) {
-            if let Some(pending) = self.pending.take() { self.deliver(pending.turn, pending.text, pending.transcribed_at).await; }
+        if self
+            .deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            if let Some(pending) = self.pending.take() {
+                self.deliver(pending.turn, pending.text, pending.transcribed_at)
+                    .await;
+            }
         }
     }
 
@@ -189,10 +336,14 @@ impl TurnOwner {
         match frame {
             CallFrame::Audio(bytes) => {
                 if let Some((_, pcm)) = &mut self.speaking {
-                    if pcm.len() + bytes.len() <= MAX_TURN_BYTES { pcm.extend_from_slice(&bytes); }
+                    if pcm.len() + bytes.len() <= MAX_TURN_BYTES {
+                        pcm.extend_from_slice(&bytes);
+                    }
                 } else {
                     self.recent.extend(bytes);
-                    while self.recent.len() > PRE_ROLL_BYTES { self.recent.pop_front(); }
+                    while self.recent.len() > PRE_ROLL_BYTES {
+                        self.recent.pop_front();
+                    }
                 }
             }
             CallFrame::Started => {
@@ -210,10 +361,38 @@ impl TurnOwner {
                     let closed = latency_now_micros();
                     let speech_end = closed.saturating_sub((stop_secs as f64 * 1_000_000.0) as u64);
                     if let Some(thread) = turn.thread_id.as_deref() {
-                        self.room.latency_mark(&self.session,thread,turn.revision,None,LatencyEvent::SpeechEnd,speech_end);
-                        self.room.latency_mark(&self.session,thread,turn.revision,None,LatencyEvent::TurnClosed,closed);
-                        self.room.latency_duration(&self.session,thread,turn.revision,None,"endpoint_silence_ms",stop_secs as f64 * 1000.0);
-                        self.room.latency_duration(&self.session,thread,turn.revision,None,"audio_ms",pcm.len() as f64 / 32.0);
+                        self.room.latency_mark(
+                            &self.session,
+                            thread,
+                            turn.revision,
+                            None,
+                            LatencyEvent::SpeechEnd,
+                            speech_end,
+                        );
+                        self.room.latency_mark(
+                            &self.session,
+                            thread,
+                            turn.revision,
+                            None,
+                            LatencyEvent::TurnClosed,
+                            closed,
+                        );
+                        self.room.latency_duration(
+                            &self.session,
+                            thread,
+                            turn.revision,
+                            None,
+                            "endpoint_silence_ms",
+                            stop_secs as f64 * 1000.0,
+                        );
+                        self.room.latency_duration(
+                            &self.session,
+                            thread,
+                            turn.revision,
+                            None,
+                            "audio_ms",
+                            pcm.len() as f64 / 32.0,
+                        );
                     }
                     let bytes = pcm.len();
                     let media = self.media.clone();
@@ -223,19 +402,51 @@ impl TurnOwner {
                     let dir = self.dir.clone();
                     let finished = self.finished_tx.clone();
                     tokio::spawn(async move {
-                        let text = media.recognize(pcm, &settings, &session, &events, &dir).await;
-                        let _ = finished.send((turn, text, closed, latency_now_micros(), bytes)).await;
+                        let text = media
+                            .recognize(pcm, &settings, &session, &events, &dir)
+                            .await;
+                        let _ = finished
+                            .send((turn, text, closed, latency_now_micros(), bytes))
+                            .await;
                     });
                 }
             }
         }
     }
 
-    pub async fn result(&mut self, turn: VoiceTurn, text: Option<String>, closed: u64, transcribed: u64, _bytes: usize) {
+    pub async fn result(
+        &mut self,
+        turn: VoiceTurn,
+        text: Option<String>,
+        closed: u64,
+        transcribed: u64,
+        _bytes: usize,
+    ) {
         if let Some(thread) = turn.thread_id.as_deref() {
-            self.room.latency_mark(&self.session,thread,turn.revision,None,LatencyEvent::Transcript,transcribed);
-            self.room.latency_duration(&self.session,thread,turn.revision,None,"recognition_ms",transcribed.saturating_sub(closed) as f64 / 1000.0);
-            self.room.latency_duration(&self.session,thread,turn.revision,None,"request_to_transcript_ms",transcribed.saturating_sub(closed) as f64 / 1000.0);
+            self.room.latency_mark(
+                &self.session,
+                thread,
+                turn.revision,
+                None,
+                LatencyEvent::Transcript,
+                transcribed,
+            );
+            self.room.latency_duration(
+                &self.session,
+                thread,
+                turn.revision,
+                None,
+                "recognition_ms",
+                transcribed.saturating_sub(closed) as f64 / 1000.0,
+            );
+            self.room.latency_duration(
+                &self.session,
+                thread,
+                turn.revision,
+                None,
+                "request_to_transcript_ms",
+                transcribed.saturating_sub(closed) as f64 / 1000.0,
+            );
         }
         let text = text.unwrap_or_default();
         let current = self.room.snapshot(Some(&self.session));
@@ -258,46 +469,88 @@ impl TurnOwner {
         if let Some(previous) = self.pending.take() {
             if previous.turn.thread_id == turn.thread_id {
                 self.room.finish_turn(&self.session, previous.turn.revision);
-                self.pending = Some(PendingTurn { turn, text: format!("{} {}", previous.text, text),
-                    deadline: Instant::now() + Duration::from_secs_f32(self.settings.merge_window_secs), transcribed_at: transcribed });
+                self.pending = Some(PendingTurn {
+                    turn,
+                    text: format!("{} {}", previous.text, text),
+                    deadline: Instant::now()
+                        + Duration::from_secs_f32(self.settings.merge_window_secs),
+                    transcribed_at: transcribed,
+                });
                 return;
             }
-            self.deliver(previous.turn, previous.text, previous.transcribed_at).await;
+            self.deliver(previous.turn, previous.text, previous.transcribed_at)
+                .await;
         }
-        self.pending = Some(PendingTurn { turn, text,
-            deadline: Instant::now() + Duration::from_secs_f32(self.settings.merge_window_secs), transcribed_at: transcribed });
+        self.pending = Some(PendingTurn {
+            turn,
+            text,
+            deadline: Instant::now() + Duration::from_secs_f32(self.settings.merge_window_secs),
+            transcribed_at: transcribed,
+        });
     }
 
     async fn hold(&mut self, turn: VoiceTurn, text: String, transcribed: u64) {
         if let Some(previous) = self.pending.take() {
             if previous.turn.thread_id == turn.thread_id {
                 self.room.finish_turn(&self.session, previous.turn.revision);
-                self.pending = Some(PendingTurn { turn, text: format!("{} {}", previous.text, text),
-                    deadline: Instant::now() + Duration::from_secs_f32(self.settings.merge_window_secs), transcribed_at: transcribed });
+                self.pending = Some(PendingTurn {
+                    turn,
+                    text: format!("{} {}", previous.text, text),
+                    deadline: Instant::now()
+                        + Duration::from_secs_f32(self.settings.merge_window_secs),
+                    transcribed_at: transcribed,
+                });
                 return;
             }
-            self.deliver(previous.turn, previous.text, previous.transcribed_at).await;
+            self.deliver(previous.turn, previous.text, previous.transcribed_at)
+                .await;
         }
         let _ = self.events.send(json!({"type":"voice-user-turn","data":{
             "phase":"cancelled","revision":turn.revision,"thread_id":turn.thread_id,"text":text,"merged":true}})).await;
-        self.pending = Some(PendingTurn { turn, text, deadline: Instant::now(), transcribed_at: transcribed });
+        self.pending = Some(PendingTurn {
+            turn,
+            text,
+            deadline: Instant::now(),
+            transcribed_at: transcribed,
+        });
     }
 
     async fn deliver(&mut self, turn: VoiceTurn, text: String, transcribed_at: u64) {
-        let _ = self.events.send(json!({"type":"voice-user-turn","data":{
-            "phase":"finished","revision":turn.revision,"thread_id":turn.thread_id,"text":text}})).await;
+        let _ = self
+            .events
+            .send(json!({"type":"voice-user-turn","data":{
+            "phase":"finished","revision":turn.revision,"thread_id":turn.thread_id,"text":text}}))
+            .await;
         let _ = self.room.queue_voice_input(&turn, &text);
         if let Some(thread) = turn.thread_id.as_deref() {
             let delivered = latency_now_micros();
-            self.room.latency_mark(&self.session,thread,turn.revision,None,LatencyEvent::TranscriptDelivered,delivered);
-            self.room.latency_duration(&self.session,thread,turn.revision,None,"transcript_to_delivery_ms",delivered.saturating_sub(transcribed_at) as f64 / 1000.0);
+            self.room.latency_mark(
+                &self.session,
+                thread,
+                turn.revision,
+                None,
+                LatencyEvent::TranscriptDelivered,
+                delivered,
+            );
+            self.room.latency_duration(
+                &self.session,
+                thread,
+                turn.revision,
+                None,
+                "transcript_to_delivery_ms",
+                delivered.saturating_sub(transcribed_at) as f64 / 1000.0,
+            );
         }
         self.room.finish_turn(&self.session, turn.revision);
     }
 
     pub async fn close(&mut self) {
-        if let Some((turn, _)) = self.speaking.take() { self.room.finish_turn(&self.session, turn.revision); }
-        if let Some(pending) = self.pending.take() { self.room.finish_turn(&self.session, pending.turn.revision); }
+        if let Some((turn, _)) = self.speaking.take() {
+            self.room.finish_turn(&self.session, turn.revision);
+        }
+        if let Some(pending) = self.pending.take() {
+            self.room.finish_turn(&self.session, pending.turn.revision);
+        }
     }
 
     pub async fn focus_changed(&mut self) {
@@ -310,25 +563,47 @@ impl TurnOwner {
             let finished = self.finished_tx.clone();
             let closed = latency_now_micros();
             if let Some(thread) = turn.thread_id.as_deref() {
-                self.room.latency_mark(&self.session,thread,turn.revision,None,LatencyEvent::TurnClosed,closed);
+                self.room.latency_mark(
+                    &self.session,
+                    thread,
+                    turn.revision,
+                    None,
+                    LatencyEvent::TurnClosed,
+                    closed,
+                );
             }
             let bytes = pcm.len();
             tokio::spawn(async move {
-                let text = media.recognize(pcm,&settings,&session,&events,&dir).await;
-                let _ = finished.send((turn,text,closed,latency_now_micros(),bytes)).await;
+                let text = media
+                    .recognize(pcm, &settings, &session, &events, &dir)
+                    .await;
+                let _ = finished
+                    .send((turn, text, closed, latency_now_micros(), bytes))
+                    .await;
             });
             if let Ok(turn) = self.room.begin_turn(&self.session) {
-                let _ = self.events.send(json!({"type":"voice-user-turn","data":{
-                    "phase":"started","revision":turn.revision,"thread_id":turn.thread_id}})).await;
-                self.speaking = Some((turn,Vec::new()));
+                let _ = self
+                    .events
+                    .send(json!({"type":"voice-user-turn","data":{
+                    "phase":"started","revision":turn.revision,"thread_id":turn.thread_id}}))
+                    .await;
+                self.speaking = Some((turn, Vec::new()));
             }
         }
     }
 }
 
-pub async fn speech_event(room: Arc<Room>, session: &str, settings: &CallSettings,
-                          dir: &PrivateDir, cache: Arc<SynthesisCache>, event: Value) -> Option<Value> {
-    if event.get("type").and_then(Value::as_str) != Some("voice-speech") { return Some(event); }
+pub async fn speech_event(
+    room: Arc<Room>,
+    session: &str,
+    settings: &CallSettings,
+    dir: &PrivateDir,
+    cache: Arc<SynthesisCache>,
+    event: Value,
+) -> Option<Value> {
+    if event.get("type").and_then(Value::as_str) != Some("voice-speech") {
+        return Some(event);
+    }
     let data = &event["data"];
     let uid = data["utterance_id"].as_str()?;
     let revision = data["revision"].as_u64()?;
@@ -344,33 +619,89 @@ pub async fn speech_event(room: Arc<Room>, session: &str, settings: &CallSetting
     object.insert("speed".into(), json!(voice.speed));
     object.insert("language".into(), json!(&voice.language));
     if voice.place == "device" {
-        if !room.speech_current(session, uid, revision) { return None; }
-        room.latency_mark(session,thread,reply_revision,Some(uid),LatencyEvent::AudioDispatched,latency_now_micros());
+        if !room.speech_current(session, uid, revision) {
+            return None;
+        }
+        room.latency_mark(
+            session,
+            thread,
+            reply_revision,
+            Some(uid),
+            LatencyEvent::AudioDispatched,
+            latency_now_micros(),
+        );
         return Some(json!({"type":"voice-speech","data":message}));
     }
     let key = provider_key(dir, "elevenlabs")?;
     let client = ElevenLabsTts::new(&key).ok()?;
-    let choice = SynthesisChoice { place: &voice.place, model: &voice.model, voice: &voice.voice, speed: voice.speed };
+    let choice = SynthesisChoice {
+        place: &voice.place,
+        model: &voice.model,
+        voice: &voice.voice,
+        speed: voice.speed,
+    };
     let model = voice.model.clone();
     let voice_id = voice.voice.clone();
     let text_owned = text.to_owned();
-    let result = cache.obtain(choice, text, move || async move {
-        client.synthesize(&text_owned, &model, &voice_id, voice.speed, true, "mp3_44100_128").await
-    }).await.ok()?;
-    room.latency_mark(session,thread,reply_revision,Some(uid),LatencyEvent::AudioReady,latency_now_micros());
-    if !room.speech_current(session, uid, revision) { return None; }
+    let result = cache
+        .obtain(choice, text, move || async move {
+            client
+                .synthesize(
+                    &text_owned,
+                    &model,
+                    &voice_id,
+                    voice.speed,
+                    true,
+                    "mp3_44100_128",
+                )
+                .await
+        })
+        .await
+        .ok()?;
+    room.latency_mark(
+        session,
+        thread,
+        reply_revision,
+        Some(uid),
+        LatencyEvent::AudioReady,
+        latency_now_micros(),
+    );
+    if !room.speech_current(session, uid, revision) {
+        return None;
+    }
     object.insert("mime_type".into(), json!(&result.speech.mime_type));
-    object.insert("audio_base64".into(), json!(base64::engine::general_purpose::STANDARD.encode(&result.speech.audio)));
+    object.insert(
+        "audio_base64".into(),
+        json!(base64::engine::general_purpose::STANDARD.encode(&result.speech.audio)),
+    );
     object.insert("alignment".into(), json!(result.speech.alignment));
-    object.insert("timings_ms".into(), json!(if result.fresh { result.speech.timings_ms.clone() } else { serde_json::Map::new() }));
+    object.insert(
+        "timings_ms".into(),
+        json!(if result.fresh {
+            result.speech.timings_ms.clone()
+        } else {
+            serde_json::Map::new()
+        }),
+    );
     object.insert("shared".into(), json!(!result.fresh));
     if result.fresh {
-        for name in ["request_to_headers_ms","request_to_first_chunk_ms","request_to_complete_ms"] {
+        for name in [
+            "request_to_headers_ms",
+            "request_to_first_chunk_ms",
+            "request_to_complete_ms",
+        ] {
             if let Some(value) = result.speech.timings_ms.get(name).and_then(Value::as_f64) {
-                room.latency_duration(session,thread,reply_revision,Some(uid),name,value);
+                room.latency_duration(session, thread, reply_revision, Some(uid), name, value);
             }
         }
     }
-    room.latency_mark(session,thread,reply_revision,Some(uid),LatencyEvent::AudioDispatched,latency_now_micros());
+    room.latency_mark(
+        session,
+        thread,
+        reply_revision,
+        Some(uid),
+        LatencyEvent::AudioDispatched,
+        latency_now_micros(),
+    );
     Some(json!({"type":"voice-speech-audio","data":message}))
 }

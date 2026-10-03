@@ -2,8 +2,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use rand::RngCore;
@@ -41,9 +41,18 @@ pub fn latency_now_micros() -> u64 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LatencyEvent {
-    SpeechEnd, TurnClosed, Transcript, TranscriptDelivered, Queued,
-    DeliveryAccepted, Read, ReplyReceived, SynthesisStarted, AudioReady,
-    AudioDispatched, PlayingReceipt,
+    SpeechEnd,
+    TurnClosed,
+    Transcript,
+    TranscriptDelivered,
+    Queued,
+    DeliveryAccepted,
+    Read,
+    ReplyReceived,
+    SynthesisStarted,
+    AudioReady,
+    AudioDispatched,
+    PlayingReceipt,
 }
 
 #[derive(Clone, Debug)]
@@ -57,7 +66,10 @@ pub struct LatencyMark {
 }
 
 #[derive(Clone, Debug)]
-pub struct LatencyDuration { pub name: String, pub milliseconds: f64 }
+pub struct LatencyDuration {
+    pub name: String,
+    pub milliseconds: f64,
+}
 
 #[derive(Clone, Debug)]
 pub struct LatencyReply {
@@ -806,73 +818,176 @@ impl Room {
         interrupt_client(&mut inner, sid, "call_ended");
         inner.latency_marks.remove(sid);
         inner.latency_replies.remove(sid);
-        inner.latency_input.retain(|(session, _, _), _| session != sid);
+        inner
+            .latency_input
+            .retain(|(session, _, _), _| session != sid);
     }
     pub fn owns_session(&self, sid: &str, device: &str) -> bool {
-        self.inner.lock().expect("room lock").browsers.get(sid)
+        self.inner
+            .lock()
+            .expect("room lock")
+            .browsers
+            .get(sid)
             .is_some_and(|browser| browser.device == device)
     }
     pub fn speech_current(&self, sid: &str, uid: &str, revision: u64) -> bool {
         let inner = self.inner.lock().expect("room lock");
         inner.browsers.get(sid).is_some_and(|browser| {
-            browser.revision == revision && !browser.speaking
+            browser.revision == revision
+                && !browser.speaking
                 && browser.active.as_deref() == Some(uid)
-        }) && inner.utterances.get(uid).and_then(|record| record.clients.get(sid))
+        }) && inner
+            .utterances
+            .get(uid)
+            .and_then(|record| record.clients.get(sid))
             .is_some_and(|(entry_revision, status)| {
                 *entry_revision == revision
-                    && !matches!(status.as_str(), "interrupted" | "failed" | "playback_finished")
+                    && !matches!(
+                        status.as_str(),
+                        "interrupted" | "failed" | "playback_finished"
+                    )
             })
     }
-    pub fn latency_mark(&self, sid: &str, thread: &str, revision: u64,
-                        uid: Option<&str>, event: LatencyEvent, at_micros: u64) {
+    pub fn latency_mark(
+        &self,
+        sid: &str,
+        thread: &str,
+        revision: u64,
+        uid: Option<&str>,
+        event: LatencyEvent,
+        at_micros: u64,
+    ) {
         let mut inner = self.inner.lock().expect("room lock");
         mark_latency(&mut inner, sid, thread, revision, uid, event, at_micros);
     }
-    pub fn latency_duration(&self, sid: &str, thread: &str, revision: u64,
-                            uid: Option<&str>, name: &str, milliseconds: f64) {
-        if !milliseconds.is_finite() || !(0.0..=3_600_000.0).contains(&milliseconds) { return; }
+    pub fn latency_duration(
+        &self,
+        sid: &str,
+        thread: &str,
+        revision: u64,
+        uid: Option<&str>,
+        name: &str,
+        milliseconds: f64,
+    ) {
+        if !milliseconds.is_finite() || !(0.0..=3_600_000.0).contains(&milliseconds) {
+            return;
+        }
         let mut inner = self.inner.lock().expect("room lock");
-        if !inner.browsers.contains_key(sid) { return; }
-        let duration = LatencyDuration { name: name.to_owned(), milliseconds: (milliseconds * 100.0).round() / 100.0 };
+        if !inner.browsers.contains_key(sid) {
+            return;
+        }
+        let duration = LatencyDuration {
+            name: name.to_owned(),
+            milliseconds: (milliseconds * 100.0).round() / 100.0,
+        };
         if let Some(uid) = uid {
-            let Some(replies) = inner.latency_replies.get_mut(sid) else { return; };
-            let Some(reply) = replies.iter_mut().find(|reply| reply.utterance_id == uid && reply.thread_id == thread) else { return; };
-            let target = if matches!(name, "request_to_headers_ms" | "request_to_first_chunk_ms" | "request_to_complete_ms") {
+            let Some(replies) = inner.latency_replies.get_mut(sid) else {
+                return;
+            };
+            let Some(reply) = replies
+                .iter_mut()
+                .find(|reply| reply.utterance_id == uid && reply.thread_id == thread)
+            else {
+                return;
+            };
+            let target = if matches!(
+                name,
+                "request_to_headers_ms" | "request_to_first_chunk_ms" | "request_to_complete_ms"
+            ) {
                 &mut reply.provider_ms
-            } else if matches!(name, "audio_received_to_playback_scheduled_ms" | "turn_finished_event_to_playback_scheduled_ms") {
+            } else if matches!(
+                name,
+                "audio_received_to_playback_scheduled_ms"
+                    | "turn_finished_event_to_playback_scheduled_ms"
+            ) {
                 &mut reply.browser_ms
-            } else { return; };
-            if let Some(existing) = target.iter_mut().find(|item| item.name == name) { *existing = duration; }
-            else { target.push(duration); }
+            } else {
+                return;
+            };
+            if let Some(existing) = target.iter_mut().find(|item| item.name == name) {
+                *existing = duration;
+            } else {
+                target.push(duration);
+            }
         } else {
-            if !matches!(name, "audio_ms" | "endpoint_silence_ms" | "recognition_ms" | "request_to_transcript_ms" | "speech_end_to_transcript_ms" | "transcript_to_delivery_ms") { return; }
-            let target = inner.latency_input.entry((sid.into(),thread.into(),revision)).or_default();
-            if let Some(existing) = target.iter_mut().find(|item| item.name == name) { *existing = duration.clone(); }
-            else { target.push(duration.clone()); }
+            if !matches!(
+                name,
+                "audio_ms"
+                    | "endpoint_silence_ms"
+                    | "recognition_ms"
+                    | "request_to_transcript_ms"
+                    | "speech_end_to_transcript_ms"
+                    | "transcript_to_delivery_ms"
+            ) {
+                return;
+            }
+            let target = inner
+                .latency_input
+                .entry((sid.into(), thread.into(), revision))
+                .or_default();
+            if let Some(existing) = target.iter_mut().find(|item| item.name == name) {
+                *existing = duration.clone();
+            } else {
+                target.push(duration.clone());
+            }
             if let Some(replies) = inner.latency_replies.get_mut(sid) {
-                for reply in replies.iter_mut().filter(|reply| reply.thread_id == thread && reply.revision == revision) {
-                    if let Some(existing) = reply.input_ms.iter_mut().find(|item| item.name == name) { *existing = duration.clone(); }
-                    else { reply.input_ms.push(duration.clone()); }
+                for reply in replies
+                    .iter_mut()
+                    .filter(|reply| reply.thread_id == thread && reply.revision == revision)
+                {
+                    if let Some(existing) = reply.input_ms.iter_mut().find(|item| item.name == name)
+                    {
+                        *existing = duration.clone();
+                    } else {
+                        reply.input_ms.push(duration.clone());
+                    }
                 }
             }
         }
     }
     /// Clone only the authenticated call's bounded records for T6's borrowed snapshot API.
-    pub fn latency_records(&self, sid: &str, device: &str) -> Option<(String, Vec<LatencyMark>, Vec<LatencyReply>)> {
+    pub fn latency_records(
+        &self,
+        sid: &str,
+        device: &str,
+    ) -> Option<(String, Vec<LatencyMark>, Vec<LatencyReply>)> {
         let inner = self.inner.lock().expect("room lock");
-        let language = inner.browsers.get(sid).filter(|browser| browser.device == device)?.language.clone();
-        Some((language,
-              inner.latency_marks.get(sid).map_or_else(Vec::new, |marks| marks.iter().cloned().collect()),
-              inner.latency_replies.get(sid).map_or_else(Vec::new, |rows| rows.iter().cloned().collect())))
+        let language = inner
+            .browsers
+            .get(sid)
+            .filter(|browser| browser.device == device)?
+            .language
+            .clone();
+        Some((
+            language,
+            inner
+                .latency_marks
+                .get(sid)
+                .map_or_else(Vec::new, |marks| marks.iter().cloned().collect()),
+            inner
+                .latency_replies
+                .get(sid)
+                .map_or_else(Vec::new, |rows| rows.iter().cloned().collect()),
+        ))
     }
     pub fn latency_browser(&self, sid: &str, uid: &str, timings: &Value) {
-        let reply = self.inner.lock().expect("room lock").latency_replies.get(sid)
+        let reply = self
+            .inner
+            .lock()
+            .expect("room lock")
+            .latency_replies
+            .get(sid)
             .and_then(|rows| rows.iter().find(|row| row.utterance_id == uid))
             .map(|row| (row.thread_id.clone(), row.revision));
-        let Some((thread, revision)) = reply else { return; };
-        for name in ["audio_received_to_playback_scheduled_ms", "turn_finished_event_to_playback_scheduled_ms"] {
+        let Some((thread, revision)) = reply else {
+            return;
+        };
+        for name in [
+            "audio_received_to_playback_scheduled_ms",
+            "turn_finished_event_to_playback_scheduled_ms",
+        ] {
             if let Some(milliseconds) = timings.get(name).and_then(Value::as_f64) {
-                self.latency_duration(sid,&thread,revision,Some(uid),name,milliseconds);
+                self.latency_duration(sid, &thread, revision, Some(uid), name, milliseconds);
             }
         }
     }
@@ -1473,11 +1588,21 @@ impl Room {
         }
         status_latency_reply(&mut inner, sid, uid, status);
         if status == "playing" {
-            if let Some((thread, reply_revision)) = inner.latency_replies.get(sid)
+            if let Some((thread, reply_revision)) = inner
+                .latency_replies
+                .get(sid)
                 .and_then(|rows| rows.iter().find(|row| row.utterance_id == uid))
-                .map(|row| (row.thread_id.clone(), row.revision)) {
-                mark_latency(&mut inner,sid,&thread,reply_revision,Some(uid),
-                    LatencyEvent::PlayingReceipt,latency_now_micros());
+                .map(|row| (row.thread_id.clone(), row.revision))
+            {
+                mark_latency(
+                    &mut inner,
+                    sid,
+                    &thread,
+                    reply_revision,
+                    Some(uid),
+                    LatencyEvent::PlayingReceipt,
+                    latency_now_micros(),
+                );
             }
         }
         Ok(json!({"status":status}))
@@ -1555,7 +1680,15 @@ impl Room {
                 let _=c.sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":payload["revision"],"history_id":payload["history_id"],"thread_id":thread,"session_id":sid,"status":"read"}}));
             }
             if let Some(revision) = payload["revision"].as_u64() {
-                mark_latency(&mut inner,&sid,&thread,revision,None,LatencyEvent::Read,latency_now_micros());
+                mark_latency(
+                    &mut inner,
+                    &sid,
+                    &thread,
+                    revision,
+                    None,
+                    LatencyEvent::Read,
+                    latency_now_micros(),
+                );
             }
         }
     }
@@ -1667,8 +1800,18 @@ impl Room {
             let _=c.sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":payload["revision"],"history_id":rid,"thread_id":payload["thread_id"],"session_id":sid,"status":new_status}}));
         }
         if new_status == "delivered" {
-            if let (Some(thread), Some(revision)) = (payload["thread_id"].as_str(), payload["revision"].as_u64()) {
-                mark_latency(&mut inner,&sid,thread,revision,None,LatencyEvent::DeliveryAccepted,latency_now_micros());
+            if let (Some(thread), Some(revision)) =
+                (payload["thread_id"].as_str(), payload["revision"].as_u64())
+            {
+                mark_latency(
+                    &mut inner,
+                    &sid,
+                    thread,
+                    revision,
+                    None,
+                    LatencyEvent::DeliveryAccepted,
+                    latency_now_micros(),
+                );
             }
         }
     }
@@ -1730,8 +1873,15 @@ fn queue_input_locked(inner: &mut Inner, draft: InputDraft<'_>) -> Value {
         next_attempt: 0,
     });
     trim_rows(inner);
-    mark_latency(inner, session_id, thread_id, revision, None,
-        LatencyEvent::Queued, latency_now_micros());
+    mark_latency(
+        inner,
+        session_id,
+        thread_id,
+        revision,
+        None,
+        LatencyEvent::Queued,
+        latency_now_micros(),
+    );
     if let Some(browser) = inner.browsers.get(session_id) {
         let _=browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
             "revision":revision,"history_id":row_id,"thread_id":thread_id,"session_id":session_id,"status":"pending"}}));
@@ -1803,36 +1953,104 @@ fn sync_row(inner: &mut Inner, row_id: &str, changed: &str, reason: Option<&str>
         };
     }
 }
-fn mark_latency(inner: &mut Inner, sid: &str, thread: &str, revision: u64,
-                uid: Option<&str>, event: LatencyEvent, at_micros: u64) {
-    if thread.is_empty() || !inner.browsers.contains_key(sid) { return; }
+fn mark_latency(
+    inner: &mut Inner,
+    sid: &str,
+    thread: &str,
+    revision: u64,
+    uid: Option<&str>,
+    event: LatencyEvent,
+    at_micros: u64,
+) {
+    if thread.is_empty() || !inner.browsers.contains_key(sid) {
+        return;
+    }
     let marks = inner.latency_marks.entry(sid.to_owned()).or_default();
-    if marks.iter().any(|mark| mark.thread_id == thread && mark.revision == revision
-        && mark.utterance_id.as_deref() == uid && mark.event == event) { return; }
-    marks.push_back(LatencyMark { session_id: sid.into(), thread_id: thread.into(),
-        revision, utterance_id: uid.map(str::to_owned), event, at_micros });
-    while marks.len() > MAX_LATENCY_MARKS { marks.pop_front(); }
+    if marks.iter().any(|mark| {
+        mark.thread_id == thread
+            && mark.revision == revision
+            && mark.utterance_id.as_deref() == uid
+            && mark.event == event
+    }) {
+        return;
+    }
+    marks.push_back(LatencyMark {
+        session_id: sid.into(),
+        thread_id: thread.into(),
+        revision,
+        utterance_id: uid.map(str::to_owned),
+        event,
+        at_micros,
+    });
+    while marks.len() > MAX_LATENCY_MARKS {
+        marks.pop_front();
+    }
     if let Some(uid) = uid {
-        if let Some(reply) = inner.latency_replies.get_mut(sid).and_then(|rows| rows.iter_mut().find(|row| row.utterance_id == uid)) {
-            if event == LatencyEvent::SynthesisStarted { reply.synthesis_attempt += 1; reply.provider_ms.clear(); reply.browser_ms.clear(); }
+        if let Some(reply) = inner
+            .latency_replies
+            .get_mut(sid)
+            .and_then(|rows| rows.iter_mut().find(|row| row.utterance_id == uid))
+        {
+            if event == LatencyEvent::SynthesisStarted {
+                reply.synthesis_attempt += 1;
+                reply.provider_ms.clear();
+                reply.browser_ms.clear();
+            }
         }
     }
 }
 
-fn register_latency_reply(inner: &mut Inner, sid: &str, thread: &str, revision: u64, uid: &str, status: &str) {
-    if !inner.browsers.contains_key(sid) { return; }
-    let input = inner.latency_input.get(&(sid.into(),thread.into(),revision)).cloned().unwrap_or_default();
+fn register_latency_reply(
+    inner: &mut Inner,
+    sid: &str,
+    thread: &str,
+    revision: u64,
+    uid: &str,
+    status: &str,
+) {
+    if !inner.browsers.contains_key(sid) {
+        return;
+    }
+    let input = inner
+        .latency_input
+        .get(&(sid.into(), thread.into(), revision))
+        .cloned()
+        .unwrap_or_default();
     let rows = inner.latency_replies.entry(sid.into()).or_default();
-    if rows.iter().any(|row| row.utterance_id == uid) { return; }
-    rows.push_back(LatencyReply { session_id:sid.into(),thread_id:thread.into(),revision,
-        utterance_id:uid.into(),status:status.into(),synthesis_attempt:0,
-        input_ms:input,provider_ms:Vec::new(),browser_ms:Vec::new() });
-    while rows.len()>MAX_LATENCY_REPLIES { rows.pop_front(); }
-    mark_latency(inner,sid,thread,revision,Some(uid),LatencyEvent::ReplyReceived,latency_now_micros());
+    if rows.iter().any(|row| row.utterance_id == uid) {
+        return;
+    }
+    rows.push_back(LatencyReply {
+        session_id: sid.into(),
+        thread_id: thread.into(),
+        revision,
+        utterance_id: uid.into(),
+        status: status.into(),
+        synthesis_attempt: 0,
+        input_ms: input,
+        provider_ms: Vec::new(),
+        browser_ms: Vec::new(),
+    });
+    while rows.len() > MAX_LATENCY_REPLIES {
+        rows.pop_front();
+    }
+    mark_latency(
+        inner,
+        sid,
+        thread,
+        revision,
+        Some(uid),
+        LatencyEvent::ReplyReceived,
+        latency_now_micros(),
+    );
 }
 
 fn status_latency_reply(inner: &mut Inner, sid: &str, uid: &str, status: &str) {
-    if let Some(reply) = inner.latency_replies.get_mut(sid).and_then(|rows| rows.iter_mut().find(|row| row.utterance_id == uid)) {
+    if let Some(reply) = inner
+        .latency_replies
+        .get_mut(sid)
+        .and_then(|rows| rows.iter_mut().find(|row| row.utterance_id == uid))
+    {
         reply.status = status.into();
     }
 }
@@ -1911,8 +2129,15 @@ fn dispatch_client(inner: &mut Inner, sid: &str) {
         }
         browser.pending.pop_front();
         browser.active = Some(uid.clone());
-        mark_latency(inner, sid, &thread, reply_revision, Some(&uid),
-            LatencyEvent::SynthesisStarted, latency_now_micros());
+        mark_latency(
+            inner,
+            sid,
+            &thread,
+            reply_revision,
+            Some(&uid),
+            LatencyEvent::SynthesisStarted,
+            latency_now_micros(),
+        );
         return;
     }
 }
