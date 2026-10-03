@@ -61,7 +61,9 @@ fn bundle(locale: &str) -> &'static Value {
     } else {
         (&ENGLISH, include_str!("messages/en.json"))
     };
-    slot.get_or_init(|| serde_json::from_str(source).expect("embedded message bundle is valid JSON"))
+    slot.get_or_init(|| {
+        serde_json::from_str(source).expect("embedded message bundle is valid JSON")
+    })
 }
 
 fn interpolate(template: &str, params: &Map<String, Value>) -> String {
@@ -116,7 +118,10 @@ mod tests {
         );
 
         let fallback = LocalizedMessage::new("device.unpaired");
-        assert_eq!(render(&fallback, "fr"), "This device is not paired with the core.");
+        assert_eq!(
+            render(&fallback, "fr"),
+            "This device is not paired with the core."
+        );
     }
 
     #[test]
