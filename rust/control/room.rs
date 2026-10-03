@@ -159,6 +159,16 @@ impl Target {
         json!({"thread_id": self.thread, "title": self.title, "binding_id": self.binding_id})
     }
 }
+/// Focus and revision captured atomically when a browser opens a voice turn.
+#[derive(Clone, Debug)]
+pub struct VoiceTurn {
+    pub session_id: String,
+    pub revision: u64,
+    pub thread_id: Option<String>,
+    pub binding_id: Option<String>,
+    pub title: Option<String>,
+    language: String,
+}
 struct Binding {
     id: String,
     connector: String,
@@ -807,7 +817,7 @@ impl Room {
         interrupt_client(&mut inner, sid, "focus_changed");
         Ok(json!({"status":"activated","binding":view}))
     }
-    pub fn begin_turn(&self, sid: &str) -> Result<(u64, Option<String>), RoomError> {
+    pub fn begin_turn(&self, sid: &str) -> Result<VoiceTurn, RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
         let Some(c) = inner.browsers.get_mut(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
@@ -818,8 +828,15 @@ impl Room {
         let _ = c.sender.try_send(
             json!({"type":"voice-cancel","data":{"session_id":sid,"revision":c.revision}}),
         );
-        let result = (c.revision, c.target.as_ref().map(|t| t.thread.clone()));
-        hold_client(&mut inner, sid, result.0);
+        let result = VoiceTurn {
+            session_id: sid.into(),
+            revision: c.revision,
+            thread_id: c.target.as_ref().filter(|t|!t.thread.is_empty()).map(|t|t.thread.clone()),
+            binding_id: c.target.as_ref().filter(|t|!t.thread.is_empty()).map(|t|t.binding_id.clone()),
+            title: c.target.as_ref().and_then(|t|t.title.clone()),
+            language: c.language.clone(),
+        };
+        hold_client(&mut inner, sid, result.revision);
         Ok(result)
     }
     pub fn finish_turn(&self, sid: &str, revision: u64) {
@@ -892,36 +909,33 @@ impl Room {
             return Err(RoomError::new(422, "room.text_empty"));
         }
         let revision = c.revision;
-        let sender = c.sender.clone();
         let language = c.language.clone();
-        let payload = json!({"thread_id":thread,"text":text,"message_id":message_id,"session_id":sid,"history_id":row_id,"revision":revision,"binding_id":bid,"title":c.target.as_ref().and_then(|t|t.title.clone())});
-        inner.seq += 1;
-        let seq = inner.seq;
-        inner.rows.push_back(Row {
-            seq,
-            id: row_id.clone(),
-            thread: thread.into(),
-            role: "user",
-            text: text.into(),
-            name: Some(crate::messages::render(
-                &crate::messages::LocalizedMessage::new("room.you"),
-                &language,
-            )),
-            session: sid.into(),
-            revision,
-            time: millis(),
-            status: "pending".into(),
-            reason: None,
-            language: None,
-            offline: None,
-            payload: Some(payload.clone()),
-            queued_at: seconds(),
-            attempts: 0,
-            next_attempt: 0,
-        });
-        trim_rows(&mut inner);
-        let _=sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":revision,"history_id":row_id,"thread_id":thread,"session_id":sid,"status":"pending"}}));
-        Ok(json!({"accepted":true,"id":row_id,"revision":revision}))
+        let title = c.target.as_ref().and_then(|t|t.title.clone());
+        Ok(queue_input_locked(&mut inner,row_id,text,sid,revision,thread,bid,title,&language,message_id))
+    }
+    /// Commit a completed transcript to the same memory journal/outbox as typed input.
+    /// The captured focus may differ from today's selection after a mid-turn switch.
+    pub fn queue_voice_input(&self, turn:&VoiceTurn, text:&str) -> Result<Value,RoomError> {
+        if text.trim().is_empty() {return Err(RoomError::new(422,"room.text_empty"));}
+        let mut inner=self.inner.lock().expect("room lock");
+        if !inner.sessions.iter().any(|sid|sid==&turn.session_id) {return Err(RoomError::new(409,"room.focus_changed"));}
+        let row_id=format!("{}:user-turn:{}",turn.session_id,turn.revision);
+        if let Some(row)=inner.rows.iter().find(|row|row.id==row_id) {
+            return if row.text==text && turn.thread_id.as_deref()==Some(row.thread.as_str()) {
+                Ok(json!({"accepted":true,"id":row_id,"revision":row.revision}))
+            } else {Err(RoomError::new(409,"room.message_conflict"))};
+        }
+        let (Some(thread),Some(bid))=(turn.thread_id.as_deref(),turn.binding_id.as_deref()) else {
+            if let Some(browser)=inner.browsers.get(&turn.session_id) {
+                let _=browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
+                    "revision":turn.revision,"history_id":row_id,"thread_id":Value::Null,
+                    "session_id":turn.session_id,"status":"not_sent"}}));
+            }
+            return Ok(json!({"accepted":false,"id":row_id,"revision":turn.revision,"status":"not_sent"}));
+        };
+        let message_id=id();
+        Ok(queue_input_locked(&mut inner,row_id,text,&turn.session_id,turn.revision,thread,bid,
+            turn.title.clone(),&turn.language,&message_id))
     }
     pub fn history(&self, thread: Option<&str>) -> Value {
         let inner = self.inner.lock().expect("room lock");
@@ -1467,6 +1481,22 @@ impl Room {
         }
     }
 }
+fn queue_input_locked(inner:&mut Inner,row_id:String,text:&str,sid:&str,revision:u64,
+    thread:&str,bid:&str,title:Option<String>,language:&str,message_id:&str)->Value {
+    let payload=json!({"thread_id":thread,"text":text,"message_id":message_id,"session_id":sid,
+        "history_id":row_id,"revision":revision,"binding_id":bid,"title":title});
+    inner.seq+=1;
+    inner.rows.push_back(Row {seq:inner.seq,id:row_id.clone(),thread:thread.into(),role:"user",
+        text:text.into(),name:Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.you"),language)),
+        session:sid.into(),revision,time:millis(),status:"pending".into(),reason:None,
+        language:None,offline:None,payload:Some(payload),queued_at:seconds(),attempts:0,next_attempt:0});
+    trim_rows(inner);
+    if let Some(browser)=inner.browsers.get(sid) {
+        let _=browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
+            "revision":revision,"history_id":row_id,"thread_id":thread,"session_id":sid,"status":"pending"}}));
+    }
+    json!({"accepted":true,"id":row_id,"revision":revision})
+}
 fn trim_rows(inner: &mut Inner) {
     while inner.rows.len() > MAX_HISTORY
         && inner
@@ -1711,4 +1741,37 @@ fn capabilities(value: Option<&Value>, experimental: Option<&Value>) -> Value {
         }
     }
     Value::Object(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_voice_turn_uses_captured_focus_and_shared_outbox() {
+        let directory=tempfile::tempdir().unwrap();
+        let room=Room::load(PrivateDir::open(directory.path()).unwrap()).unwrap();
+        let (requests,_receiver)=mpsc::channel(4);
+        let (stop,_stopped)=watch::channel(false);
+        room.attach("connector",ConnectorPeer{generation:id(),sender:requests,stop});
+        room.register("connector",&json!({"thread":"old-thread","harness":"codex"})).unwrap();
+        room.register("connector",&json!({"thread":"new-thread","harness":"codex"})).unwrap();
+        let (events,_received)=mpsc::channel(8);
+        let sid=room.join("device".into(),"en".into(),events).unwrap();
+        room.select(&sid,"old-thread").unwrap();
+        let turn=room.begin_turn(&sid).unwrap();
+        assert_eq!(turn.thread_id.as_deref(),Some("old-thread"));
+        room.select(&sid,"new-thread").unwrap();
+        let accepted=room.queue_voice_input(&turn,"Words for the old thread").unwrap();
+        assert_eq!(accepted["accepted"],true);
+        assert_eq!(accepted["id"],format!("{sid}:user-turn:{}",turn.revision));
+        let rows=room.history(Some("old-thread"));
+        assert_eq!(rows["messages"][0]["text"],"Words for the old thread");
+        assert_eq!(rows["messages"][0]["status"],"pending");
+        assert_eq!(room.history(Some("new-thread"))["messages"].as_array().unwrap().len(),0);
+        let delivery=room.pending_delivery();
+        assert_eq!(delivery.len(),1);
+        assert_eq!(delivery[0].3["thread"],"old-thread");
+        assert_eq!(room.queue_voice_input(&turn,"Words for the old thread").unwrap(),accepted);
+    }
 }
