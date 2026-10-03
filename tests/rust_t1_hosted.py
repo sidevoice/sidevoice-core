@@ -146,13 +146,19 @@ def main():
             assert other_read.returncode != 0, "a different OS user read the private key"
             prove_identity(port, python_identity.fingerprint, python_identity.public_key)
             assert request(port, "GET", "/api/rendezvous")[1] == {"kind": "node", "fingerprint": python_identity.fingerprint, "api": 1}
-            assert request(port, "GET", "/api/device/devices")[0] == 401
+            unauthenticated = request(port, "GET", "/api/device/devices")
+            assert unauthenticated[0] == 401 and set(unauthenticated[1]) == {"detail"}
+            assert unauthenticated[2]["www-authenticate"] == "Bearer"
             assert request(port, "GET", "/api/device/devices", token=old_token)[0] == 200
-            assert request(port, "GET", "/api/device/devices", token=old_token, host="attacker.example")[0] == 421
-            assert request(port, "GET", "/api/device/devices", token=old_token, origin="https://attacker.example")[0] == 403
-            assert request(port, "POST", "/api/device/pair", body={"secret": "guessed"})[0] == 403
-            assert request(port, "POST", "/api/device/local/pair", body={"name": "x"})[0] == 404
-            assert request(port, "GET", "/api/local/health")[0] == 404
+            for status, method, path, options in (
+                (421, "GET", "/api/device/devices", {"token": old_token, "host": "attacker.example"}),
+                (403, "GET", "/api/device/devices", {"token": old_token, "origin": "https://attacker.example"}),
+                (403, "POST", "/api/device/pair", {"body": {"secret": "guessed"}}),
+                (404, "POST", "/api/device/local/pair", {"body": {"name": "x"}}),
+                (404, "GET", "/api/local/health", {}),
+            ):
+                actual = request(port, method, path, **options)
+                assert actual[0] == status and set(actual[1]) == {"detail"}, (path, actual)
             assert request(port, "GET", "/api/local/health", unix=data / "local.sock")[1]["fingerprint"] == python_identity.fingerprint
             status, local, _ = request(port, "POST", "/api/device/local/pair", unix=data / "local.sock", body={"name": "Local app"})
             assert status == 200 and local["node"]["fingerprint"] == python_identity.fingerprint

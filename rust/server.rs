@@ -125,9 +125,8 @@ fn host_allowed(headers: &HeaderMap) -> bool {
 fn failure(key: &str, status: StatusCode, headers: &HeaderMap) -> Response {
     let language = headers.get(header::ACCEPT_LANGUAGE).and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(',').next()).unwrap_or("en");
-    let params = Map::new();
-    let message = render(&LocalizedMessage { key: key.to_owned(), params: params.clone() }, language);
-    let mut response = (status, Json(json!({"detail": message, "key": key, "params": params}))).into_response();
+    let message = render(&LocalizedMessage { key: key.to_owned(), params: Map::new() }, language);
+    let mut response = (status, Json(json!({"detail": message}))).into_response();
     if status == StatusCode::UNAUTHORIZED { response.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer")); }
     response
 }
@@ -281,13 +280,16 @@ async fn call_socket(State(state): State<Arc<AppState>>, headers: HeaderMap, ws:
         .unwrap_or("").split(',').map(str::trim).collect();
     let token = protocols.iter().find_map(|value| value.strip_prefix("sidevoice.token."));
     let device = token.and_then(|value| state.registry.lock().expect("registry lock").authenticate(value));
+    let language = headers.get(header::ACCEPT_LANGUAGE).and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next()).unwrap_or("en");
+    let close_reason = render(&LocalizedMessage::new("device.unpaired"), language);
     let ws = if protocols.contains(&"sidevoice") { ws.protocols(["sidevoice"]) } else { ws };
-    ws.on_upgrade(move |socket| async move { socket_loop(state, device, socket).await }).into_response()
+    ws.on_upgrade(move |socket| async move { socket_loop(state, device, socket, close_reason).await }).into_response()
 }
 
-async fn socket_loop(state: Arc<AppState>, device: Option<String>, mut socket: WebSocket) {
+async fn socket_loop(state: Arc<AppState>, device: Option<String>, mut socket: WebSocket, close_reason: String) {
     let Some(id) = device else {
-        let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: "device.unpaired".into() }))).await;
+        let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: close_reason.into() }))).await;
         return;
     };
     let (sender, mut revoked) = watch::channel(false);
@@ -295,7 +297,7 @@ async fn socket_loop(state: Arc<AppState>, device: Option<String>, mut socket: W
     loop {
         tokio::select! {
             _ = revoked.changed() => {
-                let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: "device.unpaired".into() }))).await;
+                let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: close_reason.into() }))).await;
                 break;
             }
             message = socket.recv() => if matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) { break; },
