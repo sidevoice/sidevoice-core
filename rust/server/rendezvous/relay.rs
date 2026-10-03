@@ -58,6 +58,29 @@ impl Relay {
         }
     }
 
+    pub(super) fn stopped(&self) -> watch::Receiver<bool> {
+        self.stopping.subscribe()
+    }
+
+    async fn close_to_room(&self, channel: String) {
+        let frame = Part::object([
+            ("channel", Part::Text(channel)),
+            ("code", Part::json(json!(1000))),
+            ("reason", Part::Text(String::new())),
+        ]);
+        if !matches!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                self.outbound.send(("relay.close", frame))
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            self.closed.store(true, Ordering::Release);
+            self.stopping.send_replace(true);
+        }
+    }
+
     pub(crate) async fn handle(self: &Arc<Self>, event: &str, data: Part) -> Option<Part> {
         match event {
             "relay.http" | "relay.open" => {
@@ -270,24 +293,8 @@ impl Relay {
                     },
                 }
             }
-            if self_ref
-                .channels
-                .lock()
-                .await
-                .remove(&task_channel)
-                .is_some()
-            {
-                let _ = self_ref
-                    .outbound
-                    .send((
-                        "relay.close",
-                        Part::object([
-                            ("channel", Part::Text(task_channel)),
-                            ("code", Part::json(json!(1000))),
-                            ("reason", Part::Text(String::new())),
-                        ]),
-                    ))
-                    .await;
+            if self_ref.channels.lock().await.remove(&task_channel).is_some() {
+                self_ref.close_to_room(task_channel).await;
             }
         });
         channels.insert(channel, Channel { sender, task });
@@ -315,6 +322,8 @@ impl Relay {
                 {
                     if let Some(entry) = self.channels.lock().await.remove(channel) {
                         entry.task.abort();
+                        let _ = entry.task.await;
+                        self.close_to_room(channel.to_owned()).await;
                     }
                 }
             }
@@ -400,8 +409,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn full_channel_and_shutdown_finish_within_a_deadline() {
-        let (outbound, _) = mpsc::channel(1);
+    async fn full_channel_reports_one_close_or_stops_the_link() {
+        let (outbound, mut room) = mpsc::channel(1);
         let relay = Arc::new(Relay::new(
             Url::parse("http://127.0.0.1:8768/").unwrap(),
             outbound,
@@ -426,10 +435,33 @@ mod tests {
         )
         .await
         .unwrap();
+        let (event, frame) = room.recv().await.unwrap();
+        assert_eq!(event, "relay.close");
+        assert_eq!(frame.get("channel").and_then(Part::text), Some("blocked"));
         assert!(relay.channels.lock().await.is_empty());
+        let _ = relay.handle("relay.data", Part::object([
+            ("channel", Part::Text("blocked".into())),
+            ("data", Part::Text("late".into())),
+        ])).await;
+        assert!(room.try_recv().is_err(), "the room must see exactly one close");
         tokio::time::timeout(Duration::from_secs(1), relay.shutdown())
             .await
             .unwrap();
+
+        let (outbound, _room) = mpsc::channel(1);
+        outbound.send(("relay.data", Part::Null)).await.unwrap();
+        let relay = Arc::new(Relay::new(Url::parse("http://127.0.0.1:8768/").unwrap(), outbound));
+        let (sender, _receiver) = mpsc::channel(1);
+        sender.send(Message::text("held")).await.unwrap();
+        let task = tokio::spawn(std::future::pending());
+        relay.channels.lock().await.insert("blocked".into(), Channel { sender, task });
+        tokio::time::timeout(Duration::from_secs(1), relay.handle("relay.data", Part::object([
+            ("channel", Part::Text("blocked".into())),
+            ("data", Part::Binary(vec![0, 1])),
+        ]))).await.unwrap();
+        let stopped = relay.stopped();
+        assert!(*stopped.borrow(), "an undeliverable close must stop the link");
+        relay.shutdown().await;
     }
 
     #[tokio::test]

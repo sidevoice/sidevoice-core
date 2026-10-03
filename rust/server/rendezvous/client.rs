@@ -141,6 +141,7 @@ pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()>
         .map_err(|_| ())?;
     let (outbound, mut output) = mpsc::channel::<(&'static str, Part)>(128);
     let relay = Arc::new(Relay::new(rv.base.clone(), outbound));
+    let mut relay_stopped = relay.stopped();
     let mut welcomed = false;
     let mut requests = JoinSet::new();
     let mut pairing_check = tokio::time::interval(Duration::from_secs(2));
@@ -199,10 +200,15 @@ pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()>
                 }
             },
             outbound = output.recv() => match outbound {
-                Some((event, part)) => emit(&sender, event, part).await,
+                Some((event, part)) => {
+                    if tokio::time::timeout(Duration::from_secs(1), emit(&sender, event, part)).await.is_err() {
+                        break;
+                    }
+                },
                 None => break,
             },
             _ = rv.changed.notified() => break,
+            _ = relay_stopped.changed() => break,
             _ = stopping.changed() => break,
         }
     }

@@ -289,6 +289,13 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
     rv.changed.notify_waiters();
     let (outbound, mut output) = mpsc::channel::<(&'static str, Part)>(128);
     let relay = Arc::new(Relay::new(rv.base.clone(), outbound));
+    let mut relay_stopped = relay.stopped();
+    let failed_socket = socket.clone();
+    tokio::spawn(async move {
+        if relay_stopped.changed().await.is_ok() {
+            let _ = failed_socket.disconnect();
+        }
+    });
     let emitted = socket.clone();
     let output_task = tokio::spawn(async move {
         while let Some((event, part)) = output.recv().await {
@@ -357,7 +364,7 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
             Ok(answer) => match answer.await {
                 Ok(answer) if valid_hello(&answer) => rv.connected("dial", None).await,
                 Ok(answer) => {
-                    rv.refused(field(&answer, "error").to_owned()).await;
+                    rv.refused(hello_refusal(&answer)).await;
                     let _ = socket_greet.disconnect();
                 }
                 Err(_) => {
@@ -373,6 +380,15 @@ async fn dial_connect(socket: SocketRef, State(state): State<Arc<AppState>>) {
 
 fn valid_hello(answer: &Value) -> bool {
     answer.is_object() && !answer.get("error").is_some_and(|value| !value.is_null())
+}
+
+fn hello_refusal(answer: &Value) -> String {
+    answer
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| render(&LocalizedMessage::new("relay.hello_refused"), "en"))
 }
 
 pub fn layer(app: Router, state: Arc<AppState>) -> Router {
@@ -532,6 +548,43 @@ mod tests {
         ] {
             assert!(!valid_hello(&answer));
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_hello_reports_a_connector_visible_refusal() {
+        use crate::control::room::ConnectorPeer;
+        use crate::storage::PrivateDir;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = PrivateDir::open(temp.path().join("core")).unwrap();
+        let room = Arc::new(Room::load(dir).unwrap());
+        let (sender, mut receiver) = mpsc::channel(2);
+        let (stop, _) = watch::channel(false);
+        room.attach(
+            "fixture",
+            ConnectorPeer {
+                generation: "one".into(),
+                sender,
+                stop,
+            },
+        );
+        let rv = Rendezvous::new(
+            None,
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            "fixture".into(),
+            room,
+        );
+        rv.refused(hello_refusal(&serde_json::json!("malformed")))
+            .await;
+        let event = receiver.recv().await.unwrap();
+        assert_eq!(event.method, "node.rendezvous");
+        let reason = event.params["refused"].as_str().unwrap();
+        assert!(!reason.is_empty(), "Connector's truthy refusal branch must run");
+        assert_eq!(rv.snapshot()["refused"].as_str(), Some(reason));
+        assert_eq!(
+            hello_refusal(&serde_json::json!({"error": "specific"})),
+            "specific"
+        );
     }
 
     #[test]

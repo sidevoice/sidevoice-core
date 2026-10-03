@@ -90,6 +90,7 @@
   "relay.socket_refused": "The node refused the relayed call socket.",
   "relay.credential_transport": "The room URL must use HTTPS unless it is on this machine or a trusted cluster host.",
   "relay.dial_refused": "This node is not paired with the room that is dialling it.",
+  "relay.hello_refused": "The room did not confirm this machine's connection.",
   "relay.revoked": "The room revoked this machine's pairing.",
   "relay.pair_invalid": "Enter a room address and pairing code.",
   "relay.connector_unavailable": "The connector is not connected to this core.",
