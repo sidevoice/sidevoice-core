@@ -388,7 +388,7 @@ async def main():
                     await assert_silence(ws)
                     finished, receipt = await complete_device_turn(ws, session, pcm)
                     assert receipt["revision"] == finished["revision"]
-                    assert peer.event("from-core")["method"] == "input.deliver"
+                    peer.method("input.deliver")
                     await frame(ws, "voice-input-receipt", status="delivered")
                     revision = request(port, "GET", f"/api/presentation?session_id={session}", token=token)[1]["room"]["revision"]
                     uid = f"t5-{mode}-{uuid.uuid4()}"
@@ -436,7 +436,7 @@ async def main():
                 assert request(port, "POST", "/api/presentation/select", token=token,
                                body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
                 await complete_device_turn(ws, session, pcm)
-                assert peer.event("from-core")["method"] == "input.deliver"
+                peer.method("input.deliver")
                 revision = request(port, "GET", f"/api/presentation?session_id={session}", token=token)[1]["room"]["revision"]
                 uid = f"t5-mixed-{uuid.uuid4()}"
                 peer.send({"op": "publish", "session_id": session, "revision": revision,

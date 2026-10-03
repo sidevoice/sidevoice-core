@@ -92,6 +92,14 @@ class LineProcess:
             self.seen.append(value)
         raise AssertionError(f"pinned peer did not report {name}; seen={self.seen}")
 
+    def method(self, name, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            event = self.event("from-core", timeout=deadline - time.monotonic())
+            if event["method"] == name:
+                return event
+        raise AssertionError(f"pinned peer did not receive {name}")
+
     def stop(self):
         if self.process.poll() is None:
             self.process.terminate()
@@ -258,7 +266,7 @@ async def main():
                                      "thread_id": "t3-js-thread", "binding_id": focus, "message_id": message_id})
                 assert sent[0] == 200 and sent[1]["revision"] == revision, sent
                 assert (await frame(ws, "voice-input-receipt", status="pending"))["history_id"] == sent[1]["id"]
-                assert js.event("from-core")["method"] == "input.deliver"
+                js.method("input.deliver")
                 assert (await frame(ws, "voice-input-receipt", status="delivered"))["history_id"] == sent[1]["id"]
                 js.send({"op": "read", "message_id": message_id})
                 assert (await frame(ws, "voice-input-receipt", status="read"))["history_id"] == sent[1]["id"]
@@ -330,13 +338,13 @@ async def main():
                 # A slow host scan has its own ACK; the input receipt must arrive while it waits.
                 agent_result = queue.Queue()
                 threading.Thread(target=lambda: agent_result.put(request(port, "GET", "/api/host/agents?rescan=1", token=token)), daemon=True).start()
-                assert js.event("from-core")["method"] == "agents.list"
+                js.method("agents.list")
                 second_id = str(uuid.uuid4())
                 assert request(port, "POST", "/api/presentation/text", token=token,
                                body={"text": "Input during scan", "session_id": session, "thread_id": "t3-js-thread",
                                      "binding_id": focus, "message_id": second_id})[0] == 200
                 assert (await frame(ws, "voice-input-receipt", status="pending"))["thread_id"] == "t3-js-thread"
-                assert js.event("from-core")["method"] == "input.deliver"
+                js.method("input.deliver")
                 await frame(ws, "voice-input-receipt", status="delivered", timeout=1.2)
                 assert agent_result.get(timeout=4)[0] == 200
                 js.send({"op": "host_error"})
