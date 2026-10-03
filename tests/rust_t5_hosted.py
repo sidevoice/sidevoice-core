@@ -247,16 +247,23 @@ async def two_listener_focus_case(url, protocols, port, token, peer, pcm):
         assert new["request_id"] != old["request_id"], (old, new)
         await first.send(json.dumps({"type": "voice-transcript", "data": {
             "session_id": sessions[0], "request_id": new["request_id"], "text": "After focus"}}))
-        try:
-            new_turn = await frame(first, "voice-user-turn", timeout=18)
-        except AssertionError:
+        seen = []
+        deadline = time.monotonic() + 18
+        new_turn = None
+        while time.monotonic() < deadline:
+            try:
+                event = json.loads(await asyncio.wait_for(first.recv(), deadline - time.monotonic()))
+            except TimeoutError:
+                break
+            seen.append(event)
+            if event["type"] == "voice-user-turn" and event["data"]["phase"] == "finished":
+                new_turn = event["data"]
+                break
+        if new_turn is None:
             snapshot = request(port, "GET", f"/api/presentation?session_id={sessions[0]}", token=token)
             old_rows = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)
             new_rows = request(port, "GET", "/api/presentation/history?thread_id=t3-js-other", token=token)
-            print("focus diagnostic", old_turn, new["request_id"], snapshot, old_rows, new_rows, file=sys.stderr)
-            raise
-        while new_turn["phase"] != "finished":
-            new_turn = await frame(first, "voice-user-turn", timeout=10)
+            raise AssertionError(("focus completion", old_turn, new["request_id"], seen, snapshot, old_rows, new_rows))
         completed = [old_turn, new_turn]
         assert [(turn["thread_id"], turn["text"]) for turn in completed] == [
             ("t3-js-thread", "Before focus"), ("t3-js-other", "After focus")], completed
