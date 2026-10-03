@@ -40,13 +40,15 @@ class UnixHTTP(http.client.HTTPConnection):
         self.sock.connect(str(self.path))
 
 
-def request(port, method, path, *, token=None, origin=None, host=None, body=None, unix=None):
+def request(port, method, path, *, token=None, origin=None, host=None, body=None, unix=None, extra_headers=None):
     connection = UnixHTTP(unix) if unix else http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     headers = {"Host": host or "localhost", "Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     if origin:
         headers["Origin"] = origin
+    if extra_headers:
+        headers.update(extra_headers)
     connection.request(method, path, json.dumps(body) if body is not None else None, headers)
     answer = connection.getresponse()
     content = answer.read()
@@ -159,6 +161,13 @@ def main():
             ):
                 actual = request(port, method, path, **options)
                 assert actual[0] == status and set(actual[1]) == {"detail"}, (path, actual)
+            spoofed_local = {"Sidevoice.Local": "true", "X-Sidevoice-Local": "true",
+                             "X-Forwarded-For": "127.0.0.1", "X-Forwarded-Proto": "http"}
+            for method, path, body in (("GET", "/api/local/health", None),
+                                       ("POST", "/api/device/local/pair", {"name": "spoofed"}),
+                                       ("DELETE", "/api/device/local", None)):
+                status, payload, _ = request(port, method, path, body=body, extra_headers=spoofed_local)
+                assert status == 404 and set(payload) == {"detail"}, (path, status, payload)
             assert request(port, "GET", "/api/local/health", unix=data / "local.sock")[1]["fingerprint"] == python_identity.fingerprint
             status, local, _ = request(port, "POST", "/api/device/local/pair", unix=data / "local.sock", body={"name": "Local app"})
             assert status == 200 and local["node"]["fingerprint"] == python_identity.fingerprint
