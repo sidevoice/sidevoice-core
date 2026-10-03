@@ -54,7 +54,7 @@ impl ConnectorPeer {
 }
 
 struct Browser { device: String, language: String, sender: mpsc::Sender<Value>, target: Option<Target>, revision: u64,
-    turn_revision: u64, speaking: bool, sent: u64, active: Option<String> }
+    turn_revision: u64, speaking: bool, sent: u64, active: Option<String>, pending: VecDeque<String> }
 #[derive(Clone)] struct Target { thread: String, title: Option<String>, binding_id: String }
 impl Target { fn view(&self) -> Value { json!({"thread_id": self.thread, "title": self.title, "binding_id": self.binding_id}) } }
 struct Binding { id: String, connector: String, thread: String, harness: String, title: Option<String>,
@@ -222,9 +222,11 @@ impl Room {
         for row in inner.rows.iter_mut().filter(|r|r.role=="user"&&r.thread==thread&&matches!(r.status.as_str(),"pending"|"sending")){
             row.status="not_sent".into();row.reason=Some("channel_closed".into());
         }
-        for browser in inner.browsers.values_mut().filter(|b|b.target.as_ref().is_some_and(|t|t.thread==thread)){
-            browser.revision+=1;browser.target=Some(Target{thread:String::new(),title:None,binding_id:id()});browser.active=None;browser.speaking=false;
-            let _=browser.sender.try_send(json!({"type":"voice-cancel","data":{"revision":browser.revision}}));
+        let affected:Vec<String>=inner.browsers.iter().filter(|(_,b)|b.target.as_ref().is_some_and(|t|t.thread==thread)).map(|(sid,_)|sid.clone()).collect();
+        for sid in affected{
+            if let Some(browser)=inner.browsers.get_mut(&sid){browser.revision+=1;browser.target=Some(Target{thread:String::new(),title:None,binding_id:id()});browser.speaking=false;
+                let _=browser.sender.try_send(json!({"type":"voice-cancel","data":{"session_id":sid,"revision":browser.revision}}));}
+            interrupt_client(&mut inner,&sid,"focus_changed");
         }
         Ok((json!({"status":"closed","binding_id":binding_id}),notify))
     }
@@ -246,7 +248,7 @@ impl Room {
         let max=std::env::var("VOICE_MAX_BROWSERS").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(MAX_BROWSERS).max(1);
         if inner.browsers.len()>=max { return Err(RoomError::new(429,"room.full")); }
         let sid=id(); inner.sessions.push_back(sid.clone()); if inner.sessions.len()>64 {inner.sessions.pop_front();}
-        inner.browsers.insert(sid.clone(),Browser { device,language,sender,target:None,revision:0,turn_revision:0,speaking:false,sent:0,active:None }); Ok(sid)
+        inner.browsers.insert(sid.clone(),Browser { device,language,sender,target:None,revision:0,turn_revision:0,speaking:false,sent:0,active:None,pending:VecDeque::new() }); Ok(sid)
     }
     pub fn leave(&self, sid: &str) {let mut inner=self.inner.lock().expect("room lock");inner.browsers.remove(sid);interrupt_client(&mut inner,sid,"call_ended");}
     pub fn set_language(&self,sid:&str,language:&str){if let Some(browser)=self.inner.lock().expect("room lock").browsers.get_mut(sid){browser.language=language.to_owned();}}
@@ -274,18 +276,18 @@ impl Room {
     pub fn deselect(&self,sid:&str,bid:&str)->Result<Value,RoomError>{let mut inner=self.inner.lock().expect("room lock"); let Some(c)=inner.browsers.get_mut(sid) else{return Err(RoomError::new(409,"room.browser_absent"));};
         if c.target.as_ref().is_none_or(|t|t.binding_id!=bid){return Err(RoomError::new(409,"room.focus_changed"));}
         c.revision+=1;c.active=None;c.speaking=false;let _=c.sender.try_send(json!({"type":"voice-cancel","data":{"session_id":sid,"revision":c.revision}}));let target=Target{thread:String::new(),title:None,binding_id:id()};let view=target.view();c.target=Some(target);interrupt_client(&mut inner,sid,"focus_changed");Ok(json!({"status":"activated","binding":view}))}
-    pub fn begin_turn(&self,sid:&str)->Result<(u64,Option<String>),RoomError>{let mut inner=self.inner.lock().expect("room lock");let Some(c)=inner.browsers.get_mut(sid) else{return Err(RoomError::new(409,"room.browser_absent"));};c.revision+=1;c.turn_revision=c.revision;c.speaking=true;c.active=None;let _=c.sender.try_send(json!({"type":"voice-cancel","data":{"session_id":sid,"revision":c.revision}}));let result=(c.revision,c.target.as_ref().map(|t|t.thread.clone()));interrupt_client(&mut inner,sid,"newer_turn");Ok(result)}
+    pub fn begin_turn(&self,sid:&str)->Result<(u64,Option<String>),RoomError>{let mut inner=self.inner.lock().expect("room lock");let Some(c)=inner.browsers.get_mut(sid) else{return Err(RoomError::new(409,"room.browser_absent"));};c.revision+=1;c.turn_revision=c.revision;c.speaking=true;let _=c.sender.try_send(json!({"type":"voice-cancel","data":{"session_id":sid,"revision":c.revision}}));let result=(c.revision,c.target.as_ref().map(|t|t.thread.clone()));hold_client(&mut inner,sid,result.0);Ok(result)}
     pub fn finish_turn(&self,sid:&str,revision:u64){let mut inner=self.inner.lock().expect("room lock");if let Some(c)=inner.browsers.get_mut(sid){if c.turn_revision==revision{c.speaking=false;}}
         let waiting:Vec<(String,String)>=inner.utterances.iter().filter(|(_,u)|u.clients.get(sid).is_some_and(|(rev,status)|*rev==revision&&status=="waiting_for_turn")).map(|(uid,u)|(uid.clone(),u.row_id.clone())).collect();
         for (uid,row_id) in waiting {
             let Some(row)=inner.rows.iter().find(|r|r.id==row_id) else{continue;};
-            let (thread,text,language,reply_revision)=(row.thread.clone(),row.text.clone(),row.language.clone(),row.revision);
+            let thread=row.thread.clone();
             let Some(browser)=inner.browsers.get(sid) else{continue;};
             if browser.speaking||browser.revision!=revision||browser.target.as_ref().is_none_or(|t|t.thread!=thread){continue;}
-            let _=browser.sender.try_send(json!({"type":"voice-speech","data":{"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":reply_revision,"thread_id":thread,"text":text,"language":language,"history_id":row_id}}));
             if let Some(record)=inner.utterances.get_mut(&uid){if let Some(entry)=record.clients.get_mut(sid){entry.1="queued".into();}}
             if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){row.status="queued".into();row.reason=None;}
         }
+        dispatch_client(&mut inner,sid);
     }
     pub fn send_text(&self,text:&str,sid:&str,thread:&str,bid:&str,message_id:&str)->Result<Value,RoomError>{
         let row_id=format!("{sid}:user-text:{message_id}");let mut inner=self.inner.lock().expect("room lock");
@@ -335,9 +337,9 @@ impl Room {
             else{json!({"status":"rejected","error":"room.speech_invalid","terminal":v3,"reason_code":"application_refusal"})};}
         let asker=inner.browsers.get(&sid);let known=inner.sessions.iter().any(|s|s==&sid);
         let reason=if !known {Some("session_changed")} else if asker.is_none(){Some("call_ended")} else if asker.is_some_and(|b|b.target.as_ref().is_none_or(|t|t.thread!=thread)){Some("focus_changed")} else if asker.is_some_and(|b|b.revision!=revision){Some("newer_turn")} else if asker.is_some_and(|b|b.speaking){Some("user_speaking")} else {None};
-        let capacity=inner.utterances.len()>=MAX_UTTERANCES;
+        let capacity=inner.utterances.len()>=MAX_UTTERANCES||audience.iter().any(|id|inner.browsers.get(id).is_some_and(|b|b.pending.len()>=16));
         let can_speak=reason.is_none_or(|r|["newer_turn","user_speaking"].contains(&r))&&!audience.is_empty()&&!capacity;
-        let waiting=can_speak&&asker.is_some_and(|b|b.speaking);
+        let waiting=can_speak&&audience.iter().any(|id|inner.browsers.get(id).is_some_and(|b|b.speaking));
         let status=if !can_speak{"text_only"}else if waiting{"waiting_for_turn"}else{"queued"};
         let spoken_revision=if reason.is_some_and(|r|["newer_turn","user_speaking"].contains(&r)){asker.map_or(revision,|b|b.revision)}else{revision};
         let reason=if capacity{Some("queue_full")}else{reason};
@@ -345,7 +347,9 @@ impl Room {
             .or_else(||asker.and_then(|b|b.target.as_ref()).and_then(|t|t.title.clone()))
             .or_else(||Some(crate::messages::render(&crate::messages::LocalizedMessage::new("room.conversation_title").with_param("id",thread.chars().take(8).collect::<String>()),asker.map_or("en",|b|b.language.as_str()))));
         inner.seq+=1;let seq=inner.seq;inner.rows.push_back(Row{seq,id:row_id.clone(),thread:thread.into(),role:"assistant",text:text.into(),name,session:sid.clone(),revision,time:millis(),status:status.into(),reason:reason.map(str::to_owned),language:p.get("language").and_then(Value::as_str).map(str::to_owned),offline:None,payload:None,queued_at:seconds(),attempts:0,next_attempt:0});trim_rows(&mut inner);
-        if can_speak {let mut clients=HashMap::new();for listener in audience { if let Some(c)=inner.browsers.get(&listener){let client_status=if c.speaking{"waiting_for_turn"}else{"queued"};if !c.speaking{let _=c.sender.try_send(json!({"type":"voice-speech","data":{"session_id":listener,"utterance_id":uid,"revision":c.revision,"reply_revision":revision,"thread_id":thread,"text":text,"language":p.get("language"),"history_id":row_id}}));}clients.insert(listener,(c.revision,client_status.into()));}}inner.utterances.insert(uid.into(),UtteranceRecord{row_id,clients});}
+        if can_speak {let mut clients=HashMap::new();for listener in &audience { if let Some(c)=inner.browsers.get(listener){let client_status=if c.speaking{"waiting_for_turn"}else{"queued"};clients.insert(listener.clone(),(c.revision,client_status.into()));}}
+            inner.utterances.insert(uid.into(),UtteranceRecord{row_id,clients});
+            for listener in audience{if let Some(c)=inner.browsers.get_mut(&listener){c.pending.push_back(uid.into());}dispatch_client(&mut inner,&listener);}}
         if status=="text_only" {json!({"status":"text_only","text_saved":true,"reason":reason.unwrap_or("call_ended")})}else{json!({"status":status,"utterance_id":uid,"session_id":sid,"revision":spoken_revision,"text_saved":true})}
     }
     pub fn connector_speech(&self,cid:&str,p:&Value,v3:bool)->Value{
@@ -354,16 +358,35 @@ impl Room {
         let Some(thread)=thread else{return if v3{json!({"status":"unknown_binding","event_id":p.get("event_id"),"utterance_id":p.get("utterance_id")})}else{json!({"status":"rejected","error":"room.binding_foreign","event_id":p.get("event_id")})}};
         let mut speech=p.clone();speech["thread_id"]=json!(thread);self.publish(&speech,v3)
     }
-    pub fn receipt(&self,sid:&str,uid:&str,revision:u64,status:&str)->Result<Value,RoomError>{let mut inner=self.inner.lock().expect("room lock");
+    pub fn receipt(&self,sid:&str,uid:&str,revision:u64,status:&str)->Result<Value,RoomError>{
         if !["playing","failed","playback_finished","skipped","cancelled_unplayed","cancelled_playing"].contains(&status){return Err(RoomError::new(400,"room.receipt_invalid"));}
-        if inner.browsers.get(sid).is_none_or(|c|c.revision!=revision){return Err(RoomError::new(409,"room.stale_utterance"));}
-        let Some(record)=inner.utterances.get_mut(uid) else{return Err(RoomError::new(409,"room.stale_utterance"));};
-        let Some(entry)=record.clients.get_mut(sid) else{return Err(RoomError::new(409,"room.stale_utterance"));};
-        if entry.0!=revision||["failed","playback_finished","skipped","cancelled_unplayed","cancelled_playing"].contains(&entry.1.as_str()){return Err(RoomError::new(409,"room.stale_utterance"));}
-        entry.1=status.into();let row_id=record.row_id.clone();
-        if let Some(c)=inner.browsers.get_mut(sid){c.active=Some(uid.into());}
-        if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){row.status=status.into();}
-        Ok(json!({"status":status}))}
+        let mut inner=self.inner.lock().expect("room lock");
+        let Some(browser)=inner.browsers.get(sid)else{return Err(RoomError::new(409,"room.stale_utterance"));};
+        let special=matches!(status,"skipped"|"cancelled_unplayed"|"cancelled_playing");
+        if !special&&browser.revision!=revision{return Err(RoomError::new(409,"room.stale_utterance"));}
+        let active=browser.active.as_deref()==Some(uid);
+        if matches!(status,"playing"|"failed"|"playback_finished")&&(!active||browser.speaking){return Err(RoomError::new(409,"room.stale_utterance"));}
+        let Some(record)=inner.utterances.get_mut(uid)else{return Err(RoomError::new(409,"room.stale_utterance"));};
+        let Some(entry)=record.clients.get_mut(sid)else{return Err(RoomError::new(409,"room.stale_utterance"));};
+        if (special&&revision>entry.0)||(!special&&entry.0!=revision){return Err(RoomError::new(409,"room.stale_utterance"));}
+        if matches!(entry.1.as_str(),"failed"|"playback_finished"|"interrupted"){
+            if special{return Ok(json!({"status":status}));}
+            return Err(RoomError::new(409,"room.stale_utterance"));
+        }
+        if status=="cancelled_unplayed"&&revision<entry.0{return Ok(json!({"status":status}));}
+        let next=match status{"skipped"|"cancelled_playing"=>"interrupted","cancelled_unplayed"=>"waiting_for_turn",other=>other};
+        entry.1=next.into();let row_id=record.row_id.clone();
+        let best=record.clients.values().map(|(_,status)|status.as_str()).max_by_key(|status|status_rank(status)).unwrap_or(next).to_owned();
+        if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){row.status=best;row.reason=match status{"skipped"=>Some("user_skipped".into()),"cancelled_playing"=>Some("user_interrupted".into()),"cancelled_unplayed"=>Some("user_speaking".into()),"failed"=>Some("playback_failed".into()),_=>None};}
+        let browser=inner.browsers.get_mut(sid).expect("browser present");
+        if status!="playing"{
+            if active{browser.active=None;}
+            if status=="cancelled_unplayed"&&!browser.pending.iter().any(|item|item==uid){browser.pending.push_front(uid.into());}
+            else if status!="cancelled_unplayed"{browser.pending.retain(|item|item!=uid);}
+            dispatch_client(&mut inner,sid);
+        }
+        Ok(json!({"status":status}))
+    }
     pub fn working(&self,cid:&str,data:&Value){let bid=field(data,"binding_id");let mut inner=self.inner.lock().expect("room lock");let Some(b)=inner.bindings.get(bid).filter(|b|b.connector==cid&&b.live) else{return;};let thread=b.thread.clone();let Some(working)=data.get("working").and_then(Value::as_bool) else{return;};inner.working.insert(thread.clone(),working);
         for c in inner.browsers.values().filter(|c|c.target.as_ref().is_some_and(|t|t.thread==thread)){let mut out=json!({"thread_id":thread,"working":working});if let Some(obj)=out.as_object_mut(){for key in ["turn_id","turn_phase","session_id","revision"]{if let Some(v)=data.get(key){obj.insert(key.into(),v.clone());}}}let _=c.sender.try_send(json!({"type":"voice-conversation","data":out}));}}
     pub fn engine(&self,cid:&str,data:&Value){let mut inner=self.inner.lock().expect("room lock");if let Some(b)=inner.bindings.get_mut(field(data,"binding_id")).filter(|b|b.connector==cid&&b.live){if let Some(e)=engine(data.get("engine")){if e.get("model").is_some(){b.engine=Some(e);}}}}
@@ -388,9 +411,37 @@ impl Room {
         row.reason=match status{Some("unknown")=>answer.as_ref().ok().and_then(|v|v.get("detail")).and_then(Value::as_str).map(str::to_owned),Some("unsupported")=>Some("unsupported".into()),_=>None};
         if new_status=="pending"{row.attempts+=1;row.next_attempt=seconds()+[2,5,15,60][row.attempts.min(4)-1];}
         let sid=row.session.clone();let payload=row.payload.clone().unwrap_or_default();if let Some(c)=inner.browsers.get_mut(&sid){if new_status=="delivered"{c.sent+=1;}let _=c.sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":payload["revision"],"history_id":rid,"thread_id":payload["thread_id"],"session_id":sid,"status":new_status}}));}}
-    pub async fn pump(self: std::sync::Arc<Self>) {loop{for (bid,rid,peer,data) in self.pending_delivery(){let room=self.clone();tokio::spawn(async move{let answer=peer.request("input.deliver",data,ACK_TIMEOUT).await;room.settle_delivery(&bid,&rid,&peer.generation,answer);});}tokio::time::sleep(Duration::from_millis(250)).await;}}
+    pub async fn pump(self: std::sync::Arc<Self>) {loop{
+        for (bid,rid,peer,data) in self.pending_delivery(){let room=self.clone();tokio::spawn(async move{let answer=peer.request("input.deliver",data,ACK_TIMEOUT).await;room.settle_delivery(&bid,&rid,&peer.generation,answer);});}
+        {let mut inner=self.inner.lock().expect("room lock");let clients:Vec<String>=inner.browsers.keys().cloned().collect();for sid in clients{dispatch_client(&mut inner,&sid);}}
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }}
 }
 fn trim_rows(inner:&mut Inner){while inner.rows.len()>MAX_HISTORY&&inner.rows.front().is_some_and(|r|!matches!(r.status.as_str(),"pending"|"sending")){if let Some(row)=inner.rows.pop_front(){inner.utterances.retain(|_,u|u.row_id!=row.id);}}}
+fn status_rank(status:&str)->u8{match status{"failed"=>2,"interrupted"=>3,"queued"=>4,"waiting_for_turn"=>5,"playing"=>7,"playback_finished"=>8,_=>0}}
+fn dispatch_client(inner:&mut Inner,sid:&str){
+    loop{
+        let Some(browser)=inner.browsers.get(sid)else{return;};
+        if browser.active.is_some()||browser.speaking{return;}
+        let Some(uid)=browser.pending.front().cloned()else{return;};
+        let entry=inner.utterances.get(&uid).and_then(|record|record.clients.get(sid).map(|(revision,status)|(record.row_id.clone(),*revision,status.clone())));
+        let Some((row_id,revision,status))=entry else{inner.browsers.get_mut(sid).expect("browser present").pending.pop_front();continue;};
+        if status=="waiting_for_turn"{return;}
+        if status!="queued"{inner.browsers.get_mut(sid).expect("browser present").pending.pop_front();continue;}
+        let row=inner.rows.iter().find(|r|r.id==row_id).map(|r|(r.thread.clone(),r.text.clone(),r.language.clone(),r.revision));
+        let Some((thread,text,language,reply_revision))=row else{inner.browsers.get_mut(sid).expect("browser present").pending.pop_front();continue;};
+        let browser=inner.browsers.get_mut(sid).expect("browser present");
+        if browser.revision!=revision||browser.target.as_ref().is_none_or(|t|t.thread!=thread){
+            browser.pending.pop_front();
+            if let Some(record)=inner.utterances.get_mut(&uid){if let Some(entry)=record.clients.get_mut(sid){entry.1="interrupted".into();}}
+            continue;
+        }
+        let event=json!({"type":"voice-speech","data":{"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":reply_revision,"thread_id":thread,"text":text,"language":language,"history_id":row_id}});
+        if browser.sender.try_send(event).is_err(){return;}
+        browser.pending.pop_front();browser.active=Some(uid);
+        return;
+    }
+}
 fn interrupt_client(inner:&mut Inner,sid:&str,reason:&str){
     let mut rows=Vec::new();
     for record in inner.utterances.values_mut(){if let Some(entry)=record.clients.get_mut(sid){
@@ -400,6 +451,21 @@ fn interrupt_client(inner:&mut Inner,sid:&str,reason:&str){
         }
     }}
     for row_id in rows{if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){if row.status!="playback_finished"{row.status="interrupted".into();row.reason=Some(reason.into());}}}
+    if let Some(browser)=inner.browsers.get_mut(sid){browser.pending.clear();browser.active=None;}
+}
+fn hold_client(inner:&mut Inner,sid:&str,revision:u64){
+    let active=inner.browsers.get_mut(sid).and_then(|b|b.active.take());
+    let mut waiting=Vec::new();let mut interrupted=Vec::new();
+    for (uid,record) in &mut inner.utterances{if let Some(entry)=record.clients.get_mut(sid){
+        match entry.1.as_str(){
+            "queued"|"waiting_for_turn"=>{entry.0=revision;entry.1="waiting_for_turn".into();waiting.push((uid.clone(),record.row_id.clone()));},
+            "playing"=>{entry.1="interrupted".into();interrupted.push(record.row_id.clone());},
+            _=>{}
+        }
+    }}
+    if let Some(uid)=active{if waiting.iter().any(|(id,_)|id==&uid){if let Some(browser)=inner.browsers.get_mut(sid){browser.pending.push_front(uid);}}}
+    for (_,row_id) in waiting{if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){row.status="waiting_for_turn".into();row.reason=Some("user_speaking".into());}}
+    for row_id in interrupted{if let Some(row)=inner.rows.iter_mut().find(|r|r.id==row_id){row.status="interrupted".into();row.reason=Some("newer_turn".into());}}
 }
 fn engine(value:Option<&Value>)->Option<Value>{let obj=value?.as_object()?;let mut out=Map::new();for key in ["model","effort","thinking"]{if let Some(v)=obj.get(key).filter(|v|!v.is_null()&&v.as_str()!=Some("")){out.insert(key.into(),json!(v.as_str().map(str::to_owned).unwrap_or_else(||v.to_string()).chars().take(60).collect::<String>()));}}(!out.is_empty()).then_some(Value::Object(out))}
 fn capabilities(value:Option<&Value>,experimental:Option<&Value>)->Value{let mut result=Map::new();for key in ["deliver","inspectInbound","working","endOfTurn","sessionIdentity"]{let status=value.and_then(|v|v.get(key)).and_then(Value::as_str).filter(|s|["supported","unsupported"].contains(s)).unwrap_or("unknown");result.insert(key.into(),json!(status));}
