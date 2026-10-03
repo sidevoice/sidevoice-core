@@ -571,6 +571,71 @@ impl SettingDiagnostic {
     }
 }
 
+#[derive(Clone, Debug)]
+enum StageFailure {
+    Field(String),
+    Option(OptionFailure),
+}
+
+impl From<String> for StageFailure {
+    fn from(field: String) -> Self {
+        Self::Field(field)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OptionFailure {
+    name: String,
+    kind: OptionFailureKind,
+}
+
+#[derive(Clone, Debug)]
+enum OptionFailureKind {
+    Unknown,
+    Language { value: String },
+    TextTooLong { max: usize },
+    Range { min: Value, max: Value },
+    VoiceLanguage { voice: String, language: String },
+    Other,
+}
+
+impl OptionFailure {
+    fn message(&self) -> LocalizedMessage {
+        match &self.kind {
+            OptionFailureKind::Unknown => LocalizedMessage::new("settings.option_unknown")
+                .with_param("name", self.name.clone()),
+            OptionFailureKind::Language { value } => {
+                LocalizedMessage::new("settings.option_language_invalid")
+                    .with_param("name", self.name.clone())
+                    .with_param("value", value.clone())
+            }
+            OptionFailureKind::TextTooLong { max } => {
+                LocalizedMessage::new("settings.option_text_too_long")
+                    .with_param("name", self.name.clone())
+                    .with_param("max", *max)
+            }
+            OptionFailureKind::Range { min, max } => LocalizedMessage::new("settings.stage_range")
+                .with_param("name", self.name.clone())
+                .with_param("min", min.clone())
+                .with_param("max", max.clone()),
+            OptionFailureKind::VoiceLanguage { voice, language } => {
+                LocalizedMessage::new("settings.option_voice_language")
+                    .with_param("name", self.name.clone())
+                    .with_param("voice", voice.clone())
+                    .with_param("language", language.clone())
+            }
+            OptionFailureKind::Other => LocalizedMessage::new("settings.stage_invalid"),
+        }
+    }
+
+    fn new(name: impl Into<String>, kind: OptionFailureKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CredentialState {
     pub configured: bool,
@@ -862,7 +927,12 @@ pub fn settings_from(input: Option<&Value>, defaults: &CallSettings) -> Settings
                         settings.tts = stage
                     }
                 }
-                Err(field) => invalid.extend(stage_diagnostics(task, &field, value)),
+                Err(StageFailure::Field(field)) => {
+                    invalid.extend(stage_diagnostics(task, &field, value))
+                }
+                Err(StageFailure::Option(option)) => {
+                    invalid.push(SettingDiagnostic::new(task, option.message()))
+                }
             }
         }
     }
@@ -1037,64 +1107,10 @@ fn stage_diagnostics(task: &str, field: &str, input: &Value) -> Vec<SettingDiagn
         }
     }
 
-    if let Some(option) = field.strip_prefix("options.") {
-        if let Some((minimum, maximum)) = stage_range_option(task, input, option) {
-            return vec![SettingDiagnostic::new(
-                task,
-                LocalizedMessage::new("settings.stage_range")
-                    .with_param("name", option)
-                    .with_param("min", minimum)
-                    .with_param("max", maximum),
-            )];
-        }
-        if !stage_option_known(task, input, option) {
-            return vec![SettingDiagnostic::new(
-                task,
-                LocalizedMessage::new("settings.option_unknown").with_param("name", option),
-            )];
-        }
-    }
-
     vec![SettingDiagnostic::new(
         task,
         LocalizedMessage::new("settings.stage_invalid"),
     )]
-}
-
-fn stage_schema(task: &str, input: &Value) -> Option<&'static Value> {
-    let stage = input.as_object()?;
-    let place = stage.get("place")?.as_str()?;
-    let model = stage.get("model")?.as_str()?;
-    if matches!(place, "device" | "host") {
-        let model = find_model(model)?;
-        (task_for_model(model) == Some(task)).then(|| model_schema(model))
-    } else {
-        let provider = find_provider(place)?;
-        strings(provider.get("tasks"))
-            .any(|supported| supported == task)
-            .then(|| task_schema(provider, task))?
-    }
-}
-
-fn stage_option_known(task: &str, input: &Value, name: &str) -> bool {
-    stage_schema(task, input).is_some_and(|schema| {
-        values(schema)
-            .iter()
-            .any(|option| field_str(option, "id") == Some(name))
-    })
-}
-
-fn stage_range_option(task: &str, input: &Value, name: &str) -> Option<(Value, Value)> {
-    let schema = stage_schema(task, input)?;
-    let option = values(schema)
-        .iter()
-        .find(|option| field_str(option, "id") == Some(name))?;
-    (field_str(option, "kind") == Some("range")).then(|| {
-        (
-            option.get("min").cloned().unwrap_or(Value::Null),
-            option.get("max").cloned().unwrap_or(Value::Null),
-        )
-    })
 }
 
 fn numeric_value(value: &Value) -> Option<f64> {
@@ -1106,20 +1122,20 @@ fn numeric_value(value: &Value) -> Option<f64> {
     value.is_finite().then_some(value)
 }
 
-fn parse_stage(task: &str, input: &Value) -> Result<SpeechStage, String> {
+fn parse_stage(task: &str, input: &Value) -> Result<SpeechStage, StageFailure> {
     if !matches!(task, "stt" | "tts") {
-        return Err("stage".to_owned());
+        return Err("stage".to_owned().into());
     }
     let object = input.as_object().ok_or_else(|| "stage".to_owned())?;
     for key in object.keys() {
         if !matches!(key.as_str(), "place" | "model" | "options" | "build") {
-            return Err(key.clone());
+            return Err(key.clone().into());
         }
     }
     let place = required_limited_string(object, "place", 60)?;
     let model_id = required_limited_string(object, "model", 120)?;
     if !valid_model_id(&model_id) {
-        return Err("model".to_owned());
+        return Err("model".to_owned().into());
     }
     let build = match object.get("build") {
         None | Some(Value::Null) => None,
@@ -1128,15 +1144,15 @@ fn parse_stage(task: &str, input: &Value) -> Result<SpeechStage, String> {
     let given = match object.get("options") {
         None => Map::new(),
         Some(Value::Object(options)) => options.clone(),
-        Some(_) => return Err("options".to_owned()),
+        Some(_) => return Err("options".to_owned().into()),
     };
 
     let (model, schema) = if matches!(place.as_str(), "device" | "host") {
         let Some(model) = find_model(&model_id) else {
-            return Err("model".to_owned());
+            return Err("model".to_owned().into());
         };
         if task_for_model(model) != Some(task) {
-            return Err("model".to_owned());
+            return Err("model".to_owned().into());
         }
         if let Some(build) = build.as_ref() {
             let listed = model
@@ -1145,19 +1161,19 @@ fn parse_stage(task: &str, input: &Value) -> Result<SpeechStage, String> {
                 .flat_map(values)
                 .any(|candidate| field_str(candidate, "engine") == Some(build.engine.as_str()));
             if !listed {
-                return Err("build.engine".to_owned());
+                return Err("build.engine".to_owned().into());
             }
         }
         (Some(model), model_schema(model))
     } else {
         let Some(provider) = find_provider(&place) else {
-            return Err("place".to_owned());
+            return Err("place".to_owned().into());
         };
         if !strings(provider.get("tasks")).any(|candidate| candidate == task) {
-            return Err("place".to_owned());
+            return Err("place".to_owned().into());
         }
         if build.is_some() {
-            return Err("build".to_owned());
+            return Err("build".to_owned().into());
         }
         (
             None,
@@ -1165,8 +1181,7 @@ fn parse_stage(task: &str, input: &Value) -> Result<SpeechStage, String> {
         )
     };
 
-    let options =
-        validate_options(schema, &given, model).map_err(|field| format!("options.{field}"))?;
+    let options = validate_options(schema, &given, model).map_err(StageFailure::Option)?;
     Ok(SpeechStage {
         place,
         model: model_id,
@@ -1216,7 +1231,7 @@ fn validate_options(
     schema: &Value,
     given: &Map<String, Value>,
     model: Option<&Value>,
-) -> Result<Map<String, Value>, String> {
+) -> Result<Map<String, Value>, OptionFailure> {
     let mut known = std::collections::HashMap::new();
     for option in values(schema) {
         if let Some(id) = field_str(option, "id") {
@@ -1230,7 +1245,10 @@ fn validate_options(
         .collect::<Vec<_>>();
     unknown.sort();
     if let Some(first) = unknown.first() {
-        return Err(first.clone());
+        return Err(OptionFailure::new(
+            first.clone(),
+            OptionFailureKind::Unknown,
+        ));
     }
 
     let mut result = Map::new();
@@ -1241,7 +1259,7 @@ fn validate_options(
         if let Some(value) = given.get(id) {
             result.insert(
                 id.to_owned(),
-                option_value(option, value, model).map_err(|()| id.to_owned())?,
+                option_value(option, id, value, model)?,
             );
         } else if let Some(default) = option.get("default") {
             result.insert(id.to_owned(), normalized_default(option, default));
@@ -1250,93 +1268,137 @@ fn validate_options(
     Ok(result)
 }
 
-fn option_value(option: &Value, value: &Value, model: Option<&Value>) -> Result<Value, ()> {
-    if field_str(option, "id").is_none() {
-        return Err(());
-    }
+fn option_value(
+    option: &Value,
+    name: &str,
+    value: &Value,
+    model: Option<&Value>,
+) -> Result<Value, OptionFailure> {
+    let other = || OptionFailure::new(name, OptionFailureKind::Other);
     match field_str(option, "kind") {
         Some("language") => {
-            let language = value.as_str().ok_or(())?;
+            let Some(language) = value.as_str() else {
+                return Err(other());
+            };
             if strings(option.get("values")).any(|candidate| candidate == language)
                 || (language == "auto" && option.get("auto").and_then(Value::as_bool) == Some(true))
             {
                 Ok(Value::String(language.to_owned()))
             } else {
-                Err(())
+                Err(OptionFailure::new(
+                    name,
+                    OptionFailureKind::Language {
+                        value: language.to_owned(),
+                    },
+                ))
             }
         }
         Some("text") => {
-            let text = value.as_str().ok_or(())?;
+            let Some(text) = value.as_str() else {
+                return Err(other());
+            };
             let max = option.get("max").and_then(Value::as_u64).unwrap_or(1000) as usize;
             if text.chars().count() <= max {
                 Ok(value.clone())
             } else {
-                Err(())
+                Err(OptionFailure::new(
+                    name,
+                    OptionFailureKind::TextTooLong { max },
+                ))
             }
         }
         Some("range") => {
-            let number = value.as_f64().ok_or(())?;
-            let min = option.get("min").and_then(Value::as_f64).ok_or(())?;
-            let max = option.get("max").and_then(Value::as_f64).ok_or(())?;
+            let minimum = option.get("min").cloned().unwrap_or(Value::Null);
+            let maximum = option.get("max").cloned().unwrap_or(Value::Null);
+            let range_failure = || {
+                OptionFailure::new(
+                    name,
+                    OptionFailureKind::Range {
+                        min: minimum.clone(),
+                        max: maximum.clone(),
+                    },
+                )
+            };
+            let Some(number) = value.as_f64() else {
+                return Err(range_failure());
+            };
+            let (Some(min), Some(max)) = (minimum.as_f64(), maximum.as_f64()) else {
+                return Err(range_failure());
+            };
             if !number.is_finite() || !(min..=max).contains(&number) {
-                return Err(());
+                return Err(range_failure());
             }
-            Number::from_f64(number).map(Value::Number).ok_or(())
+            Number::from_f64(number)
+                .map(Value::Number)
+                .ok_or_else(range_failure)
         }
         Some("voice") => {
             if option.get("per_language").and_then(Value::as_bool) == Some(true) {
-                let voices = value.as_object().ok_or(())?;
+                let Some(voices) = value.as_object() else {
+                    return Err(other());
+                };
                 let mut result = Map::new();
                 for (language, voice) in voices {
                     if !speech_catalogue_language(language) {
-                        return Err(());
+                        return Err(other());
                     }
                     result.insert(
                         language.clone(),
-                        Value::String(voice_id(option, voice, model, Some(language))?),
+                        Value::String(voice_id(option, name, voice, model, Some(language))?),
                     );
                 }
                 Ok(Value::Object(result))
             } else {
-                Ok(Value::String(voice_id(option, value, model, None)?))
+                Ok(Value::String(voice_id(option, name, value, model, None)?))
             }
         }
-        _ => Err(()),
+        _ => Err(other()),
     }
 }
 
 fn voice_id(
     option: &Value,
+    name: &str,
     voice: &Value,
     model: Option<&Value>,
     language: Option<&str>,
-) -> Result<String, ()> {
-    let voice = voice.as_str().ok_or(())?;
+) -> Result<String, OptionFailure> {
+    let voice = voice.as_str().ok_or_else(|| {
+        OptionFailure::new(name, OptionFailureKind::Other)
+    })?;
     if field_str(option, "from") == Some("model.voices") {
-        let Some(model) = model else { return Err(()) };
-        let matching = model
+        let Some(model) = model else {
+            return Err(OptionFailure::new(name, OptionFailureKind::Other));
+        };
+        let found = model
             .get("voices")
             .into_iter()
             .flat_map(values)
-            .any(|candidate| {
-                field_str(candidate, "id") == Some(voice)
-                    && language.is_none_or(|language| {
-                        field_str(candidate, "language")
-                            .unwrap_or("")
-                            .split('-')
-                            .next()
-                            == Some(language)
-                    })
-            });
-        if matching {
-            Ok(voice.to_owned())
-        } else {
-            Err(())
+            .find(|candidate| field_str(candidate, "id") == Some(voice));
+        let Some(found) = found else {
+            return Err(OptionFailure::new(name, OptionFailureKind::Other));
+        };
+        if let Some(language) = language {
+            let speaks = field_str(found, "language")
+                .unwrap_or("")
+                .split('-')
+                .next()
+                == Some(language);
+            if !speaks {
+                return Err(OptionFailure::new(
+                    name,
+                    OptionFailureKind::VoiceLanguage {
+                        voice: voice.to_owned(),
+                        language: language.to_owned(),
+                    },
+                ));
+            }
         }
+        Ok(voice.to_owned())
     } else if !voice.trim().is_empty() && voice.chars().count() <= 120 {
         Ok(voice.to_owned())
     } else {
-        Err(())
+        Err(OptionFailure::new(name, OptionFailureKind::Other))
     }
 }
 
@@ -1969,6 +2031,46 @@ mod tests {
                 Some(expected),
                 "Pinned Python settings.py output for {input}"
             );
+        }
+    }
+
+    #[test]
+    fn known_option_diagnostics_match_pinned_python_and_keep_atomic_stage_fallback() {
+        let defaults = default_settings(None, None);
+        let overlong_context = "x".repeat(401);
+        let cases = [
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"de"}}}),
+                "Some device settings were not valid and use their defaults: stt Value error, language: 'de' is not one of its languages",
+                "stt",
+            ),
+            (
+                json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"context":overlong_context}}}),
+                "Some device settings were not valid and use their defaults: stt Value error, context: text of at most 400 characters",
+                "stt",
+            ),
+            (
+                json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"voice":{"en":"em_alex"}}}}),
+                "Some device settings were not valid and use their defaults: tts Value error, voice: 'em_alex' does not speak en",
+                "tts",
+            ),
+        ];
+        for (input, expected, task) in cases {
+            let loaded = settings_from(Some(&input), &defaults);
+            assert_eq!(
+                loaded.issue.as_deref(),
+                Some(expected),
+                "Pinned Python settings.py output for {task} option in {input}"
+            );
+            if task == "stt" {
+                assert_eq!(loaded.settings.stt.place, defaults.stt.place);
+                assert_eq!(loaded.settings.stt.model, defaults.stt.model);
+                assert_eq!(loaded.settings.stt.options, defaults.stt.options);
+            } else {
+                assert_eq!(loaded.settings.tts.place, defaults.tts.place);
+                assert_eq!(loaded.settings.tts.model, defaults.tts.model);
+                assert_eq!(loaded.settings.tts.options, defaults.tts.options);
+            }
         }
     }
 
