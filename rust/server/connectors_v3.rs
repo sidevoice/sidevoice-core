@@ -176,6 +176,9 @@ pub async fn run(state: Arc<AppState>, mut socket: WebSocket) {
     let _ = out
         .send(json!({"jsonrpc":"2.0","method":"connector.welcome","params":{"protocol":3}}))
         .await;
+    let _ = out
+        .send(json!({"jsonrpc":"2.0","method":"node.rendezvous","params":state.rendezvous.snapshot()}))
+        .await;
     let mut pending: HashMap<String, oneshot::Sender<Result<Value, PeerError>>> = HashMap::new();
     let mut incoming = HashSet::<String>::new();
     let (finished, mut completed) = mpsc::channel::<String>(32);

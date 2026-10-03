@@ -12,7 +12,7 @@
   "bind.port-in-use": "The requested port is already in use.",
   "start.failed": "The core could not start.",
   "runtime.arguments": "Invalid core command-line arguments. Use --help to list the options.",
-  "runtime.help": "Sidevoice core: this node's conversations and voice pipeline.\nUsage: sidevoice-core [OPTIONS]\n  --host HOST              Address to listen on (default 127.0.0.1)\n  --port PORT              Port to listen on (default 8768; 0 chooses a free port)\n  --data-dir PATH          Private core data directory\n  --socket PATH            Local socket path\n  --ready-file PATH        Readiness file path\n  --launch-id ID           Identifier for this launch\n  --log-file PATH          Log path (default core.log beside the data directory)\n  --room-credential PATH   Room credential for later relay setup\n  --idle-exit SECONDS      Exit after idle seconds (0 disables)\n  --self-test WAV ASSETS   Run the detector self-test\n  -h, --help               Show this help",
+  "runtime.help": "Sidevoice core: this node's conversations and voice pipeline.\nUsage: sidevoice-core [OPTIONS]\n  --host HOST              Address to listen on (default 127.0.0.1)\n  --port PORT              Port to listen on (default 8768; 0 chooses a free port)\n  --data-dir PATH          Private core data directory\n  --socket PATH            Local socket path\n  --ready-file PATH        Readiness file path\n  --launch-id ID           Identifier for this launch\n  --log-file PATH          Log path (default core.log beside the data directory)\n  --room-credential PATH   Connector-owned room credential file\n  --idle-exit SECONDS      Exit after idle seconds (0 disables)\n  --self-test WAV ASSETS   Run the detector self-test\n  -h, --help               Show this help",
   "runtime.log_start": "The core is starting.",
   "runtime.log_ready": "The core is listening.",
   "runtime.log_stop": "The core has stopped.",
@@ -80,5 +80,14 @@
   "room.reach_offline": "That conversation is not connected to the room. Ask it to connect.",
   "room.reach_holding": "The connected harness is holding incoming messages.",
   "room.reach_unsupported": "This conversation cannot receive your messages through its harness.",
-  "room.you": "You"
+  "room.you": "You",
+  "relay.node_unavailable": "The node could not answer the relayed request.",
+  "relay.socket_refused": "The node refused the relayed call socket.",
+  "relay.credential_transport": "The room URL must use HTTPS unless it is on this machine or a trusted cluster host.",
+  "relay.dial_refused": "This node is not paired with the room that is dialling it.",
+  "relay.revoked": "The room revoked this machine's pairing.",
+  "relay.pair_invalid": "Enter a room address and pairing code.",
+  "relay.connector_unavailable": "The connector is not connected to this core.",
+  "relay.pair_timeout": "The connector did not answer the pairing request in time.",
+  "relay.pair_failed": "The room pairing failed."
 }

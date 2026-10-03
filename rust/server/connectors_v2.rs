@@ -63,6 +63,7 @@ async fn connect(
         }
     });
     let _ = socket.emit("connector.welcome", &json!({"protocol":2}));
+    let _ = socket.emit("node.rendezvous", &state.rendezvous.snapshot());
     let dispatch_socket = socket.clone();
     tokio::spawn(async move {
         while let Some(PeerRequest {
