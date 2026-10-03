@@ -45,7 +45,11 @@ pub struct CallMedia {
     focus_tx: mpsc::Sender<()>,
 }
 
-type MediaStart = (Arc<CallMedia>, mpsc::Receiver<CallFrame>, mpsc::Receiver<()>);
+type MediaStart = (
+    Arc<CallMedia>,
+    mpsc::Receiver<CallFrame>,
+    mpsc::Receiver<()>,
+);
 
 impl CallMedia {
     pub fn start(settings: &CallSettings) -> Result<MediaStart, String> {
