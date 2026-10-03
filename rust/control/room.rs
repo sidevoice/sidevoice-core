@@ -299,7 +299,13 @@ impl Room {
         let expected = field(entry, "token_hash");
         let supplied = hash(token);
         if expected.len() != supplied.len()
-            || expected.as_bytes().iter().zip(supplied.as_bytes()).fold(0u8, |diff,(a,b)| diff | (a ^ b)) != 0 {
+            || expected
+                .as_bytes()
+                .iter()
+                .zip(supplied.as_bytes())
+                .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+                != 0
+        {
             return "unknown";
         }
         if entry
@@ -620,11 +626,17 @@ impl Room {
         }) {
             row.status = "not_sent".into();
             row.reason = Some("channel_closed".into());
-            cancelled.push((row.id.clone(), row.session.clone(), row.payload.clone().unwrap_or_default()));
+            cancelled.push((
+                row.id.clone(),
+                row.session.clone(),
+                row.payload.clone().unwrap_or_default(),
+            ));
         }
-        for (row_id,sid,payload) in cancelled {
-            if let Some(browser)=inner.browsers.get(&sid) {
-                let _=browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
+        for (row_id, sid, payload) in cancelled {
+            if let Some(browser) = inner.browsers.get(&sid) {
+                let _ = browser
+                    .sender
+                    .try_send(json!({"type":"voice-input-receipt","data":{
                     "revision":payload["revision"],"history_id":row_id,"thread_id":thread,
                     "session_id":sid,"status":"not_sent"}}));
             }
@@ -846,10 +858,7 @@ impl Room {
                     entry.1 = "queued".into();
                 }
             }
-            if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id) {
-                row.status = "queued".into();
-                row.reason = None;
-            }
+            sync_row(&mut inner, &row_id, "queued", None);
         }
         dispatch_client(&mut inner, sid);
     }
@@ -1013,7 +1022,11 @@ impl Room {
         } else if asker.is_some_and(|b| b.target.as_ref().is_none_or(|t| t.thread != thread)) {
             Some("focus_changed")
         } else if asker.is_some_and(|b| b.revision != revision) {
-            Some("newer_turn")
+            Some(if asker.is_some_and(|b| b.turn_revision > revision) {
+                "newer_turn"
+            } else {
+                "focus_changed"
+            })
         } else if asker.is_some_and(|b| b.speaking) {
             Some("user_speaking")
         } else {
@@ -1099,9 +1112,14 @@ impl Room {
                     clients.insert(listener.clone(), (c.revision, client_status.into()));
                 }
             }
-            inner
-                .utterances
-                .insert(uid.into(), UtteranceRecord { row_id: row_id.clone(), clients, parked: false });
+            inner.utterances.insert(
+                uid.into(),
+                UtteranceRecord {
+                    row_id: row_id.clone(),
+                    clients,
+                    parked: false,
+                },
+            );
             for listener in audience {
                 if let Some(c) = inner.browsers.get_mut(&listener) {
                     c.pending.push_back(uid.into());
@@ -1109,9 +1127,21 @@ impl Room {
                 dispatch_client(&mut inner, &listener);
             }
         }
-        if status == "text_only" && matches!(reason,Some("session_changed"|"call_ended"|"focus_changed"))
-            && inner.utterances.len()<MAX_UTTERANCES {
-            inner.utterances.insert(uid.into(),UtteranceRecord{row_id,clients:HashMap::new(),parked:true});
+        if status == "text_only"
+            && matches!(
+                reason,
+                Some("session_changed" | "call_ended" | "focus_changed")
+            )
+            && inner.utterances.len() < MAX_UTTERANCES
+        {
+            inner.utterances.insert(
+                uid.into(),
+                UtteranceRecord {
+                    row_id,
+                    clients: HashMap::new(),
+                    parked: true,
+                },
+            );
         }
         if status == "text_only" {
             json!({"status":"text_only","text_saved":true,"reason":reason.unwrap_or("call_ended")})
@@ -1450,11 +1480,17 @@ fn trim_rows(inner: &mut Inner) {
     }
 }
 fn reachability(binding: &Binding, language: &str) -> Value {
-    let render = |key: &'static str| crate::messages::render(&crate::messages::LocalizedMessage::new(key), language);
+    let render = |key: &'static str| {
+        crate::messages::render(&crate::messages::LocalizedMessage::new(key), language)
+    };
     if !binding.live {
         return json!({"state":"offline","detail":render("room.reach_offline")});
     }
-    if binding.inbound.as_ref().is_some_and(|inbound| inbound.get("ok") == Some(&Value::Bool(false))) {
+    if binding
+        .inbound
+        .as_ref()
+        .is_some_and(|inbound| inbound.get("ok") == Some(&Value::Bool(false)))
+    {
         return json!({"state":"holding","detail":render("room.reach_holding"),"remedy":Value::Null});
     }
     if binding.capabilities.get("deliver").and_then(Value::as_str) == Some("unsupported") {
@@ -1471,6 +1507,15 @@ fn status_rank(status: &str) -> u8 {
         "playing" => 7,
         "playback_finished" => 8,
         _ => 0,
+    }
+}
+fn sync_row(inner: &mut Inner, row_id: &str, changed: &str, reason: Option<&str>) {
+    let best = inner.utterances.values().find(|record| record.row_id == row_id)
+        .and_then(|record| record.clients.values().map(|(_,status)|status.as_str()).max_by_key(|status|status_rank(status)))
+        .unwrap_or(changed).to_owned();
+    if let Some(row)=inner.rows.iter_mut().find(|row|row.id==row_id) {
+        row.status=best.clone();
+        row.reason=if best==changed {reason.map(str::to_owned)} else {None};
     }
 }
 fn dispatch_client(inner: &mut Inner, sid: &str) {
@@ -1538,6 +1583,7 @@ fn dispatch_client(inner: &mut Inner, sid: &str) {
                     entry.1 = "interrupted".into();
                 }
             }
+            sync_row(inner,&row_id,"interrupted",Some("focus_changed"));
             continue;
         }
         let event = json!({"type":"voice-speech","data":{"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":reply_revision,"thread_id":thread,"text":text,"language":language,"history_id":row_id}});
@@ -1603,17 +1649,9 @@ fn hold_client(inner: &mut Inner, sid: &str, revision: u64) {
             }
         }
     }
-    for (_, row_id) in waiting {
-        if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id) {
-            row.status = "waiting_for_turn".into();
-            row.reason = Some("user_speaking".into());
-        }
-    }
+    for (_, row_id) in waiting {sync_row(inner,&row_id,"waiting_for_turn",Some("user_speaking"));}
     for row_id in interrupted {
-        if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id) {
-            row.status = "interrupted".into();
-            row.reason = Some("newer_turn".into());
-        }
+        sync_row(inner,&row_id,"interrupted",Some("newer_turn"));
     }
 }
 fn engine(value: Option<&Value>) -> Option<Value> {

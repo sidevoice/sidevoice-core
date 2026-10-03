@@ -258,6 +258,28 @@ async def main():
                                      "revision": revision, "status": "skipped"})[0] == 200
                 queued_history = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
                 assert [row["status"] for row in queued_history[-2:]] == ["playback_finished", "interrupted"], queued_history
+                async with websockets.connect(f"ws://127.0.0.1:{port}/api/presentation/ws",
+                                              subprotocols=["sidevoice", f"sidevoice.token.{token}"]) as second:
+                    await second.send(json.dumps({"type": "voice-hello", "data": {}}))
+                    second_session = (await frame(second, "voice-session"))["session_id"]
+                    chosen = request(port, "POST", "/api/presentation/select", token=token,
+                                     body={"session_id": second_session, "thread_id": "t3-js-thread"})
+                    assert chosen[0] == 200, chosen
+                    second_revision = request(port, "GET", f"/api/presentation?session_id={second_session}", token=token)[1]["room"]["revision"]
+                    js.send({"op": "publish", "session_id": session, "revision": revision,
+                             "event_id": "t3-two-listeners-event", "utterance_id": "t3-two-listeners",
+                             "text": "One reply for both listeners"})
+                    assert js.event("published")["answer"]["status"] == "queued"
+                    assert (await frame(ws, "voice-speech"))["utterance_id"] == "t3-two-listeners"
+                    assert (await frame(second, "voice-speech"))["utterance_id"] == "t3-two-listeners"
+                    assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                                   body={"session_id": session, "utterance_id": "t3-two-listeners",
+                                         "revision": revision, "status": "playback_finished"})[0] == 200
+                    assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                                   body={"session_id": second_session, "utterance_id": "t3-two-listeners",
+                                         "revision": second_revision, "status": "skipped"})[0] == 200
+                    two_listener_row = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"][-1]
+                    assert two_listener_row["status"] == "playback_finished", two_listener_row
                 # A slow host scan has its own ACK; the input receipt must arrive while it waits.
                 agent_result = queue.Queue()
                 threading.Thread(target=lambda: agent_result.put(request(port, "GET", "/api/host/agents?rescan=1", token=token)), daemon=True).start()
@@ -337,6 +359,10 @@ async def main():
                     proof.send_signal(signal.SIGINT)
                     proof.wait(timeout=5)
                     raise AssertionError(f"{error}; history={history}; Rust peer: {proof.stderr.read()}") from error
+                stale = ipc.call("publish", {"client_ref": "t3-rust", "session_id": session,
+                                             "revision": revision-1, "text": "Stale focus reply",
+                                             "event_id": "t3-rust-stale-event", "utterance_id": "t3-rust-stale"})
+                assert stale["status"] == "text_only" and stale["reason"] == "focus_changed", stale
                 result = ipc.call("publish", {"client_ref": "t3-rust", "session_id": session, "revision": revision,
                                               "text": "Reply from actual Rust v3", "event_id": "t3-rust-event",
                                               "utterance_id": "t3-rust-utterance"})
