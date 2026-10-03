@@ -82,7 +82,8 @@ impl Telemetry {
         if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
             return None;
         }
-        endpoint.set_path("/v1/metrics");
+        let path = format!("{}/v1/metrics", endpoint.path().trim_end_matches('/'));
+        endpoint.set_path(&path);
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         Some(Self {

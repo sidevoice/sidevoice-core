@@ -126,7 +126,8 @@ async def main():
 
             async def admission():
                 answer = await peer.ask("relay.http", {"method": "GET", "path": "/api/presentation/admission",
-                                                       "headers": {"accept": "application/json"}})
+                                                       "headers": {"accept": "application/json",
+                                                                   "authorization": f"Bearer {token}"}})
                 assert answer["status"] == 200, answer
                 assert isinstance(answer["body"], bytes), "HTTP body lost binary ACK attachment"
                 assert json.loads(answer["body"])["admitted"] is True
@@ -145,7 +146,8 @@ async def main():
             recorded = await peer.ask("relay.http", {"method": "POST", "path": "/api/presentation/client-error",
                                                       "headers": {"authorization": f"Bearer {token}",
                                                                   "content-type": "application/json"},
-                                                      "body": json.dumps(report).encode()})
+                                                      "body": json.dumps(report).encode(),
+                                                      "ignored": {"nested": [b"second-attachment"]}})
             assert recorded["status"] == 200, recorded
             assert json.loads(recorded["body"])["status"] == "recorded"
             snapshot = await peer.ask("relay.http", {"method": "GET", "path": "/api/presentation",
@@ -197,7 +199,8 @@ async def main():
                 assert (proof["connector_id"], proof["token"], proof["protocol"]) == (
                     "node-1", "fixture-room-token", 3)
                 dial_answer = await dial.call("relay.http", {"method": "GET",
-                                                             "path": "/api/presentation/admission"},
+                                                             "path": "/api/presentation/admission",
+                                                             "headers": {"authorization": f"Bearer {token}"}},
                                               namespace="/room", timeout=10)
                 assert dial_answer["status"] == 200 and isinstance(dial_answer["body"], bytes)
             finally:

@@ -530,5 +530,6 @@ mod tests {
         ] {
             assert!(!relayable(&base, path, local_only), "{path}");
         }
+        assert!(!super::super::safe_url("http://room.example"));
     }
 }
