@@ -227,6 +227,26 @@ def main():
         assert json.loads((data / "room-state.json").read_text()) == before_room
         assert not list(data.glob(".*.tmp"))
 
+        # A broken local connector secret is replaceable. Valid room pairings and
+        # the node identity stay authoritative across this recovery.
+        identity_before = (data / "node-identity.json").read_bytes()
+        (data / "connector-credential.json").write_text("{invalid-json", encoding="utf-8")
+        recovered = start(data, "--launch-id", "credential-recovery")
+        try:
+            recovered_ready = wait_ready(data / "core.json", recovered)
+            replacement = (recovered_ready["connector_id"], recovered_ready["token"])
+            assert replacement != connector
+            saved = json.loads((data / "connector-credential.json").read_text())
+            assert (saved["connector_id"], saved["token"]) == replacement
+            room_after = json.loads((data / "room-state.json").read_text())
+            assert room_after["connectors"][connector[0]] == before_room["connectors"][connector[0]]
+            assert replacement[0] in room_after["connectors"]
+            assert (data / "node-identity.json").read_bytes() == identity_before
+            assert mode(data / "connector-credential.json") == 0o600
+        finally:
+            recovered.terminate()
+            assert recovered.wait(timeout=15) == 0
+
         malformed = root / "malformed"
         malformed.mkdir(mode=0o700)
         identity_file = malformed / "node-identity.json"

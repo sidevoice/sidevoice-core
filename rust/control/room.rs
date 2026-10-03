@@ -289,7 +289,7 @@ impl Room {
     }
     pub fn local_credential(&self) -> io::Result<(String, String)> {
         let mut inner = self.inner.lock().expect("room lock");
-        if let Some(saved) = self.dir.read_json("connector-credential.json")? {
+        if let Some(saved) = self.dir.read_json("connector-credential.json").ok().flatten() {
             let cid = field(&saved, "connector_id");
             let token = field(&saved, "token");
             if self.credential_locked(&inner, cid, token) == "paired" {

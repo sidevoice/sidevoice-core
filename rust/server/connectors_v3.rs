@@ -12,11 +12,12 @@ use super::AppState;
 use crate::control::room::{ConnectorPeer, PeerError, PeerRequest};
 
 const MAX_FRAME: usize = 1024 * 1024;
+const MAX_SAFE_ID: i64 = 9_007_199_254_740_991;
 fn id_valid(id: &Value) -> bool {
     id.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 100)
         || id
             .as_i64()
-            .is_some_and(|n| n.abs() <= 9_007_199_254_740_991)
+            .is_some_and(|n| (-MAX_SAFE_ID..=MAX_SAFE_ID).contains(&n))
 }
 fn decode(text: &str) -> Result<Value, u16> {
     if text.len() > MAX_FRAME {
@@ -184,6 +185,7 @@ pub async fn run(state: Arc<AppState>, mut socket: WebSocket) {
             _=stopped.changed()=>{let _=socket.send(close(1000)).await;break;},
             done=completed.recv()=>if let Some(key)=done {incoming.remove(&key);},
             command=rx.recv()=>{let Some(command)=command else{break};if let Some(answer)=command.answer{
+                pending.retain(|_,sender|!sender.is_closed());
                 if pending.len()>=128{let _=answer.send(Err(PeerError));continue;}seq+=1;let request_id=format!("s:{seq}");
                 pending.insert(request_id.clone(),answer);if out.send(json!({"jsonrpc":"2.0","id":request_id,"method":command.method,"params":command.params})).await.is_err(){break;}
             }else if out.send(json!({"jsonrpc":"2.0","method":command.method,"params":command.params})).await.is_err(){break;}},
@@ -204,5 +206,21 @@ pub async fn run(state: Arc<AppState>, mut socket: WebSocket) {
     state.room.detach(&cid, &generation);
     for (_, answer) in pending {
         let _ = answer.send(Err(PeerError));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimum_i64_id_is_a_protocol_error() {
+        for frame in [
+            r#"{"jsonrpc":"2.0","id":-9223372036854775808,"method":"input.read","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":-9223372036854775808,"result":{}}"#,
+        ] {
+            assert_eq!(decode(frame).unwrap_err(),1002);
+        }
+        assert!(decode(r#"{"jsonrpc":"2.0","id":-9007199254740991,"result":{}}"#).is_ok());
     }
 }

@@ -1,6 +1,7 @@
 """Offline functional T3 contract with pinned JS v2 and Rust v3 connector peers."""
 
 import asyncio
+import concurrent.futures
 import http.client
 import json
 import os
@@ -36,8 +37,8 @@ class UnixHTTP(http.client.HTTPConnection):
         self.sock.connect(str(self.path))
 
 
-def request(port, method, path, *, token=None, body=None, unix=None):
-    connection = UnixHTTP(unix) if unix else http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+def request(port, method, path, *, token=None, body=None, unix=None, timeout=5):
+    connection = UnixHTTP(unix) if unix else http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     headers = {"Host": "localhost", "Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -142,6 +143,15 @@ async def frame(ws, kind, *, status=None, timeout=6):
     raise AssertionError(f"missing {kind}/{status}; frames={seen}")
 
 
+async def rpc_frame(ws, *, method=None, rid=None, timeout=8):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = json.loads(await asyncio.wait_for(ws.recv(), deadline - time.monotonic()))
+        if (method is None or value.get("method") == method) and (rid is None or value.get("id") == rid):
+            return value
+    raise AssertionError(f"missing JSON-RPC method={method} id={rid}")
+
+
 class ProofIPC:
     def __init__(self, path):
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -193,6 +203,43 @@ async def main():
                                           subprotocols=["sidevoice", f"sidevoice.token.{token}"]) as ws:
                 await ws.send(json.dumps({"type": "voice-hello", "data": {}}))
                 session = (await frame(ws, "voice-session"))["session_id"]
+                browser_url = f"ws://127.0.0.1:{port}/api/presentation/ws"
+                browser_protocols = ["sidevoice", f"sidevoice.token.{token}"]
+                def active_calls():
+                    return request(port, "GET", "/api/local/health", unix=uds)[1]["calls"]
+
+                # All three early exits must release their revocation registrations.
+                for _ in range(12):
+                    async with websockets.connect(browser_url, subprotocols=browser_protocols) as refused:
+                        await refused.send(b"invalid hello")
+                        await refused.wait_closed()
+                    until(lambda: active_calls() == 1)
+                    async with websockets.connect(browser_url, subprotocols=browser_protocols) as refused:
+                        await refused.send(json.dumps({"type": "voice-hello", "data": {
+                            "settings": {"tts": {"place": "host"}}}}))
+                        assert (await frame(refused, "error"))["key"] == "place_host_unavailable"
+                        await refused.wait_closed()
+                        assert refused.close_code == 1008
+                    until(lambda: active_calls() == 1)
+                admitted = []
+                try:
+                    for _ in range(7):
+                        another = await websockets.connect(browser_url, subprotocols=browser_protocols)
+                        admitted.append(another)
+                        await another.send(json.dumps({"type": "voice-hello", "data": {}}))
+                        await frame(another, "voice-session")
+                    assert active_calls() == 8
+                    for _ in range(12):
+                        async with websockets.connect(browser_url, subprotocols=browser_protocols) as refused:
+                            await refused.send(json.dumps({"type": "voice-hello", "data": {}}))
+                            assert (await frame(refused, "error"))["reason"] == "room_is_full"
+                            await refused.wait_closed()
+                            assert refused.close_code == 1013
+                        until(lambda: active_calls() == 8)
+                finally:
+                    for another in admitted:
+                        await another.close()
+                until(lambda: active_calls() == 1)
                 js = LineProcess(["node", str(Path(__file__).with_name("rust_t3_v2_peer.mjs")),
                                   str(JS_LINK), origin, ready["connector_id"], ready["token"]])
                 peers.append(js)
@@ -376,7 +423,68 @@ async def main():
                 ipc.close()
                 proof.send_signal(signal.SIGINT)
                 assert proof.wait(timeout=5) == 0
-                print("T3 PASS: pinned JS Socket.IO v2, Rust symmetric JSONRPC v3, browser text, receipt, scan isolation, reconnect")
+                # Saturate a live v3 peer, let the callers time out, then use the
+                # same socket for a fresh input and ACK. Late results stay ignored.
+                v3_url = f"ws://127.0.0.1:{bridge.server_address[1]}/api/connectors/v3"
+                hello = {"jsonrpc": "2.0", "id": 1, "method": "connector.hello", "params": {
+                    "protocol": 3, "connector_id": ready["connector_id"], "token": ready["token"]}}
+                async with websockets.connect(v3_url) as raw:
+                    await raw.send(json.dumps(hello))
+                    assert (await rpc_frame(raw, rid=1))["result"]["protocol"] == 3
+                    await raw.send(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "binding.register", "params": {
+                        "client_ref": "t3-raw", "harness": "fixture", "thread": "t3-raw-thread",
+                        "capabilities": {"deliver": "supported"}}}))
+                    raw_binding = (await rpc_frame(raw, rid=2))["result"]["binding_id"]
+                    chosen = request(port, "POST", "/api/presentation/select", token=token,
+                                     body={"session_id": session, "thread_id": "t3-raw-thread"})
+                    assert chosen[0] == 200, chosen
+                    focus = chosen[1]["binding"]["binding_id"]
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=128) as pool:
+                        waiting = [asyncio.wrap_future(pool.submit(request, port, "GET", "/api/host/agents",
+                                                                    token=token, timeout=35)) for _ in range(128)]
+                        old_ids = []
+                        for _ in range(128):
+                            item = await rpc_frame(raw, method="agents.list", timeout=25)
+                            old_ids.append(item["id"])
+                        assert len(set(old_ids)) == 128
+                        expired = await asyncio.gather(*waiting)
+                        assert all(status == 504 for status, _ in expired), expired
+                    await raw.send(json.dumps({"jsonrpc": "2.0", "id": old_ids[0], "result": {"agents": []}}))
+                    sent = request(port, "POST", "/api/presentation/text", token=token,
+                                   body={"text": "Recovered on same v3 socket", "session_id": session,
+                                         "thread_id": "t3-raw-thread", "binding_id": focus,
+                                         "message_id": str(uuid.uuid4())})
+                    assert sent[0] == 200, sent
+                    await frame(ws, "voice-input-receipt", status="pending")
+                    delivery = await rpc_frame(raw, method="input.deliver")
+                    assert delivery["params"]["binding_id"] == raw_binding
+                    await raw.send(json.dumps({"jsonrpc": "2.0", "id": delivery["id"],
+                                               "result": {"status": "accepted"}}))
+                    assert (await frame(ws, "voice-input-receipt", status="delivered"))["history_id"] == sent[1]["id"]
+                    # The minimum signed i64 is invalid in both request and result IDs.
+                    await raw.send('{"jsonrpc":"2.0","id":-9223372036854775808,"method":"input.read","params":{}}')
+                    await raw.wait_closed()
+                    assert raw.close_code == 1002, raw.close_code
+                until(lambda: next(item for item in request(port, "GET", "/api/connectors", token=token)[1]["connectors"]
+                                   if item["id"] == ready["connector_id"])["connected"] is False)
+                async with websockets.connect(v3_url) as raw:
+                    await raw.send(json.dumps(hello))
+                    assert (await rpc_frame(raw, rid=1))["result"]["protocol"] == 3
+                    await raw.send(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "binding.register", "params": {
+                        "client_ref": "t3-raw", "harness": "fixture", "thread": "t3-raw-thread",
+                        "binding_id": raw_binding, "capabilities": {"deliver": "supported"}}}))
+                    assert (await rpc_frame(raw, rid=3))["result"]["binding_id"] == raw_binding
+                    sent = request(port, "POST", "/api/presentation/text", token=token,
+                                   body={"text": "Delivered after malformed v3 ID", "session_id": session,
+                                         "thread_id": "t3-raw-thread", "binding_id": focus,
+                                         "message_id": str(uuid.uuid4())})
+                    assert sent[0] == 200, sent
+                    await frame(ws, "voice-input-receipt", status="pending")
+                    delivery = await rpc_frame(raw, method="input.deliver")
+                    await raw.send(json.dumps({"jsonrpc": "2.0", "id": delivery["id"],
+                                               "result": {"status": "accepted"}}))
+                    assert (await frame(ws, "voice-input-receipt", status="delivered"))["history_id"] == sent[1]["id"]
+                print("T3 PASS: pinned JS v2/Rust v3, browser refusals, 128 expired v3 calls/recovery, malformed ID/reattach")
         finally:
             for peer in peers:
                 if isinstance(peer, LineProcess):

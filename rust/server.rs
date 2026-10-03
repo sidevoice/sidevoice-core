@@ -1042,19 +1042,12 @@ async fn socket_loop(
             .await;
         return;
     };
-    let (sender, mut revoked) = watch::channel(false);
-    state
-        .calls
-        .lock()
-        .expect("calls lock")
-        .entry(id.clone())
-        .or_default()
-        .push(sender);
+    let mut registration = CallRegistration::new(state.clone(), id.clone());
     let (events, mut output) = tokio::sync::mpsc::channel::<Value>(128);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     let hello = loop {
         tokio::select! {
-            _ = revoked.changed() => {
+            _ = registration.changed() => {
                 let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: close_reason.clone().into() }))).await;
                 break None;
             }
@@ -1067,7 +1060,6 @@ async fn socket_loop(
         }
     };
     let Some(hello) = hello else {
-        unregister_call(&state, &id);
         return;
     };
     let defaults = crate::models::default_settings(Some(&crate::runtime::system_language()), None);
@@ -1081,7 +1073,6 @@ async fn socket_loop(
                 reason: "".into(),
             })))
             .await;
-        unregister_call(&state, &id);
         return;
     }
     let session = match state
@@ -1098,7 +1089,6 @@ async fn socket_loop(
                     reason: "".into(),
                 })))
                 .await;
-            unregister_call(&state, &id);
             return;
         }
     };
@@ -1106,7 +1096,7 @@ async fn socket_loop(
     let _ = socket.send(Message::Text(json!({"type":"voice-session","data":{"session_id":session,"sample_rate":16000,"channels":1,"room":room_info}}).to_string().into())).await;
     loop {
         tokio::select! {
-            _ = revoked.changed() => {
+            _ = registration.changed() => {
                 let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: close_reason.into() }))).await;
                 break;
             }
@@ -1138,8 +1128,28 @@ async fn socket_loop(
         }
     }
     state.room.leave(&session);
-    drop(revoked);
-    unregister_call(&state, &id);
+}
+
+struct CallRegistration {
+    state: Arc<AppState>,
+    id: String,
+    receiver: Option<watch::Receiver<bool>>,
+}
+impl CallRegistration {
+    fn new(state: Arc<AppState>, id: String) -> Self {
+        let (sender, receiver) = watch::channel(false);
+        state.calls.lock().expect("calls lock").entry(id.clone()).or_default().push(sender);
+        Self { state, id, receiver: Some(receiver) }
+    }
+    async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        self.receiver.as_mut().expect("call receiver present").changed().await
+    }
+}
+impl Drop for CallRegistration {
+    fn drop(&mut self) {
+        drop(self.receiver.take());
+        unregister_call(&self.state, &self.id);
+    }
 }
 
 fn unregister_call(state: &AppState, id: &str) {
@@ -1214,5 +1224,27 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn repeated_browser_refusals_release_registration_senders() {
+        let temp=tempfile::tempdir().unwrap();
+        let dir=PrivateDir::open(temp.path().join("core")).unwrap();
+        let identity=NodeIdentity::load_or_create(&dir).unwrap();
+        let registry=DeviceRegistry::load(dir.clone()).unwrap();
+        let state=Arc::new(AppState::new(dir.clone(),identity,registry,"fixture".into(),"host".into(),8768,
+            Arc::new(Room::load(dir).unwrap())));
+        for _ in 0..64 {
+            let registration=CallRegistration::new(state.clone(),"device".into());
+            assert_eq!(state.calls.lock().unwrap()["device"].len(),1);
+            drop(registration);
+            assert!(!state.calls.lock().unwrap().contains_key("device"));
+        }
+        let first=CallRegistration::new(state.clone(),"device".into());
+        let second=CallRegistration::new(state.clone(),"device".into());
+        drop(first);
+        assert_eq!(state.calls.lock().unwrap()["device"].len(),1);
+        drop(second);
+        assert!(!state.calls.lock().unwrap().contains_key("device"));
     }
 }
