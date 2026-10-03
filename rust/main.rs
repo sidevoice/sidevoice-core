@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use opus::{Application, Channels, Decoder, Encoder};
 use serde_json::json;
 use sidevoice_core::messages::{render, LocalizedMessage};
 use sidevoice_core::pipeline::probe_detectors;
@@ -45,7 +46,19 @@ async fn main() {
         )
         .await
         {
-            Ok(readout) => println!("{}", json!({"detectors": readout})),
+            Ok(readout) => match probe_codec() {
+                Ok(samples) => println!(
+                    "{}",
+                    json!({"detectors": readout, "opus_decoded_samples": samples})
+                ),
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        json!({"error_key": "rust_core_t0_detector_failed", "detail": error})
+                    );
+                    std::process::exit(1);
+                }
+            },
             Err(error) => {
                 eprintln!(
                     "{}",
@@ -70,4 +83,25 @@ async fn main() {
         }
     };
     std::process::exit(runtime::run(config).await);
+}
+
+fn probe_codec() -> Result<usize, String> {
+    let mut encoder = Encoder::new(16_000, Channels::Mono, Application::Audio)
+        .map_err(|error| error.to_string())?;
+    let mut decoder = Decoder::new(16_000, Channels::Mono).map_err(|error| error.to_string())?;
+    let pcm: Vec<i16> = (0..320)
+        .map(|sample| ((sample as f32 * 0.08).sin() * 4_000.0) as i16)
+        .collect();
+    let mut packet = [0_u8; 1500];
+    let size = encoder
+        .encode(&pcm, &mut packet)
+        .map_err(|error| error.to_string())?;
+    let mut decoded = [0_i16; 320];
+    let samples = decoder
+        .decode(&packet[..size], &mut decoded, false)
+        .map_err(|error| error.to_string())?;
+    if samples != 320 || decoded.iter().all(|sample| *sample == 0) {
+        return Err("opus_roundtrip_empty".to_owned());
+    }
+    Ok(samples)
 }

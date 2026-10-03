@@ -60,3 +60,96 @@ jobs:
             readelf -d target/release/sidevoice-core-rust | grep -E 'NEEDED|RPATH|RUNPATH'
             find target/release -maxdepth 1 -name '*onnxruntime*.so*' -print
           fi
+      - name: Package and relocate verified native archive
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets/native
+          ARCHIVE="assets/native/sidevoice-core-rust-${GITHUB_SHA}-${TARGET}.tar.zst"
+          python3 tools/rust_native_bundle.py build --target "$TARGET" \
+            --binary target/release/sidevoice-core-rust --models "$RUSTVANI_CACHE_DIR" \
+            --output "$ARCHIVE" --source-sha "$GITHUB_SHA" \
+            --epoch "$(git show -s --format=%ct HEAD)" > "$RUNNER_TEMP/native-build.json"
+          python3 tools/rust_native_bundle.py verify --archive "$ARCHIVE" \
+            > "$RUNNER_TEMP/native-verify.json"
+          cat "$RUNNER_TEMP/native-build.json" "$RUNNER_TEMP/native-verify.json"
+      - name: Prove default mDNS peer and gathered offer on a routed local interface
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/t7-rtc"
+          zstd -dc "assets/native/sidevoice-core-rust-${GITHUB_SHA}-linux-x86_64.tar.zst" \
+            | tar -xf - -C "$RUNNER_TEMP/t7-rtc"
+          docker build -f tests/rust_t7.Dockerfile -t sidevoice-rust-t7-rtc .
+          docker run --rm --network bridge --cap-add NET_ADMIN --read-only --tmpfs /tmp \
+            -e RUSTVANI_CACHE_DIR=/bundle/models \
+            -v "$RUNNER_TEMP/t7-rtc/sidevoice-core-rust:/bundle:ro" \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -w /workspace \
+            sidevoice-rust-t7-rtc /opt/t7-venv/bin/python \
+            tests/rust_t7_rtc_hosted.py /bundle/bin/sidevoice-core-rust
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-native-${{ matrix.target }}
+          path: assets/native/*.tar.zst
+          retention-days: 14
+          if-no-files-found: error
+
+  manifest:
+    needs: native
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: rust-native-*
+          path: assets/native
+          merge-multiple: true
+      - name: Write closed signed-input manifest
+        run: python3 tools/rust_native_bundle.py manifest --assets assets/native --source-sha "$GITHUB_SHA"
+      - name: Attest native manifest
+        id: attest-manifest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/native/native-core-manifest.json
+      - name: Save native manifest Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest-manifest.outputs.bundle-path }}
+        run: cp "$BUNDLE" assets/native/native-core-manifest.json.sigstore.json
+      - name: Attest macOS arm64 archive
+        id: attest-macos-aarch64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/native/sidevoice-core-rust-${{ github.sha }}-macos-aarch64.tar.zst
+      - name: Save macOS arm64 Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest-macos-aarch64.outputs.bundle-path }}
+        run: cp "$BUNDLE" assets/native/sidevoice-core-rust-${GITHUB_SHA}-macos-aarch64.tar.zst.sigstore.json
+      - name: Attest Linux x86_64 archive
+        id: attest-linux-x86_64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/native/sidevoice-core-rust-${{ github.sha }}-linux-x86_64.tar.zst
+      - name: Save Linux x86_64 Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest-linux-x86_64.outputs.bundle-path }}
+        run: cp "$BUNDLE" assets/native/sidevoice-core-rust-${GITHUB_SHA}-linux-x86_64.tar.zst.sigstore.json
+      - name: Attest Linux aarch64 archive
+        id: attest-linux-aarch64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: assets/native/sidevoice-core-rust-${{ github.sha }}-linux-aarch64.tar.zst
+      - name: Save Linux aarch64 Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest-linux-aarch64.outputs.bundle-path }}
+        run: cp "$BUNDLE" assets/native/sidevoice-core-rust-${GITHUB_SHA}-linux-aarch64.tar.zst.sigstore.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-native-signed-inputs
+          path: assets/native/
+          retention-days: 14
+          if-no-files-found: error
