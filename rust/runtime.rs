@@ -388,6 +388,13 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
+    let rendezvous = server::rendezvous::Rendezvous::new(
+        config.room_credential.as_ref().map(PathBuf::from),
+        url::Url::parse(&format!("http://127.0.0.1:{port}/"))
+            .map_err(|_| StartFailure::new("start", "start.failed"))?,
+        machine_host.clone(),
+        room.clone(),
+    );
     let state = Arc::new(AppState::new(
         dir.clone(),
         identity,
@@ -396,6 +403,7 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         machine_host,
         port,
         room.clone(),
+        rendezvous.clone(),
     ));
     let delivery_task = tokio::spawn(room.pump());
     let ready = json!({"pid": std::process::id(), "port": port, "url": format!("http://127.0.0.1:{port}"),
@@ -452,6 +460,7 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         .await;
         return Err(error);
     }
+    let mut rendezvous_task = tokio::spawn(rendezvous.clone().run());
     let crashed = tokio::select! {
         _ = stop_signal() => false,
         _ = &mut tcp_task => true,
@@ -459,6 +468,14 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
         _ = watch_idle(state, config.idle_exit), if config.idle_exit > 0.0 => false,
     };
     let _ = stopping.send(true);
+    rendezvous.stop();
+    if tokio::time::timeout(Duration::from_secs(10), &mut rendezvous_task)
+        .await
+        .is_err()
+    {
+        rendezvous_task.abort();
+        let _ = rendezvous_task.await;
+    }
     let _ = tokio::time::timeout(Duration::from_secs(10), async {
         if !tcp_task.is_finished() {
             let _ = tcp_task.await;

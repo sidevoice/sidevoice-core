@@ -35,6 +35,24 @@ class TtsFixture(http.server.ThreadingHTTPServer):
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
 
+class MetricCollector(http.server.ThreadingHTTPServer):
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), MetricHandler)
+        self.received = []
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+
+class MetricHandler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        assert self.path == "/v1/metrics"
+        self.server.received.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, _format, *_args):
+        pass
+
+
 class TtsHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         assert self.path.startswith("/v1/text-to-speech/fixturevoice/stream/with-timestamps")
@@ -332,8 +350,10 @@ async def main():
         data = root / "core"
         data.mkdir(mode=0o700)
         fixture = TtsFixture()
+        collector = MetricCollector()
         env = {**os.environ, "SIDEVOICE_STUN_URLS": "", "VOICE_ELEVENLABS_API_KEY": "fixture-key",
                "SIDEVOICE_FIXTURE_STT_TIMEOUT_MS": "12000",
+               "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{collector.server_port}",
                "SIDEVOICE_ELEVENLABS_FIXTURE_BASE": f"http://127.0.0.1:{fixture.server_port}"}
         core = subprocess.Popen([str(CORE), "--data-dir", str(data), "--port", "0", "--idle-exit", "0"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
@@ -382,6 +402,14 @@ async def main():
                                          body={"session_id": session, "utterance_id": uid,
                                                "revision": speech["revision"], "status": status})
                         assert result[0] == 200, result
+                    status, trace = request(port, "GET", f"/api/presentation/latency?session_id={session}", token=token)
+                    assert status == 200 and trace["session_id"] == session, (status, trace)
+                    row = next(row for row in trace["replies"] if row["utterance_id"] == uid)
+                    assert row["input_ms"]["audio_ms"] > 0 and row["server_ms"]["input_queued_to_reply_received_ms"] >= 0, row
+                    assert request(port, "GET", f"/api/presentation/latency?session_id={session}")[0] == 401
+                    second = request(port, "POST", "/api/device/local/pair", unix=data / "local.sock",
+                                     body={"name": "Other T5 browser"})[1]["token"]
+                    assert request(port, "GET", f"/api/presentation/latency?session_id={session}", token=second)[0] == 404
                     if mode == "timer":
                         stale_uid = f"t5-barge-{uuid.uuid4()}"
                         peer.send({"op": "publish", "session_id": session, "revision": revision,
@@ -488,6 +516,8 @@ async def main():
                     await browser.close()
                     await replacement.close()
             print("T5 PASS: recorded SmartTurn/timer, mixed SDK/device reply, barge-in, RTC replacement/WS fallback, revoke")
+            until(lambda: any("sidevoice.turn.endpoint_silence" in json.dumps(item)
+                              for item in collector.received), timeout=5)
         except Exception:
             if core.poll() is None:
                 core.terminate()
@@ -497,6 +527,8 @@ async def main():
         finally:
             fixture.shutdown()
             fixture.server_close()
+            collector.shutdown()
+            collector.server_close()
             if peer:
                 peer.stop()
             if bridge:

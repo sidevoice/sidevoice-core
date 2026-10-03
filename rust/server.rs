@@ -12,6 +12,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine;
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -21,6 +22,7 @@ use uuid::Uuid;
 
 use crate::control::devices::{valid_nonce, DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
+use crate::control::{latency, room};
 use crate::messages::{render, LocalizedMessage};
 use crate::providers::cache::SynthesisCache;
 use crate::runtime::API;
@@ -30,10 +32,12 @@ mod connectors_v2;
 mod connectors_v3;
 mod media;
 mod rtc;
+pub mod rendezvous;
 
 pub struct AppState {
     pub dir: PrivateDir,
     pub room: Arc<Room>,
+    pub rendezvous: Arc<rendezvous::Rendezvous>,
     pub identity: NodeIdentity,
     registry: Mutex<DeviceRegistry>,
     calls: Mutex<HashMap<String, Vec<watch::Sender<bool>>>>,
@@ -48,6 +52,10 @@ pub struct AppState {
 struct AuthenticatedDevice(String);
 
 impl AppState {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared application owners are explicit at construction"
+    )]
     pub fn new(
         dir: PrivateDir,
         identity: NodeIdentity,
@@ -56,10 +64,12 @@ impl AppState {
         host: String,
         port: u16,
         room: Arc<Room>,
+        rendezvous: Arc<rendezvous::Rendezvous>,
     ) -> Self {
         Self {
             dir,
             room,
+            rendezvous,
             identity,
             registry: Mutex::new(registry),
             calls: Mutex::new(HashMap::new()),
@@ -82,11 +92,20 @@ impl AppState {
                 urls.push(value.to_owned());
             }
         }
-        self.registry.lock().expect("registry lock").issue_code(
+        let mut code = self.registry.lock().expect("registry lock").issue_code(
             &self.identity,
             Some(&self.host),
             &urls,
-        )
+        );
+        if let Some(rv) = self.rendezvous.room_for_devices() {
+            code["payload"]["rv"] = rv;
+            let payload = serde_json::to_vec(&code["payload"]).expect("pairing payload");
+            code["code"] = json!(format!(
+                "SV1.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+            ));
+        }
+        code
     }
 
     pub fn open_calls(&self) -> usize {
@@ -118,7 +137,7 @@ impl AppState {
     }
 }
 
-fn safe_url(value: &str) -> bool {
+pub(crate) fn safe_url(value: &str) -> bool {
     let Ok(parsed) = Url::parse(value) else {
         return false;
     };
@@ -149,7 +168,7 @@ fn safe_url(value: &str) -> bool {
         })
 }
 
-fn local_only(path: &str) -> bool {
+pub(crate) fn local_only(path: &str) -> bool {
     let mut decoded = path.to_owned();
     for _ in 0..2 {
         decoded = percent_decode_str(&decoded).decode_utf8_lossy().to_string();
@@ -339,7 +358,9 @@ async fn guard(
         return response;
     }
     let open = (request.method() == axum::http::Method::GET
-        && matches!(path.as_str(), "/api/rendezvous" | "/api/device/identity"))
+        && (matches!(path.as_str(), "/api/rendezvous" | "/api/device/identity")
+            || path == "/api/rendezvous/link"
+            || path == "/api/rendezvous/link/"))
         || (request.method() == axum::http::Method::POST && path == "/api/device/pair")
         || (local && local_only(&path));
     let is_ws = request.method() == axum::http::Method::GET
@@ -380,6 +401,7 @@ async fn guard(
 pub fn router(state: Arc<AppState>, local: bool) -> Router {
     let mut router = Router::new()
         .route("/api/rendezvous", get(rendezvous))
+        .route("/api/rendezvous/pair", post(rendezvous_pair))
         .route("/api/device/identity", get(identity))
         .route("/api/device/pair", post(pair))
         .route("/api/device/devices", get(devices))
@@ -388,6 +410,7 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             axum::routing::delete(revoke),
         )
         .route("/api/presentation/ws", get(call_socket))
+        .route("/api/presentation/latency", get(presentation_latency))
         .route("/api/presentation/rtc/config", get(rtc::config))
         .route("/api/presentation/rtc/offer", post(rtc::offer));
     router = router
@@ -424,19 +447,13 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             .route("/api/device/local", axum::routing::delete(unpair_local));
         router = router.route("/api/connectors/v3", get(connector_v3));
     }
-    let router =
-        router
-            .fallback(not_found)
-            .with_state(state.clone())
-            .layer(middleware::from_fn_with_state(
-                (state.clone(), local),
-                guard,
-            ));
-    if local {
-        connectors_v2::layer(router, state)
+    let router = router.fallback(not_found).with_state(state.clone());
+    let router = if local {
+        connectors_v2::layer(router, state.clone())
     } else {
-        router
-    }
+        rendezvous::layer(router, state.clone())
+    };
+    router.layer(middleware::from_fn_with_state((state, local), guard))
 }
 
 fn room_failure(error: crate::control::room::RoomError, headers: &HeaderMap) -> Response {
@@ -461,6 +478,49 @@ async fn presentation_state(
     uri: axum::http::Uri,
 ) -> Json<Value> {
     Json(state.room.snapshot(query(&uri, "session_id").as_deref()))
+}
+async fn presentation_latency(
+    State(state): State<Arc<AppState>>,
+    Extension(AuthenticatedDevice(device)): Extension<AuthenticatedDevice>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(sid) = query(&uri, "session_id") else {
+        return failure("room.browser_absent", StatusCode::NOT_FOUND, &headers);
+    };
+    let Some((language, marks, replies)) = state.room.latency_records(&sid, &device) else {
+        return failure("room.browser_absent", StatusCode::NOT_FOUND, &headers);
+    };
+    let input: Vec<Vec<latency::Duration<'_>>> = replies.iter().map(|reply| reply.input_ms.iter().map(|item| latency::Duration { name: &item.name, milliseconds: item.milliseconds }).collect()).collect();
+    let provider: Vec<Vec<latency::Duration<'_>>> = replies.iter().map(|reply| reply.provider_ms.iter().map(|item| latency::Duration { name: &item.name, milliseconds: item.milliseconds }).collect()).collect();
+    let browser: Vec<Vec<latency::Duration<'_>>> = replies.iter().map(|reply| reply.browser_ms.iter().map(|item| latency::Duration { name: &item.name, milliseconds: item.milliseconds }).collect()).collect();
+    let borrowed: Vec<_> = replies.iter().enumerate().map(|(index, reply)| latency::Reply {
+        session_id: &reply.session_id, thread_id: &reply.thread_id, revision: reply.revision,
+        utterance_id: &reply.utterance_id, status: &reply.status,
+        synthesis_attempt: reply.synthesis_attempt, input_ms: &input[index],
+        provider_ms: &provider[index], browser_ms: &browser[index],
+    }).collect();
+    let borrowed_marks: Vec<_> = marks.iter().map(|mark| latency::Mark {
+        session_id: &mark.session_id, thread_id: &mark.thread_id, revision: mark.revision,
+        utterance_id: mark.utterance_id.as_deref(), event: match mark.event {
+            room::LatencyEvent::SpeechEnd => latency::Event::SpeechEnd,
+            room::LatencyEvent::TurnClosed => latency::Event::TurnClosed,
+            room::LatencyEvent::Transcript => latency::Event::Transcript,
+            room::LatencyEvent::TranscriptDelivered => latency::Event::TranscriptDelivered,
+            room::LatencyEvent::Queued => latency::Event::Queued,
+            room::LatencyEvent::DeliveryAccepted => latency::Event::DeliveryAccepted,
+            room::LatencyEvent::Read => latency::Event::Read,
+            room::LatencyEvent::ReplyReceived => latency::Event::ReplyReceived,
+            room::LatencyEvent::SynthesisStarted => latency::Event::SynthesisStarted,
+            room::LatencyEvent::AudioReady => latency::Event::AudioReady,
+            room::LatencyEvent::AudioDispatched => latency::Event::AudioDispatched,
+            room::LatencyEvent::PlayingReceipt => latency::Event::PlayingReceipt,
+        }, at_micros: mark.at_micros,
+    }).collect();
+    Json(latency::snapshot(&sid, &language, &borrowed_marks, &borrowed)).into_response()
 }
 async fn presentation_admission(
     State(state): State<Arc<AppState>>,
@@ -867,6 +927,61 @@ async fn not_found(headers: HeaderMap) -> Response {
 
 async fn rendezvous(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"kind": "node", "fingerprint": state.identity.fingerprint, "api": API}))
+}
+
+#[derive(Deserialize)]
+struct PairRoom {
+    room: String,
+    code: String,
+}
+
+async fn rendezvous_pair(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if headers.get(header::ORIGIN).is_none() || !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Ok(input) = serde_json::from_slice::<PairRoom>(&body) else {
+        return failure(
+            "relay.pair_invalid",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+        );
+    };
+    let room = input.room.trim();
+    let code = input.code.trim();
+    if room.is_empty() || room.len() > 2048 || code.is_empty() || code.len() > 64 {
+        return failure(
+            "relay.pair_invalid",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+        );
+    }
+    let Some(peer) = state.room.connector_peer() else {
+        return failure(
+            "relay.connector_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+            &headers,
+        );
+    };
+    let answer = peer
+        .request(
+            "pair.request",
+            json!({"room":room,"code":code}),
+            std::time::Duration::from_secs(25),
+        )
+        .await;
+    let Ok(answer) = answer else {
+        return failure("relay.pair_timeout", StatusCode::GATEWAY_TIMEOUT, &headers);
+    };
+    if answer.get("ok") != Some(&Value::Bool(true)) {
+        return failure("relay.pair_failed", StatusCode::BAD_REQUEST, &headers);
+    }
+    state.rendezvous.poke();
+    Json(json!({"ok":true,"room":answer.get("origin"),"connector_id":answer.get("connector_id")}))
+        .into_response()
 }
 
 async fn identity(
@@ -1309,6 +1424,13 @@ mod tests {
         let dir = PrivateDir::open(temp.path().join("core")).unwrap();
         let identity = NodeIdentity::load_or_create(&dir).unwrap();
         let registry = DeviceRegistry::load(dir.clone()).unwrap();
+        let room = Arc::new(Room::load(dir.clone()).unwrap());
+        let relay = rendezvous::Rendezvous::new(
+            None,
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            "fixture-host".to_owned(),
+            room.clone(),
+        );
         let state = Arc::new(AppState::new(
             dir.clone(),
             identity,
@@ -1316,7 +1438,8 @@ mod tests {
             "fixture".to_owned(),
             "fixture-host".to_owned(),
             8768,
-            Arc::new(Room::load(dir.clone()).unwrap()),
+            room,
+            relay,
         ));
         let code = state.issue_code();
         assert!(code["code"].as_str().unwrap().starts_with("SV1."));
@@ -1366,6 +1489,13 @@ mod tests {
         let dir = PrivateDir::open(temp.path().join("core")).unwrap();
         let identity = NodeIdentity::load_or_create(&dir).unwrap();
         let registry = DeviceRegistry::load(dir.clone()).unwrap();
+        let room = Arc::new(Room::load(dir.clone()).unwrap());
+        let relay = rendezvous::Rendezvous::new(
+            None,
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            "host".to_owned(),
+            room.clone(),
+        );
         let state = Arc::new(AppState::new(
             dir.clone(),
             identity,
@@ -1373,7 +1503,8 @@ mod tests {
             "fixture".into(),
             "host".into(),
             8768,
-            Arc::new(Room::load(dir).unwrap()),
+            room,
+            relay,
         ));
         for _ in 0..64 {
             let registration = CallRegistration::new(state.clone(), "device".into());

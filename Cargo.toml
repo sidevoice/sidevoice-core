@@ -20,6 +20,7 @@ async-openai = { version = "=0.41.0", default-features = false, features = ["aud
 async-trait = "=0.1.89"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "=0.22.1"
+bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 elevenlabs-sdk = "=0.1.0"
 fs2 = "0.4"
@@ -34,16 +35,20 @@ percent-encoding = "=2.3.2"
 rand = "0.8"
 reqwest = { version = "=0.13.0", default-features = false, features = ["json", "multipart", "rustls"] }
 rtc = { version = "=0.21.0", optional = true }
+rmpv = { version = "1", features = ["with-serde"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", features = ["process"] }
 rustvani = { git = "https://github.com/Allenmylath/rustvani.git", rev = "d01f33e671f7a4d8a128e7bfe55dbf0e8963cb21", default-features = false, features = ["vad-silero-ort"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "=0.10.9"
+sioc = "=0.5.0"
 socketioxide = { version = "0.18.7", features = ["state"] }
+subtle = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "io-util"] }
 tower = { version = "=0.5.3", features = ["retry", "util"] }
+tokio-tungstenite = { version = "0.30", features = ["connect", "rustls-tls-native-roots"] }
 unicode-normalization = "0.1"
 unicode-script = "=0.5.8"
 uuid = { version = "1", features = ["v4"] }

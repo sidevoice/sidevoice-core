@@ -1,7 +1,7 @@
 //! One owner for connector credentials, bindings and process-local conversation state.
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use crate::storage::PrivateDir;
+use super::telemetry::Telemetry;
 
 const MAX_HISTORY: usize = 2000;
 const MAX_UTTERANCES: usize = 2048;
@@ -291,6 +292,7 @@ struct UtteranceRecord {
     parked: bool,
 }
 struct Inner {
+    telemetry: Option<Arc<Telemetry>>,
     connectors: Map<String, Value>,
     pairing: HashMap<String, u64>,
     peers: HashMap<String, ConnectorPeer>,
@@ -327,6 +329,7 @@ impl Room {
         Ok(Self {
             dir,
             inner: Mutex::new(Inner {
+                telemetry: Telemetry::from_env().map(Arc::new),
                 connectors,
                 pairing: HashMap::new(),
                 peers: HashMap::new(),
@@ -585,6 +588,37 @@ impl Room {
             .iter()
             .rev()
             .find_map(|cid| inner.peers.get(cid).cloned())
+    }
+    pub async fn rendezvous_changed(&self, state: Value) {
+        let peers: Vec<ConnectorPeer> = self
+            .inner
+            .lock()
+            .expect("room lock")
+            .peers
+            .values()
+            .cloned()
+            .collect();
+        for peer in peers {
+            let _ = peer.send("node.rendezvous", state.clone()).await;
+        }
+    }
+    pub fn latest_connector_identity(&self) -> Value {
+        let inner = self.inner.lock().expect("room lock");
+        let Some(row) = inner
+            .peer_order
+            .iter()
+            .rev()
+            .find_map(|id| inner.connectors.get(id))
+        else {
+            return json!({});
+        };
+        let mut result = Map::new();
+        for key in ["host", "platform", "version", "harnesses"] {
+            if let Some(value) = row.get(key) {
+                result.insert(key.to_owned(), value.clone());
+            }
+        }
+        Value::Object(result)
     }
     pub fn register(&self, cid: &str, data: &Value) -> Result<Value, RoomError> {
         let thread = field(data, "thread");
@@ -963,6 +997,18 @@ impl Room {
                     inner.latency_input.remove(&oldest);
                 }
             }
+        }
+        let stage = match name {
+            "request_to_transcript_ms" => Some("request_to_transcript"),
+            "request_to_complete_ms" => Some("provider_synthesis"),
+            "audio_received_to_playback_scheduled_ms" => Some("audio_received_to_playback"),
+            _ => None,
+        };
+        if let (Some(stage), Some(telemetry)) = (stage, inner.telemetry.as_ref()) {
+            telemetry.try_observe(stage, milliseconds, &json!({
+                "sidevoice.session_id": sid, "sidevoice.thread_id": thread,
+                "sidevoice.turn_revision": revision, "sidevoice.utterance_id": uid,
+            }));
         }
     }
     /// Clone only the authenticated call's bounded records for T6's borrowed snapshot API.
@@ -2084,6 +2130,33 @@ fn mark_latency(
                 reply.synthesis_attempt += 1;
                 reply.provider_ms.clear();
                 reply.browser_ms.clear();
+            }
+        }
+    }
+    let stages: &[(&str, LatencyEvent, bool)] = match event {
+        LatencyEvent::TurnClosed => &[("endpoint_silence", LatencyEvent::SpeechEnd, false)],
+        LatencyEvent::Transcript => &[("recognition", LatencyEvent::TurnClosed, false)],
+        LatencyEvent::TranscriptDelivered => &[("transcript_to_delivery", LatencyEvent::Transcript, false)],
+        LatencyEvent::Read => &[("delivery_to_read", LatencyEvent::DeliveryAccepted, false)],
+        LatencyEvent::ReplyReceived => &[
+            ("read_to_reply", LatencyEvent::Read, false),
+            ("input_queued_to_reply", LatencyEvent::Queued, false),
+        ],
+        LatencyEvent::SynthesisStarted => &[("reply_to_synthesis", LatencyEvent::ReplyReceived, true)],
+        _ => &[],
+    };
+    if let (Some(telemetry), Some(marks)) = (inner.telemetry.as_ref(), inner.latency_marks.get(sid)) {
+        for &(stage, start_event, same_uid) in stages {
+            let started = marks.iter().rev().find(|mark| {
+                mark.thread_id == thread && mark.revision == revision
+                    && mark.event == start_event
+                    && mark.utterance_id.as_deref() == if same_uid { uid } else { None }
+            });
+            if let Some(milliseconds) = started.and_then(|mark| at_micros.checked_sub(mark.at_micros)) {
+                telemetry.try_observe(stage, milliseconds as f64 / 1000.0, &json!({
+                    "sidevoice.session_id": sid, "sidevoice.thread_id": thread,
+                    "sidevoice.turn_revision": revision, "sidevoice.utterance_id": uid,
+                }));
             }
         }
     }
