@@ -50,5 +50,8 @@
   "check_duration": "The model produced {seconds_display} s of audio for a phrase that takes about five.",
   "provider_key_refused": "{provider_label} refused the key.",
   "provider_unreachable": "{provider_label} could not be reached.",
-  "provider_failed": "{provider_label} failed: {detail}."
+  "provider_failed": "{provider_label} failed: {detail}.",
+  "catalog.elevenlabs.fast": "Fast",
+  "catalog.elevenlabs.multilingual": "Multilingual quality",
+  "catalog.elevenlabs.expressive": "More expressive"
 }

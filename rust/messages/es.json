@@ -50,5 +50,8 @@
   "check_duration": "El modelo produjo {seconds_display} s de audio para una frase que dura unos cinco.",
   "provider_key_refused": "{provider_label} rechazó la clave.",
   "provider_unreachable": "No se pudo conectar con {provider_label}.",
-  "provider_failed": "{provider_label} falló: {detail}."
+  "provider_failed": "{provider_label} falló: {detail}.",
+  "catalog.elevenlabs.fast": "Rápido",
+  "catalog.elevenlabs.multilingual": "Calidad multilingüe",
+  "catalog.elevenlabs.expressive": "Más expresivo"
 }
