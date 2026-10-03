@@ -40,6 +40,8 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
           cargo build --locked --bin sidevoice-core-rust
+          cargo clippy --locked --all-targets --features hosted-fixtures -- -D warnings
+          cargo build --locked --features hosted-fixtures --bin sidevoice-core-rust
       - name: Prepare pinned client and offline voice fixture
         run: |
           test "$(git -C peer/connector-js rev-parse HEAD)" = ddb4bd1e0c95e7997787fe4ab98e7d812fbe2390

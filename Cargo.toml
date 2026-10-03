@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.98"
 publish = false
 
+[features]
+hosted-fixtures = []
+
 [lib]
 path = "rust/lib.rs"
 

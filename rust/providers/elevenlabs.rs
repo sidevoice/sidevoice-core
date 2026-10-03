@@ -57,6 +57,10 @@ pub struct ElevenLabsCatalog {
 
 impl ElevenLabsTts {
     pub fn new(api_key: &str) -> Result<Self, ProviderError> {
+        #[cfg(feature = "hosted-fixtures")]
+        if let Ok(base_url) = std::env::var("SIDEVOICE_ELEVENLABS_FIXTURE_BASE") {
+            return Self::with_config(api_key, &base_url, SYNTHESIS_TIMEOUT);
+        }
         Self::with_config(api_key, ELEVENLABS_API_BASE, SYNTHESIS_TIMEOUT)
     }
 
