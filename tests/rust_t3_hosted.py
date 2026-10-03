@@ -216,7 +216,7 @@ async def main():
                     until(lambda: active_calls() == 1)
                     async with websockets.connect(browser_url, subprotocols=browser_protocols) as refused:
                         await refused.send(json.dumps({"type": "voice-hello", "data": {
-                            "settings": {"tts": {"place": "host"}}}}))
+                            "settings": {"tts": {"place": "host", "model": "kokoro-82m-v1.0"}}}}))
                         assert (await frame(refused, "error"))["key"] == "place_host_unavailable"
                         await refused.wait_closed()
                         assert refused.close_code == 1008

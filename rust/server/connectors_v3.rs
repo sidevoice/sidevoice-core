@@ -219,7 +219,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":-9223372036854775808,"method":"input.read","params":{}}"#,
             r#"{"jsonrpc":"2.0","id":-9223372036854775808,"result":{}}"#,
         ] {
-            assert_eq!(decode(frame).unwrap_err(),1002);
+            assert_eq!(decode(frame).unwrap_err(), 1002);
         }
         assert!(decode(r#"{"jsonrpc":"2.0","id":-9007199254740991,"result":{}}"#).is_ok());
     }

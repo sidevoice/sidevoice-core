@@ -1138,11 +1138,25 @@ struct CallRegistration {
 impl CallRegistration {
     fn new(state: Arc<AppState>, id: String) -> Self {
         let (sender, receiver) = watch::channel(false);
-        state.calls.lock().expect("calls lock").entry(id.clone()).or_default().push(sender);
-        Self { state, id, receiver: Some(receiver) }
+        state
+            .calls
+            .lock()
+            .expect("calls lock")
+            .entry(id.clone())
+            .or_default()
+            .push(sender);
+        Self {
+            state,
+            id,
+            receiver: Some(receiver),
+        }
     }
     async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
-        self.receiver.as_mut().expect("call receiver present").changed().await
+        self.receiver
+            .as_mut()
+            .expect("call receiver present")
+            .changed()
+            .await
     }
 }
 impl Drop for CallRegistration {
@@ -1228,22 +1242,29 @@ mod tests {
 
     #[test]
     fn repeated_browser_refusals_release_registration_senders() {
-        let temp=tempfile::tempdir().unwrap();
-        let dir=PrivateDir::open(temp.path().join("core")).unwrap();
-        let identity=NodeIdentity::load_or_create(&dir).unwrap();
-        let registry=DeviceRegistry::load(dir.clone()).unwrap();
-        let state=Arc::new(AppState::new(dir.clone(),identity,registry,"fixture".into(),"host".into(),8768,
-            Arc::new(Room::load(dir).unwrap())));
+        let temp = tempfile::tempdir().unwrap();
+        let dir = PrivateDir::open(temp.path().join("core")).unwrap();
+        let identity = NodeIdentity::load_or_create(&dir).unwrap();
+        let registry = DeviceRegistry::load(dir.clone()).unwrap();
+        let state = Arc::new(AppState::new(
+            dir.clone(),
+            identity,
+            registry,
+            "fixture".into(),
+            "host".into(),
+            8768,
+            Arc::new(Room::load(dir).unwrap()),
+        ));
         for _ in 0..64 {
-            let registration=CallRegistration::new(state.clone(),"device".into());
-            assert_eq!(state.calls.lock().unwrap()["device"].len(),1);
+            let registration = CallRegistration::new(state.clone(), "device".into());
+            assert_eq!(state.calls.lock().unwrap()["device"].len(), 1);
             drop(registration);
             assert!(!state.calls.lock().unwrap().contains_key("device"));
         }
-        let first=CallRegistration::new(state.clone(),"device".into());
-        let second=CallRegistration::new(state.clone(),"device".into());
+        let first = CallRegistration::new(state.clone(), "device".into());
+        let second = CallRegistration::new(state.clone(), "device".into());
         drop(first);
-        assert_eq!(state.calls.lock().unwrap()["device"].len(),1);
+        assert_eq!(state.calls.lock().unwrap()["device"].len(), 1);
         drop(second);
         assert!(!state.calls.lock().unwrap().contains_key("device"));
     }
