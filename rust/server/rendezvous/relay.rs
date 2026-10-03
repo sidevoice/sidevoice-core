@@ -293,7 +293,13 @@ impl Relay {
                     },
                 }
             }
-            if self_ref.channels.lock().await.remove(&task_channel).is_some() {
+            if self_ref
+                .channels
+                .lock()
+                .await
+                .remove(&task_channel)
+                .is_some()
+            {
                 self_ref.close_to_room(task_channel).await;
             }
         });
@@ -439,28 +445,54 @@ mod tests {
         assert_eq!(event, "relay.close");
         assert_eq!(frame.get("channel").and_then(Part::text), Some("blocked"));
         assert!(relay.channels.lock().await.is_empty());
-        let _ = relay.handle("relay.data", Part::object([
-            ("channel", Part::Text("blocked".into())),
-            ("data", Part::Text("late".into())),
-        ])).await;
-        assert!(room.try_recv().is_err(), "the room must see exactly one close");
+        let _ = relay
+            .handle(
+                "relay.data",
+                Part::object([
+                    ("channel", Part::Text("blocked".into())),
+                    ("data", Part::Text("late".into())),
+                ]),
+            )
+            .await;
+        assert!(
+            room.try_recv().is_err(),
+            "the room must see exactly one close"
+        );
         tokio::time::timeout(Duration::from_secs(1), relay.shutdown())
             .await
             .unwrap();
 
         let (outbound, _room) = mpsc::channel(1);
         outbound.send(("relay.data", Part::Null)).await.unwrap();
-        let relay = Arc::new(Relay::new(Url::parse("http://127.0.0.1:8768/").unwrap(), outbound));
+        let relay = Arc::new(Relay::new(
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            outbound,
+        ));
         let (sender, _receiver) = mpsc::channel(1);
         sender.send(Message::text("held")).await.unwrap();
         let task = tokio::spawn(std::future::pending());
-        relay.channels.lock().await.insert("blocked".into(), Channel { sender, task });
-        tokio::time::timeout(Duration::from_secs(1), relay.handle("relay.data", Part::object([
-            ("channel", Part::Text("blocked".into())),
-            ("data", Part::Binary(vec![0, 1])),
-        ]))).await.unwrap();
+        relay
+            .channels
+            .lock()
+            .await
+            .insert("blocked".into(), Channel { sender, task });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            relay.handle(
+                "relay.data",
+                Part::object([
+                    ("channel", Part::Text("blocked".into())),
+                    ("data", Part::Binary(vec![0, 1])),
+                ]),
+            ),
+        )
+        .await
+        .unwrap();
         let stopped = relay.stopped();
-        assert!(*stopped.borrow(), "an undeliverable close must stop the link");
+        assert!(
+            *stopped.borrow(),
+            "an undeliverable close must stop the link"
+        );
         relay.shutdown().await;
     }
 

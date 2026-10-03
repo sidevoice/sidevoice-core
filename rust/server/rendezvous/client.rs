@@ -79,18 +79,19 @@ impl Acknowledge<BinaryAck, HasBinary> for BinaryAnswer {
     }
 }
 
-pub(super) async fn emit(sender: &SocketSender, event: &str, part: Part) {
+async fn emit(sender: &SocketSender, event: &str, part: Part) -> bool {
     let mut attachments = Vec::new();
     let payload = json!([event, encode(part, &mut attachments)]).to_string();
     if attachments.is_empty() {
-        let _ = sender.emit(TextEvent(payload)).await;
+        sender.emit(TextEvent(payload)).await.is_ok()
     } else {
-        let _ = sender
+        sender
             .emit(BinaryEvent(
                 payload,
                 attachments.into_iter().map(Bytes::from).collect(),
             ))
-            .await;
+            .await
+            .is_ok()
     }
 }
 
@@ -201,7 +202,10 @@ pub(super) async fn run(rv: Arc<Rendezvous>, pairing: Pairing) -> Result<(), ()>
             },
             outbound = output.recv() => match outbound {
                 Some((event, part)) => {
-                    if tokio::time::timeout(Duration::from_secs(1), emit(&sender, event, part)).await.is_err() {
+                    if !matches!(
+                        tokio::time::timeout(Duration::from_secs(1), emit(&sender, event, part)).await,
+                        Ok(true)
+                    ) {
                         break;
                     }
                 },

@@ -578,8 +578,16 @@ mod tests {
             .await;
         let event = receiver.recv().await.unwrap();
         assert_eq!(event.method, "node.rendezvous");
+        assert_eq!(event.params["connected"], false);
         let reason = event.params["refused"].as_str().unwrap();
-        assert!(!reason.is_empty(), "Connector's truthy refusal branch must run");
+        assert!(
+            !reason.is_empty(),
+            "Connector's truthy refusal branch must run"
+        );
+        assert_eq!(
+            reason,
+            render(&LocalizedMessage::new("relay.hello_refused"), "en")
+        );
         assert_eq!(rv.snapshot()["refused"].as_str(), Some(reason));
         assert_eq!(
             hello_refusal(&serde_json::json!({"error": "specific"})),
