@@ -211,9 +211,21 @@ async def main():
             await peer.server.disconnect(previous, namespace="/nodes")
             await until(lambda: peer.connections >= 2 and peer.sid != previous, timeout=20)
             await admission()
+
+            # A room refusal is terminal for this pairing. Re-pairing clears it.
+            refused_connections = peer.connections
+            await peer.tell("node.revoked", {"reason": "fixture-refused"})
+            await asyncio.sleep(3)
+            assert peer.connections == refused_connections, "revoked pairing redialled"
+            pairing.write_text(json.dumps({"url": f"http://127.0.0.1:{room_port}",
+                                           "connector_id": "node-1", "token": "rotated-room-token",
+                                           "dial_key": "fixture-dial-key", "protocol": 3}))
+            await until(lambda: peer.connections > refused_connections and
+                        peer.auth["token"] == "rotated-room-token", timeout=20)
+            await admission()
             print(json.dumps({"ok": True, "peer": "python-socketio==5.17.0", "parallel_acks": 16,
                               "http_binary": True, "ws_binary": True, "dial_ack": True,
-                              "reconnected": True,
+                              "reconnected": True, "revoked_and_repaired": True,
                               "telemetry_endpoint": "unset"}))
         finally:
             if core is not None and core.poll() is None:
