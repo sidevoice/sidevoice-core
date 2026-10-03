@@ -1257,10 +1257,7 @@ fn validate_options(
             continue;
         };
         if let Some(value) = given.get(id) {
-            result.insert(
-                id.to_owned(),
-                option_value(option, id, value, model)?,
-            );
+            result.insert(id.to_owned(), option_value(option, id, value, model)?);
         } else if let Some(default) = option.get("default") {
             result.insert(id.to_owned(), normalized_default(option, default));
         }
@@ -1363,9 +1360,9 @@ fn voice_id(
     model: Option<&Value>,
     language: Option<&str>,
 ) -> Result<String, OptionFailure> {
-    let voice = voice.as_str().ok_or_else(|| {
-        OptionFailure::new(name, OptionFailureKind::Other)
-    })?;
+    let voice = voice
+        .as_str()
+        .ok_or_else(|| OptionFailure::new(name, OptionFailureKind::Other))?;
     if field_str(option, "from") == Some("model.voices") {
         let Some(model) = model else {
             return Err(OptionFailure::new(name, OptionFailureKind::Other));
@@ -1379,11 +1376,8 @@ fn voice_id(
             return Err(OptionFailure::new(name, OptionFailureKind::Other));
         };
         if let Some(language) = language {
-            let speaks = field_str(found, "language")
-                .unwrap_or("")
-                .split('-')
-                .next()
-                == Some(language);
+            let speaks =
+                field_str(found, "language").unwrap_or("").split('-').next() == Some(language);
             if !speaks {
                 return Err(OptionFailure::new(
                     name,
