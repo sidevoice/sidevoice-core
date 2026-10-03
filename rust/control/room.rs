@@ -1304,7 +1304,9 @@ impl Room {
             (target.thread_id.as_deref(), target.binding_id.as_deref())
         else {
             if let Some(browser) = inner.browsers.get(sid) {
-                let _ = browser.sender.try_send(json!({"type":"voice-input-receipt","data":{
+                let _ = browser
+                    .sender
+                    .try_send(json!({"type":"voice-input-receipt","data":{
                     "revision":0,"history_id":row_id,"thread_id":Value::Null,
                     "session_id":sid,"status":"not_sent"}}));
             }

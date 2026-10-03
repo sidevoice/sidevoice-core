@@ -132,7 +132,13 @@ impl CallDetector {
         let worker = tokio::spawn(async move {
             let _ = runner.run(rustvani::system_clock(), None).await;
         });
-        Ok(DetectorRun { task, worker, playing, #[cfg(test)] min_volume })
+        Ok(DetectorRun {
+            task,
+            worker,
+            playing,
+            #[cfg(test)]
+            min_volume,
+        })
     }
 
     /// Rustvani currently takes VadParams at construction. Swap its configured
@@ -287,7 +293,10 @@ mod tests {
         let mut settings = crate::models::default_settings(None, None);
         settings.turn_end_mode = "timer".into();
         let (detector, _events) = CallDetector::start(&settings).unwrap();
-        assert_eq!(detector.active.lock().await.min_volume, settings.vad_min_volume);
+        assert_eq!(
+            detector.active.lock().await.min_volume,
+            settings.vad_min_volume
+        );
         detector.listening_bar(true).await;
         let active = detector.active.lock().await;
         assert!(active.playing);
