@@ -35,7 +35,7 @@ jobs:
           docker run --rm --network none --read-only --tmpfs /tmp \
             -v "$GITHUB_WORKSPACE:/workspace:ro" \
             -v "$RUSTVANI_CACHE_DIR:/models:ro" \
-            -w /workspace ubuntu:24.04 \
+            -w /workspace ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe3488d921d038ccd752c61b60 \
             /workspace/target/debug/sidevoice-core-rust --self-test \
             /workspace/tests/fixtures/hola-sala-16k.wav /models \
             | tee "$RUNNER_TEMP/detectors.json"
