@@ -18,19 +18,31 @@ async fn main() {
             &wav,
             &assets.join("silero.onnx"),
             &assets.join("smart_turn_weights.bin.gz"),
-        ).await {
+        )
+        .await
+        {
             Ok(readout) => println!("{}", json!({"detectors": readout})),
             Err(error) => {
-                eprintln!("{}", json!({"error_key": "rust_core_t0_detector_failed", "detail": error}));
+                eprintln!(
+                    "{}",
+                    json!({"error_key": "rust_core_t0_detector_failed", "detail": error})
+                );
                 std::process::exit(1);
             }
         }
         return;
     }
-    let flags: Vec<_> = args.iter().skip(1).filter_map(|arg| arg.to_str().map(str::to_owned)).collect();
+    let flags: Vec<_> = args
+        .iter()
+        .skip(1)
+        .filter_map(|arg| arg.to_str().map(str::to_owned))
+        .collect();
     let config = match Config::from_args(&flags) {
         Ok(config) => config,
-        Err(_) => { eprintln!("{}", json!({"error_key": "runtime.arguments"})); std::process::exit(2); }
+        Err(_) => {
+            eprintln!("{}", json!({"error_key": "runtime.arguments"}));
+            std::process::exit(2);
+        }
     };
     std::process::exit(runtime::run(config).await);
 }
