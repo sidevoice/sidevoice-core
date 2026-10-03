@@ -264,7 +264,7 @@ class LocalSocketTests(NodeTest):
     async def assert_the_link_is_not_relayed(self, ask):
         """The connector link, exactly, and spelled other ways: neither its HTTP transport nor its socket."""
         for path in ('/api/connectors/link', '/api/connectors/link/', '/api/device/%2e%2e/connectors/link/',
-                     '/api/presentation/../connectors/link/'):
+                     '/api/presentation/../connectors/link/', '/api/connectors/v3'):
             for transport in ('polling', 'websocket'):
                 with self.subTest(path=path, transport=transport):
                     answer = await ask('relay.http', {'method': 'GET', 'path': path, 'query': f'EIO=4&transport={transport}',
@@ -311,7 +311,8 @@ class LocalSocketFileTests(unittest.TestCase):
 class LocalOnlyRuleTests(unittest.TestCase):
     def test_the_rule_reads_the_path_however_it_is_spelled(self):
         for path in ('/api/local', '/api/local/health', '/api/device/local', '/api/device/local/pair', '/api//device/local',
-                     '/api/./device/local/', '/api/connectors/link', '/api/connectors/link/'):
+                     '/api/./device/local/', '/api/connectors/link', '/api/connectors/link/',
+                     '/api/connectors/v3', '/api/connectors//v3', '/api/connectors/./v3/'):
             self.assertTrue(local_only(path), path)
         for path in ('/api/device/pair', '/api/localhost', '/api/device/localx', '/api/connectors', '/api/presentation/ws'):
             self.assertFalse(local_only(path), path)

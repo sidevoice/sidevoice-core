@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 MARKER = 'sidevoice.local'
 # Served only with the mark: the readiness probe, the app's own pairing, and the connector link.
-LOCAL_ONLY = ('/api/local', '/api/device/local', '/api/connectors/link')
+LOCAL_ONLY = ('/api/local', '/api/device/local', '/api/connectors/link', '/api/connectors/v3')
 NOT_FOUND = b'{"detail":"Not Found"}'
 
 

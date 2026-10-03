@@ -126,6 +126,7 @@ class NodeProcessTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facts['pid'], process.pid)
             self.assertEqual(facts['url'], f"http://127.0.0.1:{facts['port']}")
             self.assertEqual(facts['protocol'], PROTOCOL)
+            self.assertEqual(facts['connector_protocols'], [PROTOCOL, 3])
             self.assertEqual((facts['launch_id'], facts['api']), ('launch-1', 1))
             self.assertEqual(facts['socket'], str((data / 'local.sock').absolute()))
             self.assertTrue(stat.S_ISSOCK(os.stat(facts['socket']).st_mode))

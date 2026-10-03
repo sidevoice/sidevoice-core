@@ -904,6 +904,9 @@ class Room:
                                       decision.revision, payload.language,
                                       wait_for_quiet=decision.wait_for_quiet, thread_id=payload.thread_id, row_id=row_id)
         except Refusal as error:
+            # Intake already succeeded above. A later audio/provider refusal must never be
+            # mistaken for a permanent refusal that happened before the transcript was stored.
+            error.text_saved = True
             if error.status_code not in {409, 429}:
                 raise
             reason = 'expired_audio_turn' if error.status_code == 409 else 'queue_full'

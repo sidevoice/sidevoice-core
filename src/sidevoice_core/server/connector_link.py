@@ -18,6 +18,7 @@ from loguru import logger
 from socketio.exceptions import ConnectionRefusedError, TimeoutError as AcknowledgementTimeout
 
 from ..control.connectors import ConnectorControl, ConnectorPeer, HEARTBEAT_MISSES, PROTOCOL
+from .connector_websocket import mount_connector_websocket
 
 REFUSED_REASON = ('This connector\'s credential is not this core\'s: the core writes a fresh one when it '
                   'starts, and the connector reads it from the core\'s ready file. Restart the connector.')
@@ -171,6 +172,7 @@ def mount_connector_link(app, room, **options):
                 await control.stop()
     app.router.lifespan_context = control_lifespan
     app.state.connector_link = mount_connector_socketio(app, control)
+    mount_connector_websocket(app, control)
 
     from fastapi import Request
     from .presentation import require_same_origin
