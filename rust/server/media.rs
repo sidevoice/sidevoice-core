@@ -535,6 +535,11 @@ impl TurnOwner {
     }
 
     pub async fn result(&mut self, done: RecognitionDone) {
+        if let RecognitionJob::Live { turn, .. } = &done.job {
+            if self.active_turn.as_ref().map(|active| active.revision) != Some(turn.revision) {
+                return;
+            }
+        }
         if let Some(active) = self.active.take() {
             let _ = active.await;
         }
@@ -578,6 +583,10 @@ impl TurnOwner {
         closed: u64,
         transcribed: u64,
     ) {
+        if self.room.turn_cancelled(&self.session, turn.revision) {
+            self.room.finish_turn(&self.session, turn.revision);
+            return;
+        }
         if let Some(thread) = turn.thread_id.as_deref() {
             self.room.latency_mark(
                 &self.session,
@@ -678,6 +687,10 @@ impl TurnOwner {
     }
 
     async fn deliver(&mut self, turn: VoiceTurn, text: String, transcribed_at: u64) {
+        if self.room.turn_cancelled(&self.session, turn.revision) {
+            self.room.finish_turn(&self.session, turn.revision);
+            return;
+        }
         let _ = self
             .events
             .send(json!({"type":"voice-user-turn","data":{
@@ -877,6 +890,36 @@ impl TurnOwner {
         }
     }
 
+    pub async fn cancel(&mut self, revision: u64) {
+        if self
+            .speaking
+            .as_ref()
+            .is_some_and(|(turn, _)| turn.revision == revision)
+        {
+            self.speaking = None;
+            self.recent.clear();
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.turn.revision == revision)
+        {
+            self.pending = None;
+        }
+        self.queue.retain(|job| {
+            !matches!(job, RecognitionJob::Live { turn, .. } if turn.revision == revision)
+        });
+        if self.active_turn.as_ref().map(|turn| turn.revision) == Some(revision) {
+            if let Some(active) = self.active.take() {
+                active.abort();
+                let _ = active.await;
+            }
+            self.active_turn = None;
+            self.start_next();
+        }
+        self.room.finish_turn(&self.session, revision);
+    }
+
     pub async fn focus_changed(&mut self) {
         if let Some((turn, pcm)) = self.speaking.take() {
             let closed = latency_now_micros();
@@ -911,6 +954,7 @@ pub async fn speech_event(
     dir: &PrivateDir,
     cache: Arc<SynthesisCache>,
     event: Value,
+    replay_audio: Option<Arc<crate::providers::CloudSpeech>>,
 ) -> Option<Value> {
     if event.get("type").and_then(Value::as_str) != Some("voice-speech") {
         return Some(event);
@@ -943,32 +987,36 @@ pub async fn speech_event(
         );
         return Some(json!({"type":"voice-speech","data":message}));
     }
-    let key = provider_key(dir, "elevenlabs")?;
-    let client = ElevenLabsTts::new(&key).ok()?;
     let choice = SynthesisChoice {
         place: &voice.place,
         model: &voice.model,
         voice: &voice.voice,
         speed: voice.speed,
     };
-    let model = voice.model.clone();
-    let voice_id = voice.voice.clone();
-    let text_owned = text.to_owned();
-    let result = cache
-        .obtain(choice, text, move || async move {
-            client
-                .synthesize(
-                    &text_owned,
-                    &model,
-                    &voice_id,
-                    voice.speed,
-                    true,
-                    "mp3_44100_128",
-                )
-                .await
-        })
-        .await
-        .ok()?;
+    let result = if let Some(speech) = replay_audio {
+        crate::providers::cache::CachedSpeech { speech, fresh: false }
+    } else {
+        let key = provider_key(dir, "elevenlabs")?;
+        let client = ElevenLabsTts::new(&key).ok()?;
+        let model = voice.model.clone();
+        let voice_id = voice.voice.clone();
+        let text_owned = text.to_owned();
+        cache
+            .obtain(choice, text, move || async move {
+                client
+                    .synthesize(
+                        &text_owned,
+                        &model,
+                        &voice_id,
+                        voice.speed,
+                        true,
+                        "mp3_44100_128",
+                    )
+                    .await
+            })
+            .await
+            .ok()?
+    };
     room.latency_mark(
         session,
         thread,

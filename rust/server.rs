@@ -31,6 +31,8 @@ use crate::storage::PrivateDir;
 mod connectors_v2;
 mod connectors_v3;
 mod media;
+mod model_check;
+mod presentation_routes;
 pub mod rendezvous;
 mod rtc;
 
@@ -42,6 +44,11 @@ pub struct AppState {
     registry: Mutex<DeviceRegistry>,
     calls: Mutex<HashMap<String, Vec<watch::Sender<bool>>>>,
     media: Mutex<HashMap<String, Arc<media::CallMedia>>>,
+    cancel_input: Mutex<HashMap<String, tokio::sync::mpsc::Sender<u64>>>,
+    call_settings: Mutex<HashMap<String, crate::types::CallSettings>>,
+    replay_audio: Mutex<HashMap<String, Arc<crate::providers::CloudSpeech>>>,
+    check_budget: model_check::CheckBudget,
+    integration_revisions: Mutex<HashMap<String, u64>>,
     synthesis: Arc<SynthesisCache>,
     launch_id: String,
     host: String,
@@ -74,6 +81,11 @@ impl AppState {
             registry: Mutex::new(registry),
             calls: Mutex::new(HashMap::new()),
             media: Mutex::new(HashMap::new()),
+            cancel_input: Mutex::new(HashMap::new()),
+            call_settings: Mutex::new(HashMap::new()),
+            replay_audio: Mutex::new(HashMap::new()),
+            check_budget: model_check::CheckBudget::default(),
+            integration_revisions: Mutex::new(HashMap::new()),
             synthesis: Arc::new(SynthesisCache::new()),
             launch_id,
             host,
@@ -415,8 +427,26 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             "/api/presentation/integrations",
             get(presentation_integrations),
         )
+        .route(
+            "/api/presentation/integrations/{provider}",
+            axum::routing::put(presentation_routes::save_integration)
+                .delete(presentation_routes::clear_integration),
+        )
+        .route(
+            "/api/presentation/transcription/models",
+            get(presentation_routes::transcription_models),
+        )
+        .route(
+            "/api/presentation/voice-catalog",
+            get(presentation_routes::voice_catalog),
+        )
+        .route(
+            "/api/presentation/synthesis/preview",
+            post(presentation_routes::synthesis_preview),
+        )
         .route("/api/presentation/latency", get(presentation_latency))
         .route("/api/models/catalog", get(model_catalog))
+        .route("/api/models/check", post(model_check::model_check))
         .route("/api/presentation/rtc/config", get(rtc::config))
         .route("/api/presentation/rtc/offer", post(rtc::offer));
     router = router
@@ -431,6 +461,8 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .route("/api/presentation/leave", post(presentation_leave))
         .route("/api/presentation/close", post(presentation_close))
         .route("/api/presentation/text", post(presentation_text))
+        .route("/api/presentation/cancel-input", post(presentation_cancel_input))
+        .route("/api/presentation/replay", post(presentation_routes::replay))
         .route(
             "/api/presentation/browser-receipt",
             post(presentation_receipt),
@@ -488,6 +520,11 @@ async fn presentation_languages() -> Json<Value> {
         settings[stage]["build"] = Value::Null;
     }
     settings["replay_on_return_seconds"] = json!(120);
+    // CallSettings uses f32 for detector input; Python's response is its
+    // original decimal defaults rather than the f32 runtime representation.
+    settings["smart_turn_min_silence"] = json!(0.9);
+    settings["vad_confidence"] = json!(0.6);
+    settings["vad_start_secs"] = json!(0.4);
     Json(settings)
 }
 async fn presentation_integrations(
@@ -497,27 +534,39 @@ async fn presentation_integrations(
     if !origin_allowed(&headers) {
         return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
     }
-    let saved = state.dir.read_json("integrations.json").ok().flatten();
-    let providers = [
-        ("openai", "OpenAI", "transcription", "VOICE_STT_API_KEY"),
-        (
-            "elevenlabs",
-            "ElevenLabs",
-            "voice",
-            "VOICE_ELEVENLABS_API_KEY",
-        ),
-    ]
-    .into_iter()
-    .map(|(id, label, capability, environment)| {
-        let stored = saved.as_ref().and_then(|value| value[id].as_str());
-        let deployed = std::env::var(environment).ok();
-        let status = crate::models::credential_state(stored, deployed.as_deref());
-        json!({"id":id,"label":label,"capabilities":[capability],
-            "configured":status.configured,"source":status.source,
-            "hint":status.hint,"environment":environment})
-    })
-    .collect::<Vec<_>>();
-    Json(json!({"providers":providers})).into_response()
+    Json(presentation_routes::integration_listing(&state)).into_response()
+}
+async fn presentation_cancel_input(
+    State(state): State<Arc<AppState>>,
+    Extension(device): Extension<AuthenticatedDevice>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(data) = payload(&body) else {
+        return failure("room.request_invalid", StatusCode::BAD_REQUEST, &headers);
+    };
+    let sid = data["session_id"].as_str().unwrap_or("");
+    let revision = data["revision"].as_u64().unwrap_or(0);
+    if !state.room.owns_session(sid, &device.0) {
+        return failure("room.browser_absent", StatusCode::CONFLICT, &headers);
+    }
+    let result = match state.room.cancel_input(sid, revision) {
+        Ok(value) => value,
+        Err(error) => return room_failure(error, &headers),
+    };
+    let sender = state
+        .cancel_input
+        .lock()
+        .expect("cancel input lock")
+        .get(sid)
+        .cloned();
+    if let Some(sender) = sender {
+        let _ = sender.send(revision).await;
+    }
+    Json(result).into_response()
 }
 async fn model_catalog(headers: HeaderMap) -> Response {
     if !origin_allowed(&headers) {
@@ -651,13 +700,28 @@ async fn presentation_admission(
 }
 async fn presentation_history(
     State(state): State<Arc<AppState>>,
+    Extension(device): Extension<AuthenticatedDevice>,
     uri: axum::http::Uri,
     headers: HeaderMap,
 ) -> Response {
     if !origin_allowed(&headers) {
         return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
     }
-    Json(state.room.history(query(&uri, "thread_id").as_deref())).into_response()
+    let mut history = state.room.history(query(&uri, "thread_id").as_deref());
+    if let Some(sid) = query(&uri, "session_id").filter(|sid| state.room.owns_session(sid, &device.0)) {
+        let settings = state.call_settings.lock().expect("call settings lock").get(&sid).cloned();
+        if let (Some(settings), Some(rows)) = (settings, history["messages"].as_array_mut()) {
+            for row in rows {
+                if row["role"] != "assistant" { continue; }
+                let Some(id) = row["id"].as_str() else { continue; };
+                let Ok((text, language)) = state.room.replay_source(&sid, id) else { continue; };
+                if presentation_routes::cached_reply(&state, &settings, &text, language.as_deref()).is_some() {
+                    row["replayable"] = json!(true);
+                }
+            }
+        }
+    }
+    Json(history).into_response()
 }
 async fn presentation_participants(
     State(state): State<Arc<AppState>>,
@@ -1396,6 +1460,9 @@ async fn socket_loop(
         control,
         state.dir.clone(),
     );
+    let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::channel::<u64>(8);
+    state.cancel_input.lock().expect("cancel input lock").insert(session.clone(), cancel_tx);
+    state.call_settings.lock().expect("call settings lock").insert(session.clone(), loaded.settings.clone());
     let mut call_settings = loaded.settings.clone();
     let (rendered_tx, mut rendered_rx) =
         tokio::sync::mpsc::channel::<(String, u64, Option<Value>)>(16);
@@ -1414,6 +1481,7 @@ async fn socket_loop(
             frame = detector_events.recv() => if let Some(frame) = frame { turns.frame(frame).await; } else { break; },
             focus = focus_events.recv() => if focus.is_some() { turns.focus_changed().await; },
             result = turns.finished.recv() => if let Some(done) = result { turns.result(done).await; },
+            cancelled = cancel_rx.recv() => if let Some(revision) = cancelled { turns.cancel(revision).await; },
             _ = tokio::time::sleep_until(deadline) => { turns.expired().await; },
             rendered = rendered_rx.recv() => if let Some((uid,revision,event)) = rendered {
                 if let Some(event) = event {
@@ -1425,10 +1493,11 @@ async fn socket_loop(
                 if event.get("type").and_then(Value::as_str)==Some("voice-speech") {
                     let uid=event["data"]["utterance_id"].as_str().unwrap_or("").to_owned();
                     let revision=event["data"]["revision"].as_u64().unwrap_or(0);
+                    let replay_audio=state.replay_audio.lock().expect("replay audio lock").remove(&uid);
                     let room=state.room.clone(); let dir=state.dir.clone(); let cache=state.synthesis.clone();
                     let settings=call_settings.clone(); let sid=session.clone(); let rendered=rendered_tx.clone();
                     tokio::spawn(async move {
-                        let result=media::speech_event(room,&sid,&settings,&dir,cache,event).await;
+                        let result=media::speech_event(room,&sid,&settings,&dir,cache,event,replay_audio).await;
                         let _=rendered.send((uid,revision,result)).await;
                     });
                 } else if socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
@@ -1461,6 +1530,7 @@ async fn socket_loop(
                                         call_settings.ui_language=loaded.settings.ui_language;
                                         call_settings.audio_grace_seconds=loaded.settings.audio_grace_seconds;
                                         call_settings.replay_on_return_seconds=loaded.settings.replay_on_return_seconds;
+                                        state.call_settings.lock().expect("call settings lock").insert(session.clone(),call_settings.clone());
                                     }
                                 },
                                 _=>{}
@@ -1473,6 +1543,9 @@ async fn socket_loop(
         }
     }
     turns.close().await;
+    state.cancel_input.lock().expect("cancel input lock").remove(&session);
+    state.call_settings.lock().expect("call settings lock").remove(&session);
+    state.replay_audio.lock().expect("replay audio lock").retain(|uid,_|!uid.starts_with(&format!("{session}:replay:")));
     call_media.close();
     call_media.close_rtc().await;
     state.media.lock().expect("media lock").remove(&session);

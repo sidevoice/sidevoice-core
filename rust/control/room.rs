@@ -200,6 +200,7 @@ struct Browser {
     revision: u64,
     turn_revision: u64,
     speaking: bool,
+    cancelled_turn: Option<u64>,
     sent: u64,
     active: Option<String>,
     pending: VecDeque<String>,
@@ -290,6 +291,7 @@ struct UtteranceRecord {
     row_id: String,
     clients: HashMap<String, (u64, String)>,
     parked: bool,
+    replay_of: Option<String>,
 }
 struct Inner {
     telemetry: Option<Arc<Telemetry>>,
@@ -839,6 +841,7 @@ impl Room {
                 revision: 0,
                 turn_revision: 0,
                 speaking: false,
+                cancelled_turn: None,
                 sent: 0,
                 active: None,
                 pending: VecDeque::new(),
@@ -1157,6 +1160,7 @@ impl Room {
         c.revision += 1;
         c.turn_revision = c.revision;
         c.speaking = true;
+        c.cancelled_turn = None;
         let _ = c.sender.try_send(
             json!({"type":"voice-cancel","data":{"session_id":sid,"revision":c.revision}}),
         );
@@ -1219,6 +1223,30 @@ impl Room {
         }
         dispatch_client(&mut inner, sid);
     }
+
+    pub fn cancel_input(&self, sid: &str, revision: u64) -> Result<Value, RoomError> {
+        let mut inner = self.inner.lock().expect("room lock");
+        let Some(browser) = inner.browsers.get_mut(sid) else {
+            return Err(RoomError::new(409, "room.input_ended"));
+        };
+        if !browser.speaking || browser.turn_revision != revision {
+            return Err(RoomError::new(409, "room.input_ended"));
+        }
+        browser.cancelled_turn = Some(revision);
+        let thread = browser.target.as_ref().map(|target| target.thread.clone());
+        let _ = browser.sender.try_send(json!({"type":"voice-user-turn","data":{
+            "phase":"cancelled","revision":revision,"thread_id":thread}}));
+        Ok(json!({"status":"cancelled"}))
+    }
+
+    pub fn turn_cancelled(&self, sid: &str, revision: u64) -> bool {
+        self.inner
+            .lock()
+            .expect("room lock")
+            .browsers
+            .get(sid)
+            .is_some_and(|browser| browser.cancelled_turn == Some(revision))
+    }
     pub fn send_text(
         &self,
         text: &str,
@@ -1275,6 +1303,13 @@ impl Room {
             return Err(RoomError::new(422, "room.text_empty"));
         }
         let mut inner = self.inner.lock().expect("room lock");
+        if inner
+            .browsers
+            .get(&turn.session_id)
+            .is_some_and(|browser| browser.cancelled_turn == Some(turn.revision))
+        {
+            return Err(RoomError::new(409, "room.input_ended"));
+        }
         if !inner.sessions.iter().any(|sid| sid == &turn.session_id) {
             return Err(RoomError::new(409, "room.focus_changed"));
         }
@@ -1384,6 +1419,70 @@ impl Room {
         let inner = self.inner.lock().expect("room lock");
         json!({"messages":inner.rows.iter().filter(|r|thread.is_none_or(|t|r.thread==t)).rev().take(1000).collect::<Vec<_>>().into_iter().rev().map(Row::view).collect::<Vec<_>>()})
     }
+    pub fn replay_source(
+        &self,
+        sid: &str,
+        history_id: &str,
+    ) -> Result<(String, Option<String>), RoomError> {
+        let inner = self.inner.lock().expect("room lock");
+        let Some(browser) = inner.browsers.get(sid) else {
+            return Err(RoomError::new(409, "room.browser_absent"));
+        };
+        let Some(record) = inner
+            .utterances
+            .values()
+            .find(|record| record.row_id == history_id && record.replay_of.is_none())
+        else {
+            return Err(RoomError::new(404, "room.replay_missing"));
+        };
+        let Some(row) = inner.rows.iter().find(|row| row.id == record.row_id) else {
+            return Err(RoomError::new(404, "room.replay_missing"));
+        };
+        if browser.target.as_ref().map(|target| target.thread.as_str()) != Some(row.thread.as_str()) {
+            return Err(RoomError::new(404, "room.replay_missing"));
+        }
+        Ok((row.text.clone(), row.language.clone()))
+    }
+
+    pub fn replay_one(&self, sid: &str, history_id: &str, uid: &str) -> Result<Value, RoomError> {
+        let mut inner = self.inner.lock().expect("room lock");
+        if inner.utterances.len() >= MAX_UTTERANCES {
+            return Err(RoomError::new(429, "room.replay_full"));
+        }
+        let Some(original) = inner
+            .utterances
+            .iter()
+            .find(|(_, record)| record.row_id == history_id && record.replay_of.is_none())
+            .map(|(uid, _)| uid.clone())
+        else {
+            return Err(RoomError::new(404, "room.replay_missing"));
+        };
+        let Some(row) = inner.rows.iter().find(|row| row.id == history_id) else {
+            return Err(RoomError::new(404, "room.replay_missing"));
+        };
+        let thread = row.thread.clone();
+        let Some(browser) = inner.browsers.get_mut(sid) else {
+            return Err(RoomError::new(409, "room.browser_absent"));
+        };
+        if browser.target.as_ref().map(|target| target.thread.as_str()) != Some(thread.as_str()) {
+            return Err(RoomError::new(404, "room.replay_missing"));
+        }
+        let event = json!({"type":"voice-replay","data":{"session_id":sid,"thread_id":thread,
+            "replies":[{"utterance_id":uid,"history_id":history_id}],"skipped":[]}});
+        if browser.sender.try_send(event).is_err() {
+            return Err(RoomError::new(429, "room.replay_full"));
+        }
+        let revision = browser.revision;
+        browser.pending.push_front(uid.to_owned());
+        inner.utterances.insert(uid.to_owned(), UtteranceRecord {
+            row_id: history_id.to_owned(),
+            clients: HashMap::from([(sid.to_owned(), (revision, "queued".to_owned()))]),
+            parked: false,
+            replay_of: Some(original),
+        });
+        dispatch_client(&mut inner, sid);
+        Ok(json!({"utterance_id":uid,"history_id":history_id}))
+    }
     pub fn reply_language(&self, row_id: &str) -> Option<String> {
         self.inner
             .lock()
@@ -1400,7 +1499,7 @@ impl Room {
             let row=inner.rows.iter().find(|r|r.id==record.row_id)?;
             let clients:Map<String,Value>=record.clients.iter().map(|(id,(_,status))|(id.clone(),json!(status))).collect();
             let own=sid.and_then(|id|record.clients.get(id)).map(|(_,status)|json!({"utterance_id":uid,"revision":row.revision,"session_id":sid,"status":status}));
-            Some((row.seq,json!({"utterance_id":uid,"revision":row.revision,"thread_id":row.thread,"status":row.status,"parked":record.parked,"replay_of":Value::Null,"clients":clients}),own))
+            Some((row.seq,json!({"utterance_id":uid,"revision":row.revision,"thread_id":row.thread,"status":row.status,"parked":record.parked,"replay_of":record.replay_of,"clients":clients}),own))
         }).collect();
         utterances.sort_by_key(|entry| entry.0);
         let room_utterances: Vec<Value> = utterances.iter().map(|entry| entry.1.clone()).collect();
@@ -1575,6 +1674,7 @@ impl Room {
                     row_id: row_id.clone(),
                     clients,
                     parked: false,
+                    replay_of: None,
                 },
             );
             for listener in &audience {
@@ -1600,6 +1700,7 @@ impl Room {
                     row_id,
                     clients: HashMap::new(),
                     parked: true,
+                    replay_of: None,
                 },
             );
         }
@@ -1694,6 +1795,7 @@ impl Room {
         };
         entry.1 = next.into();
         let row_id = record.row_id.clone();
+        let replay = record.replay_of.is_some();
         let best = record
             .clients
             .values()
@@ -1701,7 +1803,7 @@ impl Room {
             .max_by_key(|status| status_rank(status))
             .unwrap_or(next)
             .to_owned();
-        if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id) {
+        if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id).filter(|_| !replay) {
             row.status = best;
             row.reason = match status {
                 "skipped" => Some("user_skipped".into()),
@@ -2298,7 +2400,9 @@ fn dispatch_client(inner: &mut Inner, sid: &str) {
                     entry.1 = "interrupted".into();
                 }
             }
-            sync_row(inner, &row_id, "interrupted", Some("focus_changed"));
+            if inner.utterances.get(&uid).is_some_and(|record| record.replay_of.is_none()) {
+                sync_row(inner, &row_id, "interrupted", Some("focus_changed"));
+            }
             continue;
         }
         let event = json!({"type":"voice-speech","data":{"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":reply_revision,"thread_id":thread,"text":text,"language":language,"history_id":row_id}});
@@ -2325,7 +2429,7 @@ fn interrupt_client(inner: &mut Inner, sid: &str, reason: &str) {
         if let Some(entry) = record.clients.get_mut(sid) {
             if matches!(entry.1.as_str(), "queued" | "waiting_for_turn" | "playing") {
                 entry.1 = "interrupted".into();
-                if record.clients.values().all(|(_, status)| {
+                if record.replay_of.is_none() && record.clients.values().all(|(_, status)| {
                     !matches!(status.as_str(), "queued" | "waiting_for_turn" | "playing")
                 }) {
                     rows.push(record.row_id.clone());

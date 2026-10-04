@@ -38,15 +38,40 @@ pub struct Transcription {
 
 impl OpenAiTranscriber {
     pub fn new(api_key: &str) -> Result<Self, ProviderError> {
+        let base = api_base();
         Ok(Self {
             client: build_client(
                 api_key,
-                OPENAI_API_BASE,
+                &base,
                 TRANSCRIPTION_TIMEOUT,
                 CONNECT_TIMEOUT,
                 PYTHON_MAX_RETRIES,
             )?,
         })
+    }
+
+    pub async fn catalog(&self) -> Result<Vec<String>, ProviderError> {
+        let response = self.client.models().list().await.map_err(map_openai_error)?;
+        let mut models: Vec<String> = response
+            .data
+            .into_iter()
+            .map(|model| model.id)
+            .filter(|id| {
+                (id == "whisper-1" || (id.contains("transcribe")
+                    && !id.contains("realtime")
+                    && !id.contains("live")))
+                    && id.len() <= 120
+                    && id
+                        .chars()
+                        .next()
+                        .is_some_and(|first| first.is_ascii_alphanumeric())
+                    && id
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || "._:-".contains(ch))
+            })
+            .collect();
+        models.sort_by_key(|id| (id != "gpt-4o-transcribe", id.clone()));
+        Ok(models)
     }
 
     pub async fn transcribe(
@@ -108,9 +133,18 @@ impl OpenAiTranscriber {
 }
 
 pub async fn verify_openai_key(api_key: &str) -> Result<(), ProviderError> {
-    let client = build_client(api_key, OPENAI_API_BASE, VERIFY_TIMEOUT, VERIFY_TIMEOUT, 0)?;
+    let base = api_base();
+    let client = build_client(api_key, &base, VERIFY_TIMEOUT, VERIFY_TIMEOUT, 0)?;
     verify_client(&client).await?;
     Ok(())
+}
+
+fn api_base() -> String {
+    #[cfg(feature = "hosted-fixtures")]
+    if let Ok(base) = std::env::var("SIDEVOICE_OPENAI_FIXTURE_BASE") {
+        return base;
+    }
+    OPENAI_API_BASE.to_owned()
 }
 
 async fn verify_client(client: &Client<OpenAIConfig>) -> Result<(), ProviderError> {

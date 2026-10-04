@@ -42,6 +42,10 @@ fn voice_catalog() -> &'static Value {
     })
 }
 
+pub fn voice_languages() -> &'static Value {
+    &voice_catalog()["languages"]
+}
+
 fn checks() -> &'static Value {
     CHECKS.get_or_init(|| {
         serde_json::from_str(CHECKS_JSON).expect("embedded check rules are valid JSON")
@@ -1210,6 +1214,13 @@ fn parse_stage(task: &str, input: &Value) -> Result<SpeechStage, StageFailure> {
         options,
         build,
     })
+}
+
+/// Parse a provider stage for the hosted model try route with the call's catalogue rules.
+pub fn provider_check_stage(task: &str, input: &Value) -> Option<SpeechStage> {
+    parse_stage(task, input)
+        .ok()
+        .filter(|stage| !matches!(stage.place.as_str(), "device" | "host"))
 }
 
 fn required_limited_string(

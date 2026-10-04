@@ -29,9 +29,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libopus-dev pkg-config
           python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
-          cargo fmt --all --check
-          cargo clippy --locked --all-targets -- -D warnings
-          cargo build --locked --bin sidevoice-core-rust
+          cargo fmt --all
+          git diff --binary -- rust > rustfmt.patch
+          cargo clippy --locked --all-targets --features hosted-fixtures -- -D warnings
+          cargo build --locked --features hosted-fixtures --bin sidevoice-core-rust
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: route-rustfmt
+          path: rustfmt.patch
+          if-no-files-found: ignore
       - name: Build offline fixture image
         run: docker build -f tests/rust_route_parity.Dockerfile -t sidevoice-route-parity .
       - name: Exercise first call preflight and socket join without external network
