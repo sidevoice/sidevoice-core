@@ -96,7 +96,10 @@ fn refusal(message: LocalizedMessage, language: &str) -> Value {
 
 fn invalid_stage(language: &str) -> Value {
     let details = render(&LocalizedMessage::new("settings.stage_invalid"), language);
-    refusal(LocalizedMessage::new("check_invalid").with_param("details", details), language)
+    refusal(
+        LocalizedMessage::new("check_invalid").with_param("details", details),
+        language,
+    )
 }
 
 fn failed(step: &str, reason: Value, passes: Vec<Value>) -> Value {

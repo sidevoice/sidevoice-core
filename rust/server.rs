@@ -33,9 +33,9 @@ mod connectors_v3;
 mod media;
 mod model_check;
 mod presentation_routes;
-mod transcription_trial;
 pub mod rendezvous;
 mod rtc;
+mod transcription_trial;
 
 pub struct AppState {
     pub dir: PrivateDir,
