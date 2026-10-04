@@ -8,9 +8,11 @@ the core is distributed as GitHub Releases of this repository; PyPI comes with t
 
 | Act | Who | What happens |
 |---|---|---|
-| Open / update a PR | anyone | Tests, package build, native bundle build, manifest checks and **PR title is a conventional commit** run. Assets are CI artifacts only; nothing is published. |
+| Open / update a PR | anyone | Python tests and **PR title is a conventional commit** run. Rust input changes also run formatting, locked dependency, Clippy and Rust tests. Package, native bundle and manifest jobs do not run automatically on PRs. |
 | Squash-merge into `main` | reviewer | The PR title becomes the commit. `test` runs the tests and packages; when it is green, the `nightly` pre-release is replaced. release-please opens or updates the **release PR** ("chore(main): release X.Y.Z"). Nothing versioned is published. |
 | Merge the release PR | a maintainer | **This is the release.** release-please tags `vX.Y.Z` and creates a draft GitHub Release whose notes are that version's changelog; `test` runs from the tag, attaches the assets and publishes the Release. |
+
+For final candidate proof, explicitly dispatch `test.yml` and the relevant `rust-t*.yml` workflows on the candidate ref. These runs build and check package/native artifacts without publishing them. Only the `main` push and release paths publish assets.
 
 Assets of a release:
 
@@ -102,5 +104,6 @@ Build artifacts on Actions runs are kept 7 days, for debugging only. Download fr
 - Settings → Actions → General → **Allow GitHub Actions to create and approve pull requests**: without it
   release-please cannot open its PR.
 - Squash merging, with the PR title as the commit message.
-- Required check **PR title is a conventional commit**. release-please's own PR gets it through a dispatched run
-  (its pushes start no workflow by themselves).
+- The **PR title is a conventional commit** check runs for ordinary PRs; release-please's own PR gets it through a
+  dispatched run (its pushes start no workflow by themselves). GitHub currently has no branch protection or ruleset
+  requiring this check; configure one if merge enforcement is needed.

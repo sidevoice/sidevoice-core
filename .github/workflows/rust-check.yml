@@ -4,8 +4,12 @@ on:
   pull_request:
     paths:
       - rust/**
+      - vendor/**
       - Cargo.toml
       - Cargo.lock
+      - build.rs
+      - rust-toolchain*
+      - assets/**
       - scripts/stage_rust_models.py
       - tests/rust_*
       - tests/rust_*/**
