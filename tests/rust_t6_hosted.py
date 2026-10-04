@@ -14,6 +14,7 @@ import time
 import wave
 from pathlib import Path
 
+import aiohttp
 import socketio
 import uvicorn
 
@@ -57,6 +58,41 @@ async def until(check, timeout=15):
     raise AssertionError("timed out waiting for required relay state")
 
 
+async def local_rendezvous_state(local, data_dir):
+    """Read Core's existing connector snapshot only after reconnect times out."""
+    try:
+        credential = json.loads((data_dir / "connector-credential.json").read_text())
+        async with aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=str(local))) as session:
+            async with session.ws_connect("http://localhost/api/connectors/v3", timeout=3) as ws:
+                await ws.send_json({"jsonrpc": "2.0", "id": "diagnostic", "method": "connector.hello",
+                                    "params": {"protocol": 3, "connector_id": credential["connector_id"],
+                                               "token": credential["token"]}})
+                for _ in range(4):
+                    message = await asyncio.wait_for(ws.receive(), 3)
+                    if message.type != aiohttp.WSMsgType.TEXT:
+                        break
+                    event = json.loads(message.data)
+                    if event.get("method") == "node.rendezvous":
+                        return event["params"]
+        return {"capture_error": "snapshot event missing"}
+    except Exception as exc:
+        return {"capture_error": type(exc).__name__}
+
+
+def stderr_tail(path, secrets):
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 4096))
+            tail = stream.read().decode(errors="replace")
+        for secret in secrets:
+            if secret:
+                tail = tail.replace(secret, "[REDACTED]")
+        return tail
+    except OSError as exc:
+        return f"[capture error: {type(exc).__name__}]"
+
+
 class RoomPeer:
     def __init__(self):
         self.server = socketio.AsyncServer(async_mode="asgi", namespaces=["/nodes"])
@@ -66,18 +102,29 @@ class RoomPeer:
         self.closed = []
         self.disconnections = []
         self.connections = 0
+        self.started_at = time.monotonic()
+        self.timeline = []
+
+        def record(kind, sid):
+            self.timeline.append({"at_ms": round((time.monotonic() - self.started_at) * 1000),
+                                  "event": kind, "sid": sid})
+            self.timeline = self.timeline[-16:]
+
+        self.record = record
 
         @self.server.event(namespace="/nodes")
         async def connect(sid, environ, auth):
             self.connections += 1
             self.auth = auth
             self.sid = sid
+            self.record("connect", sid)
             await self.server.emit("node.welcome", {"protocol": 3, "public_url": "https://room.example"},
                                    to=sid, namespace="/nodes")
 
         @self.server.event(namespace="/nodes")
         async def disconnect(sid, *args):
             self.disconnections.append(sid)
+            self.record("disconnect", sid)
 
         @self.server.on("relay.data", namespace="/nodes")
         async def relay_data(sid, data):
@@ -111,14 +158,16 @@ async def main():
                                            "connector_id": "node-1", "token": "fixture-room-token",
                                            "dial_key": "fixture-dial-key", "protocol": 3}))
             data_dir = root / "core"
+            core_stderr = root / "core-stderr.log"
             env = dict(os.environ)
             env.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
             env.pop("VOICE_STT_API_KEY", None)
             env.pop("VOICE_ELEVENLABS_API_KEY", None)
-            core = subprocess.Popen([str(CORE), "--data-dir", str(data_dir), "--port", str(core_port),
-                                     "--room-credential", str(pairing), "--idle-exit", "0"],
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.PIPE, env=env)
+            with core_stderr.open("wb") as stderr_stream:
+                core = subprocess.Popen([str(CORE), "--data-dir", str(data_dir), "--port", str(core_port),
+                                         "--room-credential", str(pairing), "--idle-exit", "0"],
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=stderr_stream, env=env)
             await until(lambda: (data_dir / "core.json").exists() or core.poll() is not None)
             assert core.poll() is None, "Core exited before readiness"
             await until(lambda: peer.sid)
@@ -265,8 +314,21 @@ async def main():
 
             # A server-side disconnect must lead to another authenticated /nodes session.
             previous = peer.sid
+            peer.record("disconnect_requested", previous)
             await peer.server.disconnect(previous, namespace="/nodes")
-            await until(lambda: peer.connections >= 2 and peer.sid != previous, timeout=20)
+            peer.record("disconnect_returned", previous)
+            try:
+                await until(lambda: peer.connections >= 2 and peer.sid != previous, timeout=20)
+            except AssertionError:
+                state = await local_rendezvous_state(local, data_dir)
+                print(json.dumps({"reconnect_diagnostic": {
+                    "core_exit": core.poll(), "rendezvous": state,
+                    "previous_sid": previous, "current_sid": peer.sid,
+                    "connections": peer.connections, "timeline": peer.timeline,
+                    "core_stderr_tail": stderr_tail(core_stderr, ("fixture-room-token",
+                                                                     "fixture-dial-key", token))}},
+                    sort_keys=True), file=sys.stderr, flush=True)
+                raise
             await admission()
 
             # A room refusal is terminal for this pairing. Re-pairing clears it.
