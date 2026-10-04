@@ -1,12 +1,14 @@
 name: Rust T6 rendezvous contract
 
 on:
-  push:
-    branches: [feat/rust-core-t6-relay, feat/rust-core-mvp]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: rust-t6-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pinned-room-peer:

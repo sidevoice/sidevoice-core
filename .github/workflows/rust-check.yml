@@ -1,0 +1,51 @@
+name: Rust Core check
+
+on:
+  pull_request:
+    paths:
+      - rust/**
+      - vendor/**
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - rust-toolchain*
+      - assets/**
+      - scripts/stage_rust_models.py
+      - tests/rust_*
+      - tests/rust_*/**
+      - tests/fixtures/**
+      - tools/rust_native_bundle.py
+      - .github/workflows/rust-*.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-check:
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      RUSTVANI_CACHE_DIR: /tmp/sidevoice-rustvani-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned toolchain and native codec dependency
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev pkg-config
+          python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
+      - name: Format, lockfile, lint and test
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo tree --locked >/dev/null
+          cargo clippy --locked --all-targets -- -D warnings
+          test -s /etc/ssl/certs/ca-certificates.crt
+          export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+          cargo test --locked

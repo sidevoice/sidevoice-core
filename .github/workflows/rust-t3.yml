@@ -1,12 +1,14 @@
 name: Rust T3 text and connector contract
 
 on:
-  push:
-    branches: [feat/rust-core-mvp]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: rust-t3-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pinned-peers:

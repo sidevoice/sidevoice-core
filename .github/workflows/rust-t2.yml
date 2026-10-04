@@ -1,12 +1,14 @@
 name: Rust T2 catalogue and settings
 
 on:
-  push:
-    branches: [feat/rust-core-t2-models]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: rust-t2-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   rules:
