@@ -333,7 +333,7 @@ pub(super) fn provider_key(dir: &PrivateDir, name: &str) -> Option<String> {
     .map(str::to_owned)
 }
 
-fn wav(pcm: &[u8], sample_rate: u32) -> Option<Vec<u8>> {
+pub(super) fn wav(pcm: &[u8], sample_rate: u32) -> Option<Vec<u8>> {
     if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
         return None;
     }

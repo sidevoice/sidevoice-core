@@ -94,6 +94,11 @@ fn refusal(message: LocalizedMessage, language: &str) -> Value {
     Value::Object(crate::messages::render_refusal(&message, language))
 }
 
+fn invalid_stage(language: &str) -> Value {
+    let details = render(&LocalizedMessage::new("settings.stage_invalid"), language);
+    refusal(LocalizedMessage::new("check_invalid").with_param("details", details), language)
+}
+
 fn failed(step: &str, reason: Value, passes: Vec<Value>) -> Value {
     json!({"ok":false,"step":step,"reason":reason,"passes":passes})
 }
@@ -305,7 +310,7 @@ pub(super) async fn model_check(
     if !matches!(task, "stt" | "tts") {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail":refusal(LocalizedMessage::new("check_invalid"),&ui)})),
+            Json(json!({"detail":invalid_stage(&ui)})),
         )
             .into_response();
     }
@@ -328,7 +333,7 @@ pub(super) async fn model_check(
     let Some(stage) = crate::models::provider_check_stage(task, &stage_input) else {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail":refusal(LocalizedMessage::new("check_invalid"),&ui)})),
+            Json(json!({"detail":invalid_stage(&ui)})),
         )
             .into_response();
     };

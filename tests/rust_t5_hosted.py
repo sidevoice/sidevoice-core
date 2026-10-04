@@ -452,6 +452,38 @@ async def main():
                     assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
                                    body={"session_id": session, "utterance_id": uid,
                                          "revision": audio["revision"], "status": status})[0] == 200
+                history_id = audio["history_id"]
+                history = request(port, "GET", f"/api/presentation/history?thread_id=t3-js-thread&session_id={session}",
+                                  token=token)[1]["messages"]
+                assert next(row for row in history if row["id"] == history_id)["replayable"] is True
+                rendered_before = len(fixture.requests)
+                status, replayed = request(port, "POST", "/api/presentation/replay", token=token,
+                                           body={"session_id": session, "history_id": history_id})
+                assert status == 200 and replayed["history_id"] == history_id, (status, replayed)
+                replay_notice = await frame(ws, "voice-replay")
+                assert replay_notice["replies"][0]["utterance_id"] == replayed["utterance_id"]
+                replay_audio = await frame(ws, "voice-speech-audio", timeout=20)
+                assert replay_audio["utterance_id"] == replayed["utterance_id"]
+                assert replay_audio["audio_base64"] == audio["audio_base64"]
+                assert len(fixture.requests) == rendered_before, "replay invoked paid synthesis"
+                for status in ("playing", "playback_finished"):
+                    assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                                   body={"session_id": session, "utterance_id": replayed["utterance_id"],
+                                         "revision": replay_audio["revision"], "status": status})[0] == 200
+                cancelled_audio = asyncio.create_task(send_pcm(ws, pcm))
+                started = await frame(ws, "voice-user-turn", timeout=10)
+                assert started["phase"] == "started", started
+                status, cancelled = request(port, "POST", "/api/presentation/cancel-input", token=token,
+                                            body={"session_id": session, "revision": started["revision"]})
+                assert status == 200 and cancelled["status"] == "cancelled", (status, cancelled)
+                await cancelled_audio
+                turn_event = await frame(ws, "voice-user-turn", timeout=10)
+                assert turn_event["phase"] == "cancelled" and turn_event["revision"] == started["revision"]
+                assert request(port, "POST", "/api/presentation/cancel-input", token=token,
+                               body={"session_id": session, "revision": started["revision"]})[0] == 409
+                history = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread",
+                                  token=token)[1]["messages"]
+                assert not any(row["id"] == f"{session}:user-turn:{started['revision']}" for row in history)
             async with websockets.connect(url, subprotocols=protocols) as ws:
                 await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {
                     "turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 3.0}}}))

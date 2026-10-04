@@ -1,6 +1,7 @@
 """Offline first-call preflight against the packaged web pin and frozen Python defaults."""
 
 import asyncio
+import base64
 import http.client
 import http.server
 import json
@@ -39,6 +40,20 @@ class ProviderFixture(http.server.ThreadingHTTPServer):
 
 
 class ProviderHandler(http.server.BaseHTTPRequestHandler):
+    def read_body(self):
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            parts = []
+            while True:
+                size = int(self.rfile.readline().strip().split(b";", 1)[0], 16)
+                if size == 0:
+                    while self.rfile.readline() not in (b"\r\n", b"\n"):
+                        pass
+                    break
+                parts.append(self.rfile.read(size))
+                assert self.rfile.read(2) == b"\r\n"
+            return b"".join(parts)
+        return self.rfile.read(int(self.headers.get("Content-Length", "0")))
+
     def answer(self, code, payload, content_type="application/json"):
         if not isinstance(payload, bytes):
             payload = json.dumps(payload).encode()
@@ -67,10 +82,11 @@ class ProviderHandler(http.server.BaseHTTPRequestHandler):
         self.answer(404, {"error": "fixture path missing"})
 
     def do_POST(self):
+        body = self.read_body()
         self.server.requests.append(("POST", self.path, self.headers.get("Authorization"),
-                                     self.headers.get("xi-api-key")))
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                                     self.headers.get("xi-api-key"), body))
         if self.path == "/v1/audio/transcriptions":
+            assert b'audio.wav' in body and b'RIFF' in body and b'gpt-' in body, body[:300]
             checks = json.loads(Path("src/sidevoice_core/models/checks/checks.json").read_text())
             return self.answer(200, {"text": checks["stt"]["clips"]["en"]["text"]})
         if self.path.startswith("/v1/text-to-speech/") and "pcm_16000" in self.path:
@@ -161,6 +177,10 @@ async def main():
             assert all(row["configured"] for row in listing)
             assert listing[0]["hint"] == "…-key" and listing[1]["hint"] == "…-key"
             assert secret.encode() not in raw and b"environment-elevenlabs-fixture-key" not in raw
+            assert request(port, "PUT", "/api/presentation/integrations/openai", token=token,
+                           body={"key": "good-key"})[0] == 403
+            assert request(port, "DELETE", "/api/presentation/integrations/unknown", token=token,
+                           origin="tauri://localhost")[0] == 404
             status, raw = request(port, "GET", "/api/models/catalog", token=token,
                                   origin="tauri://localhost")
             assert status == 200
@@ -210,9 +230,42 @@ async def main():
             worker.join(10)
             assert delayed and delayed[0][0] == 409, delayed
             assert "openai" not in json.loads((data / "integrations.json").read_text())
+            trial_body = {"place": "openai", "model": "gpt-4o-transcribe",
+                          "options": {"language": "auto", "context": "fixture context"},
+                          "audio": {"encoding": "pcm_s16le", "sample_rate": 16000,
+                                    "data_base64": base64.b64encode(fixture.pcm).decode()}}
+            status, raw = request(port, "POST", "/api/models/transcription/preview", token=token,
+                                  origin="tauri://localhost", body=trial_body)
+            assert status == 409 and json.loads(raw)["detail"]["key"] == "trial.provider_unavailable", (status, raw)
             status, raw = request(port, "PUT", "/api/presentation/integrations/openai", token=token,
                                   origin="tauri://localhost", body={"key": "good-key"})
             assert status == 200, (status, raw)
+            assert request(port, "POST", "/api/models/transcription/preview", body=trial_body)[0] == 401
+            status, raw = request(port, "POST", "/api/models/transcription/preview", token=token,
+                                  origin="https://foreign.example", body=trial_body)
+            assert status == 403, (status, raw)
+            provider_calls = len(fixture.requests)
+            for invalid, code, key in [
+                ({**trial_body, "model": "invalid model"}, 422, "trial.invalid_stage"),
+                ({**trial_body, "audio": {**trial_body["audio"], "encoding": "wav"}}, 400, "trial.invalid_audio"),
+                ({**trial_body, "audio": {**trial_body["audio"], "data_base64": "bad?"}}, 400, "trial.invalid_audio"),
+            ]:
+                status, raw = request(port, "POST", "/api/models/transcription/preview", token=token,
+                                      origin="tauri://localhost", body=invalid)
+                assert status == code and json.loads(raw)["detail"]["key"] == key, (status, raw)
+            assert len(fixture.requests) == provider_calls, "invalid trial reached provider"
+            history_before = request(port, "GET", "/api/presentation/history", token=token)[1]
+            for _ in range(6):
+                status, raw = request(port, "POST", "/api/models/transcription/preview", token=token,
+                                      origin="tauri://localhost", body=trial_body)
+                assert status == 200 and json.loads(raw)["text"], (status, raw)
+            trial_calls = [item for item in fixture.requests if item[0] == "POST" and item[1] == "/v1/audio/transcriptions"]
+            assert len(trial_calls) == 6
+            assert all(b"fixture context" in item[4] and b"gpt-4o-transcribe" in item[4] for item in trial_calls)
+            status, raw = request(port, "POST", "/api/models/transcription/preview", token=token,
+                                  origin="tauri://localhost", body=trial_body)
+            assert status == 429 and json.loads(raw)["detail"]["key"] == "trial.busy", (status, raw)
+            assert request(port, "GET", "/api/presentation/history", token=token)[1] == history_before
             status, raw = request(port, "POST", "/api/presentation/synthesis/preview", token=token,
                                   origin="tauri://localhost", body={"text": "Hello", "model": "eleven_multilingual_v2",
                                                                    "voice": "sparse-voice", "speed": 1})
@@ -225,11 +278,23 @@ async def main():
             status, raw = request(port, "POST", "/api/models/check", token=token,
                                   origin="tauri://localhost", body=stt_check)
             assert status == 200 and json.loads(raw)["remembered"] is True, (status, raw)
+            status, raw = request(port, "POST", "/api/models/check", token=token,
+                                  origin="tauri://localhost", body={"stage": "stt", "place": "device"})
+            assert status == 400 and json.loads(raw)["detail"]["key"] == "check_on_device", (status, raw)
             tts_check = {"stage": "tts", "place": "elevenlabs", "model": "eleven_multilingual_v2",
                          "options": {"voice": {"en": "sparse-voice"}, "speed": 1}, "language": "en"}
             status, raw = request(port, "POST", "/api/models/check", token=token,
                                   origin="tauri://localhost", body=tts_check)
             assert status == 200 and json.loads(raw)["ok"] is True, (status, raw)
+            for index in range(5):
+                distinct = {**stt_check, "model": f"gpt-fixture-{index}-transcribe"}
+                status, raw = request(port, "POST", "/api/models/check", token=token,
+                                      origin="tauri://localhost", body=distinct)
+                assert status == 200 and json.loads(raw)["ok"] is True, (status, raw)
+            status, raw = request(port, "POST", "/api/models/check", token=token,
+                                  origin="tauri://localhost",
+                                  body={**stt_check, "model": "gpt-fixture-over-budget-transcribe"})
+            assert status == 429 and json.loads(raw)["detail"]["key"] == "check_rate_limited", (status, raw)
             print("ROUTE PARITY PASS: provider settings, ordered keys, STT/TTS tries", flush=True)
         finally:
             fixture.slow_release.set()

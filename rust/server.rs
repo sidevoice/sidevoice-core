@@ -33,6 +33,7 @@ mod connectors_v3;
 mod media;
 mod model_check;
 mod presentation_routes;
+mod transcription_trial;
 pub mod rendezvous;
 mod rtc;
 
@@ -48,6 +49,7 @@ pub struct AppState {
     call_settings: Mutex<HashMap<String, crate::types::CallSettings>>,
     replay_audio: Mutex<HashMap<String, Arc<crate::providers::CloudSpeech>>>,
     check_budget: model_check::CheckBudget,
+    trial_budget: transcription_trial::TrialBudget,
     integration_revisions: Mutex<HashMap<String, u64>>,
     synthesis: Arc<SynthesisCache>,
     launch_id: String,
@@ -85,6 +87,7 @@ impl AppState {
             call_settings: Mutex::new(HashMap::new()),
             replay_audio: Mutex::new(HashMap::new()),
             check_budget: model_check::CheckBudget::default(),
+            trial_budget: transcription_trial::TrialBudget::default(),
             integration_revisions: Mutex::new(HashMap::new()),
             synthesis: Arc::new(SynthesisCache::new()),
             launch_id,
@@ -447,6 +450,10 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .route("/api/presentation/latency", get(presentation_latency))
         .route("/api/models/catalog", get(model_catalog))
         .route("/api/models/check", post(model_check::model_check))
+        .route(
+            "/api/models/transcription/preview",
+            post(transcription_trial::preview),
+        )
         .route("/api/presentation/rtc/config", get(rtc::config))
         .route("/api/presentation/rtc/offer", post(rtc::offer));
     router = router
