@@ -49,3 +49,35 @@ jobs:
           test -s /etc/ssl/certs/ca-certificates.crt
           export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
           cargo test --locked
+      - name: Prove one exact Git library host and vendored SDK
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CORE_REV: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          host_dir="$RUNNER_TEMP/core-library-host"
+          mkdir -p "$host_dir/src"
+          python3 - "$CORE_REV" "$host_dir" <<'PY'
+          import pathlib, sys
+          revision, host_dir = sys.argv[1], pathlib.Path(sys.argv[2])
+          template = pathlib.Path('tests/rust_library_host/Cargo.toml.in').read_text()
+          (host_dir / 'Cargo.toml').write_text(template.replace('CORE_REV', revision))
+          PY
+          cp tests/rust_library_host/src/main.rs "$host_dir/src/main.rs"
+          rustfmt --edition 2021 --check "$host_dir/src/main.rs"
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          cargo generate-lockfile --manifest-path "$host_dir/Cargo.toml"
+          cargo metadata --locked --format-version 1 --manifest-path "$host_dir/Cargo.toml" \
+            > "$RUNNER_TEMP/core-library-host-metadata.json"
+          python3 - "$RUNNER_TEMP/core-library-host-metadata.json" "$CORE_REV" <<'PY'
+          import json, pathlib, sys
+          packages = json.loads(pathlib.Path(sys.argv[1]).read_text())['packages']
+          revision = sys.argv[2]
+          core = next(package for package in packages if package['name'] == 'sidevoice-core')
+          sdk = next(package for package in packages if package['name'] == 'elevenlabs-sdk')
+          assert core['source'] and core['source'].endswith('#' + revision), core['source']
+          assert sdk['source'] is None and sdk['manifest_path'].endswith(
+              '/vendor/elevenlabs-sdk/Cargo.toml'), sdk
+          print('exact Git Core and vendored ElevenLabs SDK selected')
+          PY
+          cargo run --locked --manifest-path "$host_dir/Cargo.toml" -- "$RUNNER_TEMP/core-library-state"

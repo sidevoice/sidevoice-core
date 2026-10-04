@@ -1,0 +1,10 @@
+[package]
+name = "sidevoice-core-library-host-proof"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sidevoice-core = { git = "https://github.com/sidevoice/sidevoice-core.git", rev = "CORE_REV" }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }

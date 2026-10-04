@@ -22,7 +22,7 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "=0.22.1"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-elevenlabs-sdk = "=0.1.0"
+elevenlabs-sdk = { version = "=0.1.0", path = "vendor/elevenlabs-sdk" }
 fs2 = "0.4"
 futures-util = "=0.3.32"
 hostname = "0.4"
@@ -57,6 +57,3 @@ webrtc = "=0.21.0"
 
 [dev-dependencies]
 wiremock = "=0.6.5"
-
-[patch.crates-io]
-elevenlabs-sdk = { path = "vendor/elevenlabs-sdk" }

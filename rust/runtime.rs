@@ -1,6 +1,7 @@
 //! Process configuration, launch handshake, listeners and shutdown.
 
 use std::fs::{self, OpenOptions};
+use std::future::Future;
 use std::io::{self, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use std::time::Duration;
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
@@ -121,11 +122,21 @@ impl Config {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct StartFailure {
     pub step: &'static str,
     pub key: &'static str,
     pub status: i32,
     pub params: Map<String, Value>,
+}
+
+/// A completed startup: both listeners answered health probes and the ready
+/// file was written. Connector credentials remain in that private file.
+#[derive(Clone, Debug)]
+pub struct Ready {
+    pub port: u16,
+    pub socket: PathBuf,
+    pub launch_id: String,
 }
 
 impl StartFailure {
@@ -301,25 +312,58 @@ async fn await_serving_local(
 }
 
 pub async fn run(config: Config) -> i32 {
-    if log_event(&config, "runtime.log_start", None).is_err() {
-        failure(&config, &StartFailure::new("start", "start.failed"));
-        return 0;
+    let (ready, _unused) = oneshot::channel();
+    match run_with_shutdown(config, stop_signal(), ready).await {
+        Ok(()) => 0,
+        Err(error) => error.status,
     }
-    match serve(&config).await {
+}
+
+/// Run the same Core service under a host-owned shutdown future. A dropped
+/// readiness receiver does not stop Core. The host must signal shutdown and
+/// await this future; aborting it skips normal cleanup.
+pub async fn run_with_shutdown<S>(
+    config: Config,
+    shutdown: S,
+    ready: oneshot::Sender<Result<Ready, StartFailure>>,
+) -> Result<(), StartFailure>
+where
+    S: Future<Output = ()> + Send,
+{
+    let mut ready = Some(ready);
+    if log_event(&config, "runtime.log_start", None).is_err() {
+        let error = StartFailure::new("start", "start.failed");
+        failure(&config, &error);
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(Err(error.clone()));
+        }
+        return Err(error);
+    }
+    match serve(&config, shutdown, &mut ready).await {
         Ok(()) => {
             let _ = log_event(&config, "runtime.log_stop", None);
-            0
+            Ok(())
         }
         Err(error) => {
             if error.step != "run" {
                 failure(&config, &error);
             }
-            error.status
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Err(error.clone()));
+            }
+            Err(error)
         }
     }
 }
 
-async fn serve(config: &Config) -> Result<(), StartFailure> {
+async fn serve<S>(
+    config: &Config,
+    shutdown: S,
+    ready_signal: &mut Option<oneshot::Sender<Result<Ready, StartFailure>>>,
+) -> Result<(), StartFailure>
+where
+    S: Future<Output = ()> + Send,
+{
     let dir = PrivateDir::open(&config.data_dir)
         .map_err(|_| StartFailure::new("directory", "identity.unsafe-directory"))?;
     let socket_parent = config
@@ -448,6 +492,13 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
             )
             .map_err(|_| StartFailure::new("start", "start.failed"))?;
         let _ = log_event(config, "runtime.log_ready", None);
+        if let Some(ready) = ready_signal.take() {
+            let _ = ready.send(Ok(Ready {
+                port,
+                socket: config.socket.clone(),
+                launch_id: config.launch_id.clone(),
+            }));
+        }
         Ok::<_, StartFailure>(())
     }
     .await;
@@ -462,7 +513,7 @@ async fn serve(config: &Config) -> Result<(), StartFailure> {
     }
     let mut rendezvous_task = tokio::spawn(rendezvous.clone().run());
     let crashed = tokio::select! {
-        _ = stop_signal() => false,
+        _ = shutdown => false,
         _ = &mut tcp_task => true,
         _ = &mut local_task => true,
         _ = watch_idle(state, config.idle_exit), if config.idle_exit > 0.0 => false,
