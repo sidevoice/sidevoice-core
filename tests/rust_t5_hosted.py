@@ -478,7 +478,8 @@ async def main():
                     burst.append(again["utterance_id"])
                 status, refused = request(port, "POST", "/api/presentation/replay", token=token,
                                           body={"session_id": session, "history_id": history_id})
-                assert status == 429 and refused["detail"]["key"] == "room.replay_full", (status, refused)
+                room_full = json.loads(Path("rust/messages/en.json").read_text())["room.replay_full"]
+                assert status == 429 and refused["detail"] == room_full, (status, refused)
                 live_uid = f"t5-after-replays-{uuid.uuid4()}"
                 peer.send({"op": "publish", "session_id": session, "revision": revision,
                            "event_id": live_uid, "utterance_id": live_uid, "text": "Live after replay burst"})
