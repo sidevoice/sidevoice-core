@@ -954,18 +954,39 @@ pub async fn speech_event(
     dir: &PrivateDir,
     cache: Arc<SynthesisCache>,
     event: Value,
-    replay_audio: Option<Arc<crate::providers::CloudSpeech>>,
+    replay_audio: Option<Arc<super::PinnedReplay>>,
 ) -> Option<Value> {
     if event.get("type").and_then(Value::as_str) != Some("voice-speech") {
         return Some(event);
     }
     let data = &event["data"];
     let uid = data["utterance_id"].as_str()?;
+    let replay = uid.starts_with(&format!("{session}:replay:"));
+    if replay && replay_audio.is_none() {
+        // A replay owns only its admitted bytes. Never synthesize a missing pin.
+        return None;
+    }
+    #[cfg(feature = "hosted-fixtures")]
+    if replay {
+        if let Ok(gate) = std::env::var("SIDEVOICE_FIXTURE_REPLAY_RENDER_GATE") {
+            let path = std::path::Path::new(&gate);
+            if path.exists() {
+                let _ = std::fs::write(format!("{gate}.entered"), uid);
+                while path.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        }
+    }
     let revision = data["revision"].as_u64()?;
     let reply_revision = data["reply_revision"].as_u64().unwrap_or(revision);
     let thread = data["thread_id"].as_str()?;
     let text = data["text"].as_str()?;
-    let voice = resolve_voice(settings, data["language"].as_str()).ok()?;
+    let voice = if let Some(pin) = &replay_audio {
+        pin.voice.clone()
+    } else {
+        resolve_voice(settings, data["language"].as_str()).ok()?
+    };
     let mut message = data.clone();
     let object = message.as_object_mut()?;
     object.insert("place".into(), json!(&voice.place));
@@ -993,9 +1014,9 @@ pub async fn speech_event(
         voice: &voice.voice,
         speed: voice.speed,
     };
-    let result = if let Some(speech) = replay_audio {
+    let result = if let Some(pin) = replay_audio {
         crate::providers::cache::CachedSpeech {
-            speech,
+            speech: pin.speech.clone(),
             fresh: false,
         }
     } else {

@@ -13,7 +13,7 @@ pub(super) fn cached_reply(
     settings: &crate::types::CallSettings,
     text: &str,
     language: Option<&str>,
-) -> Option<Arc<crate::providers::CloudSpeech>> {
+) -> Option<(Arc<crate::providers::CloudSpeech>, crate::models::ResolvedVoice)> {
     let voice = crate::models::resolve_voice(settings, language).ok()?;
     if voice.place == "device" {
         return None;
@@ -27,7 +27,7 @@ pub(super) fn cached_reply(
         },
         text,
     );
-    state.synthesis.read(&key)
+    state.synthesis.read(&key).map(|speech| (speech, voice))
 }
 
 fn provider_meta(provider: &str) -> Option<(&'static str, &'static str, &'static str)> {
@@ -337,12 +337,12 @@ pub(super) async fn replay(
     let Some(settings) = settings else {
         return failure("room.browser_absent", StatusCode::CONFLICT, &headers);
     };
-    let Some(audio) = cached_reply(&state, &settings, &text, language.as_deref()) else {
+    let Some((speech, voice)) = cached_reply(&state, &settings, &text, language.as_deref()) else {
         return failure("room.replay_audio_missing", StatusCode::GONE, &headers);
     };
     let uid = format!("{sid}:replay:{}", Uuid::new_v4());
     let mut pending = state.replay_audio.lock().expect("replay audio lock");
-    pending.insert(uid.clone(), audio);
+    pending.insert(uid.clone(), Arc::new(PinnedReplay { speech, voice }));
     match state.room.replay_one(sid, history_id, &uid) {
         Ok(value) => Json(value).into_response(),
         Err(error) => {

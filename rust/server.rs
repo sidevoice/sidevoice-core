@@ -47,7 +47,7 @@ pub struct AppState {
     media: Mutex<HashMap<String, Arc<media::CallMedia>>>,
     cancel_input: Mutex<HashMap<String, tokio::sync::mpsc::Sender<u64>>>,
     call_settings: Mutex<HashMap<String, crate::types::CallSettings>>,
-    replay_audio: Mutex<HashMap<String, Arc<crate::providers::CloudSpeech>>>,
+    replay_audio: Mutex<HashMap<String, Arc<PinnedReplay>>>,
     check_budget: model_check::CheckBudget,
     trial_budget: transcription_trial::TrialBudget,
     integration_revisions: Mutex<HashMap<String, u64>>,
@@ -55,6 +55,11 @@ pub struct AppState {
     launch_id: String,
     host: String,
     port: u16,
+}
+
+struct PinnedReplay {
+    speech: Arc<crate::providers::CloudSpeech>,
+    voice: crate::models::ResolvedVoice,
 }
 
 #[derive(Clone)]
@@ -66,6 +71,14 @@ impl AppState {
             .lock()
             .expect("replay audio lock")
             .retain(|uid, _| self.room.has_replay(uid));
+    }
+
+    fn retire_session_replays(&self, session: &str) {
+        // Replay admission also takes the audio lock before entering the room.
+        // Keep leave and the final purge atomic with that admission path.
+        let mut audio = self.replay_audio.lock().expect("replay audio lock");
+        self.room.leave(session);
+        audio.retain(|uid, _| !uid.starts_with(&format!("{session}:replay:")));
     }
 
     #[expect(
@@ -1525,22 +1538,22 @@ async fn socket_loop(
                 let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: close_reason.into() }))).await;
                 break;
             }
-            frame = detector_events.recv() => if let Some(frame) = frame { turns.frame(frame).await; } else { break; },
-            focus = focus_events.recv() => if focus.is_some() { turns.focus_changed().await; },
-            result = turns.finished.recv() => if let Some(done) = result { turns.result(done).await; },
-            cancelled = cancel_rx.recv() => if let Some(revision) = cancelled { turns.cancel(revision).await; },
+            frame = detector_events.recv() => if let Some(frame) = frame { let started = matches!(&frame, crate::pipeline::CallFrame::Started); turns.frame(frame).await; if started { state.prune_replay_audio(); } } else { break; },
+            focus = focus_events.recv() => if focus.is_some() { turns.focus_changed().await; state.prune_replay_audio(); },
+            result = turns.finished.recv() => if let Some(done) = result { turns.result(done).await; state.prune_replay_audio(); },
+            cancelled = cancel_rx.recv() => if let Some(revision) = cancelled { turns.cancel(revision).await; state.prune_replay_audio(); },
             _ = tokio::time::sleep_until(deadline) => { turns.expired().await; },
             rendered = rendered_rx.recv() => if let Some((uid,revision,event)) = rendered {
                 if let Some(event) = event {
                     if state.room.speech_current(&session,&uid,revision)
                         && socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
-                } else { let _ = state.room.receipt(&session,&uid,revision,"failed"); }
+                } else { let _ = state.room.receipt(&session,&uid,revision,"failed"); state.prune_replay_audio(); }
             },
             event = output.recv() => if let Some(event) = event {
                 if event.get("type").and_then(Value::as_str)==Some("voice-speech") {
                     let uid=event["data"]["utterance_id"].as_str().unwrap_or("").to_owned();
                     let revision=event["data"]["revision"].as_u64().unwrap_or(0);
-                    let replay_audio=state.replay_audio.lock().expect("replay audio lock").remove(&uid);
+                    let replay_audio=state.replay_audio.lock().expect("replay audio lock").get(&uid).cloned();
                     let room=state.room.clone(); let dir=state.dir.clone(); let cache=state.synthesis.clone();
                     let settings=call_settings.clone(); let sid=session.clone(); let rendered=rendered_tx.clone();
                     tokio::spawn(async move {
@@ -1600,15 +1613,10 @@ async fn socket_loop(
         .lock()
         .expect("call settings lock")
         .remove(&session);
-    state
-        .replay_audio
-        .lock()
-        .expect("replay audio lock")
-        .retain(|uid, _| !uid.starts_with(&format!("{session}:replay:")));
     call_media.close();
     call_media.close_rtc().await;
     state.media.lock().expect("media lock").remove(&session);
-    state.room.leave(&session);
+    state.retire_session_replays(&session);
 }
 
 struct CallRegistration {
@@ -1764,5 +1772,101 @@ mod tests {
         assert_eq!(state.calls.lock().unwrap()["device"].len(), 1);
         drop(second);
         assert!(!state.calls.lock().unwrap().contains_key("device"));
+    }
+
+    #[test]
+    fn replay_admission_during_teardown_leaves_no_audio_or_record() {
+        use crate::control::room::ConnectorPeer;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = PrivateDir::open(temp.path().join("core")).unwrap();
+        let identity = NodeIdentity::load_or_create(&dir).unwrap();
+        let registry = DeviceRegistry::load(dir.clone()).unwrap();
+        let room = Arc::new(Room::load(dir.clone()).unwrap());
+        let (requests, _request_receiver) = tokio::sync::mpsc::channel(4);
+        let (stop, _stopped) = watch::channel(false);
+        room.attach(
+            "connector",
+            ConnectorPeer {
+                generation: Uuid::new_v4().to_string(),
+                sender: requests,
+                stop,
+            },
+        );
+        room.register(
+            "connector",
+            &json!({"thread":"replay-thread","harness":"codex"}),
+        )
+        .unwrap();
+        let (events, _received) = tokio::sync::mpsc::channel(128);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        room.select(&sid, "replay-thread").unwrap();
+        let revision = room.snapshot(Some(&sid))["room"]["revision"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            room.publish(
+                &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,
+                    "utterance_id":"original","text":"Original reply"}),
+                false,
+            )["status"],
+            "queued"
+        );
+        room.receipt(&sid, "original", revision, "playing")
+            .unwrap();
+        room.receipt(&sid, "original", revision, "playback_finished")
+            .unwrap();
+        let relay = rendezvous::Rendezvous::new(
+            None,
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            "host".to_owned(),
+            room.clone(),
+        );
+        let state = Arc::new(AppState::new(
+            dir,
+            identity,
+            registry,
+            "fixture".into(),
+            "host".into(),
+            8768,
+            room,
+            relay,
+        ));
+        let uid = format!("{sid}:replay:{}", Uuid::new_v4());
+        let mut pending = state.replay_audio.lock().unwrap();
+        let (ready, started) = std::sync::mpsc::channel();
+        let closing = state.clone();
+        let session = sid.clone();
+        let teardown = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            closing.retire_session_replays(&session);
+        });
+        started.recv().unwrap();
+        pending.insert(
+            uid.clone(),
+            Arc::new(PinnedReplay {
+                speech: Arc::new(crate::providers::CloudSpeech {
+                    audio: vec![1, 2, 3],
+                    mime_type: "audio/mpeg".into(),
+                    alignment: None,
+                    timings_ms: Map::new(),
+                }),
+                voice: crate::models::ResolvedVoice {
+                    place: "elevenlabs".into(),
+                    model: "eleven_v3".into(),
+                    voice: "fixturevoice".into(),
+                    language: "en".into(),
+                    speed: 1.0,
+                },
+            }),
+        );
+        state
+            .room
+            .replay_one(&sid, &format!("{sid}:voice:original"), &uid)
+            .unwrap();
+        drop(pending);
+        teardown.join().unwrap();
+        assert!(!state.room.has_replay(&uid));
+        assert!(state.replay_audio.lock().unwrap().is_empty());
     }
 }

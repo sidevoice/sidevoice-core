@@ -349,12 +349,18 @@ async def main():
         root = Path(temporary)
         data = root / "core"
         data.mkdir(mode=0o700)
+        integrations = data / "integrations.json"
+        integrations.write_text(json.dumps({"elevenlabs": "fixture-key"}))
+        integrations.chmod(0o600)
+        replay_gate = root / "replay-render-gate"
         fixture = TtsFixture()
         collector = MetricCollector()
-        env = {**os.environ, "SIDEVOICE_STUN_URLS": "", "VOICE_ELEVENLABS_API_KEY": "fixture-key",
+        env = {key: value for key, value in os.environ.items() if key != "VOICE_ELEVENLABS_API_KEY"}
+        env.update({"SIDEVOICE_STUN_URLS": "",
                "SIDEVOICE_FIXTURE_STT_TIMEOUT_MS": "12000",
+               "SIDEVOICE_FIXTURE_REPLAY_RENDER_GATE": str(replay_gate),
                "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{collector.server_port}",
-               "SIDEVOICE_ELEVENLABS_FIXTURE_BASE": f"http://127.0.0.1:{fixture.server_port}"}
+               "SIDEVOICE_ELEVENLABS_FIXTURE_BASE": f"http://127.0.0.1:{fixture.server_port}"})
         core = subprocess.Popen([str(CORE), "--data-dir", str(data), "--port", "0", "--idle-exit", "0"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
         bridge = None
@@ -505,6 +511,58 @@ async def main():
                 original = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread",
                                    token=token)[1]["messages"]
                 assert next(row for row in original if row["id"] == history_id)["status"] == "playback_finished"
+                replay_gate.write_text("hold old dispatch")
+                status, held = request(port, "POST", "/api/presentation/replay", token=token,
+                                       body={"session_id": session, "history_id": history_id})
+                assert status == 200, (status, held)
+                assert (await frame(ws, "voice-replay"))["replies"][0]["utterance_id"] == held["utterance_id"]
+                entered = Path(f"{replay_gate}.entered")
+                until(lambda: entered.read_text() if entered.exists() else None)
+                assert entered.read_text() == held["utterance_id"]
+                held_input = asyncio.create_task(send_pcm(ws, pcm))
+                started = await frame(ws, "voice-user-turn", timeout=10)
+                assert started["phase"] == "started", started
+                integrations.write_text("{}")
+                replay_gate.unlink()
+                await held_input
+                await send_pcm(ws, b"\0" * 16_000 * 2 * 4)
+                ask = await frame(ws, "voice-transcribe", timeout=30)
+                await ws.send(json.dumps({"type": "voice-transcript", "data": {
+                    "session_id": session, "request_id": ask["request_id"], "text": "Resume held replay"}}))
+                finished = await frame(ws, "voice-user-turn", timeout=10)
+                assert finished["phase"] == "finished", finished
+                held_audio = await frame(ws, "voice-speech-audio", timeout=20)
+                assert held_audio["utterance_id"] == held["utterance_id"]
+                assert held_audio["audio_base64"] == audio["audio_base64"]
+                assert len(fixture.requests) == rendered_before + 1, "held replay rerendered"
+                for state in ("playing", "playback_finished"):
+                    assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                                   body={"session_id": session, "utterance_id": held["utterance_id"],
+                                         "revision": held_audio["revision"], "status": state})[0] == 200
+                status, delivered = request(port, "POST", "/api/presentation/replay", token=token,
+                                            body={"session_id": session, "history_id": history_id})
+                assert status == 200, (status, delivered)
+                assert (await frame(ws, "voice-replay"))["replies"][0]["utterance_id"] == delivered["utterance_id"]
+                delivered_audio = await frame(ws, "voice-speech-audio", timeout=20)
+                assert delivered_audio["audio_base64"] == audio["audio_base64"]
+                delivered_input = asyncio.create_task(send_pcm(ws, pcm))
+                started = await frame(ws, "voice-user-turn", timeout=10)
+                assert started["phase"] == "started", started
+                await delivered_input
+                await send_pcm(ws, b"\0" * 16_000 * 2 * 4)
+                ask = await frame(ws, "voice-transcribe", timeout=30)
+                await ws.send(json.dumps({"type": "voice-transcript", "data": {
+                    "session_id": session, "request_id": ask["request_id"], "text": "Resume delivered replay"}}))
+                finished = await frame(ws, "voice-user-turn", timeout=10)
+                assert finished["phase"] == "finished", finished
+                resumed_audio = await frame(ws, "voice-speech-audio", timeout=20)
+                assert resumed_audio["utterance_id"] == delivered["utterance_id"]
+                assert resumed_audio["audio_base64"] == audio["audio_base64"]
+                assert len(fixture.requests) == rendered_before + 1, "delivered replay rerendered"
+                for state in ("playing", "playback_finished"):
+                    assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                                   body={"session_id": session, "utterance_id": delivered["utterance_id"],
+                                         "revision": resumed_audio["revision"], "status": state})[0] == 200
                 cancelled_audio = asyncio.create_task(send_pcm(ws, pcm))
                 started = await frame(ws, "voice-user-turn", timeout=10)
                 assert started["phase"] == "started", started
