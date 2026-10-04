@@ -1,7 +1,13 @@
 import { createNodeClient, sendVoiceMedia } from "./client.js";
 
 const node = createNodeClient("http://127.0.0.1", fetch);
-node.POST("/api/presentation/languages");
+node.POST("/api/presentation/languages", {
+  body: {
+    place: "openai",
+    model: "gpt-4o-transcribe",
+    audio: { encoding: "pcm_s16le", sample_rate: 16000, data_base64: "" }
+  }
+});
 node.GET("/api/unknown");
 node.POST("/api/models/transcription/preview", {
   body: {
