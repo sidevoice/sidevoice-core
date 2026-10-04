@@ -2392,7 +2392,10 @@ fn retire_terminal_replays(inner: &mut Inner) {
     inner.utterances.retain(|_, record| {
         record.replay_of.is_none()
             || record.clients.values().any(|(_, status)| {
-                !matches!(status.as_str(), "failed" | "playback_finished" | "interrupted")
+                !matches!(
+                    status.as_str(),
+                    "failed" | "playback_finished" | "interrupted"
+                )
             })
     });
 }
@@ -2530,7 +2533,10 @@ fn hold_client(inner: &mut Inner, sid: &str, revision: u64) {
                 "queued" | "waiting_for_turn" => {
                     entry.0 = revision;
                     entry.1 = "waiting_for_turn".into();
-                    waiting.push((uid.clone(), record.replay_of.is_none().then(|| record.row_id.clone())));
+                    waiting.push((
+                        uid.clone(),
+                        record.replay_of.is_none().then(|| record.row_id.clone()),
+                    ));
                 }
                 "playing" => {
                     entry.1 = "interrupted".into();
@@ -2636,8 +2642,11 @@ mod tests {
                 stop,
             },
         );
-        room.register("connector", &json!({"thread":"replay-thread","harness":"codex"}))
-            .unwrap();
+        room.register(
+            "connector",
+            &json!({"thread":"replay-thread","harness":"codex"}),
+        )
+        .unwrap();
         let (events, mut received) = mpsc::channel(128);
         let sid = room.join("device".into(), "en".into(), events).unwrap();
         room.select(&sid, "replay-thread").unwrap();
@@ -2698,10 +2707,18 @@ mod tests {
             while received.try_recv().is_ok() {}
         }
         let inner = room.inner.lock().unwrap();
-        assert!(inner.utterances.values().all(|record| record.replay_of.is_none()));
+        assert!(inner
+            .utterances
+            .values()
+            .all(|record| record.replay_of.is_none()));
         assert!(inner.utterances.contains_key("original"));
         assert_eq!(
-            inner.rows.iter().find(|row| row.id == history_id).unwrap().status,
+            inner
+                .rows
+                .iter()
+                .find(|row| row.id == history_id)
+                .unwrap()
+                .status,
             "playback_finished"
         );
     }
@@ -2720,8 +2737,11 @@ mod tests {
                 stop,
             },
         );
-        room.register("connector", &json!({"thread":"replay-thread","harness":"codex"}))
-            .unwrap();
+        room.register(
+            "connector",
+            &json!({"thread":"replay-thread","harness":"codex"}),
+        )
+        .unwrap();
         let (events, _received) = mpsc::channel(128);
         let sid = room.join("device".into(), "en".into(), events).unwrap();
         room.select(&sid, "replay-thread").unwrap();
@@ -2744,7 +2764,12 @@ mod tests {
             .unwrap();
         room.receipt(&sid, "cancelled-replay", revision, "cancelled_playing")
             .unwrap();
-        assert!(!room.inner.lock().unwrap().utterances.contains_key("cancelled-replay"));
+        assert!(!room
+            .inner
+            .lock()
+            .unwrap()
+            .utterances
+            .contains_key("cancelled-replay"));
         room.replay_one(&sid, &history_id, "held-replay").unwrap();
         let turn = room.begin_turn(&sid).unwrap();
         assert_eq!(
@@ -2771,11 +2796,20 @@ mod tests {
         room.replay_one(&other, &history_id, "leaving-replay")
             .unwrap();
         room.leave(&other);
-        assert!(!room.inner.lock().unwrap().utterances.contains_key("leaving-replay"));
-        room.replay_one(&sid, &history_id, "closed-replay")
-            .unwrap();
+        assert!(!room
+            .inner
+            .lock()
+            .unwrap()
+            .utterances
+            .contains_key("leaving-replay"));
+        room.replay_one(&sid, &history_id, "closed-replay").unwrap();
         room.close_channel("replay-thread").unwrap();
-        assert!(!room.inner.lock().unwrap().utterances.contains_key("closed-replay"));
+        assert!(!room
+            .inner
+            .lock()
+            .unwrap()
+            .utterances
+            .contains_key("closed-replay"));
         assert_eq!(
             room.inner
                 .lock()
@@ -2788,7 +2822,12 @@ mod tests {
             "playback_finished"
         );
         room.leave(&sid);
-        assert!(room.inner.lock().unwrap().utterances.contains_key("original"));
+        assert!(room
+            .inner
+            .lock()
+            .unwrap()
+            .utterances
+            .contains_key("original"));
     }
 
     #[test]
