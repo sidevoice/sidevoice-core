@@ -238,7 +238,13 @@ pub(super) async fn voice_catalog(
     let models = catalog
         .models
         .into_iter()
-        .map(|model| json!({"id":model.id,"label":model.label,"description":model.description}))
+        .map(|model| {
+            let mut entry = json!({"id":model.id,"label":model.label});
+            if let Some(description) = model.description {
+                entry["description"] = json!(description);
+            }
+            entry
+        })
         .collect::<Vec<_>>();
     let voices = catalog
         .voices

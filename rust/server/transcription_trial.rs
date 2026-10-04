@@ -74,7 +74,7 @@ fn usable(text: &str) -> bool {
         return false;
     }
     let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
-    if tokens.len() >= 10 && tokens.iter().copied().collect::<std::collections::HashSet<_>>().len() as f64 / tokens.len() as f64 < 0.15 {
+    if tokens.len() >= 10 && tokens.iter().copied().collect::<std::collections::HashSet<_>>().len() as f64 / (tokens.len() as f64) < 0.15 {
         return false;
     }
     true

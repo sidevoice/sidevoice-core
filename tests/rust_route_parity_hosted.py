@@ -33,6 +33,8 @@ class ProviderFixture(http.server.ThreadingHTTPServer):
         self.requests = []
         self.slow_entered = threading.Event()
         self.slow_release = threading.Event()
+        self.trial_entered = threading.Event()
+        self.trial_release = threading.Event()
         self.pcm = b"".join(struct.pack("<h", int(6000 * math.sin(2 * math.pi * 220 * i / 16000)))
                             for i in range(5 * 16000))
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
@@ -87,6 +89,9 @@ class ProviderHandler(http.server.BaseHTTPRequestHandler):
                                      self.headers.get("xi-api-key"), body))
         if self.path == "/v1/audio/transcriptions":
             assert b'audio.wav' in body and b'RIFF' in body and b'gpt-' in body, body[:300]
+            if b"gpt-slow-transcribe" in body:
+                self.server.trial_entered.set()
+                assert self.server.trial_release.wait(8)
             checks = json.loads(Path("src/sidevoice_core/models/checks/checks.json").read_text())
             return self.answer(200, {"text": checks["stt"]["clips"]["en"]["text"]})
         if self.path.startswith("/v1/text-to-speech/") and "pcm_16000" in self.path:
@@ -255,13 +260,26 @@ async def main():
                 assert status == code and json.loads(raw)["detail"]["key"] == key, (status, raw)
             assert len(fixture.requests) == provider_calls, "invalid trial reached provider"
             history_before = request(port, "GET", "/api/presentation/history", token=token)[1]
-            for _ in range(6):
+            slow_trial = []
+            worker = threading.Thread(target=lambda: slow_trial.append(request(
+                port, "POST", "/api/models/transcription/preview", token=token,
+                origin="tauri://localhost", body={**trial_body, "model": "gpt-slow-transcribe"})))
+            worker.start()
+            assert fixture.trial_entered.wait(5)
+            status, raw = request(port, "POST", "/api/models/transcription/preview", token=token,
+                                  origin="tauri://localhost", body=trial_body)
+            assert status == 429 and json.loads(raw)["detail"]["key"] == "trial.busy", (status, raw)
+            fixture.trial_release.set()
+            worker.join(10)
+            assert slow_trial and slow_trial[0][0] == 200, slow_trial
+            for _ in range(5):
                 status, raw = request(port, "POST", "/api/models/transcription/preview", token=token,
                                       origin="tauri://localhost", body=trial_body)
                 assert status == 200 and json.loads(raw)["text"], (status, raw)
             trial_calls = [item for item in fixture.requests if item[0] == "POST" and item[1] == "/v1/audio/transcriptions"]
             assert len(trial_calls) == 6
-            assert all(b"fixture context" in item[4] and b"gpt-4o-transcribe" in item[4] for item in trial_calls)
+            assert all(b"fixture context" in item[4] for item in trial_calls)
+            assert any(b"gpt-slow-transcribe" in item[4] for item in trial_calls)
             status, raw = request(port, "POST", "/api/models/transcription/preview", token=token,
                                   origin="tauri://localhost", body=trial_body)
             assert status == 429 and json.loads(raw)["detail"]["key"] == "trial.busy", (status, raw)
@@ -298,6 +316,7 @@ async def main():
             print("ROUTE PARITY PASS: provider settings, ordered keys, STT/TTS tries", flush=True)
         finally:
             fixture.slow_release.set()
+            fixture.trial_release.set()
             if core.poll() is None:
                 core.send_signal(signal.SIGTERM)
                 assert core.wait(timeout=10) == 0, core.stderr.read()
