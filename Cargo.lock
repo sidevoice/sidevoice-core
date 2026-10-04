@@ -4254,6 +4254,8 @@ dependencies = [
  "hostname",
  "hound",
  "httpdate",
+ "hyper",
+ "hyper-util",
  "libc",
  "opus",
  "p256",

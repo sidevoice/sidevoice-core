@@ -36,7 +36,9 @@ async fn main() {
     ])
     .expect("host configuration");
     let ready_file = config.ready_file.clone();
-    let before = tokio::runtime::Handle::current().metrics().num_alive_tasks();
+    let before = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
     let (ready_tx, ready_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let service = tokio::spawn(runtime::run_with_shutdown(
@@ -148,7 +150,10 @@ async fn main() {
         },
         held_tx,
     ));
-    let held_ready = held_rx.await.expect("held readiness report").expect("held startup");
+    let held_ready = held_rx
+        .await
+        .expect("held readiness report")
+        .expect("held startup");
     let mut held = UnixStream::connect(&held_ready.socket)
         .await
         .expect("held local connection");
@@ -161,7 +166,12 @@ async fn main() {
         .await
         .expect("forced shutdown deadline")
         .expect("held service task");
-    assert_eq!(result.expect_err("held request reaches graceful deadline").step, "run");
+    assert_eq!(
+        result
+            .expect_err("held request reaches graceful deadline")
+            .step,
+        "run"
+    );
     let mut byte = [0u8; 1];
     let closed = tokio::time::timeout(Duration::from_secs(2), held.read(&mut byte))
         .await
@@ -169,7 +179,9 @@ async fn main() {
     assert!(closed.is_err() || closed.expect("held read") == 0);
     assert!(!held_ready_file.exists());
     assert!(!held_ready.socket.exists());
-    assert!(TcpStream::connect(("127.0.0.1", held_ready.port)).await.is_err());
+    assert!(TcpStream::connect(("127.0.0.1", held_ready.port))
+        .await
+        .is_err());
     no_retained_tasks(before).await;
     println!("external library host: normal, startup failure, held shutdown retired");
 }

@@ -40,14 +40,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libopus-dev pkg-config
           python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
-      - name: Resolve hosted lockfile for dependency addition
-        run: |
-          set -euo pipefail
-          cargo metadata --format-version 1 >/dev/null
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: core-library-lock-bootstrap
-          path: Cargo.lock
       - name: Format, lockfile, lint and test
         run: |
           set -euo pipefail
