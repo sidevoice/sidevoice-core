@@ -341,19 +341,15 @@ pub(super) async fn replay(
         return failure("room.replay_audio_missing", StatusCode::GONE, &headers);
     };
     let uid = format!("{sid}:replay:{}", Uuid::new_v4());
-    state
+    let mut pending = state
         .replay_audio
         .lock()
-        .expect("replay audio lock")
-        .insert(uid.clone(), audio);
+        .expect("replay audio lock");
+    pending.insert(uid.clone(), audio);
     match state.room.replay_one(sid, history_id, &uid) {
         Ok(value) => Json(value).into_response(),
         Err(error) => {
-            state
-                .replay_audio
-                .lock()
-                .expect("replay audio lock")
-                .remove(&uid);
+            pending.remove(&uid);
             room_failure(error, &headers)
         }
     }

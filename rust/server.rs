@@ -1,6 +1,6 @@
 //! Minimum device trust surface on TCP and the same user's Unix socket.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{
@@ -62,11 +62,10 @@ struct AuthenticatedDevice(String);
 
 impl AppState {
     fn prune_replay_audio(&self) {
-        let live: HashSet<String> = self.room.replay_ids().into_iter().collect();
         self.replay_audio
             .lock()
             .expect("replay audio lock")
-            .retain(|uid, _| live.contains(uid));
+            .retain(|uid, _| self.room.has_replay(uid));
     }
 
     #[expect(

@@ -1510,15 +1510,13 @@ impl Room {
         dispatch_client(&mut inner, sid);
         Ok(json!({"utterance_id":uid,"history_id":history_id}))
     }
-    pub fn replay_ids(&self) -> Vec<String> {
+    pub fn has_replay(&self, uid: &str) -> bool {
         self.inner
             .lock()
             .expect("room lock")
             .utterances
-            .iter()
-            .filter(|(_, record)| record.replay_of.is_some())
-            .map(|(uid, _)| uid.clone())
-            .collect()
+            .get(uid)
+            .is_some_and(|record| record.replay_of.is_some())
     }
     pub fn reply_language(&self, row_id: &str) -> Option<String> {
         self.inner
