@@ -9,7 +9,8 @@ use tokio::sync::oneshot;
 #[tokio::main]
 async fn main() {
     let data_dir = PathBuf::from(std::env::args().nth(1).expect("data directory"));
-    let models = PathBuf::from(std::env::var_os("RUSTVANI_CACHE_DIR").expect("packaged model path"));
+    let models =
+        PathBuf::from(std::env::var_os("RUSTVANI_CACHE_DIR").expect("packaged model path"));
     assert!(models.join("silero.onnx").is_file());
     assert!(models.join("smart_turn_weights.bin.gz").is_file());
     let config = Config::from_args(&[
@@ -46,13 +47,20 @@ async fn main() {
     assert_eq!(record["port"].as_u64(), Some(u64::from(ready.port)));
     assert_eq!(record["launch_id"].as_str(), Some(ready.launch_id.as_str()));
     assert_eq!(record["socket"].as_str(), ready.socket.to_str());
-    let mut local = UnixStream::connect(&ready.socket).await.expect("local socket");
+    let mut local = UnixStream::connect(&ready.socket)
+        .await
+        .expect("local socket");
     local
-        .write_all(b"GET /api/local/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .write_all(
+            b"GET /api/local/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
         .await
         .expect("health request");
     let mut status = [0u8; 12];
-    local.read_exact(&mut status).await.expect("health response");
+    local
+        .read_exact(&mut status)
+        .await
+        .expect("health response");
     assert_eq!(&status, b"HTTP/1.1 200");
     drop(local);
     shutdown_tx.send(()).expect("shutdown receiver");

@@ -44,6 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --package sidevoice-core --check
+          rustfmt --edition 2021 --check tests/rust_library_host/src/main.rs
           cargo tree --locked >/dev/null
           cargo clippy --locked --all-targets -- -D warnings
           test -s /etc/ssl/certs/ca-certificates.crt
@@ -64,7 +65,6 @@ jobs:
           (host_dir / 'Cargo.toml').write_text(template.replace('CORE_REV', revision))
           PY
           cp tests/rust_library_host/src/main.rs "$host_dir/src/main.rs"
-          rustfmt --edition 2021 --check "$host_dir/src/main.rs"
           export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
           cargo generate-lockfile --manifest-path "$host_dir/Cargo.toml"
           cargo metadata --locked --format-version 1 --manifest-path "$host_dir/Cargo.toml" \
