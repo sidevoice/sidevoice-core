@@ -1812,8 +1812,7 @@ mod tests {
             )["status"],
             "queued"
         );
-        room.receipt(&sid, "original", revision, "playing")
-            .unwrap();
+        room.receipt(&sid, "original", revision, "playing").unwrap();
         room.receipt(&sid, "original", revision, "playback_finished")
             .unwrap();
         let relay = rendezvous::Rendezvous::new(

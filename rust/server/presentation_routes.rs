@@ -13,7 +13,10 @@ pub(super) fn cached_reply(
     settings: &crate::types::CallSettings,
     text: &str,
     language: Option<&str>,
-) -> Option<(Arc<crate::providers::CloudSpeech>, crate::models::ResolvedVoice)> {
+) -> Option<(
+    Arc<crate::providers::CloudSpeech>,
+    crate::models::ResolvedVoice,
+)> {
     let voice = crate::models::resolve_voice(settings, language).ok()?;
     if voice.place == "device" {
         return None;
