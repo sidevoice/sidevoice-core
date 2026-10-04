@@ -29,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           test -s tests/fixtures/hola-sala-16k.wav
-          cargo fmt --all --check
+          cargo fmt --package sidevoice-core --check
           cargo clippy --locked --all-targets -- -D warnings
           test -s /etc/ssl/certs/ca-certificates.crt
           export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt

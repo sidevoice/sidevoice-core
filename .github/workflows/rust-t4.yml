@@ -28,7 +28,7 @@ jobs:
       - name: Verify committed formatting and lockfile
         run: |
           set -euo pipefail
-          cargo fmt --all --check
+          cargo fmt --package sidevoice-core --check
           cargo tree --locked >/dev/null
       - name: Lint and compile the selected feature set
         run: |

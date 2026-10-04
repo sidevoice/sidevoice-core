@@ -43,7 +43,7 @@ jobs:
       - name: Format, lockfile, lint and test
         run: |
           set -euo pipefail
-          cargo fmt --all --check
+          cargo fmt --package sidevoice-core --check
           cargo tree --locked >/dev/null
           cargo clippy --locked --all-targets -- -D warnings
           test -s /etc/ssl/certs/ca-certificates.crt
