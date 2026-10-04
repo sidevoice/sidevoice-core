@@ -548,7 +548,7 @@ where
     let tcp_address = tcp
         .local_addr()
         .map_err(|_| StartFailure::new("start", "start.failed"))?;
-    let mut delivery_task = tokio::spawn(room.pump());
+    let delivery_task = tokio::spawn(room.pump());
     let (stopping, receiver) = watch::channel(false);
     let (force, force_receiver) = watch::channel(false);
     let tcp_app = server::router(state.clone(), false);
