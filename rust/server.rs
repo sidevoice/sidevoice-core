@@ -410,7 +410,10 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             axum::routing::delete(revoke),
         )
         .route("/api/presentation/ws", get(call_socket))
+        .route("/api/presentation/languages", get(presentation_languages))
+        .route("/api/presentation/integrations", get(presentation_integrations))
         .route("/api/presentation/latency", get(presentation_latency))
+        .route("/api/models/catalog", get(model_catalog))
         .route("/api/presentation/rtc/config", get(rtc::config))
         .route("/api/presentation/rtc/offer", post(rtc::offer));
     router = router
@@ -472,6 +475,47 @@ fn query(uri: &axum::http::Uri, name: &str) -> Option<String> {
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.into_owned())
     })
+}
+async fn presentation_languages() -> Json<Value> {
+    // Python's load_settings().model_dump() includes null builds. Settings still
+    // belong to the device; this route only supplies the catalogue defaults.
+    let mut settings = serde_json::to_value(crate::models::default_settings(None, None))
+        .expect("default settings serialize");
+    for stage in ["stt", "tts"] {
+        settings[stage]["build"] = Value::Null;
+    }
+    settings["replay_on_return_seconds"] = json!(120);
+    Json(settings)
+}
+async fn presentation_integrations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let saved = state.dir.read_json("integrations.json").ok().flatten();
+    let providers = [
+        ("openai", "OpenAI", "transcription", "VOICE_STT_API_KEY"),
+        ("elevenlabs", "ElevenLabs", "voice", "VOICE_ELEVENLABS_API_KEY"),
+    ]
+    .into_iter()
+    .map(|(id, label, capability, environment)| {
+        let stored = saved.as_ref().and_then(|value| value[id].as_str());
+        let deployed = std::env::var(environment).ok();
+        let status = crate::models::credential_state(stored, deployed.as_deref());
+        json!({"id":id,"label":label,"capabilities":[capability],
+            "configured":status.configured,"source":status.source,
+            "hint":status.hint,"environment":environment})
+    })
+    .collect::<Vec<_>>();
+    Json(json!({"providers":providers})).into_response()
+}
+async fn model_catalog(headers: HeaderMap) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    ([(header::CONTENT_TYPE, "application/json")], crate::models::catalog_text()).into_response()
 }
 async fn presentation_state(
     State(state): State<Arc<AppState>>,
