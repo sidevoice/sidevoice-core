@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -92,6 +93,8 @@ async fn main() {
     let failed_dir = data_dir.join("failed-start");
     let blocked_ready = failed_dir.join("blocked-ready");
     std::fs::create_dir_all(&blocked_ready).expect("readiness collision");
+    std::fs::set_permissions(&failed_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("private failed-start directory");
     let failed_config = Config::from_args(&[
         "--data-dir".into(),
         failed_dir.to_string_lossy().into_owned(),
