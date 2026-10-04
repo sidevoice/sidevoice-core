@@ -30,12 +30,16 @@ use crate::storage::PrivateDir;
 
 mod connectors_v2;
 mod connectors_v3;
+mod contract_slice_generated;
 mod media;
 mod model_check;
 mod presentation_routes;
 pub mod rendezvous;
 mod rtc;
 mod transcription_trial;
+
+#[cfg(test)]
+mod contract_slice_tests;
 
 pub struct AppState {
     pub dir: PrivateDir,
@@ -445,7 +449,6 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             axum::routing::delete(revoke),
         )
         .route("/api/presentation/ws", get(call_socket))
-        .route("/api/presentation/languages", get(presentation_languages))
         .route(
             "/api/presentation/integrations",
             get(presentation_integrations),
@@ -470,10 +473,6 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .route("/api/presentation/latency", get(presentation_latency))
         .route("/api/models/catalog", get(model_catalog))
         .route("/api/models/check", post(model_check::model_check))
-        .route(
-            "/api/models/transcription/preview",
-            post(transcription_trial::preview),
-        )
         .route("/api/presentation/rtc/config", get(rtc::config))
         .route("/api/presentation/rtc/offer", post(rtc::offer));
     router = router
@@ -518,7 +517,10 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             .route("/api/device/local", axum::routing::delete(unpair_local));
         router = router.route("/api/connectors/v3", get(connector_v3));
     }
-    let router = router.fallback(not_found).with_state(state.clone());
+    let router = router
+        .merge(contract_slice_generated::routes::<ContractAdapters>())
+        .fallback(not_found)
+        .with_state(state.clone());
     let router = if local {
         connectors_v2::layer(router, state.clone())
     } else {
@@ -559,6 +561,24 @@ async fn presentation_languages() -> Json<Value> {
     settings["vad_confidence"] = json!(0.6);
     settings["vad_start_secs"] = json!(0.4);
     Json(settings)
+}
+
+struct ContractAdapters;
+
+#[async_trait::async_trait]
+impl contract_slice_generated::ContractSliceHandlers for ContractAdapters {
+    async fn get_presentation_languages() -> Response {
+        presentation_languages().await.into_response()
+    }
+
+    async fn post_transcription_trial(
+        state: State<Arc<AppState>>,
+        device: Extension<AuthenticatedDevice>,
+        headers: HeaderMap,
+        body: axum::body::Bytes,
+    ) -> Response {
+        transcription_trial::preview(state, device, headers, body).await
+    }
 }
 async fn presentation_integrations(
     State(state): State<Arc<AppState>>,

@@ -1,0 +1,163 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Sidevoice Core contract feasibility slice",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/presentation/languages": {
+      "get": {
+        "operationId": "getPresentationLanguages",
+        "security": [{ "deviceBearer": [] }],
+        "responses": {
+          "200": {
+            "description": "Current Python-exact default call settings",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LanguagesResponse" } } }
+          },
+          "401": {
+            "description": "Device token absent or revoked",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TrialRefusal" } } }
+          }
+        }
+      }
+    },
+    "/api/models/transcription/preview": {
+      "post": {
+        "operationId": "postTranscriptionTrial",
+        "security": [{ "deviceBearer": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TrialRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "One provider transcription",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TrialResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/TrialRefusal" },
+          "401": { "$ref": "#/components/responses/TrialRefusal" },
+          "403": { "$ref": "#/components/responses/TrialRefusal" },
+          "409": { "$ref": "#/components/responses/TrialRefusal" },
+          "413": { "$ref": "#/components/responses/TrialRefusal" },
+          "422": { "$ref": "#/components/responses/TrialRefusal" },
+          "429": { "$ref": "#/components/responses/TrialRefusal" },
+          "502": { "$ref": "#/components/responses/TrialRefusal" },
+          "504": { "$ref": "#/components/responses/TrialRefusal" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "deviceBearer": { "type": "http", "scheme": "bearer" }
+    },
+    "responses": {
+      "TrialRefusal": {
+        "description": "Localized keyed refusal",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TrialRefusal" } } }
+      }
+    },
+    "schemas": {
+      "LanguagesStage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["place", "model", "options", "build"],
+        "properties": {
+          "place": { "type": "string" },
+          "model": { "type": "string" },
+          "options": { "type": "object", "additionalProperties": true },
+          "build": { "type": "null" }
+        }
+      },
+      "LanguagesResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ui_language", "stt", "tts", "audio_grace_seconds", "replay_on_return_seconds", "turn_patience", "turn_end_mode", "user_speech_timeout", "smart_turn_min_silence", "smart_turn_max_silence", "vad_confidence", "vad_min_volume", "vad_start_secs", "merge_window_secs"],
+        "properties": {
+          "ui_language": { "type": "string" },
+          "stt": { "$ref": "#/components/schemas/LanguagesStage" },
+          "tts": { "$ref": "#/components/schemas/LanguagesStage" },
+          "audio_grace_seconds": { "type": "number" },
+          "replay_on_return_seconds": { "type": "integer" },
+          "turn_patience": { "type": "string" },
+          "turn_end_mode": { "type": "string" },
+          "user_speech_timeout": { "type": "number" },
+          "smart_turn_min_silence": { "type": "number" },
+          "smart_turn_max_silence": { "type": "number" },
+          "vad_confidence": { "type": "number" },
+          "vad_min_volume": { "type": "number" },
+          "vad_start_secs": { "type": "number" },
+          "merge_window_secs": { "type": "number" }
+        }
+      },
+      "TrialRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["place", "model", "audio"],
+        "properties": {
+          "place": { "const": "openai" },
+          "model": { "type": "string" },
+          "options": { "$ref": "#/components/schemas/TrialOptions" },
+          "audio": { "$ref": "#/components/schemas/TrialAudio" }
+        }
+      },
+      "TrialOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "language": { "type": "string" },
+          "context": { "type": "string" }
+        }
+      },
+      "TrialAudio": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["encoding", "sample_rate", "data_base64"],
+        "properties": {
+          "encoding": { "const": "pcm_s16le" },
+          "sample_rate": { "const": 16000 },
+          "data_base64": { "type": "string" }
+        }
+      },
+      "TrialResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text"],
+        "properties": { "text": { "type": "string" } }
+      },
+      "TrialRefusal": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["detail"],
+        "properties": { "detail": { "$ref": "#/components/schemas/RefusalDetail" } }
+      },
+      "RefusalDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "message"],
+        "properties": {
+          "key": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      },
+      "VoiceMediaCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "data"],
+        "properties": {
+          "type": { "const": "voice-media" },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["session_id", "path"],
+            "properties": {
+              "session_id": { "type": "string" },
+              "path": { "enum": ["socket", "webrtc"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

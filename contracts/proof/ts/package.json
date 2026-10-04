@@ -1,0 +1,17 @@
+{
+  "name": "@sidevoice/core-contract-slice-proof",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "openapi-typescript ../../core-slice.openapi.json -o src/generated/core-http.d.ts",
+    "check": "tsc -p tsconfig.json",
+    "negative": "tsc -p tsconfig.negative.json"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}
