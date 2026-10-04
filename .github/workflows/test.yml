@@ -1,7 +1,7 @@
 name: test
 
 # What runs when (RELEASING.md):
-# - pull request: unit tests plus native bundle build, archive relocation and manifest checks; nothing is published.
+# - pull request: unit tests; final native bundle proof is available through workflow_dispatch.
 # - push to main: tests and packages, then replace the `nightly` pre-release with verified assets.
 # - a release (called by release-please.yml with the tag it created): the same, attached to that release.
 on:
@@ -22,7 +22,8 @@ permissions:
 concurrency:
   # Per ref. A release (github.workflow is the caller's, release-please) never shares a group with a push.
   group: test-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Do not interrupt protected-main asset production; superseded PR checks may be cancelled.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   python:
@@ -88,6 +89,7 @@ jobs:
   package:
     name: Wheel, sdist, model catalogue and vectors
     needs: python
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       # Where the assets go: the release that called this, or the rolling `nightly` pre-release on a push to main.

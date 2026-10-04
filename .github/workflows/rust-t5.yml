@@ -2,11 +2,13 @@ name: Rust T5 voice and media
 
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/rust-core-mvp]
 
 permissions:
   contents: read
+
+concurrency:
+  group: rust-t5-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   voice:

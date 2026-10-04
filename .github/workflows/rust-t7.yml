@@ -2,11 +2,14 @@ name: Rust T7 native bundles
 
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/rust-core-mvp]
 
 permissions:
   contents: read
+
+concurrency:
+  group: rust-t7-${{ github.ref }}
+  # A dispatched protected-main archive run must finish for attested asset consumers.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   native:

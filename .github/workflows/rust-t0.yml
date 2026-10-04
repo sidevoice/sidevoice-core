@@ -1,12 +1,14 @@
 name: Rust T0 foundation
 
 on:
-  push:
-    branches: [feat/rust-core-mvp]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: rust-t0-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   detector:

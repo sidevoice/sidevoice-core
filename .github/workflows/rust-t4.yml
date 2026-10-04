@@ -1,12 +1,14 @@
 name: Rust T4 cloud provider SDKs and synthesis cache
 
 on:
-  push:
-    branches: [feat/rust-core-t4-providers, feat/rust-core-mvp]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: rust-t4-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   providers:
