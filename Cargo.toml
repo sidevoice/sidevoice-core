@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.98"
 publish = false
 
+[workspace]
+exclude = ["vendor/elevenlabs-sdk"]
+
 [features]
 hosted-fixtures = ["dep:rtc"]
 
