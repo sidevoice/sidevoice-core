@@ -51,15 +51,21 @@ impl OpenAiTranscriber {
     }
 
     pub async fn catalog(&self) -> Result<Vec<String>, ProviderError> {
-        let response = self.client.models().list().await.map_err(map_openai_error)?;
+        let response = self
+            .client
+            .models()
+            .list()
+            .await
+            .map_err(map_openai_error)?;
         let mut models: Vec<String> = response
             .data
             .into_iter()
             .map(|model| model.id)
             .filter(|id| {
-                (id == "whisper-1" || (id.contains("transcribe")
-                    && !id.contains("realtime")
-                    && !id.contains("live")))
+                (id == "whisper-1"
+                    || (id.contains("transcribe")
+                        && !id.contains("realtime")
+                        && !id.contains("live")))
                     && id.len() <= 120
                     && id
                         .chars()

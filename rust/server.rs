@@ -461,8 +461,14 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .route("/api/presentation/leave", post(presentation_leave))
         .route("/api/presentation/close", post(presentation_close))
         .route("/api/presentation/text", post(presentation_text))
-        .route("/api/presentation/cancel-input", post(presentation_cancel_input))
-        .route("/api/presentation/replay", post(presentation_routes::replay))
+        .route(
+            "/api/presentation/cancel-input",
+            post(presentation_cancel_input),
+        )
+        .route(
+            "/api/presentation/replay",
+            post(presentation_routes::replay),
+        )
         .route(
             "/api/presentation/browser-receipt",
             post(presentation_receipt),
@@ -708,14 +714,29 @@ async fn presentation_history(
         return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
     }
     let mut history = state.room.history(query(&uri, "thread_id").as_deref());
-    if let Some(sid) = query(&uri, "session_id").filter(|sid| state.room.owns_session(sid, &device.0)) {
-        let settings = state.call_settings.lock().expect("call settings lock").get(&sid).cloned();
+    if let Some(sid) =
+        query(&uri, "session_id").filter(|sid| state.room.owns_session(sid, &device.0))
+    {
+        let settings = state
+            .call_settings
+            .lock()
+            .expect("call settings lock")
+            .get(&sid)
+            .cloned();
         if let (Some(settings), Some(rows)) = (settings, history["messages"].as_array_mut()) {
             for row in rows {
-                if row["role"] != "assistant" { continue; }
-                let Some(id) = row["id"].as_str() else { continue; };
-                let Ok((text, language)) = state.room.replay_source(&sid, id) else { continue; };
-                if presentation_routes::cached_reply(&state, &settings, &text, language.as_deref()).is_some() {
+                if row["role"] != "assistant" {
+                    continue;
+                }
+                let Some(id) = row["id"].as_str() else {
+                    continue;
+                };
+                let Ok((text, language)) = state.room.replay_source(&sid, id) else {
+                    continue;
+                };
+                if presentation_routes::cached_reply(&state, &settings, &text, language.as_deref())
+                    .is_some()
+                {
                     row["replayable"] = json!(true);
                 }
             }
@@ -1461,8 +1482,16 @@ async fn socket_loop(
         state.dir.clone(),
     );
     let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::channel::<u64>(8);
-    state.cancel_input.lock().expect("cancel input lock").insert(session.clone(), cancel_tx);
-    state.call_settings.lock().expect("call settings lock").insert(session.clone(), loaded.settings.clone());
+    state
+        .cancel_input
+        .lock()
+        .expect("cancel input lock")
+        .insert(session.clone(), cancel_tx);
+    state
+        .call_settings
+        .lock()
+        .expect("call settings lock")
+        .insert(session.clone(), loaded.settings.clone());
     let mut call_settings = loaded.settings.clone();
     let (rendered_tx, mut rendered_rx) =
         tokio::sync::mpsc::channel::<(String, u64, Option<Value>)>(16);
@@ -1543,9 +1572,21 @@ async fn socket_loop(
         }
     }
     turns.close().await;
-    state.cancel_input.lock().expect("cancel input lock").remove(&session);
-    state.call_settings.lock().expect("call settings lock").remove(&session);
-    state.replay_audio.lock().expect("replay audio lock").retain(|uid,_|!uid.starts_with(&format!("{session}:replay:")));
+    state
+        .cancel_input
+        .lock()
+        .expect("cancel input lock")
+        .remove(&session);
+    state
+        .call_settings
+        .lock()
+        .expect("call settings lock")
+        .remove(&session);
+    state
+        .replay_audio
+        .lock()
+        .expect("replay audio lock")
+        .retain(|uid, _| !uid.starts_with(&format!("{session}:replay:")));
     call_media.close();
     call_media.close_rtc().await;
     state.media.lock().expect("media lock").remove(&session);

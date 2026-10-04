@@ -1234,7 +1234,9 @@ impl Room {
         }
         browser.cancelled_turn = Some(revision);
         let thread = browser.target.as_ref().map(|target| target.thread.clone());
-        let _ = browser.sender.try_send(json!({"type":"voice-user-turn","data":{
+        let _ = browser
+            .sender
+            .try_send(json!({"type":"voice-user-turn","data":{
             "phase":"cancelled","revision":revision,"thread_id":thread}}));
         Ok(json!({"status":"cancelled"}))
     }
@@ -1438,7 +1440,8 @@ impl Room {
         let Some(row) = inner.rows.iter().find(|row| row.id == record.row_id) else {
             return Err(RoomError::new(404, "room.replay_missing"));
         };
-        if browser.target.as_ref().map(|target| target.thread.as_str()) != Some(row.thread.as_str()) {
+        if browser.target.as_ref().map(|target| target.thread.as_str()) != Some(row.thread.as_str())
+        {
             return Err(RoomError::new(404, "room.replay_missing"));
         }
         Ok((row.text.clone(), row.language.clone()))
@@ -1474,12 +1477,15 @@ impl Room {
         }
         let revision = browser.revision;
         browser.pending.push_front(uid.to_owned());
-        inner.utterances.insert(uid.to_owned(), UtteranceRecord {
-            row_id: history_id.to_owned(),
-            clients: HashMap::from([(sid.to_owned(), (revision, "queued".to_owned()))]),
-            parked: false,
-            replay_of: Some(original),
-        });
+        inner.utterances.insert(
+            uid.to_owned(),
+            UtteranceRecord {
+                row_id: history_id.to_owned(),
+                clients: HashMap::from([(sid.to_owned(), (revision, "queued".to_owned()))]),
+                parked: false,
+                replay_of: Some(original),
+            },
+        );
         dispatch_client(&mut inner, sid);
         Ok(json!({"utterance_id":uid,"history_id":history_id}))
     }
@@ -1803,7 +1809,12 @@ impl Room {
             .max_by_key(|status| status_rank(status))
             .unwrap_or(next)
             .to_owned();
-        if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id).filter(|_| !replay) {
+        if let Some(row) = inner
+            .rows
+            .iter_mut()
+            .find(|r| r.id == row_id)
+            .filter(|_| !replay)
+        {
             row.status = best;
             row.reason = match status {
                 "skipped" => Some("user_skipped".into()),
@@ -2400,7 +2411,11 @@ fn dispatch_client(inner: &mut Inner, sid: &str) {
                     entry.1 = "interrupted".into();
                 }
             }
-            if inner.utterances.get(&uid).is_some_and(|record| record.replay_of.is_none()) {
+            if inner
+                .utterances
+                .get(&uid)
+                .is_some_and(|record| record.replay_of.is_none())
+            {
                 sync_row(inner, &row_id, "interrupted", Some("focus_changed"));
             }
             continue;
@@ -2429,9 +2444,11 @@ fn interrupt_client(inner: &mut Inner, sid: &str, reason: &str) {
         if let Some(entry) = record.clients.get_mut(sid) {
             if matches!(entry.1.as_str(), "queued" | "waiting_for_turn" | "playing") {
                 entry.1 = "interrupted".into();
-                if record.replay_of.is_none() && record.clients.values().all(|(_, status)| {
-                    !matches!(status.as_str(), "queued" | "waiting_for_turn" | "playing")
-                }) {
+                if record.replay_of.is_none()
+                    && record.clients.values().all(|(_, status)| {
+                        !matches!(status.as_str(), "queued" | "waiting_for_turn" | "playing")
+                    })
+                {
                     rows.push(record.row_id.clone());
                 }
             }

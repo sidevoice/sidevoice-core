@@ -906,9 +906,9 @@ impl TurnOwner {
         {
             self.pending = None;
         }
-        self.queue.retain(|job| {
-            !matches!(job, RecognitionJob::Live { turn, .. } if turn.revision == revision)
-        });
+        self.queue.retain(
+            |job| !matches!(job, RecognitionJob::Live { turn, .. } if turn.revision == revision),
+        );
         if self.active_turn.as_ref().map(|turn| turn.revision) == Some(revision) {
             if let Some(active) = self.active.take() {
                 active.abort();
@@ -994,7 +994,10 @@ pub async fn speech_event(
         speed: voice.speed,
     };
     let result = if let Some(speech) = replay_audio {
-        crate::providers::cache::CachedSpeech { speech, fresh: false }
+        crate::providers::cache::CachedSpeech {
+            speech,
+            fresh: false,
+        }
     } else {
         let key = provider_key(dir, "elevenlabs")?;
         let client = ElevenLabsTts::new(&key).ok()?;

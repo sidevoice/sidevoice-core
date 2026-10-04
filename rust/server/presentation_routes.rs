@@ -1,11 +1,11 @@
 //! Settings and try routes backed by the node's existing provider and private stores.
 
 use super::*;
+use crate::providers::cache::{SynthesisCache, SynthesisChoice};
 use crate::providers::{
     verify_elevenlabs_key, verify_openai_key, ElevenLabsCatalog, ElevenLabsTts, OpenAiTranscriber,
     ProviderError, ProviderErrorKind,
 };
-use crate::providers::cache::{SynthesisCache, SynthesisChoice};
 use axum::body::Bytes;
 
 pub(super) fn cached_reply(
@@ -55,16 +55,12 @@ pub(super) fn integration_listing(state: &AppState) -> Value {
     json!({"providers":providers})
 }
 
-fn write_allowed(headers: &HeaderMap, provider: &str) -> Result<(), Response> {
+fn write_allowed(headers: &HeaderMap, provider: &str) -> Result<(), (&'static str, StatusCode)> {
     if provider_meta(provider).is_none() {
-        return Err(failure("integration.unknown", StatusCode::NOT_FOUND, headers));
+        return Err(("integration.unknown", StatusCode::NOT_FOUND));
     }
     if headers.get(header::ORIGIN).is_none() || !origin_allowed(headers) {
-        return Err(failure(
-            "request.origin_invalid",
-            StatusCode::FORBIDDEN,
-            headers,
-        ));
+        return Err(("request.origin_invalid", StatusCode::FORBIDDEN));
     }
     Ok(())
 }
@@ -84,14 +80,18 @@ pub(super) async fn save_integration(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(response) = write_allowed(&headers, &provider) {
-        return response;
+    if let Err((key, status)) = write_allowed(&headers, &provider) {
+        return failure(key, status, &headers);
     }
     let Some(key) = payload(&body)
         .and_then(|body| body["key"].as_str().map(str::trim).map(str::to_owned))
         .filter(|key| !key.is_empty())
     else {
-        return failure("integration.key_empty", StatusCode::UNPROCESSABLE_ENTITY, &headers);
+        return failure(
+            "integration.key_empty",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+        );
     };
     let ticket = {
         let mut revisions = state
@@ -137,8 +137,8 @@ pub(super) async fn clear_integration(
     Path(provider): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = write_allowed(&headers, &provider) {
-        return response;
+    if let Err((key, status)) = write_allowed(&headers, &provider) {
+        return failure(key, status, &headers);
     }
     let mut revisions = state
         .integration_revisions
@@ -153,7 +153,11 @@ pub(super) async fn clear_integration(
         .flatten()
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
-    if saved.as_object_mut().expect("object").remove(&provider).is_some()
+    if saved
+        .as_object_mut()
+        .expect("object")
+        .remove(&provider)
+        .is_some()
         && state.dir.write_json("integrations.json", &saved).is_err()
     {
         return failure("start.failed", StatusCode::INTERNAL_SERVER_ERROR, &headers);
@@ -205,7 +209,9 @@ pub(super) async fn transcription_models(
                 "models":ids.into_iter().map(|id|json!({"label":id,"id":id})).collect::<Vec<_>>(),
                 "error":if empty {Some(render(&LocalizedMessage::new("integration.catalog_empty"),language(&headers)))} else {None}})
         }
-        Err(error) => json!({"provider":"openai","configured":true,"models":[],"error":catalog_error(&error,&headers)}),
+        Err(error) => {
+            json!({"provider":"openai","configured":true,"models":[],"error":catalog_error(&error,&headers)})
+        }
     };
     Json(listing).into_response()
 }
@@ -229,16 +235,23 @@ pub(super) async fn voice_catalog(
         },
         None => ElevenLabsCatalog::unconfigured(language(&headers)),
     };
-    let models = catalog.models.into_iter().map(|model| {
-        json!({"id":model.id,"label":model.label,"description":model.description})
-    }).collect::<Vec<_>>();
-    let voices = catalog.voices.into_iter().map(|voice| {
-        json!({"id":voice.id,"label":voice.label,"description":voice.description,
+    let models = catalog
+        .models
+        .into_iter()
+        .map(|model| json!({"id":model.id,"label":model.label,"description":model.description}))
+        .collect::<Vec<_>>();
+    let voices = catalog
+        .voices
+        .into_iter()
+        .map(|voice| {
+            json!({"id":voice.id,"label":voice.label,"description":voice.description,
             "languages":voice.languages})
-    }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     Json(json!({"languages":crate::models::voice_languages(),
         "providers":{"elevenlabs":{"configured":configured,"models":models,"voices":voices,
-            "error":catalog.error.as_ref().map(|error|catalog_error(error,&headers))}}})).into_response()
+            "error":catalog.error.as_ref().map(|error|catalog_error(error,&headers))}}}))
+    .into_response()
 }
 
 pub(super) async fn synthesis_preview(
@@ -257,7 +270,11 @@ pub(super) async fn synthesis_preview(
         body["model"].as_str().filter(|value| !value.is_empty()),
         body["voice"].as_str().filter(|value| !value.is_empty()),
     ) else {
-        return failure("integration.preview_invalid", StatusCode::UNPROCESSABLE_ENTITY, &headers);
+        return failure(
+            "integration.preview_invalid",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+        );
     };
     let speed = body["speed"].as_f64().unwrap_or(1.0);
     let text = body["text"].as_str().unwrap_or("");
@@ -265,10 +282,14 @@ pub(super) async fn synthesis_preview(
         Ok(client) => client,
         Err(error) => return provider_failure(&error, &headers),
     };
-    match client.synthesize(text, model, voice, speed, false, "mp3_44100_128").await {
+    match client
+        .synthesize(text, model, voice, speed, false, "mp3_44100_128")
+        .await
+    {
         Ok(speech) => Json(json!({"mime_type":speech.mime_type,
             "audio_base64":base64::engine::general_purpose::STANDARD.encode(speech.audio),
-            "timings_ms":speech.timings_ms,"alignment":speech.alignment})).into_response(),
+            "timings_ms":speech.timings_ms,"alignment":speech.alignment}))
+        .into_response(),
         Err(error) => provider_failure(&error, &headers),
     }
 }
@@ -291,7 +312,11 @@ pub(super) async fn replay(
         return failure("room.browser_absent", StatusCode::CONFLICT, &headers);
     }
     if history_id.is_empty() {
-        return failure("room.replay_invalid", StatusCode::UNPROCESSABLE_ENTITY, &headers);
+        return failure(
+            "room.replay_invalid",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+        );
     }
     let (text, language) = match state.room.replay_source(sid, history_id) {
         Ok(source) => source,
