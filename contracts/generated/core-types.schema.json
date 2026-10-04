@@ -126,7 +126,9 @@
       ],
       "properties": {
         "place": {
-          "const": "openai"
+          "enum": [
+            "openai"
+          ]
         },
         "model": {
           "type": "string"
@@ -161,10 +163,14 @@
       ],
       "properties": {
         "encoding": {
-          "const": "pcm_s16le"
+          "enum": [
+            "pcm_s16le"
+          ]
         },
         "sample_rate": {
-          "const": 16000
+          "enum": [
+            16000
+          ]
         },
         "data_base64": {
           "type": "string"
@@ -220,7 +226,9 @@
       ],
       "properties": {
         "type": {
-          "const": "voice-media"
+          "enum": [
+            "voice-media"
+          ]
         },
         "data": {
           "type": "object",

@@ -92,9 +92,13 @@ jobs:
           from pathlib import Path
           path = Path('rust/server/contract_slice_generated.rs')
           text = path.read_text()
-          line = '        .route("/api/presentation/languages", get(H::get_presentation_languages))\n'
-          assert text.count(line) == 1
-          path.write_text(text.replace(line, ''))
+          block = '''        .route(
+                      "/api/presentation/languages",
+                      get(H::get_presentation_languages),
+                  )
+          '''
+          assert text.count(block) == 1
+          path.write_text(text.replace(block, ''))
           PY
           if python3 tools/contract_slice.py check; then
             echo 'missing generated registration was accepted'

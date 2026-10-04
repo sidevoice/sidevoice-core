@@ -15,6 +15,12 @@ pub(super) trait ContractSliceHandlers: Send + Sync + 'static {
 
 pub(super) fn routes<H: ContractSliceHandlers>() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/presentation/languages", get(H::get_presentation_languages))
-        .route("/api/models/transcription/preview", post(H::post_transcription_trial))
+        .route(
+            "/api/presentation/languages",
+            get(H::get_presentation_languages),
+        )
+        .route(
+            "/api/models/transcription/preview",
+            post(H::post_transcription_trial),
+        )
 }

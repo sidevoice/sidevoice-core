@@ -40,6 +40,8 @@ mod transcription_trial;
 
 #[cfg(test)]
 mod contract_slice_tests;
+#[cfg(test)]
+mod contract_types_generated;
 
 pub struct AppState {
     pub dir: PrivateDir,

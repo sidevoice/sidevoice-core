@@ -96,7 +96,7 @@
         "additionalProperties": false,
         "required": ["place", "model", "audio"],
         "properties": {
-          "place": { "const": "openai" },
+          "place": { "enum": ["openai"] },
           "model": { "type": "string" },
           "options": { "$ref": "#/components/schemas/TrialOptions" },
           "audio": { "$ref": "#/components/schemas/TrialAudio" }
@@ -115,8 +115,8 @@
         "additionalProperties": false,
         "required": ["encoding", "sample_rate", "data_base64"],
         "properties": {
-          "encoding": { "const": "pcm_s16le" },
-          "sample_rate": { "const": 16000 },
+          "encoding": { "enum": ["pcm_s16le"] },
+          "sample_rate": { "enum": [16000] },
           "data_base64": { "type": "string" }
         }
       },
@@ -146,7 +146,7 @@
         "additionalProperties": false,
         "required": ["type", "data"],
         "properties": {
-          "type": { "const": "voice-media" },
+          "type": { "enum": ["voice-media"] },
           "data": {
             "type": "object",
             "additionalProperties": false,
