@@ -8,10 +8,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::serve::Listener;
+use axum::Router;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::{oneshot, watch};
+use tokio::task::{JoinHandle, JoinSet};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
@@ -244,6 +251,91 @@ async fn wait_stop(mut receiver: watch::Receiver<bool>) {
     while !*receiver.borrow() && receiver.changed().await.is_ok() {}
 }
 
+// Axum 0.8.9 detaches accepted connection tasks. Keep the same Axum routers
+// and Hyper protocol/upgrade driver, but own each connection until it ends.
+async fn serve_owned<L: Listener>(
+    mut listener: L,
+    app: Router,
+    stopping: watch::Receiver<bool>,
+    force: watch::Receiver<bool>,
+) -> io::Result<()> {
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = wait_stop(stopping.clone()) => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => {},
+            (io, _) = listener.accept() => {
+                let app = app.clone();
+                let connection_stop = stopping.clone();
+                connections.spawn(async move {
+                    let service = hyper::service::service_fn(move |request: hyper::Request<Incoming>| {
+                        app.clone().oneshot(request.map(axum::body::Body::new))
+                    });
+                    let mut builder = Builder::new(TokioExecutor::new());
+                    builder.http2().enable_connect_protocol();
+                    let mut connection = Box::pin(
+                        builder.serve_connection_with_upgrades(TokioIo::new(io), service)
+                    );
+                    tokio::select! {
+                        _ = &mut connection => {},
+                        _ = wait_stop(connection_stop) => {
+                            connection.as_mut().graceful_shutdown();
+                            let _ = connection.await;
+                        }
+                    }
+                });
+            }
+        }
+    }
+    drop(listener);
+    while !connections.is_empty() {
+        tokio::select! {
+            biased;
+            _ = wait_stop(force.clone()) => {
+                connections.abort_all();
+                while connections.join_next().await.is_some() {}
+                break;
+            }
+            _ = connections.join_next() => {},
+        }
+    }
+    Ok(())
+}
+
+// The graceful deadline covers both listeners and their accepted connections.
+// After it expires, each listener aborts and joins its remaining connections.
+async fn retire_listeners(
+    stopping: &watch::Sender<bool>,
+    force: &watch::Sender<bool>,
+    tcp_task: &mut JoinHandle<io::Result<()>>,
+    local_task: &mut JoinHandle<io::Result<()>>,
+) -> bool {
+    let _ = stopping.send(true);
+    let wait = async {
+        if !tcp_task.is_finished() {
+            let _ = (&mut *tcp_task).await;
+        }
+        if !local_task.is_finished() {
+            let _ = (&mut *local_task).await;
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(10), wait)
+        .await
+        .is_ok()
+    {
+        return false;
+    }
+    let _ = force.send(true);
+    if !tcp_task.is_finished() {
+        let _ = tcp_task.await;
+    }
+    if !local_task.is_finished() {
+        let _ = local_task.await;
+    }
+    true
+}
+
 async fn probe_http<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, path: &str) -> bool {
     let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     tokio::time::timeout(Duration::from_millis(250), async {
@@ -449,28 +541,26 @@ where
         room.clone(),
         rendezvous.clone(),
     ));
-    let delivery_task = tokio::spawn(room.pump());
     let ready = json!({"pid": std::process::id(), "port": port, "url": format!("http://127.0.0.1:{port}"),
         "socket": config.socket, "launch_id": config.launch_id, "version": env!("CARGO_PKG_VERSION"),
         "api": API, "protocol": CONNECTOR_PROTOCOL, "connector_protocols": [CONNECTOR_PROTOCOL, 3],
         "connector_id": connector_id, "token": token});
-    let (stopping, receiver) = watch::channel(false);
     let tcp_address = tcp
         .local_addr()
         .map_err(|_| StartFailure::new("start", "start.failed"))?;
+    let mut delivery_task = tokio::spawn(room.pump());
+    let (stopping, receiver) = watch::channel(false);
+    let (force, force_receiver) = watch::channel(false);
     let tcp_app = server::router(state.clone(), false);
     let local_app = server::router(state.clone(), true);
     let tcp_receiver = receiver.clone();
-    let tcp_task = tokio::spawn(async move {
-        axum::serve(tcp, tcp_app)
-            .with_graceful_shutdown(wait_stop(tcp_receiver))
-            .await
-    });
-    let local_task = tokio::spawn(async move {
-        axum::serve(local, local_app)
-            .with_graceful_shutdown(wait_stop(receiver))
-            .await
-    });
+    let tcp_task = tokio::spawn(serve_owned(
+        tcp,
+        tcp_app,
+        tcp_receiver,
+        force_receiver.clone(),
+    ));
+    let local_task = tokio::spawn(serve_owned(local, local_app, receiver, force_receiver));
     let mut tcp_task = tcp_task;
     let mut local_task = local_task;
     let startup = async {
@@ -503,12 +593,9 @@ where
     }
     .await;
     if let Err(error) = startup {
-        let _ = stopping.send(true);
-        let _ = tokio::time::timeout(Duration::from_secs(10), async {
-            let _ = tcp_task.await;
-            let _ = local_task.await;
-        })
-        .await;
+        retire_listeners(&stopping, &force, &mut tcp_task, &mut local_task).await;
+        delivery_task.abort();
+        let _ = delivery_task.await;
         return Err(error);
     }
     let mut rendezvous_task = tokio::spawn(rendezvous.clone().run());
@@ -527,19 +614,12 @@ where
         rendezvous_task.abort();
         let _ = rendezvous_task.await;
     }
-    let _ = tokio::time::timeout(Duration::from_secs(10), async {
-        if !tcp_task.is_finished() {
-            let _ = tcp_task.await;
-        }
-        if !local_task.is_finished() {
-            let _ = local_task.await;
-        }
-    })
-    .await;
+    let forced = retire_listeners(&stopping, &force, &mut tcp_task, &mut local_task).await;
     remove_own_ready(&config.ready_file);
     drop(cleanup);
     delivery_task.abort();
-    if crashed {
+    let _ = delivery_task.await;
+    if crashed || forced {
         Err(StartFailure {
             step: "run",
             key: "start.failed",
