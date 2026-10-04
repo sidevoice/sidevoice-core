@@ -50,7 +50,7 @@ jobs:
           test -s /etc/ssl/certs/ca-certificates.crt
           export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
           cargo test --locked
-      - name: Prove one exact Git library host and vendored SDK
+      - name: Prove exact Git host, vendored SDK and standalone signal
         if: github.event_name == 'workflow_dispatch'
         env:
           CORE_REV: ${{ github.sha }}
@@ -81,3 +81,32 @@ jobs:
           print('exact Git Core and vendored ElevenLabs SDK selected')
           PY
           cargo run --locked --manifest-path "$host_dir/Cargo.toml" -- "$RUNNER_TEMP/core-library-state"
+          cargo build --locked --bin sidevoice-core-rust
+          standalone_state="$RUNNER_TEMP/core-standalone-signal"
+          standalone_pid=
+          cleanup_standalone() {
+            if [ -n "$standalone_pid" ]; then
+              kill "$standalone_pid" 2>/dev/null || true
+              wait "$standalone_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup_standalone EXIT
+          target/debug/sidevoice-core-rust --data-dir "$standalone_state" --port 0 --idle-exit 0 \
+            > "$RUNNER_TEMP/core-standalone-signal.log" 2>&1 &
+          standalone_pid=$!
+          for attempt in $(seq 1 100); do
+            if test -s "$standalone_state/core.json"; then break; fi
+            if ! kill -0 "$standalone_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/core-standalone-signal.log"
+              exit 1
+            fi
+            sleep 0.1
+          done
+          test -s "$standalone_state/core.json"
+          sleep 0.2
+          kill -TERM "$standalone_pid"
+          wait "$standalone_pid"
+          standalone_pid=
+          test ! -e "$standalone_state/core.json"
+          test ! -e "$standalone_state/local.sock"
+          echo 'standalone SIGTERM: ready, stopped, state cleared'
