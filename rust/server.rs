@@ -411,7 +411,10 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         )
         .route("/api/presentation/ws", get(call_socket))
         .route("/api/presentation/languages", get(presentation_languages))
-        .route("/api/presentation/integrations", get(presentation_integrations))
+        .route(
+            "/api/presentation/integrations",
+            get(presentation_integrations),
+        )
         .route("/api/presentation/latency", get(presentation_latency))
         .route("/api/models/catalog", get(model_catalog))
         .route("/api/presentation/rtc/config", get(rtc::config))
@@ -497,7 +500,12 @@ async fn presentation_integrations(
     let saved = state.dir.read_json("integrations.json").ok().flatten();
     let providers = [
         ("openai", "OpenAI", "transcription", "VOICE_STT_API_KEY"),
-        ("elevenlabs", "ElevenLabs", "voice", "VOICE_ELEVENLABS_API_KEY"),
+        (
+            "elevenlabs",
+            "ElevenLabs",
+            "voice",
+            "VOICE_ELEVENLABS_API_KEY",
+        ),
     ]
     .into_iter()
     .map(|(id, label, capability, environment)| {
@@ -515,7 +523,11 @@ async fn model_catalog(headers: HeaderMap) -> Response {
     if !origin_allowed(&headers) {
         return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
     }
-    ([(header::CONTENT_TYPE, "application/json")], crate::models::catalog_text()).into_response()
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        crate::models::catalog_text(),
+    )
+        .into_response()
 }
 async fn presentation_state(
     State(state): State<Arc<AppState>>,
