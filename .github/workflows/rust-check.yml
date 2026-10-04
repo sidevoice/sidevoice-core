@@ -76,8 +76,8 @@ jobs:
           core = next(package for package in packages if package['name'] == 'sidevoice-core')
           sdk = next(package for package in packages if package['name'] == 'elevenlabs-sdk')
           assert core['source'] and core['source'].endswith('#' + revision), core['source']
-          assert sdk['source'] is None and sdk['manifest_path'].endswith(
-              '/vendor/elevenlabs-sdk/Cargo.toml'), sdk
+          assert sdk['source'] == core['source'], sdk['source']
+          assert sdk['manifest_path'].endswith('/vendor/elevenlabs-sdk/Cargo.toml'), sdk['manifest_path']
           print('exact Git Core and vendored ElevenLabs SDK selected')
           PY
           cargo run --locked --manifest-path "$host_dir/Cargo.toml" -- "$RUNNER_TEMP/core-library-state"
