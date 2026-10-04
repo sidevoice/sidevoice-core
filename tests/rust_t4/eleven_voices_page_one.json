@@ -1,0 +1,15 @@
+{
+  "voices": [
+    {
+      "voice_id": "voice-spanish",
+      "name": "Voz",
+      "category": "premade",
+      "labels": {"language": " es-MX ", "accent": "neutral"},
+      "available_for_tiers": [],
+      "high_quality_base_model_ids": []
+    }
+  ],
+  "has_more": true,
+  "total_count": 2,
+  "next_page_token": "next/2+token="
+}
