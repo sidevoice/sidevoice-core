@@ -126,6 +126,7 @@
       ],
       "properties": {
         "place": {
+          "type": "string",
           "enum": [
             "openai"
           ]
@@ -163,11 +164,13 @@
       ],
       "properties": {
         "encoding": {
+          "type": "string",
           "enum": [
             "pcm_s16le"
           ]
         },
         "sample_rate": {
+          "type": "integer",
           "enum": [
             16000
           ]
@@ -226,6 +229,7 @@
       ],
       "properties": {
         "type": {
+          "type": "string",
           "enum": [
             "voice-media"
           ]
@@ -242,6 +246,7 @@
               "type": "string"
             },
             "path": {
+              "type": "string",
               "enum": [
                 "socket",
                 "webrtc"

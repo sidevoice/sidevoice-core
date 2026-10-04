@@ -96,7 +96,7 @@
         "additionalProperties": false,
         "required": ["place", "model", "audio"],
         "properties": {
-          "place": { "enum": ["openai"] },
+          "place": { "type": "string", "enum": ["openai"] },
           "model": { "type": "string" },
           "options": { "$ref": "#/components/schemas/TrialOptions" },
           "audio": { "$ref": "#/components/schemas/TrialAudio" }
@@ -115,8 +115,8 @@
         "additionalProperties": false,
         "required": ["encoding", "sample_rate", "data_base64"],
         "properties": {
-          "encoding": { "enum": ["pcm_s16le"] },
-          "sample_rate": { "enum": [16000] },
+          "encoding": { "type": "string", "enum": ["pcm_s16le"] },
+          "sample_rate": { "type": "integer", "enum": [16000] },
           "data_base64": { "type": "string" }
         }
       },
@@ -146,14 +146,14 @@
         "additionalProperties": false,
         "required": ["type", "data"],
         "properties": {
-          "type": { "enum": ["voice-media"] },
+          "type": { "type": "string", "enum": ["voice-media"] },
           "data": {
             "type": "object",
             "additionalProperties": false,
             "required": ["session_id", "path"],
             "properties": {
               "session_id": { "type": "string" },
-              "path": { "enum": ["socket", "webrtc"] }
+              "path": { "type": "string", "enum": ["socket", "webrtc"] }
             }
           }
         }

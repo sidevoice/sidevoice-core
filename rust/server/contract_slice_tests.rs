@@ -15,7 +15,8 @@ async fn contract_slice_preserves_representative_json_shapes() {
 
     let trial = json!({"place":"openai","model":"gpt-4o-transcribe",
         "audio":{"encoding":"pcm_s16le","sample_rate":16000,"data_base64":""}});
-    let typed: contract_types_generated::TrialRequest = serde_json::from_value(trial.clone()).unwrap();
+    let typed: contract_types_generated::TrialRequest =
+        serde_json::from_value(trial.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(), trial);
     assert!(trial.get("options").is_none());
     let refusal = json!({"detail":{"key":"trial.silent","message":"localized"}});
@@ -26,12 +27,16 @@ async fn contract_slice_preserves_representative_json_shapes() {
     let typed: contract_types_generated::VoiceMediaCommand =
         serde_json::from_value(voice_media.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(), voice_media);
-    assert!(serde_json::from_value::<contract_types_generated::VoiceMediaCommand>(
-        json!({"type":"voice-media","data":{"session_id":"session","path":"unknown"}})
-    )
-    .is_err());
-    assert!(serde_json::from_value::<contract_types_generated::VoiceMediaCommand>(
-        json!({"type":"voice-unknown","data":{"session_id":"session","path":"socket"}})
-    )
-    .is_err());
+    assert!(
+        serde_json::from_value::<contract_types_generated::VoiceMediaCommand>(
+            json!({"type":"voice-media","data":{"session_id":"session","path":"unknown"}})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<contract_types_generated::VoiceMediaCommand>(
+            json!({"type":"voice-unknown","data":{"session_id":"session","path":"socket"}})
+        )
+        .is_err()
+    );
 }

@@ -65,7 +65,7 @@ export interface components {
             merge_window_secs: number;
         };
         TrialRequest: {
-            /** @enum {unknown} */
+            /** @enum {string} */
             place: "openai";
             model: string;
             options?: components["schemas"]["TrialOptions"];
@@ -76,9 +76,9 @@ export interface components {
             context?: string;
         };
         TrialAudio: {
-            /** @enum {unknown} */
+            /** @enum {string} */
             encoding: "pcm_s16le";
-            /** @enum {unknown} */
+            /** @enum {integer} */
             sample_rate: 16000;
             data_base64: string;
         };
@@ -93,11 +93,11 @@ export interface components {
             message: string;
         };
         VoiceMediaCommand: {
-            /** @enum {unknown} */
+            /** @enum {string} */
             type: "voice-media";
             data: {
                 session_id: string;
-                /** @enum {unknown} */
+                /** @enum {string} */
                 path: "socket" | "webrtc";
             };
         };
