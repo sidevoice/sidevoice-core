@@ -1,6 +1,6 @@
 //! Minimum device trust surface on TCP and the same user's Unix socket.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{
@@ -61,6 +61,14 @@ pub struct AppState {
 struct AuthenticatedDevice(String);
 
 impl AppState {
+    fn prune_replay_audio(&self) {
+        let live: HashSet<String> = self.room.replay_ids().into_iter().collect();
+        self.replay_audio
+            .lock()
+            .expect("replay audio lock")
+            .retain(|uid, _| live.contains(uid));
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "shared application owners are explicit at construction"
@@ -773,6 +781,7 @@ async fn presentation_select(
         data["thread_id"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
+            state.prune_replay_audio();
             let call = {
                 state
                     .media
@@ -805,6 +814,7 @@ async fn presentation_leave(
         data["binding_id"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
+            state.prune_replay_audio();
             let call = {
                 state
                     .media
@@ -837,6 +847,7 @@ async fn presentation_close(
         .close_channel(data["thread_id"].as_str().unwrap_or(""))
     {
         Ok((result, notify)) => {
+            state.prune_replay_audio();
             if let Some((peer, params)) = notify {
                 let _ = peer.send("binding.close", params).await;
             }
@@ -894,6 +905,7 @@ async fn presentation_receipt(
         data["status"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
+            state.prune_replay_audio();
             let sid = data["session_id"].as_str().unwrap_or("");
             let uid = data["utterance_id"].as_str().unwrap_or("");
             let status = data["status"].as_str().unwrap_or("");

@@ -470,6 +470,40 @@ async def main():
                     assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
                                    body={"session_id": session, "utterance_id": replayed["utterance_id"],
                                          "revision": replay_audio["revision"], "status": status})[0] == 200
+                burst = []
+                for _ in range(16):
+                    status, again = request(port, "POST", "/api/presentation/replay", token=token,
+                                            body={"session_id": session, "history_id": history_id})
+                    assert status == 200, (status, again)
+                    burst.append(again["utterance_id"])
+                status, refused = request(port, "POST", "/api/presentation/replay", token=token,
+                                          body={"session_id": session, "history_id": history_id})
+                assert status == 429 and refused["detail"]["key"] == "room.replay_full", (status, refused)
+                live_uid = f"t5-after-replays-{uuid.uuid4()}"
+                peer.send({"op": "publish", "session_id": session, "revision": revision,
+                           "event_id": live_uid, "utterance_id": live_uid, "text": "Live after replay burst"})
+                assert peer.event("published")["answer"]["status"] == "queued"
+                for expected_uid in [burst[0], *reversed(burst[1:])]:
+                    replay_audio = await frame(ws, "voice-speech-audio", timeout=20)
+                    assert replay_audio["utterance_id"] == expected_uid, replay_audio
+                    assert replay_audio["audio_base64"] == audio["audio_base64"]
+                    for state in ("playing", "playback_finished"):
+                        assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                                       body={"session_id": session, "utterance_id": expected_uid,
+                                             "revision": replay_audio["revision"], "status": state})[0] == 200
+                live_audio = await frame(ws, "voice-speech-audio", timeout=20)
+                assert live_audio["utterance_id"] == live_uid, live_audio
+                assert fixture.requests[-1]["text"] == "Live after replay burst"
+                assert len(fixture.requests) == rendered_before + 1, "replays invoked paid synthesis"
+                for state in ("playing", "playback_finished"):
+                    assert request(port, "POST", "/api/presentation/browser-receipt", token=token,
+                                   body={"session_id": session, "utterance_id": live_uid,
+                                         "revision": live_audio["revision"], "status": state})[0] == 200
+                snapshot = request(port, "GET", f"/api/presentation?session_id={session}", token=token)[1]
+                assert all(row["replay_of"] is None for row in snapshot["room"]["utterances"])
+                original = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread",
+                                   token=token)[1]["messages"]
+                assert next(row for row in original if row["id"] == history_id)["status"] == "playback_finished"
                 cancelled_audio = asyncio.create_task(send_pcm(ws, pcm))
                 started = await frame(ws, "voice-user-turn", timeout=10)
                 assert started["phase"] == "started", started

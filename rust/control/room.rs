@@ -17,6 +17,8 @@ use crate::storage::PrivateDir;
 
 const MAX_HISTORY: usize = 2000;
 const MAX_UTTERANCES: usize = 2048;
+const MAX_REPLAY_RECORDS: usize = 16;
+const MAX_PENDING: usize = 16;
 const MAX_BROWSERS: usize = 8;
 const INPUT_TTL: u64 = 600;
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
@@ -855,6 +857,9 @@ impl Room {
         let mut inner = self.inner.lock().expect("room lock");
         inner.browsers.remove(sid);
         interrupt_client(&mut inner, sid, "call_ended");
+        inner
+            .utterances
+            .retain(|_, record| record.replay_of.is_none() || !record.clients.contains_key(sid));
         inner.latency_marks.remove(sid);
         inner.latency_replies.remove(sid);
         inner
@@ -1219,7 +1224,13 @@ impl Room {
                     entry.1 = "queued".into();
                 }
             }
-            sync_row(&mut inner, &row_id, "queued", None);
+            if inner
+                .utterances
+                .get(&uid)
+                .is_some_and(|record| record.replay_of.is_none())
+            {
+                sync_row(&mut inner, &row_id, "queued", None);
+            }
         }
         dispatch_client(&mut inner, sid);
     }
@@ -1449,7 +1460,13 @@ impl Room {
 
     pub fn replay_one(&self, sid: &str, history_id: &str, uid: &str) -> Result<Value, RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
-        if inner.utterances.len() >= MAX_UTTERANCES {
+        if inner
+            .utterances
+            .values()
+            .filter(|record| record.replay_of.is_some())
+            .count()
+            >= MAX_REPLAY_RECORDS
+        {
             return Err(RoomError::new(429, "room.replay_full"));
         }
         let Some(original) = inner
@@ -1470,6 +1487,10 @@ impl Room {
         if browser.target.as_ref().map(|target| target.thread.as_str()) != Some(thread.as_str()) {
             return Err(RoomError::new(404, "room.replay_missing"));
         }
+        // Leave one queue slot for the next live reply, even during a replay burst.
+        if browser.pending.len() >= MAX_PENDING - 1 {
+            return Err(RoomError::new(429, "room.replay_full"));
+        }
         let event = json!({"type":"voice-replay","data":{"session_id":sid,"thread_id":thread,
             "replies":[{"utterance_id":uid,"history_id":history_id}],"skipped":[]}});
         if browser.sender.try_send(event).is_err() {
@@ -1488,6 +1509,16 @@ impl Room {
         );
         dispatch_client(&mut inner, sid);
         Ok(json!({"utterance_id":uid,"history_id":history_id}))
+    }
+    pub fn replay_ids(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("room lock")
+            .utterances
+            .iter()
+            .filter(|(_, record)| record.replay_of.is_some())
+            .map(|(uid, _)| uid.clone())
+            .collect()
     }
     pub fn reply_language(&self, row_id: &str) -> Option<String> {
         self.inner
@@ -1594,12 +1625,17 @@ impl Room {
         } else {
             None
         };
-        let capacity = inner.utterances.len() >= MAX_UTTERANCES
+        let capacity = inner
+            .utterances
+            .values()
+            .filter(|record| record.replay_of.is_none())
+            .count()
+            >= MAX_UTTERANCES
             || audience.iter().any(|id| {
                 inner
                     .browsers
                     .get(id)
-                    .is_some_and(|b| b.pending.len() >= 16)
+                    .is_some_and(|b| b.pending.len() >= MAX_PENDING)
             });
         let can_speak = reason.is_none_or(|r| ["newer_turn", "user_speaking"].contains(&r))
             && !audience.is_empty()
@@ -1698,7 +1734,12 @@ impl Room {
                 reason,
                 Some("session_changed" | "call_ended" | "focus_changed")
             )
-            && inner.utterances.len() < MAX_UTTERANCES
+            && inner
+                .utterances
+                .values()
+                .filter(|record| record.replay_of.is_none())
+                .count()
+                < MAX_UTTERANCES
         {
             inner.utterances.insert(
                 uid.into(),
@@ -1855,6 +1896,7 @@ impl Room {
                 );
             }
         }
+        retire_terminal_replays(&mut inner);
         Ok(json!({"status":status}))
     }
     pub fn working(&self, cid: &str, data: &Value) {
@@ -2346,6 +2388,15 @@ fn status_latency_reply(inner: &mut Inner, sid: &str, uid: &str, status: &str) {
     }
 }
 
+fn retire_terminal_replays(inner: &mut Inner) {
+    inner.utterances.retain(|_, record| {
+        record.replay_of.is_none()
+            || record.clients.values().any(|(_, status)| {
+                !matches!(status.as_str(), "failed" | "playback_finished" | "interrupted")
+            })
+    });
+}
+
 fn dispatch_client(inner: &mut Inner, sid: &str) {
     loop {
         let Some(browser) = inner.browsers.get(sid) else {
@@ -2418,6 +2469,7 @@ fn dispatch_client(inner: &mut Inner, sid: &str) {
             {
                 sync_row(inner, &row_id, "interrupted", Some("focus_changed"));
             }
+            retire_terminal_replays(inner);
             continue;
         }
         let event = json!({"type":"voice-speech","data":{"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":reply_revision,"thread_id":thread,"text":text,"language":language,"history_id":row_id}});
@@ -2466,6 +2518,7 @@ fn interrupt_client(inner: &mut Inner, sid: &str, reason: &str) {
         browser.pending.clear();
         browser.active = None;
     }
+    retire_terminal_replays(inner);
 }
 fn hold_client(inner: &mut Inner, sid: &str, revision: u64) {
     let active = inner.browsers.get_mut(sid).and_then(|b| b.active.take());
@@ -2477,11 +2530,13 @@ fn hold_client(inner: &mut Inner, sid: &str, revision: u64) {
                 "queued" | "waiting_for_turn" => {
                     entry.0 = revision;
                     entry.1 = "waiting_for_turn".into();
-                    waiting.push((uid.clone(), record.row_id.clone()));
+                    waiting.push((uid.clone(), record.replay_of.is_none().then(|| record.row_id.clone())));
                 }
                 "playing" => {
                     entry.1 = "interrupted".into();
-                    interrupted.push(record.row_id.clone());
+                    if record.replay_of.is_none() {
+                        interrupted.push(record.row_id.clone());
+                    }
                 }
                 _ => {}
             }
@@ -2495,11 +2550,14 @@ fn hold_client(inner: &mut Inner, sid: &str, revision: u64) {
         }
     }
     for (_, row_id) in waiting {
-        sync_row(inner, &row_id, "waiting_for_turn", Some("user_speaking"));
+        if let Some(row_id) = row_id {
+            sync_row(inner, &row_id, "waiting_for_turn", Some("user_speaking"));
+        }
     }
     for row_id in interrupted {
         sync_row(inner, &row_id, "interrupted", Some("newer_turn"));
     }
+    retire_terminal_replays(inner);
 }
 fn engine(value: Option<&Value>) -> Option<Value> {
     let obj = value?.as_object()?;
@@ -2563,6 +2621,175 @@ fn capabilities(value: Option<&Value>, experimental: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_burst_reserves_live_speech_and_retires_terminal_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let room = Room::load(PrivateDir::open(directory.path().join("private")).unwrap()).unwrap();
+        let (requests, _request_receiver) = mpsc::channel(4);
+        let (stop, _stopped) = watch::channel(false);
+        room.attach(
+            "connector",
+            ConnectorPeer {
+                generation: id(),
+                sender: requests,
+                stop,
+            },
+        );
+        room.register("connector", &json!({"thread":"replay-thread","harness":"codex"}))
+            .unwrap();
+        let (events, mut received) = mpsc::channel(128);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        room.select(&sid, "replay-thread").unwrap();
+        let revision = room.snapshot(Some(&sid))["room"]["revision"]
+            .as_u64()
+            .unwrap();
+        let original = room.publish(
+            &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,
+                "utterance_id":"original","text":"Original reply"}),
+            false,
+        );
+        assert_eq!(original["status"], "queued");
+        room.receipt(&sid, "original", revision, "playing").unwrap();
+        room.receipt(&sid, "original", revision, "playback_finished")
+            .unwrap();
+        let history_id = format!("{sid}:voice:original");
+        for index in 0..MAX_REPLAY_RECORDS {
+            room.replay_one(&sid, &history_id, &format!("replay-{index}"))
+                .unwrap();
+        }
+        assert_eq!(
+            room.replay_one(&sid, &history_id, "one-too-many")
+                .unwrap_err()
+                .status,
+            429
+        );
+        let live = room.publish(
+            &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,
+                "utterance_id":"next-live","text":"Live reply after replay burst"}),
+            false,
+        );
+        assert_eq!(live["status"], "queued");
+        for _ in 0..MAX_REPLAY_RECORDS {
+            let active = room.inner.lock().unwrap().browsers[&sid]
+                .active
+                .clone()
+                .unwrap();
+            assert!(active.starts_with("replay-"), "{active}");
+            room.receipt(&sid, &active, revision, "playing").unwrap();
+            room.receipt(&sid, &active, revision, "playback_finished")
+                .unwrap();
+        }
+        assert_eq!(
+            room.inner.lock().unwrap().browsers[&sid].active.as_deref(),
+            Some("next-live")
+        );
+        room.receipt(&sid, "next-live", revision, "playing")
+            .unwrap();
+        room.receipt(&sid, "next-live", revision, "playback_finished")
+            .unwrap();
+        while received.try_recv().is_ok() {}
+        for index in 0..MAX_UTTERANCES + 1 {
+            let uid = format!("again-{index}");
+            room.replay_one(&sid, &history_id, &uid).unwrap();
+            room.receipt(&sid, &uid, revision, "playing").unwrap();
+            room.receipt(&sid, &uid, revision, "playback_finished")
+                .unwrap();
+            while received.try_recv().is_ok() {}
+        }
+        let inner = room.inner.lock().unwrap();
+        assert!(inner.utterances.values().all(|record| record.replay_of.is_none()));
+        assert!(inner.utterances.contains_key("original"));
+        assert_eq!(
+            inner.rows.iter().find(|row| row.id == history_id).unwrap().status,
+            "playback_finished"
+        );
+    }
+
+    #[test]
+    fn replay_cancellation_close_and_leave_keep_original_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let room = Room::load(PrivateDir::open(directory.path().join("private")).unwrap()).unwrap();
+        let (requests, _request_receiver) = mpsc::channel(4);
+        let (stop, _stopped) = watch::channel(false);
+        room.attach(
+            "connector",
+            ConnectorPeer {
+                generation: id(),
+                sender: requests,
+                stop,
+            },
+        );
+        room.register("connector", &json!({"thread":"replay-thread","harness":"codex"}))
+            .unwrap();
+        let (events, _received) = mpsc::channel(128);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        room.select(&sid, "replay-thread").unwrap();
+        let revision = room.snapshot(Some(&sid))["room"]["revision"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            room.publish(
+                &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,
+                    "utterance_id":"original","text":"Original reply"}),
+                false,
+            )["status"],
+            "queued"
+        );
+        room.receipt(&sid, "original", revision, "playing").unwrap();
+        room.receipt(&sid, "original", revision, "playback_finished")
+            .unwrap();
+        let history_id = format!("{sid}:voice:original");
+        room.replay_one(&sid, &history_id, "cancelled-replay")
+            .unwrap();
+        room.receipt(&sid, "cancelled-replay", revision, "cancelled_playing")
+            .unwrap();
+        assert!(!room.inner.lock().unwrap().utterances.contains_key("cancelled-replay"));
+        room.replay_one(&sid, &history_id, "held-replay").unwrap();
+        let turn = room.begin_turn(&sid).unwrap();
+        assert_eq!(
+            room.inner
+                .lock()
+                .unwrap()
+                .rows
+                .iter()
+                .find(|row| row.id == history_id)
+                .unwrap()
+                .status,
+            "playback_finished"
+        );
+        room.finish_turn(&sid, turn.revision);
+        room.receipt(&sid, "held-replay", turn.revision, "playing")
+            .unwrap();
+        room.receipt(&sid, "held-replay", turn.revision, "playback_finished")
+            .unwrap();
+        let (other_events, _other_received) = mpsc::channel(8);
+        let other = room
+            .join("other-device".into(), "en".into(), other_events)
+            .unwrap();
+        room.select(&other, "replay-thread").unwrap();
+        room.replay_one(&other, &history_id, "leaving-replay")
+            .unwrap();
+        room.leave(&other);
+        assert!(!room.inner.lock().unwrap().utterances.contains_key("leaving-replay"));
+        room.replay_one(&sid, &history_id, "closed-replay")
+            .unwrap();
+        room.close_channel("replay-thread").unwrap();
+        assert!(!room.inner.lock().unwrap().utterances.contains_key("closed-replay"));
+        assert_eq!(
+            room.inner
+                .lock()
+                .unwrap()
+                .rows
+                .iter()
+                .find(|row| row.id == history_id)
+                .unwrap()
+                .status,
+            "playback_finished"
+        );
+        room.leave(&sid);
+        assert!(room.inner.lock().unwrap().utterances.contains_key("original"));
+    }
 
     #[test]
     fn latency_input_keeps_only_recent_turns_and_seeds_recent_reply() {
