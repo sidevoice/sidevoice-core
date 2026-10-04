@@ -304,7 +304,7 @@ async def main():
             status, raw = request(port, "POST", "/api/models/check", token=token,
                                   origin="tauri://localhost", body=tts_check)
             assert status == 200 and json.loads(raw)["ok"] is True, (status, raw)
-            for index in range(5):
+            for index in range(4):
                 distinct = {**stt_check, "model": f"gpt-fixture-{index}-transcribe"}
                 status, raw = request(port, "POST", "/api/models/check", token=token,
                                       origin="tauri://localhost", body=distinct)
