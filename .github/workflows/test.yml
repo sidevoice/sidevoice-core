@@ -224,9 +224,9 @@ jobs:
           RELEASE_TAG: ${{ inputs.release-tag }}
         run: |
           set -euo pipefail
-          mkdir assets
-          cp dist/* assets/
-          cp bundles/*.tar.zst assets/
+          mkdir publish-assets
+          cp dist/* publish-assets/
+          cp bundles/*.tar.zst publish-assets/
           if [ -n "$RELEASE_TAG" ]; then
             DESTINATION_TAG="$RELEASE_TAG"
           elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
@@ -234,19 +234,19 @@ jobs:
           else
             DESTINATION_TAG="pr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           fi
-          python3 tools/core_manifest.py --assets assets --tag "$DESTINATION_TAG" --output assets/core-manifest.json
-          rm assets/SHA256SUMS
-          (cd assets && sha256sum -- *.whl *.tar.gz models-catalog.json models-vectors.json \
+          python3 tools/core_manifest.py --assets publish-assets --tag "$DESTINATION_TAG" --output publish-assets/core-manifest.json
+          rm publish-assets/SHA256SUMS
+          (cd publish-assets && sha256sum -- *.whl *.tar.gz models-catalog.json models-vectors.json \
             sidevoice-core-*.tar.zst core-manifest.json > SHA256SUMS)
-          WHEEL=$(basename "$(find assets -maxdepth 1 -name 'sidevoice_core-*-py3-none-any.whl' -print -quit)")
+          WHEEL=$(basename "$(find publish-assets -maxdepth 1 -name 'sidevoice_core-*-py3-none-any.whl' -print -quit)")
           VERSION=${WHEEL#sidevoice_core-}
           VERSION=${VERSION%-py3-none-any.whl}
           printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
-          cat assets/core-manifest.json
+          cat publish-assets/core-manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sidevoice-core-publish-assets
-          path: assets/
+          path: publish-assets/
           retention-days: 7
           if-no-files-found: error
 
