@@ -31,8 +31,11 @@ use crate::storage::PrivateDir;
 mod connectors_v2;
 mod connectors_v3;
 mod media;
+mod model_check;
+mod presentation_routes;
 pub mod rendezvous;
 mod rtc;
+mod transcription_trial;
 
 pub struct AppState {
     pub dir: PrivateDir,
@@ -42,16 +45,42 @@ pub struct AppState {
     registry: Mutex<DeviceRegistry>,
     calls: Mutex<HashMap<String, Vec<watch::Sender<bool>>>>,
     media: Mutex<HashMap<String, Arc<media::CallMedia>>>,
+    cancel_input: Mutex<HashMap<String, tokio::sync::mpsc::Sender<u64>>>,
+    call_settings: Mutex<HashMap<String, crate::types::CallSettings>>,
+    replay_audio: Mutex<HashMap<String, Arc<PinnedReplay>>>,
+    check_budget: model_check::CheckBudget,
+    trial_budget: transcription_trial::TrialBudget,
+    integration_revisions: Mutex<HashMap<String, u64>>,
     synthesis: Arc<SynthesisCache>,
     launch_id: String,
     host: String,
     port: u16,
 }
 
+struct PinnedReplay {
+    speech: Arc<crate::providers::CloudSpeech>,
+    voice: crate::models::ResolvedVoice,
+}
+
 #[derive(Clone)]
 struct AuthenticatedDevice(String);
 
 impl AppState {
+    fn prune_replay_audio(&self) {
+        self.replay_audio
+            .lock()
+            .expect("replay audio lock")
+            .retain(|uid, _| self.room.has_replay(uid));
+    }
+
+    fn retire_session_replays(&self, session: &str) {
+        // Replay admission also takes the audio lock before entering the room.
+        // Keep leave and the final purge atomic with that admission path.
+        let mut audio = self.replay_audio.lock().expect("replay audio lock");
+        self.room.leave(session);
+        audio.retain(|uid, _| !uid.starts_with(&format!("{session}:replay:")));
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "shared application owners are explicit at construction"
@@ -74,6 +103,12 @@ impl AppState {
             registry: Mutex::new(registry),
             calls: Mutex::new(HashMap::new()),
             media: Mutex::new(HashMap::new()),
+            cancel_input: Mutex::new(HashMap::new()),
+            call_settings: Mutex::new(HashMap::new()),
+            replay_audio: Mutex::new(HashMap::new()),
+            check_budget: model_check::CheckBudget::default(),
+            trial_budget: transcription_trial::TrialBudget::default(),
+            integration_revisions: Mutex::new(HashMap::new()),
             synthesis: Arc::new(SynthesisCache::new()),
             launch_id,
             host,
@@ -410,7 +445,35 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             axum::routing::delete(revoke),
         )
         .route("/api/presentation/ws", get(call_socket))
+        .route("/api/presentation/languages", get(presentation_languages))
+        .route(
+            "/api/presentation/integrations",
+            get(presentation_integrations),
+        )
+        .route(
+            "/api/presentation/integrations/{provider}",
+            axum::routing::put(presentation_routes::save_integration)
+                .delete(presentation_routes::clear_integration),
+        )
+        .route(
+            "/api/presentation/transcription/models",
+            get(presentation_routes::transcription_models),
+        )
+        .route(
+            "/api/presentation/voice-catalog",
+            get(presentation_routes::voice_catalog),
+        )
+        .route(
+            "/api/presentation/synthesis/preview",
+            post(presentation_routes::synthesis_preview),
+        )
         .route("/api/presentation/latency", get(presentation_latency))
+        .route("/api/models/catalog", get(model_catalog))
+        .route("/api/models/check", post(model_check::model_check))
+        .route(
+            "/api/models/transcription/preview",
+            post(transcription_trial::preview),
+        )
         .route("/api/presentation/rtc/config", get(rtc::config))
         .route("/api/presentation/rtc/offer", post(rtc::offer));
     router = router
@@ -425,6 +488,14 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .route("/api/presentation/leave", post(presentation_leave))
         .route("/api/presentation/close", post(presentation_close))
         .route("/api/presentation/text", post(presentation_text))
+        .route(
+            "/api/presentation/cancel-input",
+            post(presentation_cancel_input),
+        )
+        .route(
+            "/api/presentation/replay",
+            post(presentation_routes::replay),
+        )
         .route(
             "/api/presentation/browser-receipt",
             post(presentation_receipt),
@@ -472,6 +543,73 @@ fn query(uri: &axum::http::Uri, name: &str) -> Option<String> {
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.into_owned())
     })
+}
+async fn presentation_languages() -> Json<Value> {
+    // Python's load_settings().model_dump() includes null builds. Settings still
+    // belong to the device; this route only supplies the catalogue defaults.
+    let mut settings = serde_json::to_value(crate::models::default_settings(None, None))
+        .expect("default settings serialize");
+    for stage in ["stt", "tts"] {
+        settings[stage]["build"] = Value::Null;
+    }
+    settings["replay_on_return_seconds"] = json!(120);
+    // CallSettings uses f32 for detector input; Python's response is its
+    // original decimal defaults rather than the f32 runtime representation.
+    settings["smart_turn_min_silence"] = json!(0.9);
+    settings["vad_confidence"] = json!(0.6);
+    settings["vad_start_secs"] = json!(0.4);
+    Json(settings)
+}
+async fn presentation_integrations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    Json(presentation_routes::integration_listing(&state)).into_response()
+}
+async fn presentation_cancel_input(
+    State(state): State<Arc<AppState>>,
+    Extension(device): Extension<AuthenticatedDevice>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    let Some(data) = payload(&body) else {
+        return failure("room.request_invalid", StatusCode::BAD_REQUEST, &headers);
+    };
+    let sid = data["session_id"].as_str().unwrap_or("");
+    let revision = data["revision"].as_u64().unwrap_or(0);
+    if !state.room.owns_session(sid, &device.0) {
+        return failure("room.browser_absent", StatusCode::CONFLICT, &headers);
+    }
+    let result = match state.room.cancel_input(sid, revision) {
+        Ok(value) => value,
+        Err(error) => return room_failure(error, &headers),
+    };
+    let sender = state
+        .cancel_input
+        .lock()
+        .expect("cancel input lock")
+        .get(sid)
+        .cloned();
+    if let Some(sender) = sender {
+        let _ = sender.send(revision).await;
+    }
+    Json(result).into_response()
+}
+async fn model_catalog(headers: HeaderMap) -> Response {
+    if !origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        crate::models::catalog_text(),
+    )
+        .into_response()
 }
 async fn presentation_state(
     State(state): State<Arc<AppState>>,
@@ -595,13 +733,43 @@ async fn presentation_admission(
 }
 async fn presentation_history(
     State(state): State<Arc<AppState>>,
+    Extension(device): Extension<AuthenticatedDevice>,
     uri: axum::http::Uri,
     headers: HeaderMap,
 ) -> Response {
     if !origin_allowed(&headers) {
         return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
     }
-    Json(state.room.history(query(&uri, "thread_id").as_deref())).into_response()
+    let mut history = state.room.history(query(&uri, "thread_id").as_deref());
+    if let Some(sid) =
+        query(&uri, "session_id").filter(|sid| state.room.owns_session(sid, &device.0))
+    {
+        let settings = state
+            .call_settings
+            .lock()
+            .expect("call settings lock")
+            .get(&sid)
+            .cloned();
+        if let (Some(settings), Some(rows)) = (settings, history["messages"].as_array_mut()) {
+            for row in rows {
+                if row["role"] != "assistant" {
+                    continue;
+                }
+                let Some(id) = row["id"].as_str() else {
+                    continue;
+                };
+                let Ok((text, language)) = state.room.replay_source(&sid, id) else {
+                    continue;
+                };
+                if presentation_routes::cached_reply(&state, &settings, &text, language.as_deref())
+                    .is_some()
+                {
+                    row["replayable"] = json!(true);
+                }
+            }
+        }
+    }
+    Json(history).into_response()
 }
 async fn presentation_participants(
     State(state): State<Arc<AppState>>,
@@ -625,6 +793,7 @@ async fn presentation_select(
         data["thread_id"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
+            state.prune_replay_audio();
             let call = {
                 state
                     .media
@@ -657,6 +826,7 @@ async fn presentation_leave(
         data["binding_id"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
+            state.prune_replay_audio();
             let call = {
                 state
                     .media
@@ -689,6 +859,7 @@ async fn presentation_close(
         .close_channel(data["thread_id"].as_str().unwrap_or(""))
     {
         Ok((result, notify)) => {
+            state.prune_replay_audio();
             if let Some((peer, params)) = notify {
                 let _ = peer.send("binding.close", params).await;
             }
@@ -746,6 +917,7 @@ async fn presentation_receipt(
         data["status"].as_str().unwrap_or(""),
     ) {
         Ok(v) => {
+            state.prune_replay_audio();
             let sid = data["session_id"].as_str().unwrap_or("");
             let uid = data["utterance_id"].as_str().unwrap_or("");
             let status = data["status"].as_str().unwrap_or("");
@@ -1340,6 +1512,17 @@ async fn socket_loop(
         control,
         state.dir.clone(),
     );
+    let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::channel::<u64>(8);
+    state
+        .cancel_input
+        .lock()
+        .expect("cancel input lock")
+        .insert(session.clone(), cancel_tx);
+    state
+        .call_settings
+        .lock()
+        .expect("call settings lock")
+        .insert(session.clone(), loaded.settings.clone());
     let mut call_settings = loaded.settings.clone();
     let (rendered_tx, mut rendered_rx) =
         tokio::sync::mpsc::channel::<(String, u64, Option<Value>)>(16);
@@ -1355,24 +1538,26 @@ async fn socket_loop(
                 let _ = socket.send(Message::Close(Some(CloseFrame { code: 4401, reason: close_reason.into() }))).await;
                 break;
             }
-            frame = detector_events.recv() => if let Some(frame) = frame { turns.frame(frame).await; } else { break; },
-            focus = focus_events.recv() => if focus.is_some() { turns.focus_changed().await; },
-            result = turns.finished.recv() => if let Some(done) = result { turns.result(done).await; },
+            frame = detector_events.recv() => if let Some(frame) = frame { let started = matches!(&frame, crate::pipeline::CallFrame::Started); turns.frame(frame).await; if started { state.prune_replay_audio(); } } else { break; },
+            focus = focus_events.recv() => if focus.is_some() { turns.focus_changed().await; state.prune_replay_audio(); },
+            result = turns.finished.recv() => if let Some(done) = result { turns.result(done).await; state.prune_replay_audio(); },
+            cancelled = cancel_rx.recv() => if let Some(revision) = cancelled { turns.cancel(revision).await; state.prune_replay_audio(); },
             _ = tokio::time::sleep_until(deadline) => { turns.expired().await; },
             rendered = rendered_rx.recv() => if let Some((uid,revision,event)) = rendered {
                 if let Some(event) = event {
                     if state.room.speech_current(&session,&uid,revision)
                         && socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
-                } else { let _ = state.room.receipt(&session,&uid,revision,"failed"); }
+                } else { let _ = state.room.receipt(&session,&uid,revision,"failed"); state.prune_replay_audio(); }
             },
             event = output.recv() => if let Some(event) = event {
                 if event.get("type").and_then(Value::as_str)==Some("voice-speech") {
                     let uid=event["data"]["utterance_id"].as_str().unwrap_or("").to_owned();
                     let revision=event["data"]["revision"].as_u64().unwrap_or(0);
+                    let replay_audio=state.replay_audio.lock().expect("replay audio lock").get(&uid).cloned();
                     let room=state.room.clone(); let dir=state.dir.clone(); let cache=state.synthesis.clone();
                     let settings=call_settings.clone(); let sid=session.clone(); let rendered=rendered_tx.clone();
                     tokio::spawn(async move {
-                        let result=media::speech_event(room,&sid,&settings,&dir,cache,event).await;
+                        let result=media::speech_event(room,&sid,&settings,&dir,cache,event,replay_audio).await;
                         let _=rendered.send((uid,revision,result)).await;
                     });
                 } else if socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
@@ -1405,6 +1590,7 @@ async fn socket_loop(
                                         call_settings.ui_language=loaded.settings.ui_language;
                                         call_settings.audio_grace_seconds=loaded.settings.audio_grace_seconds;
                                         call_settings.replay_on_return_seconds=loaded.settings.replay_on_return_seconds;
+                                        state.call_settings.lock().expect("call settings lock").insert(session.clone(),call_settings.clone());
                                     }
                                 },
                                 _=>{}
@@ -1417,10 +1603,20 @@ async fn socket_loop(
         }
     }
     turns.close().await;
+    state
+        .cancel_input
+        .lock()
+        .expect("cancel input lock")
+        .remove(&session);
+    state
+        .call_settings
+        .lock()
+        .expect("call settings lock")
+        .remove(&session);
     call_media.close();
     call_media.close_rtc().await;
     state.media.lock().expect("media lock").remove(&session);
-    state.room.leave(&session);
+    state.retire_session_replays(&session);
 }
 
 struct CallRegistration {
@@ -1576,5 +1772,100 @@ mod tests {
         assert_eq!(state.calls.lock().unwrap()["device"].len(), 1);
         drop(second);
         assert!(!state.calls.lock().unwrap().contains_key("device"));
+    }
+
+    #[test]
+    fn replay_admission_during_teardown_leaves_no_audio_or_record() {
+        use crate::control::room::ConnectorPeer;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = PrivateDir::open(temp.path().join("core")).unwrap();
+        let identity = NodeIdentity::load_or_create(&dir).unwrap();
+        let registry = DeviceRegistry::load(dir.clone()).unwrap();
+        let room = Arc::new(Room::load(dir.clone()).unwrap());
+        let (requests, _request_receiver) = tokio::sync::mpsc::channel(4);
+        let (stop, _stopped) = watch::channel(false);
+        room.attach(
+            "connector",
+            ConnectorPeer {
+                generation: Uuid::new_v4().to_string(),
+                sender: requests,
+                stop,
+            },
+        );
+        room.register(
+            "connector",
+            &json!({"thread":"replay-thread","harness":"codex"}),
+        )
+        .unwrap();
+        let (events, _received) = tokio::sync::mpsc::channel(128);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        room.select(&sid, "replay-thread").unwrap();
+        let revision = room.snapshot(Some(&sid))["room"]["revision"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            room.publish(
+                &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,
+                    "utterance_id":"original","text":"Original reply"}),
+                false,
+            )["status"],
+            "queued"
+        );
+        room.receipt(&sid, "original", revision, "playing").unwrap();
+        room.receipt(&sid, "original", revision, "playback_finished")
+            .unwrap();
+        let relay = rendezvous::Rendezvous::new(
+            None,
+            Url::parse("http://127.0.0.1:8768/").unwrap(),
+            "host".to_owned(),
+            room.clone(),
+        );
+        let state = Arc::new(AppState::new(
+            dir,
+            identity,
+            registry,
+            "fixture".into(),
+            "host".into(),
+            8768,
+            room,
+            relay,
+        ));
+        let uid = format!("{sid}:replay:{}", Uuid::new_v4());
+        let mut pending = state.replay_audio.lock().unwrap();
+        let (ready, started) = std::sync::mpsc::channel();
+        let closing = state.clone();
+        let session = sid.clone();
+        let teardown = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            closing.retire_session_replays(&session);
+        });
+        started.recv().unwrap();
+        pending.insert(
+            uid.clone(),
+            Arc::new(PinnedReplay {
+                speech: Arc::new(crate::providers::CloudSpeech {
+                    audio: vec![1, 2, 3],
+                    mime_type: "audio/mpeg".into(),
+                    alignment: None,
+                    timings_ms: Map::new(),
+                }),
+                voice: crate::models::ResolvedVoice {
+                    place: "elevenlabs".into(),
+                    model: "eleven_v3".into(),
+                    voice: "fixturevoice".into(),
+                    language: "en".into(),
+                    speed: 1.0,
+                },
+            }),
+        );
+        state
+            .room
+            .replay_one(&sid, &format!("{sid}:voice:original"), &uid)
+            .unwrap();
+        drop(pending);
+        teardown.join().unwrap();
+        assert!(!state.room.has_replay(&uid));
+        assert!(state.replay_audio.lock().unwrap().is_empty());
     }
 }

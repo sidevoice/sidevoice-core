@@ -55,6 +55,16 @@ pub struct ElevenLabsCatalog {
     pub error: Option<ProviderError>,
 }
 
+impl ElevenLabsCatalog {
+    pub fn unconfigured(language: &str) -> Self {
+        Self {
+            models: fallback_models(language),
+            voices: Vec::new(),
+            error: None,
+        }
+    }
+}
+
 impl ElevenLabsTts {
     pub fn new(api_key: &str) -> Result<Self, ProviderError> {
         #[cfg(feature = "hosted-fixtures")]
@@ -236,7 +246,12 @@ impl ElevenLabsTts {
 }
 
 pub async fn verify_elevenlabs_key(api_key: &str) -> Result<(), ProviderError> {
-    let client = client(api_key, ELEVENLABS_API_BASE, VERIFY_TIMEOUT)?;
+    #[cfg(feature = "hosted-fixtures")]
+    let base = std::env::var("SIDEVOICE_ELEVENLABS_FIXTURE_BASE")
+        .unwrap_or_else(|_| ELEVENLABS_API_BASE.to_owned());
+    #[cfg(not(feature = "hosted-fixtures"))]
+    let base = ELEVENLABS_API_BASE.to_owned();
+    let client = client(api_key, &base, VERIFY_TIMEOUT)?;
     verify_client(&client).await
 }
 
