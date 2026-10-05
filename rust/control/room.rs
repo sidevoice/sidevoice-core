@@ -2061,7 +2061,7 @@ impl Room {
         };
         let mut read = Vec::new();
         for row in inner.rows.iter_mut().filter(|row| {
-            held(&**row)
+            held(row)
                 && row
                     .payload
                     .as_ref()
@@ -2092,7 +2092,7 @@ impl Room {
         let mut more = false;
         let mut fresh = 0usize;
         for row in inner.rows.iter_mut().filter(|row| {
-            held(&**row)
+            held(row)
                 || (row.thread == thread
                     && row.role == "user"
                     && row.status == "pending"
@@ -2389,7 +2389,7 @@ fn release_pull_claims(inner: &mut Inner, released: impl Fn(&Row) -> bool) {
         .rows
         .iter_mut()
         .filter(|row| row.status == "delivered" && row.pull_claimed_by.is_some())
-        .filter(|row| released(&**row))
+        .filter(|row| released(row))
     {
         row.status = "pending".into();
         row.pull_claimed_by = None;
