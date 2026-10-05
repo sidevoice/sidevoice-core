@@ -85,12 +85,11 @@ impl Utterances {
             .iter()
             .find(|(_, record)| record.row_id == row_id && !record.is_replay())
     }
-    /// The furthest status of the utterance spoken from a journal row.
+    /// The furthest status of the original utterance spoken from a journal row. Replays share
+    /// the row but never decide its status.
     pub(super) fn row_status(&self, row_id: &str) -> Option<&str> {
-        self.by_id
-            .values()
-            .find(|record| record.row_id == row_id)
-            .and_then(UtteranceRecord::best_status)
+        self.original_of_row(row_id)
+            .and_then(|(_, record)| record.best_status())
     }
     /// A call's entry for an utterance: the revision it was queued under and its status.
     pub(super) fn client_entry(&self, uid: &str, sid: &str) -> Option<&ClientEntry> {
