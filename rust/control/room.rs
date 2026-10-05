@@ -2090,6 +2090,7 @@ impl Room {
         let mut messages = Vec::new();
         let mut claimed = Vec::new();
         let mut more = false;
+        let mut fresh = 0usize;
         for row in inner.rows.iter_mut().filter(|row| {
             held(&**row)
                 || (row.thread == thread
@@ -2098,21 +2099,26 @@ impl Room {
                     && now.saturating_sub(row.queued_at) < INPUT_TTL)
         }) {
             count += 1;
-            if operation != "get" || row.seq <= after {
-                continue;
+            if operation == "get" && row.seq > after {
+                if messages.len() >= PULL_PAGE {
+                    more = true;
+                } else {
+                    let payload = row.payload.clone().unwrap_or_default();
+                    messages.push(json!({"message_id":payload["message_id"],
+                        "session_id":payload["session_id"], "revision":payload["revision"],
+                        "channel":"voice", "text":row.text, "arrival_time":row.time,
+                        "cursor":row.seq}));
+                    if row.status == "pending" {
+                        row.status = "delivered".into();
+                        row.pull_claimed_by = Some(bid.to_owned());
+                        claimed.push((row.session.clone(), row.id.clone(), row.revision));
+                    }
+                }
             }
-            if messages.len() >= PULL_PAGE {
-                more = true;
-                continue;
-            }
-            let payload = row.payload.clone().unwrap_or_default();
-            messages.push(json!({"message_id":payload["message_id"],
-                "session_id":payload["session_id"], "revision":payload["revision"],
-                "channel":"voice", "text":row.text, "arrival_time":row.time, "cursor":row.seq}));
+            // Never fetched by anyone: what a hook check uses to ask for one retrieval
+            // without asking again for messages the agent already holds.
             if row.status == "pending" {
-                row.status = "delivered".into();
-                row.pull_claimed_by = Some(bid.to_owned());
-                claimed.push((row.session.clone(), row.id.clone(), row.revision));
+                fresh += 1;
             }
         }
         for (session, history_id, revision) in claimed {
@@ -2142,7 +2148,8 @@ impl Room {
             .and_then(|message| message["cursor"].as_u64())
             .unwrap_or(after);
         Ok(json!({"connected":true, "pending":count > 0, "count":count,
-            "messages":messages, "cursor":cursor, "more":more, "acknowledged":acknowledged}))
+            "fresh":fresh, "messages":messages, "cursor":cursor, "more":more,
+            "acknowledged":acknowledged}))
     }
     pub fn pending_delivery(&self) -> Vec<(String, String, ConnectorPeer, Value)> {
         let mut inner = self.inner.lock().expect("room lock");
@@ -3186,6 +3193,7 @@ mod tests {
             (json!(true), json!(2))
         );
         assert_eq!(check["messages"].as_array().unwrap().len(), 0);
+        assert_eq!(check["fresh"], 2);
         assert_eq!(
             room.history(Some("pull-thread"))["messages"][0]["status"],
             "pending"
@@ -3240,6 +3248,16 @@ mod tests {
         .unwrap();
         assert_eq!(again["messages"][0]["message_id"], one.as_str());
         assert_eq!(again["messages"][1]["message_id"], two.as_str());
+        let held = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"check"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (held["count"].clone(), held["fresh"].clone()),
+            (json!(2), json!(0))
+        );
         let past = pull(
             &room,
             "pull-owner",
