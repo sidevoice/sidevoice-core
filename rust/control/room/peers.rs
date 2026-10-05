@@ -1,11 +1,10 @@
-//! Connector peers: the live connection to each paired machine, and its attach/detach lifecycle.
+//! Connector peers: the live connection to each paired machine, and the table of those that
+//! are attached now.
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
-
-use super::pull::release_pull_claims;
-use super::Room;
 
 #[derive(Debug)]
 pub struct PeerError;
@@ -56,115 +55,48 @@ impl ConnectorPeer {
     }
 }
 
-impl Room {
-    pub fn attach(&self, cid: &str, peer: ConnectorPeer) -> Option<ConnectorPeer> {
-        let mut inner = self.inner.lock().expect("room lock");
-        let old = inner.peers.insert(cid.into(), peer);
-        inner.peer_order.retain(|id| id != cid);
-        inner.peer_order.push_back(cid.into());
-        let ids: Vec<String> = inner
-            .bindings
-            .values_mut()
-            .filter(|b| b.connector == cid && b.active)
-            .map(|b| {
-                b.live = false;
-                b.id.clone()
-            })
-            .collect();
-        release_pull_claims(&mut inner, |row| {
-            row.pull_claimed_by
-                .as_ref()
-                .is_some_and(|claim| ids.contains(claim))
-        });
-        for bid in ids {
-            if let Some(row_id) = inner.inflight.remove(&bid) {
-                if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id) {
-                    row.status = "pending".into();
-                    row.next_attempt = 0;
-                }
-            }
-        }
+/// The attached peers, one per connector, remembered in the order they attached.
+#[derive(Default)]
+pub(super) struct Peers {
+    attached: HashMap<String, ConnectorPeer>,
+    order: VecDeque<String>,
+}
+impl Peers {
+    /// Attach `peer` as connector `cid`'s connection, returning the one it replaces.
+    pub(super) fn attach(&mut self, cid: &str, peer: ConnectorPeer) -> Option<ConnectorPeer> {
+        let old = self.attached.insert(cid.into(), peer);
+        self.order.retain(|id| id != cid);
+        self.order.push_back(cid.into());
         old
     }
-    pub fn detach(&self, cid: &str, generation: &str) {
-        let mut inner = self.inner.lock().expect("room lock");
-        if inner
-            .peers
-            .get(cid)
-            .is_none_or(|p| p.generation != generation)
-        {
-            return;
+    /// Detach connector `cid` if `generation` is still its connection; false if it was not.
+    pub(super) fn detach(&mut self, cid: &str, generation: &str) -> bool {
+        if !self.is_current(cid, generation) {
+            return false;
         }
-        inner.peers.remove(cid);
-        inner.peer_order.retain(|id| id != cid);
-        let ids: Vec<String> = inner
-            .bindings
-            .values_mut()
-            .filter(|b| b.connector == cid)
-            .map(|b| {
-                b.live = false;
-                b.id.clone()
-            })
-            .collect();
-        release_pull_claims(&mut inner, |row| {
-            row.pull_claimed_by
-                .as_ref()
-                .is_some_and(|claim| ids.contains(claim))
-        });
-        for bid in ids {
-            if let Some(row_id) = inner.inflight.remove(&bid) {
-                if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id) {
-                    row.status = "pending".into();
-                    row.next_attempt = 0;
-                }
-            }
-        }
+        self.attached.remove(cid);
+        self.order.retain(|id| id != cid);
+        true
     }
-    pub fn current_peer(&self, cid: &str, generation: &str) -> bool {
-        self.inner
-            .lock()
-            .expect("room lock")
-            .peers
+    pub(super) fn is_current(&self, cid: &str, generation: &str) -> bool {
+        self.attached
             .get(cid)
             .is_some_and(|peer| peer.generation == generation)
     }
-    pub fn connector_peer(&self) -> Option<ConnectorPeer> {
-        let inner = self.inner.lock().expect("room lock");
-        inner
-            .peer_order
-            .iter()
-            .rev()
-            .find_map(|cid| inner.peers.get(cid).cloned())
+    pub(super) fn get(&self, cid: &str) -> Option<&ConnectorPeer> {
+        self.attached.get(cid)
     }
-    pub async fn rendezvous_changed(&self, state: Value) {
-        let peers: Vec<ConnectorPeer> = self
-            .inner
-            .lock()
-            .expect("room lock")
-            .peers
-            .values()
-            .cloned()
-            .collect();
-        for peer in peers {
-            let _ = peer.send("node.rendezvous", state.clone()).await;
-        }
+    pub(super) fn contains(&self, cid: &str) -> bool {
+        self.attached.contains_key(cid)
     }
-    pub fn latest_connector_identity(&self) -> Value {
-        let inner = self.inner.lock().expect("room lock");
-        let Some(row) = inner
-            .peer_order
-            .iter()
-            .rev()
-            .find_map(|id| inner.connectors.get(id))
-        else {
-            return json!({});
-        };
-        let mut result = Map::new();
-        for key in ["host", "platform", "version", "harnesses"] {
-            if let Some(value) = row.get(key) {
-                result.insert(key.to_owned(), value.clone());
-            }
-        }
-        Value::Object(result)
+    /// Connector IDs, most recently attached first.
+    pub(super) fn recent(&self) -> impl Iterator<Item = &String> {
+        self.order.iter().rev()
+    }
+    pub(super) fn latest(&self) -> Option<&ConnectorPeer> {
+        self.recent().find_map(|cid| self.attached.get(cid))
+    }
+    pub(super) fn all(&self) -> Vec<ConnectorPeer> {
+        self.attached.values().cloned().collect()
     }
 }

@@ -1,9 +1,7 @@
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::support::{pull_room, say};
-use crate::control::room::bindings::Binding;
-use crate::control::room::util::seconds;
 
 #[test]
 fn push_falls_back_to_an_idle_older_binding_as_before() {
@@ -26,23 +24,9 @@ fn push_falls_back_to_an_idle_older_binding_as_before() {
     // A second, newer push binding for the same thread from the same connector.
     let newer = {
         let mut inner = room.inner.lock().unwrap();
-        let mut binding = Binding {
-            id: "newer".into(),
-            connector: "connector".into(),
-            thread: "busy".into(),
-            harness: "claude".into(),
-            title: None,
-            created: seconds(),
-            active: true,
-            live: true,
-            inbound: None,
-            capabilities: Value::Null,
-            engine: None,
-            route: None,
-            pull_input: false,
-        };
+        let binding = inner.bindings.get_or_create("newer", "connector", "busy");
+        binding.harness = "claude".into();
         binding.created += 1;
-        inner.bindings.insert("newer".into(), binding);
         "newer".to_owned()
     };
     room.select(&sid, "busy").unwrap();

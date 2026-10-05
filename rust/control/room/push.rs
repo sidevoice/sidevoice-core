@@ -3,11 +3,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::journal::INPUT_TTL;
-use super::latency::{latency_now_micros, mark_latency, LatencyEvent};
+use super::latency::{latency_now_micros, LatencyEvent};
 use super::peers::{ConnectorPeer, PeerError};
-use super::playback::dispatch_client;
-use super::pull::delivery_binding;
 use super::util::{field, seconds};
 use super::Room;
 
@@ -44,60 +41,37 @@ fn valid_delivery_ack(value: &Value) -> Option<&str> {
 
 impl Room {
     pub fn pending_delivery(&self) -> Vec<(String, String, ConnectorPeer, Value)> {
-        let mut inner = self.inner.lock().expect("room lock");
+        let mut guard = self.inner.lock().expect("room lock");
+        let inner = &mut *guard;
         let now = seconds();
+        for input in inner.journal.expire_input(now) {
+            inner.browsers.input_receipt(&input, "not_sent");
+        }
         let mut work = Vec::new();
-        for ix in 0..inner.rows.len() {
-            let row = &inner.rows[ix];
-            if row.role != "user" || row.status != "pending" {
-                continue;
-            }
-            let rid = row.id.clone();
-            let thread = row.thread.clone();
-            let queued = row.queued_at;
-            let next = row.next_attempt;
-            if now.saturating_sub(queued) >= INPUT_TTL {
-                inner.rows[ix].status = "not_sent".into();
-                inner.rows[ix].reason = Some("expired".into());
-                let payload = inner.rows[ix].payload.clone().unwrap_or_default();
-                let sid = inner.rows[ix].session.clone();
-                if let Some(c) = inner.browsers.get(&sid) {
-                    let _=c.sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":payload["revision"],"history_id":rid,"thread_id":thread,"session_id":sid,"status":"not_sent"}}));
-                }
-                continue;
-            }
-            if next > now {
-                continue;
-            }
+        for row in inner.journal.due_input(now) {
             // A pull binding consumes the room journal directly. Falling back to an older
             // push binding here would deliver the same words twice.
-            if delivery_binding(&inner, &thread).is_some_and(|b| b.pull_input) {
+            if inner
+                .bindings
+                .delivery_target(&row.thread)
+                .is_some_and(|b| b.pull_input)
+            {
                 continue;
             }
-            let Some(b) = inner
+            let Some(binding) = inner
                 .bindings
-                .values()
-                .filter(|b| {
-                    b.active
-                        && b.live
-                        && b.thread == thread
-                        && !b.pull_input
-                        && !inner.inflight.contains_key(&b.id)
-                })
-                .max_by_key(|b| b.created)
+                .push_target(&row.thread, |bid| inner.inflight.is_busy(bid))
             else {
                 continue;
             };
-            let bid = b.id.clone();
-            let Some(peer) = inner.peers.get(&b.connector).cloned() else {
+            let Some(peer) = inner.peers.get(&binding.connector).cloned() else {
                 continue;
             };
-            let row = &inner.rows[ix];
             let payload = row.payload.as_ref().unwrap();
-            let data = json!({"event_id":rid,"binding_id":bid,"thread":thread,"text":row.text,"channel":"voice","session_id":payload["session_id"],"revision":payload["revision"],"message_id":payload["message_id"]});
-            inner.rows[ix].status = "sending".into();
-            inner.inflight.insert(bid.clone(), rid.clone());
-            work.push((bid, rid, peer, data));
+            let data = json!({"event_id":row.id,"binding_id":binding.id,"thread":row.thread,"text":row.text,"channel":"voice","session_id":payload["session_id"],"revision":payload["revision"],"message_id":payload["message_id"]});
+            row.status = "sending".into();
+            inner.inflight.start(&binding.id, &row.id);
+            work.push((binding.id.clone(), row.id.clone(), peer, data));
         }
         work
     }
@@ -108,22 +82,19 @@ impl Room {
         generation: &str,
         answer: Result<Value, PeerError>,
     ) {
-        let mut inner = self.inner.lock().expect("room lock");
-        if inner.inflight.get(bid).is_none_or(|id| id != rid) {
+        let mut guard = self.inner.lock().expect("room lock");
+        let inner = &mut *guard;
+        if !inner.inflight.awaits(bid, rid) {
             return;
         }
         let Some(b) = inner.bindings.get(bid) else {
             return;
         };
-        if inner
-            .peers
-            .get(&b.connector)
-            .is_none_or(|p| p.generation != generation)
-        {
+        if !inner.peers.is_current(&b.connector, generation) {
             return;
         }
-        inner.inflight.remove(bid);
-        let Some(row) = inner.rows.iter_mut().find(|r| r.id == rid) else {
+        inner.inflight.finish(bid);
+        let Some(row) = inner.journal.find_mut(rid) else {
             return;
         };
         if row.status == "read" {
@@ -151,28 +122,22 @@ impl Room {
             row.attempts += 1;
             row.next_attempt = seconds() + [2, 5, 15, 60][row.attempts.min(4) - 1];
         }
-        let sid = row.session.clone();
-        let payload = row.payload.clone().unwrap_or_default();
-        if let Some(c) = inner.browsers.get_mut(&sid) {
-            if new_status == "delivered" {
+        let input = row.input_ref();
+        if new_status == "delivered" {
+            if let Some(c) = inner.browsers.get_mut(&input.session) {
                 c.sent += 1;
             }
-            let _=c.sender.try_send(json!({"type":"voice-input-receipt","data":{"revision":payload["revision"],"history_id":rid,"thread_id":payload["thread_id"],"session_id":sid,"status":new_status}}));
         }
-        if new_status == "delivered" {
-            if let (Some(thread), Some(revision)) =
-                (payload["thread_id"].as_str(), payload["revision"].as_u64())
-            {
-                mark_latency(
-                    &mut inner,
-                    &sid,
-                    thread,
-                    revision,
-                    None,
-                    LatencyEvent::DeliveryAccepted,
-                    latency_now_micros(),
-                );
-            }
+        inner.browsers.input_receipt(&input, new_status);
+        if let (Some(thread), "delivered") = (input.thread.as_deref(), new_status) {
+            inner.mark_latency(
+                &input.session,
+                thread,
+                input.revision,
+                None,
+                LatencyEvent::DeliveryAccepted,
+                latency_now_micros(),
+            );
         }
     }
     pub async fn pump(self: std::sync::Arc<Self>) {
@@ -186,9 +151,8 @@ impl Room {
             }
             {
                 let mut inner = self.inner.lock().expect("room lock");
-                let clients: Vec<String> = inner.browsers.keys().cloned().collect();
-                for sid in clients {
-                    dispatch_client(&mut inner, &sid);
+                for sid in inner.browsers.ids() {
+                    inner.dispatch_client(&sid);
                 }
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
