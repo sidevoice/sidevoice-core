@@ -21,7 +21,7 @@ pub(super) async fn admission(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Json<Value> {
-    // The room parses the whole header itself, unlike the refusals' first-tag rule.
+    // The whole header goes to the room; rendering keeps only its primary subtag.
     Json(
         state.room.admission(
             headers
