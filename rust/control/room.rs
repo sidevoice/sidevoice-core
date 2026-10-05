@@ -21,6 +21,8 @@ const MAX_REPLAY_RECORDS: usize = 16;
 const MAX_PENDING: usize = 16;
 const MAX_BROWSERS: usize = 8;
 const INPUT_TTL: u64 = 600;
+/// Most pull messages one fetch returns, and most IDs one fetch may acknowledge.
+const PULL_PAGE: usize = 32;
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn seconds() -> u64 {
@@ -241,12 +243,14 @@ struct Binding {
     capabilities: Value,
     engine: Option<Value>,
     route: Option<String>,
+    pull_input: bool,
 }
 impl Binding {
     fn view(&self) -> Value {
         json!({"id": self.id, "connector": self.connector, "thread": self.thread,
         "harness": self.harness, "title": self.title, "created": self.created, "active": self.active as u8,
         "inbound": self.inbound, "capabilities": self.capabilities, "engine": self.engine, "route": self.route,
+        "input_mode": if self.pull_input { "pull" } else { "push" },
         "connected": self.live})
     }
 }
@@ -268,6 +272,7 @@ struct Row {
     queued_at: u64,
     attempts: usize,
     next_attempt: u64,
+    pull_claimed_by: Option<String>,
 }
 struct InputDraft<'a> {
     row_id: String,
@@ -538,6 +543,11 @@ impl Room {
                 b.id.clone()
             })
             .collect();
+        release_pull_claims(&mut inner, |row| {
+            row.pull_claimed_by
+                .as_ref()
+                .is_some_and(|claim| ids.contains(claim))
+        });
         for bid in ids {
             if let Some(row_id) = inner.inflight.remove(&bid) {
                 if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id) {
@@ -568,6 +578,11 @@ impl Room {
                 b.id.clone()
             })
             .collect();
+        release_pull_claims(&mut inner, |row| {
+            row.pull_claimed_by
+                .as_ref()
+                .is_some_and(|claim| ids.contains(claim))
+        });
         for bid in ids {
             if let Some(row_id) = inner.inflight.remove(&bid) {
                 if let Some(row) = inner.rows.iter_mut().find(|r| r.id == row_id) {
@@ -634,6 +649,11 @@ impl Room {
             return Err(RoomError::new(409, "room.connector_disconnected"));
         }
         let requested = field(data, "binding_id");
+        let pull_input = match field(data, "input_mode") {
+            "" | "push" => false,
+            "pull" => true,
+            _ => return Err(RoomError::new(400, "room.input_mode_invalid")),
+        };
         if let Some(existing) = inner.bindings.get(requested) {
             if existing.connector != cid {
                 return Err(RoomError::new(409, "room.binding_foreign"));
@@ -688,6 +708,7 @@ impl Room {
                 capabilities: Value::Null,
                 engine: None,
                 route: None,
+                pull_input: false,
             });
         binding.harness = harness;
         binding.active = true;
@@ -703,8 +724,13 @@ impl Room {
             binding.engine = engine;
         }
         binding.route = route;
+        binding.pull_input = pull_input;
         let actual_thread = binding.thread.clone();
         inner.working.remove(&actual_thread);
+        release_pull_claims(&mut inner, |row| {
+            row.thread == actual_thread
+                && (!pull_input || row.pull_claimed_by.as_deref() != Some(bid.as_str()))
+        });
         Ok(
             json!({"client_ref": data.get("client_ref"), "binding_id": bid, "thread": actual_thread}),
         )
@@ -716,6 +742,9 @@ impl Room {
             b.live = false;
             let thread = b.thread.clone();
             inner.working.remove(&thread);
+            release_pull_claims(&mut inner, |row| {
+                row.pull_claimed_by.as_deref() == Some(bid)
+            });
         }
     }
     pub fn close_channel(
@@ -1694,6 +1723,7 @@ impl Room {
             queued_at: seconds(),
             attempts: 0,
             next_attempt: 0,
+            pull_claimed_by: None,
         });
         trim_rows(&mut inner);
         if can_speak {
@@ -1982,6 +2012,138 @@ impl Room {
             }
         }
     }
+    /// Read the existing in-memory journal for one live pull binding. A fetched message is
+    /// claimed by that binding and returned again on every later fetch until the caller
+    /// acknowledges its ID; the claim is released if the binding stops being the thread's live
+    /// pull binding. Acknowledgement is idempotent: an ID this binding does not hold is ignored.
+    pub fn pull_input(&self, cid: &str, data: &Value) -> Result<Value, RoomError> {
+        let mut inner = self.inner.lock().expect("room lock");
+        let bid = field(data, "binding_id");
+        let Some(binding) = inner.bindings.get(bid).filter(|binding| {
+            binding.connector == cid && binding.active && binding.live && binding.pull_input
+        }) else {
+            return Err(RoomError::new(403, "room.pull_binding_invalid"));
+        };
+        let thread = binding.thread.clone();
+        // Only the binding that would receive the thread's input may read it; an older or
+        // newer binding on the same thread would otherwise see words also delivered elsewhere.
+        if delivery_binding(&inner, &thread).is_none_or(|b| b.id != bid) {
+            return Err(RoomError::new(409, "room.pull_binding_superseded"));
+        }
+        let operation = field(data, "operation");
+        if !matches!(operation, "check" | "get") {
+            return Err(RoomError::new(400, "room.pull_operation_invalid"));
+        }
+        let ack_ids = data.get("ack_ids");
+        if operation == "check" && ack_ids.is_some() {
+            return Err(RoomError::new(400, "room.pull_ack_invalid"));
+        }
+        let ack_ids: Vec<&str> = match ack_ids {
+            None => Vec::new(),
+            Some(Value::Array(ids)) if ids.len() <= PULL_PAGE => ids
+                .iter()
+                .map(|id| id.as_str().filter(|id| !id.is_empty()))
+                .collect::<Option<Vec<&str>>>()
+                .ok_or(RoomError::new(400, "room.pull_ack_invalid"))?,
+            Some(_) => return Err(RoomError::new(400, "room.pull_ack_invalid")),
+        };
+        let after = match data.get("after") {
+            None => 0,
+            Some(value) => value
+                .as_u64()
+                .ok_or(RoomError::new(400, "room.pull_cursor_invalid"))?,
+        };
+        let held = |row: &Row| {
+            row.thread == thread
+                && row.role == "user"
+                && row.status == "delivered"
+                && row.pull_claimed_by.as_deref() == Some(bid)
+        };
+        let mut read = Vec::new();
+        for row in inner.rows.iter_mut().filter(|row| {
+            held(&**row)
+                && row
+                    .payload
+                    .as_ref()
+                    .is_some_and(|payload| ack_ids.contains(&field(payload, "message_id")))
+        }) {
+            row.status = "read".into();
+            read.push((row.session.clone(), row.id.clone(), row.revision));
+        }
+        let acknowledged = read.len();
+        for (session, history_id, revision) in read {
+            input_receipt(&inner, &session, &history_id, &thread, revision, "read");
+            mark_latency(
+                &mut inner,
+                &session,
+                &thread,
+                revision,
+                None,
+                LatencyEvent::Read,
+                latency_now_micros(),
+            );
+        }
+        // Undelivered input expires as it does for push; a claimed row stays until it is
+        // acknowledged, released or trimmed from the bounded journal.
+        let now = seconds();
+        let mut count = 0usize;
+        let mut messages = Vec::new();
+        let mut claimed = Vec::new();
+        let mut more = false;
+        for row in inner.rows.iter_mut().filter(|row| {
+            held(&**row)
+                || (row.thread == thread
+                    && row.role == "user"
+                    && row.status == "pending"
+                    && now.saturating_sub(row.queued_at) < INPUT_TTL)
+        }) {
+            count += 1;
+            if operation != "get" || row.seq <= after {
+                continue;
+            }
+            if messages.len() >= PULL_PAGE {
+                more = true;
+                continue;
+            }
+            let payload = row.payload.clone().unwrap_or_default();
+            messages.push(json!({"message_id":payload["message_id"],
+                "session_id":payload["session_id"], "revision":payload["revision"],
+                "channel":"voice", "text":row.text, "arrival_time":row.time, "cursor":row.seq}));
+            if row.status == "pending" {
+                row.status = "delivered".into();
+                row.pull_claimed_by = Some(bid.to_owned());
+                claimed.push((row.session.clone(), row.id.clone(), row.revision));
+            }
+        }
+        for (session, history_id, revision) in claimed {
+            if let Some(browser) = inner.browsers.get_mut(&session) {
+                browser.sent += 1;
+            }
+            input_receipt(
+                &inner,
+                &session,
+                &history_id,
+                &thread,
+                revision,
+                "delivered",
+            );
+            mark_latency(
+                &mut inner,
+                &session,
+                &thread,
+                revision,
+                None,
+                LatencyEvent::DeliveryAccepted,
+                latency_now_micros(),
+            );
+        }
+        let cursor = messages
+            .last()
+            .and_then(|message| message["cursor"].as_u64())
+            .unwrap_or(after);
+        Ok(json!({"connected":true, "pending":count > 0, "count":count,
+            "messages":messages, "cursor":cursor, "more":more, "acknowledged":acknowledged}))
+    }
     pub fn pending_delivery(&self) -> Vec<(String, String, ConnectorPeer, Value)> {
         let mut inner = self.inner.lock().expect("room lock");
         let now = seconds();
@@ -2008,11 +2170,20 @@ impl Room {
             if next > now {
                 continue;
             }
+            // A pull binding consumes the room journal directly. Falling back to an older
+            // push binding here would deliver the same words twice.
+            if delivery_binding(&inner, &thread).is_some_and(|b| b.pull_input) {
+                continue;
+            }
             let Some(b) = inner
                 .bindings
                 .values()
                 .filter(|b| {
-                    b.active && b.live && b.thread == thread && !inner.inflight.contains_key(&b.id)
+                    b.active
+                        && b.live
+                        && b.thread == thread
+                        && !b.pull_input
+                        && !inner.inflight.contains_key(&b.id)
                 })
                 .max_by_key(|b| b.created)
             else {
@@ -2163,6 +2334,7 @@ fn queue_input_locked(inner: &mut Inner, draft: InputDraft<'_>) -> Value {
         queued_at: seconds(),
         attempts: 0,
         next_attempt: 0,
+        pull_claimed_by: None,
     });
     trim_rows(inner);
     mark_latency(
@@ -2190,6 +2362,55 @@ fn trim_rows(inner: &mut Inner) {
         if let Some(row) = inner.rows.pop_front() {
             inner.utterances.retain(|_, u| u.row_id != row.id);
         }
+    }
+}
+/// The live binding a thread's input goes to first: the newest, ties broken by ID so push and
+/// pull agree on it.
+fn delivery_binding<'a>(inner: &'a Inner, thread: &str) -> Option<&'a Binding> {
+    inner
+        .bindings
+        .values()
+        .filter(|b| b.active && b.live && b.thread == thread)
+        .max_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)))
+}
+/// Return fetched but unacknowledged pull input to the queue, so that the thread's next
+/// delivery binding (pull or push) receives it rather than leaving it claimed by a binding
+/// that can no longer read it. The same message ID may therefore be fetched again.
+fn release_pull_claims(inner: &mut Inner, released: impl Fn(&Row) -> bool) {
+    let mut back = Vec::new();
+    for row in inner
+        .rows
+        .iter_mut()
+        .filter(|row| row.status == "delivered" && row.pull_claimed_by.is_some())
+        .filter(|row| released(&**row))
+    {
+        row.status = "pending".into();
+        row.pull_claimed_by = None;
+        row.next_attempt = 0;
+        back.push((
+            row.session.clone(),
+            row.id.clone(),
+            row.thread.clone(),
+            row.revision,
+        ));
+    }
+    for (session, history_id, thread, revision) in back {
+        input_receipt(inner, &session, &history_id, &thread, revision, "pending");
+    }
+}
+fn input_receipt(
+    inner: &Inner,
+    session: &str,
+    history_id: &str,
+    thread: &str,
+    revision: u64,
+    status: &str,
+) {
+    if let Some(browser) = inner.browsers.get(session) {
+        let _ = browser.sender.try_send(
+            json!({"type":"voice-input-receipt","data":{"revision":revision,
+            "history_id":history_id,"thread_id":thread,"session_id":session,"status":status}}),
+        );
     }
 }
 fn reachability(binding: &Binding, language: &str) -> Value {
@@ -2903,6 +3124,388 @@ mod tests {
                 .unwrap(),
             accepted
         );
+    }
+
+    fn pull_room(connectors: &[&str]) -> (tempfile::TempDir, Room, Vec<String>) {
+        let directory = tempfile::tempdir().unwrap();
+        let room = Room::load(PrivateDir::open(directory.path().join("private")).unwrap()).unwrap();
+        let mut generations = Vec::new();
+        for cid in connectors {
+            let (requests, _receiver) = mpsc::channel(4);
+            let (stop, _stopped) = watch::channel(false);
+            let generation = id();
+            room.attach(
+                cid,
+                ConnectorPeer {
+                    generation: generation.clone(),
+                    sender: requests,
+                    stop,
+                },
+            );
+            generations.push(generation);
+        }
+        (directory, room, generations)
+    }
+
+    fn say(room: &Room, sid: &str, text: &str) {
+        let turn = room.begin_turn(sid).unwrap();
+        room.queue_voice_input(&turn, text).unwrap();
+    }
+
+    fn pull(room: &Room, cid: &str, request: Value) -> Result<Value, RoomError> {
+        room.pull_input(cid, &request)
+    }
+
+    #[test]
+    fn pull_reads_only_its_live_binding_and_keeps_messages_until_ack() {
+        let (_directory, room, _) = pull_room(&["pull-owner", "other"]);
+        let joined = room
+            .register(
+                "pull-owner",
+                &json!({"thread":"pull-thread","harness":"codex","input_mode":"pull"}),
+            )
+            .unwrap();
+        let bid = joined["binding_id"].as_str().unwrap().to_owned();
+        let (events, _received) = mpsc::channel(64);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        room.select(&sid, "pull-thread").unwrap();
+        say(&room, &sid, "first");
+        say(&room, &sid, "second");
+        assert!(
+            room.pending_delivery().is_empty(),
+            "pull input must not also use push"
+        );
+        let check = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"check"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (check["pending"].clone(), check["count"].clone()),
+            (json!(true), json!(2))
+        );
+        assert_eq!(check["messages"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            room.history(Some("pull-thread"))["messages"][0]["status"],
+            "pending"
+        );
+        assert!(pull(&room, "other", json!({"binding_id":bid,"operation":"get"})).is_err());
+        assert!(pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"check","ack_ids":[]})
+        )
+        .is_err());
+        assert!(pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"get","ack_ids":[""]})
+        )
+        .is_err());
+
+        let first = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"get"}),
+        )
+        .unwrap();
+        let texts: Vec<&str> = first["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, ["first", "second"]);
+        assert_eq!(first["more"], false);
+        assert_eq!(
+            room.history(Some("pull-thread"))["messages"][0]["status"],
+            "delivered"
+        );
+        let one = first["messages"][0]["message_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let two = first["messages"][1]["message_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // A failed or lost fetch is retried: the same IDs come back until acknowledged.
+        let again = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"get"}),
+        )
+        .unwrap();
+        assert_eq!(again["messages"][0]["message_id"], one.as_str());
+        assert_eq!(again["messages"][1]["message_id"], two.as_str());
+        let past = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"get","after":first["cursor"]}),
+        )
+        .unwrap();
+        assert_eq!(past["messages"].as_array().unwrap().len(), 0);
+        assert_eq!(past["count"], 2);
+
+        // An ID this binding does not hold changes nothing.
+        let foreign = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"get","ack_ids":["somebody-else"]}),
+        )
+        .unwrap();
+        assert_eq!(
+            (foreign["acknowledged"].clone(), foreign["count"].clone()),
+            (json!(0), json!(2))
+        );
+
+        let acked = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"get","ack_ids":[one]}),
+        )
+        .unwrap();
+        assert_eq!(
+            (acked["acknowledged"].clone(), acked["count"].clone()),
+            (json!(1), json!(1))
+        );
+        assert_eq!(acked["messages"][0]["message_id"], two.as_str());
+        assert_eq!(
+            room.history(Some("pull-thread"))["messages"][0]["status"],
+            "read"
+        );
+
+        // Repeating an acknowledgement whose answer was lost is harmless.
+        let repeated = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"get","ack_ids":[one, two]}),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                repeated["acknowledged"].clone(),
+                repeated["count"].clone(),
+                repeated["pending"].clone()
+            ),
+            (json!(1), json!(0), json!(false))
+        );
+        room.unregister("pull-owner", &bid);
+        assert!(pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"check"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pull_pages_without_silent_loss() {
+        let (_directory, room, _) = pull_room(&["pull-owner"]);
+        let bid = room
+            .register(
+                "pull-owner",
+                &json!({"thread":"pull-thread","harness":"codex","input_mode":"pull"}),
+            )
+            .unwrap()["binding_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (events, _received) = mpsc::channel(256);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        room.select(&sid, "pull-thread").unwrap();
+        for n in 0..(PULL_PAGE + 3) {
+            say(&room, &sid, &format!("message {n}"));
+        }
+        let page = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"get"}),
+        )
+        .unwrap();
+        assert_eq!(page["messages"].as_array().unwrap().len(), PULL_PAGE);
+        assert_eq!(
+            (page["more"].clone(), page["count"].clone()),
+            (json!(true), json!(PULL_PAGE + 3))
+        );
+        let rest = pull(
+            &room,
+            "pull-owner",
+            json!({"binding_id":bid,"operation":"get","after":page["cursor"]}),
+        )
+        .unwrap();
+        let texts: Vec<&str> = rest["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["text"].as_str().unwrap())
+            .collect();
+        let expected: Vec<String> = (PULL_PAGE..PULL_PAGE + 3)
+            .map(|n| format!("message {n}"))
+            .collect();
+        assert_eq!(texts, expected);
+        assert_eq!(rest["more"], false);
+    }
+
+    #[test]
+    fn pull_claims_return_to_push_when_the_pull_binding_goes_away() {
+        let (_directory, room, generations) = pull_room(&["pusher", "puller"]);
+        let push_bid = room
+            .register("pusher", &json!({"thread":"shared","harness":"claude"}))
+            .unwrap()["binding_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (events, _received) = mpsc::channel(64);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        room.select(&sid, "shared").unwrap();
+        // Make the pull binding the newest one on the thread.
+        room.inner
+            .lock()
+            .unwrap()
+            .bindings
+            .get_mut(&push_bid)
+            .unwrap()
+            .created -= 10;
+        let pull_bid = room
+            .register(
+                "puller",
+                &json!({"thread":"shared","harness":"codex","input_mode":"pull"}),
+            )
+            .unwrap()["binding_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        say(&room, &sid, "held");
+        assert!(
+            room.pending_delivery().is_empty(),
+            "the newest binding pulls"
+        );
+        // The older push binding may not read the thread's input by pull either.
+        assert!(pull(
+            &room,
+            "pusher",
+            json!({"binding_id":push_bid,"operation":"check"})
+        )
+        .is_err());
+        let got = pull(
+            &room,
+            "puller",
+            json!({"binding_id":pull_bid,"operation":"get"}),
+        )
+        .unwrap();
+        assert_eq!(got["messages"][0]["text"], "held");
+
+        // The pull connector drops: its unacknowledged message returns to the push binding.
+        room.detach("puller", &generations[1]);
+        let delivery = room.pending_delivery();
+        assert_eq!(delivery.len(), 1);
+        assert_eq!(delivery[0].0, push_bid);
+        assert_eq!(delivery[0].3["text"], "held");
+        assert_eq!(
+            delivery[0].3["message_id"],
+            got["messages"][0]["message_id"]
+        );
+    }
+
+    #[test]
+    fn re_registering_as_push_releases_pull_claims_once() {
+        let (_directory, room, _) = pull_room(&["connector"]);
+        let joined = |mode: &str| {
+            room.register(
+                "connector",
+                &json!({"thread":"switch","harness":"codex","input_mode":mode}),
+            )
+            .unwrap()["binding_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let bid = joined("pull");
+        let (events, _received) = mpsc::channel(64);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        room.select(&sid, "switch").unwrap();
+        say(&room, &sid, "switching");
+        pull(
+            &room,
+            "connector",
+            json!({"binding_id":bid,"operation":"get"}),
+        )
+        .unwrap();
+        // Re-registering in pull mode keeps the claim; the message is not pushed.
+        assert_eq!(joined("pull"), bid);
+        assert!(room.pending_delivery().is_empty());
+        assert_eq!(
+            pull(
+                &room,
+                "connector",
+                json!({"binding_id":bid,"operation":"check"})
+            )
+            .unwrap()["count"],
+            1
+        );
+        // Switching the same binding to push hands the unacknowledged message to push, once.
+        assert_eq!(joined("push"), bid);
+        assert!(pull(
+            &room,
+            "connector",
+            json!({"binding_id":bid,"operation":"check"})
+        )
+        .is_err());
+        let delivery = room.pending_delivery();
+        assert_eq!(delivery.len(), 1);
+        assert_eq!(delivery[0].3["text"], "switching");
+        assert!(room.pending_delivery().is_empty());
+    }
+
+    #[test]
+    fn push_falls_back_to_an_idle_older_binding_as_before() {
+        let (_directory, room, _) = pull_room(&["connector"]);
+        let older = room
+            .register("connector", &json!({"thread":"busy","harness":"claude"}))
+            .unwrap()["binding_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        room.inner
+            .lock()
+            .unwrap()
+            .bindings
+            .get_mut(&older)
+            .unwrap()
+            .created -= 10;
+        let (events, _received) = mpsc::channel(64);
+        let sid = room.join("device".into(), "en".into(), events).unwrap();
+        // A second, newer push binding for the same thread from the same connector.
+        let newer = {
+            let mut inner = room.inner.lock().unwrap();
+            let mut binding = Binding {
+                id: "newer".into(),
+                connector: "connector".into(),
+                thread: "busy".into(),
+                harness: "claude".into(),
+                title: None,
+                created: seconds(),
+                active: true,
+                live: true,
+                inbound: None,
+                capabilities: Value::Null,
+                engine: None,
+                route: None,
+                pull_input: false,
+            };
+            binding.created += 1;
+            inner.bindings.insert("newer".into(), binding);
+            "newer".to_owned()
+        };
+        room.select(&sid, "busy").unwrap();
+        say(&room, &sid, "one");
+        say(&room, &sid, "two");
+        let delivery = room.pending_delivery();
+        let targets: Vec<&str> = delivery.iter().map(|work| work.0.as_str()).collect();
+        assert_eq!(targets, [newer.as_str(), older.as_str()]);
     }
 
     #[test]
