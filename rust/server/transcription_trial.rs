@@ -30,23 +30,23 @@ fn fail(key: &str, status: StatusCode, headers: &HeaderMap) -> Response {
     (status, Json(json!({"detail":refusal}))).into_response()
 }
 
+/// A refusal's message key and status, rendered by `fail` once the request's language is known.
+type Refused = (&'static str, StatusCode);
+
+const INVALID_STAGE: Refused = ("trial.invalid_stage", StatusCode::UNPROCESSABLE_ENTITY);
+const INVALID_AUDIO: Refused = ("trial.invalid_audio", StatusCode::BAD_REQUEST);
+const AUDIO_TOO_LARGE: Refused = ("trial.audio_too_large", StatusCode::PAYLOAD_TOO_LARGE);
+
 /// The OpenAI transcription stage the trial asks for, refused unless the call's catalogue rules accept it.
-fn trial_stage(data: &Value, headers: &HeaderMap) -> Result<SpeechStage, Response> {
-    let invalid = || {
-        fail(
-            "trial.invalid_stage",
-            StatusCode::UNPROCESSABLE_ENTITY,
-            headers,
-        )
-    };
+fn trial_stage(data: &Value) -> Result<SpeechStage, Refused> {
     if data["place"] != "openai" {
-        return Err(invalid());
+        return Err(INVALID_STAGE);
     }
     let options = data.get("options").cloned().unwrap_or_else(|| json!({}));
     let stage_input = json!({"place":"openai","model":data["model"],"options":options});
-    let stage = crate::models::provider_check_stage("stt", &stage_input).ok_or_else(invalid)?;
+    let stage = crate::models::provider_check_stage("stt", &stage_input).ok_or(INVALID_STAGE)?;
     if context(&stage).chars().count() > MAX_CONTEXT_CHARS {
-        return Err(invalid());
+        return Err(INVALID_STAGE);
     }
     Ok(stage)
 }
@@ -61,40 +61,28 @@ fn context(stage: &SpeechStage) -> &str {
 }
 
 /// The sample's 16 kHz 16-bit PCM, refused when it is malformed, too large, too short or silent.
-fn trial_pcm(data: &Value, headers: &HeaderMap) -> Result<Vec<u8>, Response> {
-    let invalid = || fail("trial.invalid_audio", StatusCode::BAD_REQUEST, headers);
-    let too_large = || {
-        fail(
-            "trial.audio_too_large",
-            StatusCode::PAYLOAD_TOO_LARGE,
-            headers,
-        )
-    };
+fn trial_pcm(data: &Value) -> Result<Vec<u8>, Refused> {
     let audio = &data["audio"];
     if audio["encoding"] != "pcm_s16le" || audio["sample_rate"] != 16_000 {
-        return Err(invalid());
+        return Err(INVALID_AUDIO);
     }
     let Some(encoded) = audio["data_base64"].as_str() else {
-        return Err(invalid());
+        return Err(INVALID_AUDIO);
     };
     if encoded.len() > MAX_BODY_BYTES {
-        return Err(too_large());
+        return Err(AUDIO_TOO_LARGE);
     }
     let pcm = base64::engine::general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|_| invalid())?;
+        .map_err(|_| INVALID_AUDIO)?;
     if pcm.len() > MAX_PCM_BYTES {
-        return Err(too_large());
+        return Err(AUDIO_TOO_LARGE);
     }
     if pcm.len() < MIN_PCM_BYTES || !pcm.len().is_multiple_of(2) {
-        return Err(invalid());
+        return Err(INVALID_AUDIO);
     }
     if !enough_speech(&pcm) {
-        return Err(fail(
-            "trial.silent",
-            StatusCode::UNPROCESSABLE_ENTITY,
-            headers,
-        ));
+        return Err(("trial.silent", StatusCode::UNPROCESSABLE_ENTITY));
     }
     Ok(pcm)
 }
@@ -155,13 +143,10 @@ pub(super) async fn preview(
     let Some(data) = payload(&body) else {
         return fail("trial.invalid_audio", StatusCode::BAD_REQUEST, &headers);
     };
-    let stage = match trial_stage(&data, &headers) {
-        Ok(stage) => stage,
-        Err(response) => return response,
-    };
-    let pcm = match trial_pcm(&data, &headers) {
-        Ok(pcm) => pcm,
-        Err(response) => return response,
+    let trial = trial_stage(&data).and_then(|stage| trial_pcm(&data).map(|pcm| (stage, pcm)));
+    let (stage, pcm) = match trial {
+        Ok(trial) => trial,
+        Err((key, status)) => return fail(key, status, &headers),
     };
     let Some(wav) = media::wav(&pcm, 16_000) else {
         return fail("trial.invalid_audio", StatusCode::BAD_REQUEST, &headers);
