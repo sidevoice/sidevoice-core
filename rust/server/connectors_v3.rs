@@ -113,6 +113,9 @@ async fn dispatch(
             room.read(&cid, &params);
             Ok(Value::Null)
         }
+        "input.pull" => room
+            .pull_input(&cid, &params)
+            .map_err(|error| (-(error.status as i64), error.key)),
         "device.pairing_code" => Ok(state.issue_code()),
         _ => Err((-32601, "Method not found")),
     }
