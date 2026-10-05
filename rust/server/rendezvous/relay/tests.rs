@@ -2,8 +2,10 @@ use super::*;
 use crate::server::rendezvous::test_support::loopback;
 
 /// A channel whose WebSocket side never drains, so the next send must time out.
-async fn block_channel(relay: &Relay) {
-    let (sender, _receiver) = mpsc::channel(1);
+/// The caller keeps the returned receiver alive: dropped, the send would fail
+/// at once instead of timing out.
+async fn block_channel(relay: &Relay) -> mpsc::Receiver<Message> {
+    let (sender, receiver) = mpsc::channel(1);
     sender.send(Message::text("held")).await.unwrap();
     let task = tokio::spawn(std::future::pending());
     relay
@@ -11,6 +13,7 @@ async fn block_channel(relay: &Relay) {
         .lock()
         .await
         .insert("blocked".into(), Channel { sender, task });
+    receiver
 }
 
 fn data(payload: Part) -> Part {
@@ -21,7 +24,7 @@ fn data(payload: Part) -> Part {
 async fn full_channel_reports_one_close_or_stops_the_link() {
     let (outbound, mut room) = mpsc::channel(1);
     let relay = Arc::new(Relay::new(loopback(), outbound));
-    block_channel(&relay).await;
+    let _receiver = block_channel(&relay).await;
     tokio::time::timeout(
         Duration::from_secs(1),
         relay.handle("relay.data", data(Part::Binary(vec![0, 1]))),
@@ -46,7 +49,7 @@ async fn full_channel_reports_one_close_or_stops_the_link() {
     let (outbound, _room) = mpsc::channel(1);
     outbound.send(("relay.data", Part::Null)).await.unwrap();
     let relay = Arc::new(Relay::new(loopback(), outbound));
-    block_channel(&relay).await;
+    let _receiver = block_channel(&relay).await;
     tokio::time::timeout(
         Duration::from_secs(1),
         relay.handle("relay.data", data(Part::Binary(vec![0, 1]))),
