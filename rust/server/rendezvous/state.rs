@@ -31,7 +31,7 @@ impl LinkState {
     /// The room's public URL, only while the link is up for this same pairing.
     pub(super) fn public_url_for(&self, pairing: &Pairing) -> Option<&str> {
         (self.linked.as_ref() == Some(pairing))
-            .then(|| self.public_url.as_deref())
+            .then_some(self.public_url.as_deref())
             .flatten()
     }
 
