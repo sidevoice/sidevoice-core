@@ -672,6 +672,20 @@ impl Microphone {
     }
 }
 
+/// An event as a failure message shows it: no audio, nothing long.
+fn summary(event: &Value) -> String {
+    let mut event = event.clone();
+    if let Some(data) = event["data"].as_object_mut() {
+        data.retain(|key, _| !key.contains("audio"));
+    }
+    let text = event.to_string();
+    if text.len() > 300 {
+        format!("{}…", &text[..text.floor_char_boundary(300)])
+    } else {
+        text
+    }
+}
+
 /// A browser's end of a call socket.
 pub struct Browser {
     tx: Writer,
@@ -766,7 +780,7 @@ impl Browser {
             if event["type"] == kind && accept(&event["data"]) {
                 return event["data"].clone();
             }
-            seen.push(event);
+            seen.push(summary(&event));
         }
     }
 
@@ -798,14 +812,18 @@ impl Browser {
                 return;
             };
             let kind = event["type"].as_str().unwrap_or("");
-            assert!(!kinds.contains(&kind), "unexpected {kind}: {event}");
+            assert!(
+                !kinds.contains(&kind),
+                "unexpected {kind}: {}",
+                summary(&event)
+            );
         }
     }
 
     /// Nothing at all arrives for `within`.
     pub async fn quiet(&mut self, within: Duration) {
         if let Some(event) = self.next(within).await {
-            panic!("unexpected event: {event}");
+            panic!("unexpected event: {}", summary(&event));
         }
     }
 
