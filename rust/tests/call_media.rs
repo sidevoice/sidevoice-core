@@ -34,10 +34,10 @@ fn quiet_room(mut settings: Value) -> Value {
     settings
 }
 
-fn timer(merge_window: f64) -> Value {
-    quiet_room(
-        json!({"turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": merge_window}),
-    )
+/// A call whose detector the room tunes by its patience: `fast` ends a turn soon and merges nothing, `calm`
+/// waits longer and joins utterances inside its merge window.
+fn patience(patience: &str) -> Value {
+    quiet_room(json!({"turn_patience": patience}))
 }
 
 fn decode(audio: &Value) -> Vec<u8> {
@@ -126,14 +126,8 @@ async fn a_spoken_turn_reaches_the_conversation_and_its_reply_plays_on_the_devic
     .await;
     let (core, token) = (&call.core, call.token.clone());
     let pcm = speech();
-    for mode in ["smart_turn", "timer"] {
-        let mut browser = core
-            .join(
-                &token,
-                quiet_room(json!({"turn_end_mode": mode, "merge_window_secs": 0, "user_speech_timeout": 0.5,
-                    "smart_turn_min_silence": 0.5, "smart_turn_max_silence": 1.0})),
-            )
-            .await;
+    for mode in ["normal", "fast"] {
+        let mut browser = core.join(&token, patience(mode)).await;
         let session = browser.session.clone();
         core.select(&token, &session, THREAD).await;
         browser.speak(&silence(1.0)).await;
@@ -205,7 +199,7 @@ async fn a_spoken_turn_reaches_the_conversation_and_its_reply_plays_on_the_devic
             .to_owned();
         assert_eq!(core.get(&latency).token(&other).send().await.status, 404);
 
-        if mode == "timer" {
+        if mode == "fast" {
             // Speaking over a reply interrupts it; the interrupted reply takes no more receipts.
             let stale = format!("barge-{}", message_id());
             publish(
@@ -319,7 +313,7 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
     .await;
     let (core, token) = (&call.core, call.token.clone());
     let pcm = speech();
-    let mut settings = timer(0.0);
+    let mut settings = patience("fast");
     settings["tts"] = json!({"place": "elevenlabs", "model": "eleven_v3", "options": {"voice": {"en": "fixturevoice"}}});
     let mut browser = core.join(&token, settings).await;
     let session = browser.session.clone();
@@ -615,12 +609,12 @@ async fn pauses_inside_the_merge_window_make_one_turn() {
     let call = call(|_, launch| launch).await;
     let (core, token) = (&call.core, call.token.clone());
     let pcm = speech();
-    let mut browser = core.join(&token, timer(3.0)).await;
+    let mut browser = core.join(&token, patience("calm")).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
     for part in ["First thought", "continued thought"] {
         browser.speak(&pcm).await;
-        browser.speak(&silence(1.0)).await;
+        browser.speak(&silence(2.0)).await;
         let ask = browser
             .frame_within("voice-transcribe", Duration::from_secs(30))
             .await;
@@ -642,7 +636,7 @@ async fn pauses_inside_the_merge_window_make_one_turn() {
     );
 
     // A second utterance inside the window while the first is still being transcribed joins it.
-    let mut browser = core.join(&token, timer(2.0)).await;
+    let mut browser = core.join(&token, patience("calm")).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
     browser.speak(&pcm).await;
@@ -686,7 +680,7 @@ async fn offline_speech_arrives_as_one_turn_and_failed_transcriptions_cancel_the
     let call = call(|_, launch| launch.env("SIDEVOICE_FIXTURE_STT_TIMEOUT_MS", "12000")).await;
     let (core, token) = (&call.core, call.token.clone());
     let pcm = speech();
-    let mut browser = core.join(&token, timer(0.0)).await;
+    let mut browser = core.join(&token, patience("fast")).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
     let revision = core.revision(&token, &session).await;
@@ -807,8 +801,8 @@ async fn a_turn_keeps_the_focus_it_started_with_while_both_listeners_hear_the_re
     assert!(other["binding_id"].is_string(), "{other}");
     let (core, token) = (&call.core, call.token.clone());
     let pcm = speech();
-    let mut first = core.join(&token, timer(0.0)).await;
-    let mut second = core.join(&token, timer(0.0)).await;
+    let mut first = core.join(&token, patience("fast")).await;
+    let mut second = core.join(&token, patience("fast")).await;
     for browser in [&first, &second] {
         core.select(&token, &browser.session, THREAD).await;
     }
@@ -920,7 +914,7 @@ async fn the_reply_playing_is_not_heard_as_the_user_but_a_louder_voice_interrupt
     let call = call(|_, launch| launch).await;
     let (core, token) = (&call.core, call.token.clone());
     let pcm = speech();
-    let mut browser = core.join(&token, timer(0.0)).await;
+    let mut browser = core.join(&token, patience("fast")).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
 
@@ -979,7 +973,7 @@ async fn a_turn_spoken_over_webrtc_then_over_the_socket_after_a_replaced_offer()
     let call = call(|_, launch| launch).await;
     let (core, token) = (&call.core, call.token.clone());
     let pcm = speech();
-    let mut browser = core.join(&token, timer(0.0)).await;
+    let mut browser = core.join(&token, patience("fast")).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
     let before = core.history(&token, THREAD).await.len();
