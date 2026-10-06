@@ -12,8 +12,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde_json::{json, Value};
 use support::*;
-use wiremock::matchers::{body_string_contains, header, method, path, path_regex, query_param};
-use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use wiremock::matchers::{header, method, path, path_regex, query_param};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 const ORIGIN: &str = "tauri://localhost";
 const STORED: &str = "stored-openai-fixture-key";
@@ -36,6 +36,18 @@ fn tone() -> Vec<u8> {
             ((6000.0 * phase.sin()) as i16).to_le_bytes()
         })
         .collect()
+}
+
+/// A request whose body holds these bytes. The multipart body carries a WAV, so it is not text to search.
+struct BodyHolds(&'static [u8]);
+
+impl Match for BodyHolds {
+    fn matches(&self, request: &Request) -> bool {
+        request
+            .body
+            .windows(self.0.len())
+            .any(|window| window == self.0)
+    }
 }
 
 /// OpenAI and ElevenLabs as far as these routes reach them.
@@ -79,7 +91,7 @@ async fn providers() -> MockServer {
         .await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
-        .and(body_string_contains("gpt-slow-transcribe"))
+        .and(BodyHolds(b"gpt-slow-transcribe"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!({"text": "Hello from the provider"}))
