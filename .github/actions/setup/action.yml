@@ -1,0 +1,24 @@
+name: Set up the Rust core build
+description: Installs the pinned Rust toolchain and the native libraries the core links against, and stages the pinned detector models into RUSTVANI_CACHE_DIR.
+
+runs:
+  using: composite
+  steps:
+    - name: Toolchain and native libraries
+      shell: bash
+      env:
+        RUST_VERSION: "1.98.1"
+      run: |
+        set -euo pipefail
+        rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy --component rustfmt
+        echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
+        echo "RUSTVANI_CACHE_DIR=$RUNNER_TEMP/sidevoice-models" >> "$GITHUB_ENV"
+        if [ "$RUNNER_OS" = macOS ]; then
+          brew install opus zstd
+        else
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev patchelf pkg-config zstd
+        fi
+    - name: Detector models (pinned by digest in assets/rust-models.json)
+      shell: bash
+      run: cargo xtask models

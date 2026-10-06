@@ -24,7 +24,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libopus-dev pkg-config
       - name: Stage verified detector assets for the locked Rustvani build
-        run: python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
+        run: cargo xtask models "$RUSTVANI_CACHE_DIR"
       - name: Verify committed formatting and lockfile
         run: |
           set -euo pipefail
