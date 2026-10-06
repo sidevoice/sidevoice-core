@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/sidevoice/sidevoice-core/compare/v0.2.0...v0.2.1) (2026-10-06)
+
+
+### Miscellaneous Chores
+
+* release 0.2.1 with the Linux build for glibc 2.28 ([#83](https://github.com/sidevoice/sidevoice-core/issues/83)) ([3003f66](https://github.com/sidevoice/sidevoice-core/commit/3003f66589de9790a259687769475a0167b153e3))
+
 ## [0.2.0](https://github.com/sidevoice/sidevoice-core/compare/v0.1.0...v0.2.0) (2026-10-06)
 
 
