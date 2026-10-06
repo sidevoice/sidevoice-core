@@ -9,11 +9,11 @@ use std::process::Command;
 use crate::util::*;
 use crate::Result;
 
-/// The signer every asset must carry: the reusable build workflow on main, for nightlies and releases alike.
+/// The signer every asset must carry: the release workflow on main, for nightlies and releases alike.
 pub(crate) fn signer() -> Result<String> {
     let repository = env::var("GH_REPO").map_err(|_| "GH_REPO is not set")?;
     Ok(format!(
-        "https://github.com/{repository}/.github/workflows/build.yml@refs/heads/main"
+        "https://github.com/{repository}/.github/workflows/release.yml@refs/heads/main"
     ))
 }
 

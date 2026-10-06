@@ -8,14 +8,14 @@ Releases of this repository.
 
 | Act | Who | What happens |
 |---|---|---|
-| Open / update a PR | anyone | `check`: format, Clippy and the Rust tests. **PR title is a conventional commit**. Nothing is built for release and nothing is published. |
-| Squash-merge into `main` | reviewer | The PR title becomes the commit. `nightly` calls `build`: per target it runs the tests, builds and packages the native core; then it attests the assets, attaches them to the `nightly` pre-release, reads them back, verifies them and publishes. release-please opens or updates the **release PR** ("chore(main): release X.Y.Z"). |
-| Merge the release PR | a maintainer | **This is the release.** release-please tags `vX.Y.Z` and creates a draft GitHub Release whose notes are that version's changelog; `build` runs from the tag, attaches and verifies the assets, and publishes the Release. |
+| Open / update a PR | anyone | `ci`: format and Clippy, then on every target the tests and the release packaging (`cargo xtask dist`), publishing nothing. **PR title is a conventional commit**. |
+| Squash-merge into `main` | reviewer | The PR title becomes the commit. `release` runs: per target it runs the tests, builds and packages the native core; then it attests the assets, attaches them to the `nightly` pre-release, reads them back, verifies them and publishes. release-please opens or updates the **release PR** ("chore(main): release X.Y.Z"). |
+| Merge the release PR | a maintainer | **This is the release.** release-please tags `vX.Y.Z` and creates a draft GitHub Release whose notes are that version's changelog; `release` runs from the tag, attaches and verifies the assets, and publishes the Release. |
 
 The tests are part of the build: an asset is only produced on a target where the whole suite passed. Everything
 besides the GitHub steps is code in `xtask/` (`cargo xtask models | dist | verify | manifest | publish`): run
 `cargo xtask dist` on a machine to get that machine's archive, built, packaged and verified exactly as the release
-one. Dispatching `build` by hand on a branch builds and checks every target and publishes nothing.
+one. A pull request already runs that packaging on every target.
 
 ## Assets
 
@@ -26,13 +26,13 @@ one. Dispatching `build` by hand on a branch builds and checks every target and 
 - `SHA256SUMS`.
 - `attestation.sigstore.json`: one SLSA provenance attestation whose subjects are every archive and the manifest.
 
-The signer is the reusable workflow `build.yml` on `main`, for nightlies and releases alike. Verify an asset with:
+The signer is the workflow `release.yml` on `main`, for nightlies and releases alike. Verify an asset with:
 
 ```sh
 gh attestation verify sidevoice-core-rust-<commit>-linux-x86_64.tar.zst \
   --repo sidevoice/sidevoice-core \
   --bundle attestation.sigstore.json \
-  --cert-identity 'https://github.com/sidevoice/sidevoice-core/.github/workflows/build.yml@refs/heads/main' \
+  --cert-identity 'https://github.com/sidevoice/sidevoice-core/.github/workflows/release.yml@refs/heads/main' \
   --deny-self-hosted-runners
 ```
 
@@ -60,7 +60,7 @@ empty commit (`git commit --allow-empty`) carries the footer.
 
 ## Nightly
 
-Every green `build` on `main` moves the tag `nightly` to that commit and replaces every asset of the one `nightly`
+Every green `release` run on `main` moves the tag `nightly` to that commit and replaces every asset of the one `nightly`
 pre-release. Its notes give the commit and its date. It is a snapshot, not a version: never latest, and
 release-please ignores the tag. Pin a `vX.Y.Z` release, never `nightly`.
 
@@ -71,12 +71,12 @@ Build artifacts on Actions runs are kept 7 days, for debugging only. Download fr
 - A release build or its verification fails: the Release stays a draft, its tag in place. Fix forward if needed,
   then re-run the failed jobs of that `release-please` run. Nothing is published until every check passed.
 - A `nightly` run fails: the previous snapshot stays. The next green push replaces it.
-- Nightly and release runs share one concurrency group and are never cancelled half-way.
+- A release run is never cancelled half-way; nightlies queue behind each other.
 
 ## What this needs from the repository settings
 
 - Settings → Actions → General → **Allow GitHub Actions to create and approve pull requests**: without it
   release-please cannot open its PR.
 - Squash merging, with the PR title as the commit message.
-- `check` and **PR title is a conventional commit** run on every PR; release-please's own PR gets both through a
+- `ci` and **PR title is a conventional commit** run on every PR; release-please's own PR gets both through a
   dispatched run (its pushes start no workflow by themselves). Make both required in a ruleset to enforce them.
