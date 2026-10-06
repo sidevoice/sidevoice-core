@@ -40,16 +40,21 @@ class TtsFixture(http.server.ThreadingHTTPServer):
 
 
 class MetricCollector(http.server.ThreadingHTTPServer):
+    """A fake OTLP/HTTP collector: keeps each protobuf export by signal, undecoded."""
+
     def __init__(self):
         super().__init__(("127.0.0.1", 0), MetricHandler)
         self.received = []
+        self.traces = []
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
 
 class MetricHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        assert self.path == "/v1/metrics"
-        self.server.received.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
+        assert self.path in ("/v1/metrics", "/v1/traces"), self.path
+        assert self.headers["content-type"] == "application/x-protobuf", self.headers["content-type"]
+        body = self.rfile.read(int(self.headers["content-length"]))
+        (self.server.received if self.path == "/v1/metrics" else self.server.traces).append(body)
         self.send_response(200)
         self.end_headers()
 
@@ -364,6 +369,7 @@ async def main():
                "SIDEVOICE_FIXTURE_STT_TIMEOUT_MS": "12000",
                "SIDEVOICE_FIXTURE_REPLAY_RENDER_GATE": str(replay_gate),
                "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{collector.server_port}",
+               "OTEL_METRIC_EXPORT_INTERVAL": "1000",
                "SIDEVOICE_ELEVENLABS_FIXTURE_BASE": f"http://127.0.0.1:{fixture.server_port}"})
         core = subprocess.Popen([str(CORE), "--data-dir", str(data), "--port", "0", "--idle-exit", "0"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
@@ -647,8 +653,10 @@ async def main():
                     await browser.close()
                     await replacement.close()
             print("T5 PASS: recorded SmartTurn/timer, mixed SDK/device reply, barge-in, RTC replacement/WS fallback, revoke")
-            until(lambda: any("sidevoice.turn.endpoint_silence" in json.dumps(item)
-                              for item in collector.received), timeout=5)
+            # Protobuf keeps names as plain bytes: the stage histogram and the stage span, under voice.call.
+            until(lambda: any(b"sidevoice.turn.endpoint_silence" in item for item in collector.received), timeout=10)
+            until(lambda: all(name in b"".join(collector.traces) for name in (b"endpoint_silence", b"voice.call")),
+                  timeout=10)
         except Exception:
             if core.poll() is None:
                 core.terminate()

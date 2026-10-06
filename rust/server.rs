@@ -188,6 +188,10 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
             .merge(pairing::local_routes())
             .merge(connectors::local_routes());
     }
+    let telemetry = crate::control::telemetry::shared();
+    if telemetry.is_some() {
+        router = router.route_layer(middleware::from_fn(crate::control::telemetry::http_route));
+    }
     let router = router
         .fallback(refusal::not_found)
         .with_state(state.clone());
@@ -196,5 +200,12 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
     } else {
         rendezvous::layer(router, state.clone())
     };
-    router.layer(middleware::from_fn_with_state((state, local), guard::guard))
+    let router = router.layer(middleware::from_fn_with_state((state, local), guard::guard));
+    match telemetry {
+        Some(telemetry) => router.layer(middleware::from_fn_with_state(
+            telemetry,
+            crate::control::telemetry::http_span,
+        )),
+        None => router,
+    }
 }

@@ -40,6 +40,9 @@ impl Room {
         let mut inner = self.inner.lock().expect("room lock");
         inner.browsers.leave(sid);
         inner.interrupt_client(sid, "call_ended");
+        if let Some(telemetry) = super::telemetry::shared() {
+            telemetry.call_ended(sid, "disconnected");
+        }
         inner.utterances.forget_replays_of(sid);
         inner.latency.close(sid);
     }

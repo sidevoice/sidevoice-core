@@ -7,6 +7,7 @@ use super::latency::{latency_now_micros, LatencyEvent};
 use super::peers::{ConnectorPeer, PeerError};
 use super::util::{field, seconds};
 use super::Room;
+use crate::control::telemetry::Counted;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -93,6 +94,7 @@ impl Room {
         if !inner.peers.is_current(&b.connector, generation) {
             return;
         }
+        let harness = b.harness.clone();
         inner.inflight.finish(bid);
         let Some(row) = inner.journal.find_mut(rid) else {
             return;
@@ -123,6 +125,12 @@ impl Room {
             row.next_attempt = seconds() + [2, 5, 15, 60][row.attempts.min(4) - 1];
         }
         let input = row.input_ref();
+        if let (Some(telemetry), "pending") = (crate::control::telemetry::shared(), new_status) {
+            telemetry.count(
+                Counted::Redeliveries,
+                &json!({"sidevoice.thread_id": input.thread, "sidevoice.harness": harness}),
+            );
+        }
         if new_status == "delivered" {
             if let Some(c) = inner.browsers.get_mut(&input.session) {
                 c.sent += 1;

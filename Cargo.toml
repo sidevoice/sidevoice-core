@@ -29,6 +29,10 @@ hostname = "0.4"
 hound = "3.5.1"
 httpdate = "=1.0.3"
 libc = "0.2"
+opentelemetry = { version = "0.31", default-features = false, features = ["trace", "metrics"] }
+opentelemetry-http = { version = "0.31", default-features = false }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "trace", "metrics"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "metrics"] }
 opus = "=0.3.0"
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 percent-encoding = "=2.3.2"
@@ -56,6 +60,8 @@ url = "2"
 webrtc = "=0.21.0"
 
 [dev-dependencies]
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics"] }
+prost = "0.14"
 wiremock = "=0.6.5"
 
 [patch.crates-io]

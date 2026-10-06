@@ -164,6 +164,9 @@ impl Browsers {
     /// Tell the call that sent an input row what became of it.
     pub(super) fn input_receipt(&self, input: &InputRef, status: &str) {
         if let Some(browser) = self.calls.get(&input.session) {
+            if let Some(telemetry) = crate::control::telemetry::shared() {
+                telemetry.receipt(&input.session, status, input.thread.as_deref());
+            }
             browser.notify(json!({"type":"voice-input-receipt","data":{
                 "revision":input.revision,"history_id":input.id,"thread_id":input.thread,
                 "session_id":input.session,"status":status}}));

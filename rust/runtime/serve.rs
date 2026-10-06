@@ -82,6 +82,7 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
     ready::remove_own(&config.ready_file);
     drop(cleanup);
     delivery_task.abort();
+    crate::control::telemetry::shutdown().await;
     if crashed {
         Err(StartFailure::crashed())
     } else {
