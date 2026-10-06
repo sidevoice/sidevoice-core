@@ -1,5 +1,8 @@
 name: Set up the Rust core build
-description: Installs the pinned Rust toolchain and the native libraries the core links against, and stages the pinned detector models into RUSTVANI_CACHE_DIR.
+description: >-
+  Installs the pinned Rust toolchain and the native libraries the core links against, on Linux the pinned zig and
+  cargo-zigbuild that link the release binary against an old glibc (xtask/src/glibc.rs), and stages the pinned
+  detector models into RUSTVANI_CACHE_DIR.
 
 runs:
   using: composite
@@ -19,6 +22,44 @@ runs:
           sudo apt-get update
           sudo apt-get install -y libopus-dev patchelf pkg-config zstd
         fi
+    # Each download checked against the digest pinned here (zig's from ziglang.org/download/index.json,
+    # cargo-zigbuild's from its release's .sha256 files).
+    - name: zig and cargo-zigbuild (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        ZIG_VERSION: "0.16.0"
+        ZIG_SHA256_X86_64: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+        ZIG_SHA256_AARCH64: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+        ZIGBUILD_VERSION: "0.23.4"
+        ZIGBUILD_SHA256_X86_64: 6b69963040818ca1ef573d8135a95aa902e17cf7f873c32c6426642dadfe7f59
+        ZIGBUILD_SHA256_AARCH64: 25cf2cdc6cde848b33a761ff2cf46d1efe6ba7e1adfc4b6f3ee2d570cacb5419
+      run: |
+        set -euo pipefail
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64) zig_sha="$ZIG_SHA256_X86_64"; zigbuild_sha="$ZIGBUILD_SHA256_X86_64" ;;
+          aarch64) zig_sha="$ZIG_SHA256_AARCH64"; zigbuild_sha="$ZIGBUILD_SHA256_AARCH64" ;;
+          *) echo "no pinned zig for $arch" >&2; exit 1 ;;
+        esac
+        tools="$RUNNER_TEMP/build-tools"
+        mkdir -p "$tools/bin"
+        cd "$tools"
+        zig="zig-$arch-linux-$ZIG_VERSION"
+        curl --fail --silent --show-error --location --retry 3 -o zig.tar.xz \
+          "https://ziglang.org/download/$ZIG_VERSION/$zig.tar.xz"
+        echo "$zig_sha  zig.tar.xz" | sha256sum --check --strict
+        tar -xJf zig.tar.xz
+        ln -s "$tools/$zig/zig" bin/zig
+        zigbuild="cargo-zigbuild-$arch-unknown-linux-gnu"
+        curl --fail --silent --show-error --location --retry 3 -o zigbuild.tar.xz \
+          "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/$zigbuild.tar.xz"
+        echo "$zigbuild_sha  zigbuild.tar.xz" | sha256sum --check --strict
+        tar -xJf zigbuild.tar.xz
+        install -m 0755 "$zigbuild/cargo-zigbuild" bin/cargo-zigbuild
+        echo "$tools/bin" >> "$GITHUB_PATH"
+        "$tools/bin/zig" version
+        "$tools/bin/cargo-zigbuild" --version
     # Compiled dependencies, per runner and toolchain; a PR reads main's cache and keeps its own.
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
