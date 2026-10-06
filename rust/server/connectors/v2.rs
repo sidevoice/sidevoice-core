@@ -90,8 +90,6 @@ async fn connect(
         stopped,
     } = attach(&state.room, cid.to_owned());
     disconnect_when_stopped(socket.clone(), stopped);
-    let _ = socket.emit("connector.welcome", &json!({"protocol":2}));
-    let _ = socket.emit("node.rendezvous", &state.rendezvous.snapshot());
     forward_requests(socket.clone(), requests);
     let room = state.room.clone();
     let gone = link.clone();
@@ -103,6 +101,9 @@ async fn connect(
         }
     });
     events::register(&socket, &state.room, &link);
+    // Welcomed only once its handlers exist: a connector registers its bindings the moment it is welcomed.
+    let _ = socket.emit("connector.welcome", &json!({"protocol":2}));
+    let _ = socket.emit("node.rendezvous", &state.rendezvous.snapshot());
 }
 
 fn disconnect_when_stopped(socket: SocketRef, mut stopped: watch::Receiver<bool>) {

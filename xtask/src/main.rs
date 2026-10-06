@@ -8,8 +8,11 @@
 //!   `SHA256SUMS`; with a tag, the crate version must be that release.
 //! - `publish DIR TAG`: attach every file in DIR to the release TAG (for `nightly`, move the tag here first and drop
 //!   older assets), download them back, check them against `SHA256SUMS` and the attestation, and publish.
+//! - `compat`: run the cross-repository contract tests against the latest published release of the connector and of
+//!   the web client; `compat-report` opens or updates the `compat` issue after a failed run in Actions.
 
 mod archive;
+mod compat;
 mod dist;
 mod libraries;
 mod manifest;
@@ -22,6 +25,7 @@ mod verify;
 use std::env;
 use std::path::Path;
 
+use compat::{compat, report};
 use dist::dist;
 use manifest::manifest;
 use models::models;
@@ -37,7 +41,8 @@ pub(crate) const ENTRYPOINT: &str = "bin/sidevoice-core-rust";
 pub(crate) const KIND: &str = "rust-native-v1";
 
 const USAGE: &str =
-    "usage: cargo xtask models [DIR] | dist | verify ARCHIVE | manifest DIR [--tag vX.Y.Z] | publish DIR TAG";
+    "usage: cargo xtask models [DIR] | dist | verify ARCHIVE | manifest DIR [--tag vX.Y.Z] | publish DIR TAG | compat \
+     | compat-report";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -50,6 +55,8 @@ fn main() {
         ["manifest", dir] => manifest(Path::new(dir), None),
         ["manifest", dir, "--tag", tag] => manifest(Path::new(dir), Some(tag)),
         ["publish", dir, tag] => publish(Path::new(dir), tag),
+        ["compat"] => compat(),
+        ["compat-report"] => report(),
         _ => Err(USAGE.into()),
     };
     if let Err(error) = result {

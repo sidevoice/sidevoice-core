@@ -11,7 +11,7 @@ The three files are staged outside the Git tree for compilation and detector exe
   The ONNX and converted native Silero files here are the exact bytes committed by Rustvani;
   the native conversion is not used by the T0 runtime probe but Rustvani's build script expects it.
 - The committed speech fixture was synthesized locally with espeak-ng, as recorded in
-  `tests/fixtures/README.md`; its original Core source is pinned in `tests/fixtures/rust-contract.md`.
+  `tests/fixtures/README.md`, with its digest and the Core revision it was first committed with.
 
 The selected Rustvani feature fixes `ort` and `ort-sys` at `2.0.0-rc.10` in
 `Cargo.lock`. That `ort-sys` release fixes ONNX Runtime at **1.22.0** and verifies
@@ -26,8 +26,8 @@ The three intended target archive hashes from that pinned table are:
 
 Source: [`ort-sys` distribution table](https://github.com/pykeio/ort/blob/v2.0.0-rc.10/ort-sys/dist.txt)
 and [ONNX Runtime 1.22.0 MIT license](https://github.com/microsoft/onnxruntime/blob/v1.22.0/LICENSE).
-The Linux x86_64 static link and model execution are proven by T0 CI; the other
-target hashes are recorded for later T7 packaging and are not T0 build claims.
+Every packaged target runs the detector self-test from its archive in `ci.yml` (`cargo xtask dist`); the
+hashes above are the ones `ort-sys` checks while building each of them.
 
 Before a distributable T7 bundle, carry the full Rustvani, Pipecat and Silero notices with
 the shipped assets and verify the upstream terms for the converted SmartTurn weights.
