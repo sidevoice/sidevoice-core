@@ -19,6 +19,12 @@ runs:
           sudo apt-get update
           sudo apt-get install -y libopus-dev patchelf pkg-config zstd
         fi
+    # Compiled dependencies, per runner and toolchain; a PR reads main's cache and keeps its own.
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        workspaces: |
+          . -> target
+          xtask -> target
     - name: Detector models (pinned by digest in assets/rust-models.json)
       shell: bash
       run: cargo xtask models
