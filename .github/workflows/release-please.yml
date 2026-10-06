@@ -2,8 +2,8 @@ name: release-please
 
 # On every push to main: keep the "release X.Y.Z" PR up to date (version from feat/fix, changelog from the squashed
 # PR titles). Merging that PR is the release: this run then creates the tag and a draft GitHub Release, and
-# test.yml (called below) builds the wheel, sdist, catalogue and vectors from the tag, attaches them and publishes
-# it. RELEASING.md.
+# build.yml (called below) tests and builds the native core from the tag, attaches the attested assets and publishes
+# the Release. RELEASING.md.
 on:
   push:
     branches: [main]
@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
-      - name: Run the PR-title check on the release PR (its own pushes start no workflow)
+      - name: Run the PR checks on the release PR (its own pushes start no workflow)
         if: steps.release.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -41,6 +41,7 @@ jobs:
         run: |
           for branch in $(gh pr list --state open --label 'autorelease: pending' --json headRefName --jq '.[].headRefName'); do
             gh workflow run pr-title.yml --ref "$branch"
+            gh workflow run check.yml --ref "$branch"
           done
 
   assets:
@@ -51,6 +52,6 @@ jobs:
       contents: write
       attestations: write
       id-token: write
-    uses: ./.github/workflows/test.yml
+    uses: ./.github/workflows/build.yml
     with:
-      release-tag: ${{ needs.release-please.outputs.tag_name }}
+      tag: ${{ needs.release-please.outputs.tag_name }}

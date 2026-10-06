@@ -1,0 +1,77 @@
+name: check
+
+# Every pull request: what merging would ship must already build and pass here. Merging publishes it (nightly.yml).
+on:
+  pull_request:
+    branches: [main]
+  # release-please.yml dispatches it on the release PR, whose pushes start no workflow.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Format, lint, test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/setup
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+        env:
+          SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      # The local socket's boundary is the OS user: a second user on the same machine can neither open local.sock nor
+      # read core.json, and the socket-only routes answer 404 over TCP. The data directory sits under a parent anyone
+      # may enter, so the core's own 0700/0600 are the only things in the way.
+      - name: A second OS user cannot use the local socket nor reach local routes over TCP
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin sidevoice-core-rust
+          install -d -m 0755 /tmp/sidevoice-ci
+          target/debug/sidevoice-core-rust --port 8768 --data-dir /tmp/sidevoice-ci/core --idle-exit 0 \
+            --launch-id ci > /tmp/sidevoice-ci.log 2>&1 &
+          CORE=$!
+          for _ in $(seq 1 120); do [ -f /tmp/sidevoice-ci/core/core.json ] && break; sleep 0.5; done
+          ls -la /tmp/sidevoice-ci/core
+          curl -sf --unix-socket /tmp/sidevoice-ci/core/local.sock http://localhost/api/local/health; echo
+          sudo useradd --create-home sidevoice-other
+          (cd /tmp && sudo -u sidevoice-other python3 -) <<'PY'
+          import errno, socket, urllib.error, urllib.request
+
+          probe = socket.socket(socket.AF_UNIX)
+          try:
+              probe.connect('/tmp/sidevoice-ci/core/local.sock')
+          except PermissionError as error:
+              assert error.errno == errno.EACCES, error
+              print('local.sock: EACCES')
+          else:
+              raise SystemExit('a second user opened local.sock')
+          try:
+              open('/tmp/sidevoice-ci/core/core.json').read()
+          except PermissionError:
+              print('core.json: EACCES')
+          else:
+              raise SystemExit('a second user read core.json')
+          for method, path in [('GET', '/api/connectors/link/?EIO=4&transport=polling'), ('GET', '/api/connectors/v3'),
+                               ('GET', '/api/local/health'), ('POST', '/api/device/local/pair'),
+                               ('DELETE', '/api/device/local')]:
+              request = urllib.request.Request('http://127.0.0.1:8768' + path, method=method,
+                                               data=b'{}' if method == 'POST' else None,
+                                               headers={'content-type': 'application/json'})
+              try:
+                  urllib.request.urlopen(request, timeout=10)
+              except urllib.error.HTTPError as error:
+                  assert error.code == 404, (path, error.code)
+                  print(f'{method} {path} over TCP: 404')
+              else:
+                  raise SystemExit(f'{method} {path} answered a second user over TCP')
+          PY
+          kill "$CORE"
+          wait "$CORE" || true
+          test ! -e /tmp/sidevoice-ci/core/local.sock

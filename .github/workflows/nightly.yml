@@ -1,0 +1,19 @@
+name: nightly
+
+# Merging is publishing: every push to main replaces the `nightly` pre-release with what build.yml tested and built.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  nightly:
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/build.yml
+    with:
+      tag: nightly

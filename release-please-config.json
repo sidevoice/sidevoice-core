@@ -6,10 +6,9 @@
   "force-tag-creation": true,
   "packages": {
     ".": {
-      "release-type": "python",
+      "release-type": "rust",
       "package-name": "sidevoice-core",
-      "bump-minor-pre-major": true,
-      "extra-files": ["uv.lock"]
+      "bump-minor-pre-major": true
     }
   }
 }
