@@ -7,7 +7,7 @@
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::json;
@@ -40,6 +40,7 @@ pub(crate) fn dist() -> Result<()> {
     let built = match &ort {
         Some((ort_dir, _, _)) => {
             let triple = glibc::host_triple()?;
+            let (openssl_include, openssl_lib) = host_openssl(&repo, triple)?;
             build
                 .args([
                     "zigbuild",
@@ -58,7 +59,12 @@ pub(crate) fn dist() -> Result<()> {
                 .env("LIBOPUS_STATIC", "1")
                 .env("LIBOPUS_NO_PKG", "1")
                 // That source asks for CMake 3.1, which CMake 4 refuses without this.
-                .env("CMAKE_POLICY_VERSION_MINIMUM", "3.5");
+                .env("CMAKE_POLICY_VERSION_MINIMUM", "3.5")
+                // OpenSSL: only ort-sys's build script uses it (its download client), a host program never shipped.
+                // cargo-zigbuild hands zig's compiler to every C build of this triple, the host's too, and zig does
+                // not search the multiarch include directory: point openssl-sys at one tree with both halves.
+                .env("OPENSSL_INCLUDE_DIR", &openssl_include)
+                .env("OPENSSL_LIB_DIR", &openssl_lib);
             repo.join("target").join(triple).join("release")
         }
         None => {
@@ -158,6 +164,36 @@ pub(crate) fn dist() -> Result<()> {
                "size": bytes.len(), "sha256": sha256(&bytes), "files": count, "links_before_relocation": links})
     );
     verify(&archive, None)
+}
+
+/// The build machine's OpenSSL for a host-only build script compiled by zig: an include directory under target/ that
+/// joins `/usr/include/openssl` and the multiarch `/usr/include/<arch>-linux-gnu/openssl` (where Debian and Ubuntu
+/// keep `opensslconf.h`), and the multiarch library directory.
+fn host_openssl(repo: &Path, triple: &str) -> Result<(PathBuf, PathBuf)> {
+    let multiarch = triple.replace("-unknown-", "-");
+    let include = repo.join("target/host-openssl/include");
+    let headers = include.join("openssl");
+    if headers.exists() {
+        fs::remove_dir_all(&headers).map_err(|error| format!("{}: {error}", headers.display()))?;
+    }
+    mkdir(&headers)?;
+    for source in [
+        PathBuf::from("/usr/include/openssl"),
+        Path::new("/usr/include").join(&multiarch).join("openssl"),
+    ] {
+        let Ok(entries) = fs::read_dir(&source) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let link = headers.join(entry.file_name());
+            if !link.exists() {
+                std::os::unix::fs::symlink(entry.path(), &link)
+                    .map_err(|error| format!("{}: {error}", link.display()))?;
+            }
+        }
+    }
+    Ok((include, Path::new("/usr/lib").join(multiarch)))
 }
 
 /// A reproducible tar of `<work>/sidevoice-core-rust`: owner root, fixed time, 0755 for directories and the
