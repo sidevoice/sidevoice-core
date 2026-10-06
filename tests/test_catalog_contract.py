@@ -7,8 +7,9 @@ agree (it runs when SIDEVOICE_REPOSITORY names a sidevoice-web checkout, and ski
 import json
 import os
 import unittest
-from importlib.resources import files
 from pathlib import Path
+
+from sidevoice_core.models.catalog import data
 
 COPIES = {('pipeline', 'catalog.json'): 'catalog.json',
           ('models', 'catalog.json'): 'models.json',
@@ -22,9 +23,9 @@ class CatalogContractTest(unittest.TestCase):
             self.skipTest('SIDEVOICE_REPOSITORY does not name a sidevoice-web checkout')
         for (package, name), copy in COPIES.items():
             with self.subTest(copy=copy):
-                core = json.loads(files(f'sidevoice_core.{package}').joinpath(name).read_text(encoding='utf8'))
+                core = json.loads(data().joinpath(package).joinpath(name).read_text(encoding='utf8'))
                 self.assertEqual(core, json.loads((page / copy).read_text(encoding='utf8')))
-        checks = files('sidevoice_core.models').joinpath('checks')
+        checks = data().joinpath('models').joinpath('checks')
         names = sorted(entry.name for entry in checks.iterdir())
         self.assertEqual(names, sorted(entry.name for entry in (page / 'checks').iterdir()))
         for name in names:

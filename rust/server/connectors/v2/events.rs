@@ -7,11 +7,21 @@ use serde_json::{json, Value};
 use socketioxide::extract::{AckSender, SocketRef, State, TryData};
 
 use crate::control::room::Room;
+use crate::messages::{render, LocalizedMessage};
 use crate::server::AppState;
 
 use crate::server::connectors::{echo_ids, register_binding, Link, Notification};
 
 const DISCONNECTED: &str = "room.connector_disconnected";
+
+/// The connector's words for a v2 answer: v2 connectors log and show `error` as it comes, so a room key becomes its
+/// English sentence (what reaches the agent is English). v3 keeps the stable key.
+pub(super) fn readable(mut answer: Value) -> Value {
+    if let Some(key) = answer.get("error").and_then(Value::as_str) {
+        answer["error"] = json!(render(&LocalizedMessage::new(key), "en"));
+    }
+    answer
+}
 
 pub(super) fn register(socket: &SocketRef, room: &Arc<Room>, link: &Link) {
     on_register(socket, room.clone(), link.clone());
@@ -34,7 +44,7 @@ fn on_register(socket: &SocketRef, room: Arc<Room>, link: Link) {
                 } else {
                     json!({ "error": DISCONNECTED })
                 };
-                let _ = ack.send(&answer);
+                let _ = ack.send(&readable(answer));
             }
         },
     );
@@ -68,7 +78,7 @@ fn on_speech(socket: &SocketRef, room: Arc<Room>, link: Link) {
                 } else {
                     json!({"status":"rejected","error":DISCONNECTED})
                 };
-                let _ = ack.send(&echo_ids(answer, &data, &["event_id"]));
+                let _ = ack.send(&echo_ids(readable(answer), &data, &["event_id"]));
             }
         },
     );

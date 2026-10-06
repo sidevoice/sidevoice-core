@@ -92,7 +92,7 @@ class ProviderHandler(http.server.BaseHTTPRequestHandler):
             if b"gpt-slow-transcribe" in body:
                 self.server.trial_entered.set()
                 assert self.server.trial_release.wait(8)
-            checks = json.loads(Path("src/sidevoice_core/models/checks/checks.json").read_text())
+            checks = json.loads(Path("assets/catalog/models/checks/checks.json").read_text())
             return self.answer(200, {"text": checks["stt"]["clips"]["en"]["text"]})
         if self.path.startswith("/v1/text-to-speech/") and "pcm_16000" in self.path:
             return self.answer(200, self.server.pcm, "audio/pcm")
@@ -189,7 +189,7 @@ async def main():
             status, raw = request(port, "GET", "/api/models/catalog", token=token,
                                   origin="tauri://localhost")
             assert status == 200
-            assert raw == Path("src/sidevoice_core/models/catalog.json").read_bytes()
+            assert raw == Path("assets/catalog/models/catalog.json").read_bytes()
             async with websockets.connect(f"ws://127.0.0.1:{port}/api/presentation/ws",
                                           origin="tauri://localhost",
                                           subprotocols=["sidevoice", f"sidevoice.token.{token}"]) as ws:
@@ -210,7 +210,7 @@ async def main():
                                   origin="tauri://localhost")
             assert status == 200, (status, raw)
             voice_catalog = json.loads(raw)
-            assert voice_catalog["languages"] == json.loads(Path("src/sidevoice_core/pipeline/catalog.json").read_text())["languages"]
+            assert voice_catalog["languages"] == json.loads(Path("assets/catalog/pipeline/catalog.json").read_text())["languages"]
             assert voice_catalog["providers"]["elevenlabs"]["configured"] is True
             assert voice_catalog["providers"]["elevenlabs"]["models"]
             assert voice_catalog["providers"]["elevenlabs"]["voices"]

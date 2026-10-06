@@ -20,6 +20,7 @@ Shape (version 2):
 import json
 from functools import cache
 from importlib.resources import files
+from pathlib import Path
 
 VERSION = 2
 TASKS = ('stt', 'tts')
@@ -31,9 +32,19 @@ PLACES = ('device', 'host')
 
 
 @cache
+def data():
+    """The catalogue data's one copy: `assets/catalog/` at the repository root, which the Rust core compiles in.
+    A wheel carries it as the data package `sidevoice_core._catalog`; a source checkout reads it in place."""
+    try:
+        return files('sidevoice_core._catalog')
+    except ModuleNotFoundError:
+        return Path(__file__).resolve().parents[3] / 'assets' / 'catalog'
+
+
+@cache
 def catalog_text():
     """The file exactly as shipped: what the endpoint serves and every copy must equal."""
-    return files(__package__).joinpath('catalog.json').read_text(encoding='utf8')
+    return data().joinpath('models').joinpath('catalog.json').read_text(encoding='utf8')
 
 
 def load():
@@ -43,7 +54,7 @@ def load():
 
 def vectors():
     """The shared resolver vectors: capabilities in, offers out (see `offers.py`)."""
-    return json.loads(files(__package__).joinpath('vectors.json').read_text(encoding='utf8'))
+    return json.loads(data().joinpath('models').joinpath('vectors.json').read_text(encoding='utf8'))
 
 
 def _sha256(value):

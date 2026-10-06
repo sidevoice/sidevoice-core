@@ -83,3 +83,24 @@ fn origins_are_allowed_when_absent_desktop_or_same_as_host() {
         "https://elsewhere.example"
     )])));
 }
+
+#[test]
+fn credentials_travel_only_over_a_safe_transport() {
+    for safe in [
+        "https://room.example",
+        "wss://room.example",
+        "http://127.0.0.1:8080",
+        "ws://localhost:9",
+        "http://[::1]:1",
+    ] {
+        assert!(credential_safe(safe), "{safe}");
+    }
+    for unsafe_url in [
+        "http://room.example",
+        "ws://room.example",
+        "ftp://room.example",
+        "nonsense",
+    ] {
+        assert!(!credential_safe(unsafe_url), "{unsafe_url}");
+    }
+}

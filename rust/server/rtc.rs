@@ -73,6 +73,9 @@ pub(super) async fn offer(
     headers: HeaderMap,
     Json(offer): Json<Offer>,
 ) -> Response {
+    if !super::trust::origin_allowed(&headers) {
+        return failure("request.origin_invalid", StatusCode::FORBIDDEN, &headers);
+    }
     if !enabled() {
         return failure(
             "voice.rtc_unavailable",

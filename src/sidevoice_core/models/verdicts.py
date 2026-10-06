@@ -3,7 +3,7 @@
 Selecting a model loads it and checks it before it takes effect: a transcription model transcribes a bundled
 clip of about five seconds and must give back text close to what the clip says; a voice model speaks a fixed
 phrase and must give back audio that is not silent and lasts a plausible time. The clips, the phrases and the
-thresholds are `checks/checks.json` beside the catalogue, this package's data and their one owner: a node
+thresholds are `models/checks/checks.json` beside the catalogue (`assets/catalog/`), this package's data and their one owner: a node
 checks a provider with them (`sidevoice_core.pipeline.model_check`), and the web build copies the directory
 to check what a device runs itself — so a client and a host judge alike.
 
@@ -16,9 +16,10 @@ import math
 import re
 import unicodedata
 from functools import cache
-from importlib.resources import files
 
-CHECKS = files(__package__).joinpath('checks')
+from .catalog import data
+
+CHECKS = data().joinpath('models').joinpath('checks')
 
 
 @cache

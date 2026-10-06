@@ -239,7 +239,7 @@ async def main():
                     assert active_calls() == 8
                     for _ in range(12):
                         async with websockets.connect(browser_url, subprotocols=browser_protocols) as refused:
-                            await refused.send(json.dumps({"type": "voice-hello", "data": {}}))
+                            # A full room refuses before the hello, so none is sent.
                             assert (await frame(refused, "error"))["reason"] == "room_is_full"
                             await refused.wait_closed()
                             assert refused.close_code == 1013

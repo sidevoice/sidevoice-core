@@ -7,7 +7,7 @@ use crate::models::{
     offers,
 };
 
-const VECTORS_JSON: &str = include_str!("../../../src/sidevoice_core/models/vectors.json");
+const VECTORS_JSON: &str = include_str!("../../../assets/catalog/models/vectors.json");
 
 #[test]
 fn shipped_catalogue_is_sound_and_catalogue_bytes_remain_the_source_contract() {

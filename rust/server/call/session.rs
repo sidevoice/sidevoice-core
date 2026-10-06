@@ -14,7 +14,7 @@ use crate::server::media::{self, CallMedia, TurnOwner};
 use crate::server::AppState;
 use crate::types::CallSettings;
 
-use super::admission::{admit, await_hello, Admitted};
+use super::admission::{admit, await_hello, refuse_full, Admitted};
 use super::heartbeat::{Beat, Heartbeat};
 use super::registration::CallRegistration;
 use super::{close, text, UNPAIRED};
@@ -38,11 +38,18 @@ pub(super) async fn run(
     device: Option<String>,
     mut socket: WebSocket,
     close_reason: String,
+    language: String,
 ) {
     let Some(id) = device else {
         let _ = socket.send(close(UNPAIRED, &close_reason)).await;
         return;
     };
+    // A full room is said before the hello, as the Python core did: the browser need not send anything to learn it.
+    let admission = state.room.admission(&language);
+    if admission["admitted"] == Value::Bool(false) {
+        refuse_full(&mut socket, &admission).await;
+        return;
+    }
     let mut registration = CallRegistration::new(state.clone(), id.clone());
     let (events, output) = mpsc::channel::<Value>(128);
     let control = events.clone();

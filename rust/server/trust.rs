@@ -38,6 +38,21 @@ pub(crate) fn safe_url(value: &str) -> bool {
     trusted_cluster_host(&host)
 }
 
+/// Whether a credential may travel to `value`: https or wss anywhere, http or ws only to loopback or a trusted
+/// cluster host (`safe_url`).
+pub(crate) fn credential_safe(value: &str) -> bool {
+    let Ok(mut parsed) = Url::parse(value) else {
+        return false;
+    };
+    let scheme = match parsed.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        other => other,
+    }
+    .to_owned();
+    parsed.set_scheme(&scheme).is_ok() && safe_url(parsed.as_str())
+}
+
 fn trusted_cluster_host(host: &str) -> bool {
     std::env::var("SIDEVOICE_TRUSTED_CLUSTER_HOSTS")
         .unwrap_or_default()

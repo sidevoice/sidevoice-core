@@ -125,11 +125,14 @@ pub(super) async fn save(
         .lock()
         .expect("integration revisions lock");
     if revisions.get(&provider) != Some(&ticket) {
-        return Err(refuse(
-            "integration.superseded",
-            StatusCode::CONFLICT,
-            &headers,
-        ));
+        // Keyed like the Python core's refusal, which the page translates by this key.
+        let refusal = crate::messages::render_refusal(
+            &crate::messages::LocalizedMessage::new("integration_superseded"),
+            crate::server::request::accept_language(&headers),
+        );
+        return Err((StatusCode::CONFLICT, Json(json!({ "detail": refusal })))
+            .into_response()
+            .into());
     }
     let mut saved = saved_integrations(&state);
     saved[&provider] = json!(key);

@@ -12,7 +12,6 @@ one is accepted — it may have shipped a model since Sidevoice did.
 """
 import json
 import re
-from importlib.resources import files
 from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -22,7 +21,7 @@ from ..models.offers import offers
 
 # The voice catalogue is this package's data, its one owner: the browser's build copies it, never the reverse.
 # Its languages are the ones a reply can be spoken in.
-CATALOG = json.loads(files(__package__).joinpath('catalog.json').read_text(encoding='utf8'))
+CATALOG = json.loads(model_catalog.data().joinpath('pipeline').joinpath('catalog.json').read_text(encoding='utf8'))
 LANGUAGES = {item['id']: item for item in CATALOG['languages']}
 
 # The model catalogue, read once: what a stage may name and the option schemas it is checked against.

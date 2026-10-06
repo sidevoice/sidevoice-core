@@ -37,7 +37,12 @@ mod trust;
 use refusal::failure;
 use request::payload;
 use trust::origin_allowed;
-pub(crate) use trust::{local_only, safe_url};
+pub(crate) use trust::{credential_safe, local_only, safe_url};
+
+/// The room a pairing code may name, only when the device's pairing secret and token may travel to it.
+fn advertisable_room(room: Option<Value>) -> Option<Value> {
+    room.filter(|room| room["url"].as_str().is_some_and(credential_safe))
+}
 
 pub struct AppState {
     pub dir: PrivateDir,
@@ -136,7 +141,7 @@ impl AppState {
             Some(&self.host),
             &urls,
         );
-        if let Some(rv) = self.rendezvous.room_for_devices() {
+        if let Some(rv) = advertisable_room(self.rendezvous.room_for_devices()) {
             code["payload"]["rv"] = rv;
             let payload = serde_json::to_vec(&code["payload"]).expect("pairing payload");
             code["code"] = json!(format!(

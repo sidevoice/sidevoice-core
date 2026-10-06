@@ -7,16 +7,20 @@ use axum::Router;
 use serde_json::{json, Value};
 use socketioxide::{
     extract::{SocketRef, State, TryData},
+    handler::ConnectHandler,
     SocketIo,
 };
 use tokio::sync::{mpsc, watch};
 
 use crate::control::room::{PeerError, PeerRequest};
+use crate::messages::{render, LocalizedMessage};
 use crate::server::AppState;
 
 use super::{attach, field, Attached};
 
 mod events;
+#[cfg(test)]
+mod tests;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -28,8 +32,46 @@ pub(in crate::server) fn layer(app: Router, state: Arc<AppState>) -> Router {
         .ack_timeout(ACK_TIMEOUT)
         .with_state(state)
         .build_layer();
-    io.ns("/connectors", connect);
+    io.ns("/connectors", connect.with(admit));
     app.layer(layer)
+}
+
+/// Why a v2 connection is refused, said in its `connect_error`, or None when it is admitted. The credential is checked
+/// first and then the protocol, as the Python core did, so a wrong token never learns which protocol is spoken here.
+fn refusal(
+    auth: Option<&Value>,
+    authenticate: impl FnOnce(&str, &str, &Value) -> bool,
+) -> Option<String> {
+    let refused = || render(&LocalizedMessage::new("connector.credential_refused"), "en");
+    let Some(auth) = auth.filter(|auth| auth.is_object()) else {
+        return Some(refused());
+    };
+    if !authenticate(field(auth, "connector_id"), field(auth, "token"), auth) {
+        return Some(refused());
+    }
+    let protocol = auth.get("protocol").cloned().unwrap_or(Value::Null);
+    (protocol.as_i64() != Some(2)).then(|| {
+        render(
+            &LocalizedMessage::new("connector.protocol_unsupported")
+                .with_param("protocol", protocol.to_string())
+                .with_param("supported", 2),
+            "en",
+        )
+    })
+}
+
+/// Runs before the namespace connects, so a refusal reaches the connector as `connect_error` with its reason
+/// instead of a bare disconnect.
+async fn admit(
+    State(state): State<Arc<AppState>>,
+    TryData(auth): TryData<Value>,
+) -> Result<(), String> {
+    match refusal(auth.as_ref().ok(), |cid, token, auth| {
+        state.room.authenticate_connector(cid, token, auth)
+    }) {
+        Some(reason) => Err(reason),
+        None => Ok(()),
+    }
 }
 
 async fn connect(
@@ -42,13 +84,6 @@ async fn connect(
         return;
     };
     let cid = field(&auth, "connector_id");
-    let token = field(&auth, "token");
-    if auth.get("protocol").and_then(Value::as_i64) != Some(2)
-        || !state.room.authenticate_connector(cid, token, &auth)
-    {
-        let _ = socket.disconnect();
-        return;
-    }
     let Attached {
         link,
         requests,

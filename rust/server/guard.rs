@@ -47,16 +47,12 @@ pub(super) async fn guard(
     response
 }
 
-/// Routes that answer without a paired device's bearer token.
-fn open_route(method: &Method, path: &str, local: bool) -> bool {
-    (method == Method::GET
-        && matches!(
-            path,
-            "/api/rendezvous"
-                | "/api/device/identity"
-                | "/api/rendezvous/link"
-                | "/api/rendezvous/link/"
-        ))
+/// Routes that answer without a paired device's bearer token. The room's dialling link carries its own key, and
+/// Socket.IO long-polling POSTs to it too, so any method under it is open, as in the Python core.
+pub(super) fn open_route(method: &Method, path: &str, local: bool) -> bool {
+    (method == Method::GET && matches!(path, "/api/rendezvous" | "/api/device/identity"))
+        || path == "/api/rendezvous/link"
+        || path.starts_with("/api/rendezvous/link/")
         || (method == Method::POST && path == "/api/device/pair")
         || (local && local_only(path))
 }

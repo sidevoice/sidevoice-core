@@ -17,7 +17,8 @@ use crate::types::CallSettings;
 use super::registration::CallRegistration;
 use super::{close, text, UNPAIRED};
 
-const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a call waits for the client's hello before it goes on with the default settings.
+pub(super) const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Policy violation: the requested settings cannot run on this node.
 const SETTINGS_REFUSED: u16 = 1008;
 /// Try again later: the room has no seat for this call.
@@ -38,7 +39,8 @@ pub(super) struct Admitted {
     pub(super) transcription: Value,
 }
 
-/// Waits for the client's first text frame, answering pings meanwhile.
+/// Waits for the client's first text frame, answering pings meanwhile. No hello in time is a call with the default
+/// settings, as in the Python core.
 pub(super) async fn await_hello(
     socket: &mut WebSocket,
     registration: &mut CallRegistration,
@@ -52,6 +54,7 @@ pub(super) async fn await_hello(
                 return None;
             }
             input = tokio::time::timeout_at(deadline, socket.recv()) => match input {
+                Err(_) => return Some(json!({})),
                 Ok(Some(Ok(Message::Text(raw)))) => {
                     return Some(serde_json::from_str::<Value>(&raw).unwrap_or_default());
                 }
@@ -91,9 +94,7 @@ pub(super) async fn admit(
         .join(device, settings.ui_language.clone(), events)
     else {
         let admission = state.room.admission(&settings.ui_language);
-        let refusal = json!({"type":"error","data":{"message":admission["message"],"reason":admission["reason"]}});
-        let _ = socket.send(text(&refusal)).await;
-        let _ = socket.send(close(ROOM_FULL, "")).await;
+        refuse_full(socket, &admission).await;
         return None;
     };
     let Ok((media, detector_events, focus_events)) = CallMedia::start(&settings) else {
@@ -138,6 +139,13 @@ pub(super) async fn admit(
         problems,
         transcription,
     })
+}
+
+/// Refuses a client the room has no seat for: the reason as a frame, then 1013 (try again later).
+pub(super) async fn refuse_full(socket: &mut WebSocket, admission: &Value) {
+    let refusal = json!({"type":"error","data":{"message":admission["message"],"reason":admission["reason"]}});
+    let _ = socket.send(text(&refusal)).await;
+    let _ = socket.send(close(ROOM_FULL, "")).await;
 }
 
 /// The error event for settings whose provider this node cannot reach, if any.
