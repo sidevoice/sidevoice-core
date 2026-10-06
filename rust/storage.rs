@@ -124,3 +124,6 @@ fn is_own_directory(found: &fs::Metadata) -> bool {
 fn unsafe_directory() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "identity.unsafe-directory")
 }
+
+#[cfg(test)]
+mod tests;

@@ -52,3 +52,5 @@ fn devices_persist_and_revoke_by_id() {
     assert!(!registry.revoke(&id).unwrap());
     assert_eq!(registry.authenticate(&token), None);
 }
+
+mod parity;
