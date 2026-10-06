@@ -1,5 +1,7 @@
 //! The single owner of private files and process locks.
 
+mod legacy;
+
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -15,33 +17,27 @@ pub struct PrivateDir {
 }
 
 impl PrivateDir {
+    /// Create `path` if needed and accept it only as an owner-only directory of this user.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700).create(path)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
         let found = fs::symlink_metadata(path)?;
-        if !found.file_type().is_dir()
-            || found.uid() != rustix::process::getuid().as_raw()
-            || found.permissions().mode() & 0o077 != 0
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "identity.unsafe-directory",
-            ));
+        if !is_own_directory(&found) || found.permissions().mode() & 0o077 != 0 {
+            return Err(unsafe_directory());
         }
         Ok(Self {
             path: path.to_path_buf(),
         })
     }
 
+    /// Accept an existing directory of this user, whatever its mode, to leave a failure report in.
     pub fn open_for_report(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
-        let found = fs::symlink_metadata(path)?;
-        if !found.file_type().is_dir() || found.uid() != rustix::process::getuid().as_raw() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "identity.unsafe-directory",
-            ));
+        if !is_own_directory(&fs::symlink_metadata(path)?) {
+            return Err(unsafe_directory());
         }
         Ok(Self {
             path: path.to_path_buf(),
@@ -51,7 +47,8 @@ impl PrivateDir {
     pub fn path(&self) -> &Path {
         &self.path
     }
-    pub fn file(&self, name: &str) -> PathBuf {
+
+    fn file(&self, name: &str) -> PathBuf {
         self.path.join(name)
     }
 
@@ -71,7 +68,7 @@ impl PrivateDir {
         self.write_private(name, &bytes)
     }
 
-    pub fn write_private(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+    fn write_private(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
         let mut staged = self.stage(bytes)?;
         staged.flush()?;
         staged
@@ -118,52 +115,12 @@ impl PrivateDir {
             Err(error) => Err(error),
         }
     }
+}
 
-    pub(crate) fn import_legacy_connectors(&self) -> io::Result<Value> {
-        let path = self.file("room-history.sqlite3");
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(serde_json::json!({"connectors": {}}));
-            }
-            Err(error) => return Err(error),
-            Ok(meta) if !meta.file_type().is_file() => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "legacy SQLite path is not a file",
-                ));
-            }
-            Ok(_) => {}
-        }
-        let sqlite_error = |error| io::Error::new(io::ErrorKind::InvalidData, error);
-        let connection =
-            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(sqlite_error)?;
-        let mut query = connection
-            .prepare("SELECT id, token_hash, host, created, last_seen, revoked FROM connectors")
-            .map_err(sqlite_error)?;
-        let rows = query
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            })
-            .map_err(sqlite_error)?;
-        let mut connectors = serde_json::Map::new();
-        for row in rows {
-            let row = row.map_err(sqlite_error)?;
-            connectors.insert(
-                row.0,
-                serde_json::json!({"token_hash": row.1, "host": row.2,
-                "created": row.3, "last_seen": row.4, "revoked": row.5}),
-            );
-        }
-        let state = serde_json::json!({"connectors": connectors});
-        self.write_json("room-state.json", &state)?;
-        Ok(state)
-    }
+fn is_own_directory(found: &fs::Metadata) -> bool {
+    found.file_type().is_dir() && found.uid() == rustix::process::getuid().as_raw()
+}
+
+fn unsafe_directory() -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, "identity.unsafe-directory")
 }
