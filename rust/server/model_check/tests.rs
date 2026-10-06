@@ -78,3 +78,5 @@ fn the_check_key_changes_with_the_credential_without_containing_it() {
     assert_ne!(key, check_key("stt", &stage, Some("es"), "sk-other"));
     assert_ne!(key, check_key("stt", &stage, Some("en"), "sk-secret"));
 }
+
+mod parity;

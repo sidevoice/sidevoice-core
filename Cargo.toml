@@ -15,6 +15,27 @@ path = "rust/lib.rs"
 name = "sidevoice-core-rust"
 path = "rust/main.rs"
 
+# Rust integration tests live under rust/tests/: tests/ holds the Python suite and hosted harnesses.
+[[test]]
+name = "node_process"
+path = "rust/tests/node_process.rs"
+
+[[test]]
+name = "publication"
+path = "rust/tests/publication.rs"
+
+[[test]]
+name = "latency"
+path = "rust/tests/latency.rs"
+
+[[test]]
+name = "speech_filter"
+path = "rust/tests/speech_filter.rs"
+
+[[test]]
+name = "integrations"
+path = "rust/tests/integrations.rs"
+
 [dependencies]
 async-openai = { version = "=0.41.0", default-features = false, features = ["audio", "model", "rustls", "middleware"] }
 async-trait = "=0.1.89"

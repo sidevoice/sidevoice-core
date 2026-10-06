@@ -104,3 +104,35 @@ fn credentials_travel_only_over_a_safe_transport() {
         assert!(!credential_safe(unsafe_url), "{unsafe_url}");
     }
 }
+
+/// Spellings ported from the Python suite (`tests/test_local_socket.py` `LocalOnlyRuleTests`).
+#[test]
+fn the_local_only_rule_reads_the_path_however_it_is_spelled() {
+    for path in [
+        "/api/local",
+        "/api/local/health",
+        "/api/device/local",
+        "/api/device/local/pair",
+        "/api//device/local",
+        "/api/./device/local/",
+        "/api/connectors/link",
+        "/api/connectors/link/",
+        "/api/connectors/v3",
+        "/api/connectors//v3",
+        "/api/connectors/./v3/",
+        "/api/device/%6cocal/pair",
+        "/api/device/%252e/local/pair",
+        "/api/device/x/../local",
+    ] {
+        assert!(local_only(path), "{path}");
+    }
+    for path in [
+        "/api/device/pair",
+        "/api/localhost",
+        "/api/device/localx",
+        "/api/connectors",
+        "/api/presentation/ws",
+    ] {
+        assert!(!local_only(path), "{path}");
+    }
+}

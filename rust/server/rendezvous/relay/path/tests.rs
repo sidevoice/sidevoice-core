@@ -29,3 +29,48 @@ fn relay_path_never_crosses_local_or_rendezvous_boundary() {
     }
     assert!(!crate::server::safe_url("http://room.example"));
 }
+
+/// Ported from the Python suite (`tests/test_local_socket.py`, `tests/test_device_pairing.py`):
+/// the real local-only rule, however a path is spelled, never reaches the relay.
+#[test]
+fn the_room_relays_none_of_it_however_it_is_spelled() {
+    let base = loopback();
+    for path in [
+        "/api/device/local",
+        "/api/device/local/pair",
+        "/api/device/local/",
+        "/api/local/health",
+        "/api/local",
+        "/api/device/%6cocal/pair",
+        "/api/device/local%2fpair",
+        "/api/device//local/pair",
+        "/api/device/./local",
+        "/api/device/%2e/local",
+        "/api/device/%252e/local/pair",
+        "/api/device/x/../local",
+        "/api/device/pair/../local",
+        "/api/presentation/%2e%2e/local/health",
+        "/api/device/%2E/local/pair",
+        // The connector link, exactly and spelled other ways.
+        "/api/connectors/link",
+        "/api/connectors/link/",
+        "/api/device/%2e%2e/connectors/link/",
+        "/api/presentation/../connectors/link/",
+        "/api/connectors/v3",
+        // Encoded dot segments never leave the relayed surface.
+        "/api/device/%252e%252e/connectors/link/",
+        "/api/device/%2e%2e/%2e%2e/api/rendezvous",
+        "/api/presentation/%2E%2E%2Fconnectors",
+        "/api/device/..%2f..%2fapi",
+    ] {
+        assert!(!relayable(&base, path, crate::server::local_only), "{path}");
+    }
+    // What sits beside them under the relayed prefix still is relayed.
+    for path in [
+        "/api/device/pair",
+        "/api/device/localhost",
+        "/api/presentation/ws",
+    ] {
+        assert!(relayable(&base, path, crate::server::local_only), "{path}");
+    }
+}
