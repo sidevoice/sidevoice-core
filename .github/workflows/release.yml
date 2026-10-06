@@ -2,7 +2,8 @@ name: release
 
 # Merging is publishing. Every push to main replaces the `nightly` pre-release; release-please.yml calls this with
 # the vX.Y.Z tag it created. Per target: the tests, then `cargo xtask dist` (release binary, relocatable archive,
-# verified by starting the core from it). Then `cargo xtask manifest`, one attestation over every asset, and
+# verified by starting the core from it; on Linux `cargo xtask verify-floor` starts it again on the oldest distribution
+# it supports). Then `cargo xtask manifest`, one attestation over every asset, and
 # `cargo xtask publish` (attach, read back, verify, publish). RELEASING.md.
 on:
   push:
@@ -44,6 +45,9 @@ jobs:
       - uses: ./.github/actions/setup
       - run: cargo test --locked --all-features
       - run: cargo xtask dist
+      # The Linux archive on the oldest distribution it supports (glibc floor, xtask/src/glibc.rs).
+      - if: runner.os == 'Linux'
+        run: cargo xtask verify-floor native/sidevoice-core-${{ matrix.target }}.tar.zst
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-${{ matrix.target }}

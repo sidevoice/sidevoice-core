@@ -13,16 +13,49 @@ Releases of this repository.
 | Merge the release PR | a maintainer | **This is the release.** release-please tags `vX.Y.Z` and creates a draft GitHub Release whose notes are that version's changelog; `release` runs from the tag, attaches and verifies the assets, and publishes the Release. |
 
 The tests are part of the build: an asset is only produced on a target where the whole suite passed. Everything
-besides the GitHub steps is code in `xtask/` (`cargo xtask models | dist | verify | manifest | publish`): run
-`cargo xtask dist` on a machine to get that machine's archive, built, packaged and verified exactly as the release
-one. A pull request already runs that packaging on every target.
+besides the GitHub steps is code in `xtask/` (`cargo xtask models | dist | verify | verify-floor | manifest |
+publish`): run `cargo xtask dist` on a machine to get that machine's archive, built, packaged and verified exactly as
+the release one. A pull request already runs that packaging on every target. On Linux `dist` needs
+[zig](https://ziglang.org), [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild), CMake and `readelf` on
+the `PATH` (CI installs the zig and cargo-zigbuild pinned in `.github/actions/setup`), and `cargo xtask verify-floor
+<archive>` (needs Docker) starts the archive's core again in a container of the oldest distribution it supports; CI
+runs it after `dist` on both Linux targets. See [Linux: the glibc floor](#linux-the-glibc-floor).
+
+## Linux: the glibc floor
+
+A Linux binary only starts where the system's C library is at least as new as the newest glibc symbol it, or a
+library it loads, was linked against. Built plainly on the `ubuntu-24.04` runners, the core needed glibc 2.39 and
+did not start on Debian 12 or Ubuntu 22.04. The floor is fixed in `xtask/src/glibc.rs` (`FLOOR`, today **glibc
+2.28**: Debian 10, Ubuntu 20.04, RHEL/AlmaLinux 8, Amazon Linux 2023 and every later release) and enforced:
+
+- `dist` links the Linux binary with `cargo zigbuild --target <arch>-unknown-linux-gnu.2.28` (zig's glibc 2.28 stubs
+  instead of the runner's library) and records the floor in the archive's inventory (`"glibc": "2.28"`). What it
+  links:
+  - ONNX Runtime: Microsoft's 1.22.0 release build (pinned by digest in `xtask/src/libraries.rs`), loaded from
+    `lib/libonnxruntime.so.1`. It needs glibc 2.27 and the system's `libstdc++.so.6` (GLIBCXX 3.4.22, GCC 6). The
+    static library ort-sys downloads by itself, which the tests and the macOS archive use, needs glibc 2.32 and the
+    build machine's libstdc++, so the Linux archive does not use it.
+  - libopus: the source audiopus_sys bundles, compiled by zig and linked statically (the runner's `libopus.so.0`
+    needs glibc 2.29).
+  - Everything else (Rust, BoringSSL, SQLite) is compiled against the floor; the C++ in BoringSSL takes zig's
+    libc++, linked statically.
+- `verify` reads the GLIBC symbol versions of the binary and of every library in `lib/` (`readelf --version-info`)
+  and fails if any is newer than the floor the inventory records, or if any of them loads a library that is neither
+  in `lib/` nor on every glibc system; its report gives the floor and the newest version really needed.
+- `verify-floor` starts the core in `almalinux:8` (pinned by digest in `glibc.rs`, glibc exactly 2.28), after
+  checking the container's glibc: the unpacked tree mounted read-only, no network, driven by the xtask itself built
+  against the floor (`verify-tree`).
+
+Raising or lowering the floor is a change of `FLOOR` and `FLOOR_IMAGE` together. Musl-based systems (Alpine) are not
+supported.
 
 ## Assets
 
 - `sidevoice-core-<version>-<target>.tar.zst` for `macos-aarch64`, `linux-x86_64` and `linux-aarch64` (on the nightly,
   `sidevoice-core-nightly-<target>.tar.zst`, fixed names whose download URLs never change): the relocatable native
   core per target (`bin/sidevoice-core-rust`, the pinned detector models, its libraries and licence notices). The
-  source commit is in the manifest and in each archive's `native-core.json`.
+  source commit is in the manifest and in each archive's `native-core.json`, and on Linux the glibc floor too. The
+  Linux archives run on glibc 2.28 or newer, x86_64 and arm64; the macOS one on Apple silicon.
 - `native-core-manifest.json`: every archive with its digest and size, bound to the source commit.
 - `SHA256SUMS`.
 - `attestation.sigstore.json`: one SLSA provenance attestation whose subjects are every archive and the manifest.

@@ -1,7 +1,7 @@
 name: ci
 
 # Every pull request: lint once, then on every target the tests and the release packaging, exactly as a release
-# builds it, publishing nothing. What passes here is what merging publishes (release.yml).
+# builds it (on Linux also started on the oldest distribution it supports), publishing nothing. What passes here is what merging publishes (release.yml).
 on:
   pull_request:
     branches: [main]
@@ -41,3 +41,6 @@ jobs:
       - uses: ./.github/actions/setup
       - run: cargo test --locked --all-features
       - run: cargo xtask dist
+      # The Linux archive on the oldest distribution it supports (glibc floor, xtask/src/glibc.rs).
+      - if: runner.os == 'Linux'
+        run: cargo xtask verify-floor native/sidevoice-core-${{ matrix.target }}.tar.zst
