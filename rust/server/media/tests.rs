@@ -6,7 +6,7 @@ use serde_json::{json, Map, Value};
 
 use super::{
     audio::{to_gate_rate, wav, GATE_RATE},
-    recognition::accepted,
+    recognition::{accepted, recognition_language},
     speech::{attach_audio, describe_voice},
     transcripts::DeviceTranscripts,
 };
@@ -169,4 +169,11 @@ fn speech_message_carries_voice_then_audio_and_shares_no_timings() {
     );
     assert_eq!(shared["timings_ms"], json!({}));
     assert_eq!(shared["shared"], json!(true));
+}
+
+#[test]
+fn automatic_language_is_not_sent_to_the_recogniser() {
+    assert_eq!(recognition_language(&settings(Some("auto"))), None);
+    assert_eq!(recognition_language(&settings(Some("es"))), Some("es"));
+    assert_eq!(recognition_language(&settings(None)), None);
 }

@@ -15,6 +15,7 @@ use crate::server::AppState;
 use crate::types::CallSettings;
 
 use super::admission::{admit, await_hello, Admitted};
+use super::heartbeat::{Beat, Heartbeat};
 use super::registration::CallRegistration;
 use super::{close, text, UNPAIRED};
 
@@ -85,6 +86,14 @@ struct Call {
     output: mpsc::Receiver<Value>,
     rendered_tx: mpsc::Sender<Rendered>,
     rendered: mpsc::Receiver<Rendered>,
+    /// What the hello got wrong, sent right after the session.
+    problems: Vec<Value>,
+    /// What the room shows about this call's transcription; `voice-stt-ready` adds to it.
+    transcription: Value,
+    /// The browser keepalive, and when anything last arrived on the socket.
+    keepalive: Option<Heartbeat>,
+    last_frame: tokio::time::Instant,
+    beats: tokio::time::Interval,
 }
 
 impl Call {
@@ -105,6 +114,8 @@ impl Call {
             media,
             detector_events,
             focus_events,
+            problems,
+            transcription,
         } = admitted;
         state
             .media
@@ -131,6 +142,10 @@ impl Call {
             .expect("call settings lock")
             .insert(session.clone(), settings.clone());
         let (rendered_tx, rendered) = mpsc::channel::<Rendered>(16);
+        let keepalive = Heartbeat::from_env();
+        let every = keepalive.map_or(IDLE_WAKE, |beat| beat.interval);
+        let mut beats = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        beats.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         Self {
             state,
             socket,
@@ -147,6 +162,11 @@ impl Call {
             output,
             rendered_tx,
             rendered,
+            problems,
+            transcription,
+            keepalive,
+            last_frame: tokio::time::Instant::now(),
+            beats,
         }
     }
 
@@ -168,6 +188,10 @@ impl Call {
         let room = json!({"api": API, "version": env!("CARGO_PKG_VERSION")});
         let session = json!({"type":"voice-session","data":{"session_id":self.session,"sample_rate":16000,"channels":1,"room":room}});
         let _ = self.socket.send(text(&session)).await;
+        // Only now can anything reach the browser: what its hello got wrong goes right after the session.
+        for problem in std::mem::take(&mut self.problems) {
+            let _ = self.socket.send(text(&problem)).await;
+        }
     }
 
     async fn serve(&mut self) {
@@ -222,11 +246,36 @@ impl Call {
                     Some(event) => self.on_output(event).await,
                     None => Flow::Stop,
                 },
-                message = self.socket.recv() => self.on_socket(message).await,
+                // A browser that stopped answering leaves exactly as if its socket had closed: behind a
+                // proxy a closed tab never closes the socket, and its seat would stay taken.
+                _ = self.beats.tick(), if self.keepalive.is_some() => self.on_heartbeat().await,
+                message = self.socket.recv() => {
+                    self.last_frame = tokio::time::Instant::now();
+                    self.on_socket(message).await
+                }
             };
             if matches!(flow, Flow::Stop) {
                 break;
             }
+        }
+    }
+
+    /// Asks a quiet browser to answer, or ends the call of one that never did.
+    async fn on_heartbeat(&mut self) -> Flow {
+        match self
+            .keepalive
+            .map(|beat| beat.check(self.last_frame.elapsed()))
+        {
+            Some(Beat::Drop) => Flow::Stop,
+            Some(Beat::Ask) => {
+                let ping = json!({"type":"voice-ping","data":{"session_id":self.session}});
+                if self.socket.send(text(&ping)).await.is_err() {
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                }
+            }
+            _ => Flow::Continue,
         }
     }
 

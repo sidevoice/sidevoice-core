@@ -32,6 +32,10 @@ pub(super) struct Admitted {
     pub(super) media: Arc<CallMedia>,
     pub(super) detector_events: mpsc::Receiver<CallFrame>,
     pub(super) focus_events: mpsc::Receiver<()>,
+    /// What the hello got wrong, as error events sent right after the session.
+    pub(super) problems: Vec<Value>,
+    /// What the room shows about this call's transcription.
+    pub(super) transcription: Value,
 }
 
 /// Waits for the client's first text frame, answering pings meanwhile.
@@ -70,9 +74,13 @@ pub(super) async fn admit(
     events: mpsc::Sender<Value>,
 ) -> Option<Admitted> {
     let defaults = crate::models::default_settings(Some(&crate::runtime::system_language()), None);
-    let settings =
-        crate::models::settings_from(hello.get("data").and_then(|v| v.get("settings")), &defaults)
-            .settings;
+    let hello = hello.get("data");
+    let loaded = crate::models::settings_from(hello.and_then(|v| v.get("settings")), &defaults);
+    // The detector runs on the room's numbers shaped by the device's patience; the device's own
+    // tuning, sent or stored, never reaches it (Python `mic_settings`, the 2026-09-20 regression).
+    let (mic, mic_problem) =
+        crate::models::mic_settings(&loaded.settings, hello.and_then(|v| v.get("mic")));
+    let settings = mic.applied_to(&loaded.settings);
     if let Some(refusal) = unavailable_refusal(state, &settings) {
         let _ = socket.send(text(&refusal)).await;
         let _ = socket.send(close(SETTINGS_REFUSED, "")).await;
@@ -99,6 +107,27 @@ pub(super) async fn admit(
         let _ = socket.send(text(&refusal)).await;
         return None;
     };
+    let language = settings.ui_language.as_str();
+    let settings_problem = loaded
+        .issue
+        .map(|message| json!({"key":"settings.invalid","message":message}))
+        .or_else(|| {
+            mic_problem.map(|message| json!({"key":"turn_patience_unknown","message":message}))
+        });
+    let (runtime, runtime_problem) =
+        match crate::models::browser_runtime(hello.and_then(|v| v.get("transcription"))) {
+            Ok(runtime) => (runtime, None),
+            Err(problem) => (None, Some(runtime_refusal(&problem, language))),
+        };
+    let problems = [settings_problem, runtime_problem]
+        .into_iter()
+        .flatten()
+        .map(|problem| json!({"type":"error","data":problem}))
+        .collect();
+    let transcription = crate::models::call_transcription(&settings.stt, runtime.as_ref());
+    state
+        .room
+        .set_transcription(&session, transcription.clone());
     Some(Admitted {
         defaults,
         settings,
@@ -106,6 +135,8 @@ pub(super) async fn admit(
         media,
         detector_events,
         focus_events,
+        problems,
+        transcription,
     })
 }
 
@@ -115,4 +146,9 @@ pub(super) fn unavailable_refusal(state: &AppState, settings: &CallSettings) -> 
         media::provider_key(&state.dir, place).is_some()
     })?;
     Some(json!({"type":"error","data":render_refusal(&refusal, &settings.ui_language)}))
+}
+
+/// The error data for a transcription runtime this node cannot read.
+pub(super) fn runtime_refusal(problem: &LocalizedMessage, language: &str) -> Value {
+    json!({"key":problem.key,"message":render(problem, language)})
 }

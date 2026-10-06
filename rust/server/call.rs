@@ -17,6 +17,7 @@ use super::request::accept_language;
 use super::AppState;
 
 mod admission;
+mod heartbeat;
 mod registration;
 mod session;
 

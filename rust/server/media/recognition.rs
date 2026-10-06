@@ -55,11 +55,7 @@ impl Recognizer<'_> {
     }
 
     fn language(&self) -> Option<&str> {
-        self.settings
-            .stt
-            .options
-            .get("language")
-            .and_then(Value::as_str)
+        recognition_language(self.settings)
     }
 
     /// Asks the browser to transcribe and waits for its reply on the call socket.
@@ -139,4 +135,14 @@ fn device_timeout() -> Duration {
         return Duration::from_millis(milliseconds);
     }
     Duration::from_secs(90)
+}
+
+/// The language a recogniser is asked for: none when the stage detects it (`auto`), as in Python.
+pub(super) fn recognition_language(settings: &CallSettings) -> Option<&str> {
+    settings
+        .stt
+        .options
+        .get("language")
+        .and_then(Value::as_str)
+        .filter(|language| *language != "auto")
 }

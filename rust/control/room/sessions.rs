@@ -68,6 +68,11 @@ impl Room {
             });
         }
     }
+    pub fn set_transcription(&self, sid: &str, transcription: Value) {
+        if let Some(browser) = self.inner.lock().expect("room lock").browsers.get_mut(sid) {
+            browser.transcription = transcription;
+        }
+    }
     pub fn admission(&self, language: &str) -> Value {
         let inner = self.inner.lock().expect("room lock");
         let max = max_browsers();

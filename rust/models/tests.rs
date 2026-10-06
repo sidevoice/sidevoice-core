@@ -6,6 +6,7 @@ mod defaults;
 mod mic;
 mod python_repr;
 mod resolution;
+mod runtime;
 mod settings;
 mod stage;
 mod support;

@@ -89,6 +89,7 @@
   "voice.catchup_too_long": "The audio captured offline was too long.",
   "voice.rtc_unavailable": "This machine cannot receive WebRTC audio; the microphone stays on the call socket.",
   "voice.rtc_answer_failed": "This machine could not answer the WebRTC offer; the microphone stays on the call socket.",
+  "voice.transcription_runtime_unsupported": "Unsupported transcription runtime.",
   "room.thread_invalid": "Invalid conversation identifier.",
   "room.connector_disconnected": "The connector is not connected.",
   "room.binding_foreign": "Unknown or foreign binding.",
