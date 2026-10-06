@@ -69,14 +69,14 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: dist-*
-          path: assets
+          path: dist
           merge-multiple: true
-      - run: cargo xtask manifest assets ${{ inputs.tag && format('--tag {0}', inputs.tag) || '' }}
+      - run: cargo xtask manifest dist ${{ inputs.tag && format('--tag {0}', inputs.tag) || '' }}
       - id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
-            assets/*.tar.zst
-            assets/native-core-manifest.json
-      - run: cp "${{ steps.attest.outputs.bundle-path }}" assets/attestation.sigstore.json
-      - run: cargo xtask publish assets "$TAG"
+            dist/*.tar.zst
+            dist/native-core-manifest.json
+      - run: cp "${{ steps.attest.outputs.bundle-path }}" dist/attestation.sigstore.json
+      - run: cargo xtask publish dist "$TAG"
