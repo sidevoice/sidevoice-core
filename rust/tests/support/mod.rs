@@ -576,7 +576,14 @@ async fn exchange(mut stream: impl AsyncRead + AsyncWrite + Unpin, request: &Htt
     }
     stream.flush().await.unwrap();
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await.unwrap();
+    // A server that closes right after answering may reset the connection (macOS does, after an `Upgrade`
+    // request it refused); what it answered is already read.
+    if let Err(error) = stream.read_to_end(&mut raw).await {
+        assert!(
+            error.kind() == std::io::ErrorKind::ConnectionReset && !raw.is_empty(),
+            "{error}"
+        );
+    }
     let split = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
