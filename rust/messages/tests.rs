@@ -1,5 +1,5 @@
 use super::template::interpolate;
-use super::{render, render_refusal, ui_locale, LocalizedMessage};
+use super::{bundle, render, render_refusal, ui_locale, LocalizedMessage};
 use serde_json::{json, Map, Value};
 
 #[test]
@@ -144,4 +144,47 @@ fn templates_substitute_formats_and_join_parameters() {
     );
     assert_eq!(interpolate("a{missing}b", &params), "ab");
     assert_eq!(interpolate("open {label", &params), "open {label");
+}
+
+fn placeholders(template: &str) -> Vec<&str> {
+    let mut found: Vec<&str> = template
+        .split('{')
+        .skip(1)
+        .filter_map(|rest| rest.split_once('}').map(|(name, _)| name))
+        .collect();
+    found.sort_unstable();
+    found
+}
+
+#[test]
+fn spanish_says_every_english_key_with_the_same_placeholders() {
+    let english = bundle("en").as_object().unwrap();
+    let spanish = bundle("es").as_object().unwrap();
+    for (key, template) in english {
+        let local = spanish.get(key).and_then(Value::as_str);
+        assert!(local.is_some(), "es.json lacks {key}");
+        assert_eq!(
+            placeholders(local.unwrap()),
+            placeholders(template.as_str().unwrap()),
+            "{key}"
+        );
+    }
+    assert!(
+        spanish.keys().all(|key| english.contains_key(key)),
+        "es.json has keys en.json does not"
+    );
+}
+
+#[test]
+fn keys_the_server_emits_have_english_text() {
+    for key in [
+        "connector-error",
+        "connector-unavailable",
+        "origin-not-allowed",
+        "integration_superseded",
+        "connector.credential_refused",
+        "connector.protocol_unsupported",
+    ] {
+        assert_ne!(render(&LocalizedMessage::new(key), "en"), key, "{key}");
+    }
 }

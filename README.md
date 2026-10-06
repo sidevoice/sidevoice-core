@@ -107,6 +107,7 @@ src/sidevoice_core/
   pipeline/      one Pipecat pipeline per call, and the speech providers
   control/       conversations, history, listeners, the connector link, devices
   server/        the web surface (FastAPI + Socket.IO) that carries both
+assets/catalog/  the model and voice catalogues, resolver vectors and model-check clips (both cores read these)
 ```
 
 `pipeline` never imports `control`, and neither imports a web framework; `tests/test_boundaries.py` enforces both.

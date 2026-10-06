@@ -67,7 +67,7 @@
   "integration.key_refused": "The provider rejected the key.",
   "integration.unreachable": "The provider could not be reached.",
   "integration.verify_failed": "The provider could not verify the key.",
-  "integration.superseded": "This key was replaced or removed while it was being checked, so it was not saved.",
+  "integration_superseded": "This key was replaced or removed while it was being checked, so it was not saved.",
   "integration.catalog_failed": "Could not load the provider catalogue.",
   "integration.catalog_empty": "The provider returned no transcription models for this account.",
   "integration.preview_invalid": "Choose a configured voice and model before trying a sample.",
@@ -118,6 +118,9 @@
   "no-connector": "No connector is connected.",
   "invalid-connector-response": "The connector returned an invalid response.",
   "connector-timeout": "The connector did not answer in time.",
+  "connector-unavailable": "The connector could not be reached.",
+  "connector-error": "The connector reported an error.",
+  "origin-not-allowed": "The request origin is not allowed.",
   "room.speech_invalid": "The reply is invalid.",
   "room.conversation_title": "Conversation {id}",
   "room.reach_offline": "That conversation is not connected to the room. Ask it to connect.",
@@ -136,5 +139,7 @@
   "relay.pair_invalid": "Enter a room address and pairing code.",
   "relay.connector_unavailable": "The connector is not connected to this core.",
   "relay.pair_timeout": "The connector did not answer the pairing request in time.",
-  "relay.pair_failed": "The room pairing failed."
+  "relay.pair_failed": "The room pairing failed.",
+  "connector.credential_refused": "This connector's credential is not this core's: the core writes a fresh one when it starts, and the connector reads it from the core's ready file. Restart the connector.",
+  "connector.protocol_unsupported": "This connector speaks protocol {protocol} and this core speaks {supported}: update the connector."
 }

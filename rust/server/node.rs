@@ -48,6 +48,24 @@ struct PairRoom {
     code: String,
 }
 
+/// A pairing the connector refused: its own reason when it gave one (passed through as the Python core did), else
+/// the generic one.
+pub(super) fn pair_refused(answer: &Value, headers: &HeaderMap) -> axum::response::Response {
+    match answer
+        .get("detail")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+    {
+        Some(detail) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail": detail.chars().take(1000).collect::<String>()})),
+        )
+            .into_response(),
+        None => super::refusal::failure("relay.pair_failed", StatusCode::BAD_REQUEST, headers),
+    }
+}
+
 /// Asks the pinned connector to pair this node with a room.
 async fn rendezvous_pair(
     State(state): State<Arc<AppState>>,
@@ -82,20 +100,26 @@ async fn rendezvous_pair(
             &headers,
         ));
     };
-    let answer = peer
-        .request(
+    // The route's own deadline around the peer's tells a timeout from a connector that could not answer at all.
+    let answer = tokio::time::timeout(
+        PAIR_TIMEOUT,
+        peer.request(
             "pair.request",
             json!({"room":room,"code":code}),
-            PAIR_TIMEOUT,
-        )
-        .await
-        .map_err(|_| refuse("relay.pair_timeout", StatusCode::GATEWAY_TIMEOUT, &headers))?;
-    if answer.get("ok") != Some(&Value::Bool(true)) {
-        return Err(refuse(
-            "relay.pair_failed",
-            StatusCode::BAD_REQUEST,
+            PAIR_TIMEOUT + Duration::from_secs(1),
+        ),
+    )
+    .await
+    .map_err(|_| refuse("relay.pair_timeout", StatusCode::GATEWAY_TIMEOUT, &headers))?
+    .map_err(|_| {
+        refuse(
+            "relay.connector_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
             &headers,
-        ));
+        )
+    })?;
+    if answer.get("ok") != Some(&Value::Bool(true)) {
+        return Err(pair_refused(&answer, &headers).into());
     }
     state.rendezvous.poke();
     Ok(Json(

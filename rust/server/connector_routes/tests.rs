@@ -70,26 +70,32 @@ async fn body(response: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn connector_answers_map_to_device_responses() {
-    let refused = host_agent_response(Ok(
+    let refused = host_agent_response(Some(Ok(
         json!({"error":{"key":"Bad Key","params":{"id":"a","output":"x"},"message":"no"}}),
-    ));
+    )));
     assert_eq!(refused.status(), StatusCode::CONFLICT);
     assert_eq!(
         body(refused).await,
         json!({"error":{"key":"connector-error","params":{"id":"a"},"message":"no"}})
     );
-    let listed = host_agent_response(Ok(json!({"agents":[],"custom":{},"extra":1})));
+    let listed = host_agent_response(Some(Ok(json!({"agents":[],"custom":{},"extra":1}))));
     assert_eq!(listed.status(), StatusCode::OK);
     assert_eq!(
         body(listed).await,
         json!({"agents":[],"scanned_at":null,"custom":{}})
     );
     assert_eq!(
-        host_agent_response(Ok(json!({"agents":[]}))).status(),
+        host_agent_response(Some(Ok(json!({"agents":[]})))).status(),
         StatusCode::BAD_GATEWAY
     );
+    // A connector that could not answer is 502; only the routes' own deadline is a timeout (504).
+    let unavailable = host_agent_response(Some(Err(PeerError)));
+    assert_eq!(unavailable.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(
-        host_agent_response(Err(PeerError)).status(),
-        StatusCode::GATEWAY_TIMEOUT
+        body(unavailable).await,
+        json!({"key":"connector-unavailable"})
     );
+    let timeout = host_agent_response(None);
+    assert_eq!(timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(body(timeout).await, json!({"key":"connector-timeout"}));
 }

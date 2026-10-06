@@ -49,17 +49,15 @@ async fn call_socket(
         .iter()
         .find_map(|value| value.strip_prefix(TOKEN_PREFIX))
         .and_then(|token| state.authenticate_token(token));
-    let close_reason = render(
-        &LocalizedMessage::new("device.unpaired"),
-        accept_language(&headers),
-    );
+    let language = accept_language(&headers).to_owned();
+    let close_reason = render(&LocalizedMessage::new("device.unpaired"), &language);
     let ws = if protocols.contains(&SUBPROTOCOL) {
         ws.protocols([SUBPROTOCOL])
     } else {
         ws
     };
     Ok(ws
-        .on_upgrade(move |socket| session::run(state, device, socket, close_reason))
+        .on_upgrade(move |socket| session::run(state, device, socket, close_reason, language))
         .into_response())
 }
 

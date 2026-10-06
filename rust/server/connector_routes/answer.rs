@@ -26,19 +26,23 @@ const UNSAFE_WORDS: [&str; 9] = [
     "error",
 ];
 
-pub(super) fn host_agent_response(answer: Result<Value, PeerError>) -> Response {
+pub(super) fn host_agent_response(answer: Option<Result<Value, PeerError>>) -> Response {
+    let answer = match answer {
+        None => return keyed(StatusCode::GATEWAY_TIMEOUT, "connector-timeout"),
+        Some(Err(_)) => return keyed(StatusCode::BAD_GATEWAY, "connector-unavailable"),
+        Some(Ok(answer)) => answer,
+    };
     match answer {
-        Ok(v) if v["error"].is_object() => (
+        v if v["error"].is_object() => (
             StatusCode::CONFLICT,
             Json(json!({"error":error_body(&v["error"])})),
         )
             .into_response(),
-        Ok(v) if v["agents"].is_array() && v["custom"].is_object() => Json(
+        v if v["agents"].is_array() && v["custom"].is_object() => Json(
             json!({"agents":v["agents"],"scanned_at":v.get("scanned_at"),"custom":v["custom"]}),
         )
         .into_response(),
-        Ok(_) => keyed(StatusCode::BAD_GATEWAY, "invalid-connector-response"),
-        Err(_) => keyed(StatusCode::GATEWAY_TIMEOUT, "connector-timeout"),
+        _ => keyed(StatusCode::BAD_GATEWAY, "invalid-connector-response"),
     }
 }
 

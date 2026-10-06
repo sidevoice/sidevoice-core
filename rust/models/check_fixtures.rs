@@ -6,9 +6,9 @@ use serde_json::Value;
 
 use super::json::field_str;
 
-const CHECKS_JSON: &str = include_str!("../../src/sidevoice_core/models/checks/checks.json");
-const CHECK_ES_WAV: &[u8] = include_bytes!("../../src/sidevoice_core/models/checks/stt-es.wav");
-const CHECK_EN_WAV: &[u8] = include_bytes!("../../src/sidevoice_core/models/checks/stt-en.wav");
+const CHECKS_JSON: &str = include_str!("../../assets/catalog/models/checks/checks.json");
+const CHECK_ES_WAV: &[u8] = include_bytes!("../../assets/catalog/models/checks/stt-es.wav");
+const CHECK_EN_WAV: &[u8] = include_bytes!("../../assets/catalog/models/checks/stt-en.wav");
 
 static CHECKS: OnceLock<Value> = OnceLock::new();
 

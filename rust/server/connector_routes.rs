@@ -13,7 +13,9 @@ use serde_json::json;
 
 use super::refusal::{refuse, require_origin, Handled, Refusal};
 use super::request::query;
+use super::trust::origin_allowed;
 use super::AppState;
+use crate::control::room::{ConnectorPeer, PeerError};
 
 mod answer;
 
@@ -39,7 +41,7 @@ async fn connector_listing(State(state): State<Arc<AppState>>, headers: HeaderMa
 }
 
 async fn host_agents(State(state): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Handled {
-    require_origin(&headers)?;
+    require_page_origin(&headers)?;
     let rescan = query(&uri, "rescan").unwrap_or_default();
     let force = match rescan.to_ascii_lowercase().as_str() {
         "" | "0" | "false" => false,
@@ -58,7 +60,7 @@ async fn host_agents(State(state): State<Arc<AppState>>, headers: HeaderMap, uri
         params["watch"] = json!(watch)
     }
     Ok(answer::host_agent_response(
-        peer.request("agents.list", params, AGENT_TIMEOUT).await,
+        ask_connector(&peer, "agents.list", params).await,
     ))
 }
 
@@ -67,7 +69,7 @@ async fn host_agent_action(
     Path((agent_id, action)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Handled {
-    require_origin(&headers)?;
+    require_page_origin(&headers)?;
     if !agent_id_valid(&agent_id) {
         return Err(keyed(StatusCode::BAD_REQUEST, "invalid-agent-id").into());
     }
@@ -78,13 +80,37 @@ async fn host_agent_action(
         return Err(no_connector());
     };
     Ok(answer::host_agent_response(
-        peer.request(
+        ask_connector(
+            &peer,
             &format!("agents.{action}"),
-            json!({"id":agent_id}),
-            AGENT_TIMEOUT,
+            json!({ "id": agent_id }),
         )
         .await,
     ))
+}
+
+/// The host-agent routes refuse a foreign page by key, as the Python core did (`origin-not-allowed`).
+fn require_page_origin(headers: &HeaderMap) -> Result<(), Refusal> {
+    if origin_allowed(headers) {
+        Ok(())
+    } else {
+        Err(keyed(StatusCode::FORBIDDEN, "origin-not-allowed").into())
+    }
+}
+
+/// A host-agent request to the connector, with the routes' own deadline around the peer's: `None` when the deadline
+/// passed (504), an error when the connector could not answer at all (502), as the Python core told them apart.
+async fn ask_connector(
+    peer: &ConnectorPeer,
+    method: &str,
+    params: serde_json::Value,
+) -> Option<Result<serde_json::Value, PeerError>> {
+    tokio::time::timeout(
+        AGENT_TIMEOUT,
+        peer.request(method, params, AGENT_TIMEOUT + Duration::from_secs(1)),
+    )
+    .await
+    .ok()
 }
 
 fn agent_id_valid(id: &str) -> bool {

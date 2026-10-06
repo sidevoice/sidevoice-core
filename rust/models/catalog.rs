@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use super::json::{field_str, values};
 
-pub(super) const CATALOG_JSON: &str = include_str!("../../src/sidevoice_core/models/catalog.json");
-const VOICE_CATALOG_JSON: &str = include_str!("../../src/sidevoice_core/pipeline/catalog.json");
+pub(super) const CATALOG_JSON: &str = include_str!("../../assets/catalog/models/catalog.json");
+const VOICE_CATALOG_JSON: &str = include_str!("../../assets/catalog/pipeline/catalog.json");
 
 static CATALOG: OnceLock<Value> = OnceLock::new();
 static VOICE_CATALOG: OnceLock<Value> = OnceLock::new();
