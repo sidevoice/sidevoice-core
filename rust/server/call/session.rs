@@ -60,6 +60,7 @@ pub(super) async fn run(
         control,
         output,
     );
+    call.trace_started(&hello);
     call.announce().await;
     call.state
         .welcome(&call.session, hello.get("data"), &call.settings);
@@ -146,6 +147,20 @@ impl Call {
             output,
             rendered_tx,
             rendered,
+        }
+    }
+
+    /// The hello carries the browser's call span: the room's turns go inside the browser's call.
+    fn trace_started(&self, hello: &Value) {
+        if let Some(telemetry) = crate::control::telemetry::shared() {
+            let stt = &self.settings.stt;
+            telemetry.call_started(
+                &self.session,
+                hello["data"]["telemetry"]["traceparent"].as_str(),
+                &json!({"sidevoice.stt_place": stt.place, "sidevoice.stt_model": stt.model,
+                    "sidevoice.stt_accelerator": stt.build.as_ref().map(|build| &build.accelerator),
+                    "sidevoice.turn_end_mode": self.settings.turn_end_mode}),
+            );
         }
     }
 

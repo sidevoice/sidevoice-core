@@ -26,6 +26,8 @@ impl Call {
             Some("voice-client-error") => {
                 self.state.room.report_client_error(&data);
             }
+            Some("voice-turn-trace") => trace_turn(&self.session, &data),
+            Some("voice-audio-health") => audio_health(&self.session, &data),
             Some("voice-media") => self.select_media(&data).await,
             Some("voice-transcript") => self.media.transcript(&data, false, &self.session),
             Some("voice-transcript-error") => self.media.transcript(&data, true, &self.session),
@@ -76,5 +78,30 @@ impl Call {
             .lock()
             .expect("call settings lock")
             .insert(self.session.clone(), self.settings.clone());
+    }
+}
+
+/// The browser opened the root span of a turn the room announced, and names it.
+fn trace_turn(session: &str, data: &Value) {
+    if let Some(telemetry) = crate::control::telemetry::shared() {
+        telemetry.turn_context(
+            session,
+            data["thread_id"].as_str().unwrap_or(""),
+            data["revision"].as_u64().unwrap_or(0),
+            data["traceparent"].as_str(),
+        );
+    }
+}
+
+/// What the browser's audio output did, as an event on the call's span.
+fn audio_health(session: &str, data: &Value) {
+    if let Some(telemetry) = crate::control::telemetry::shared() {
+        let health = &data["health"];
+        telemetry.audio_event(
+            session,
+            data["reason"].as_str().unwrap_or(""),
+            &json!({"sidevoice.audio_output": health["output"],
+                "sidevoice.audio_context": health["context"], "sidevoice.stalls": health["stalls"]}),
+        );
     }
 }

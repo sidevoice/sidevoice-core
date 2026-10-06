@@ -128,6 +128,15 @@ impl Utterances {
             .map(|(uid, u)| (uid.clone(), u.row_id.clone()))
             .collect()
     }
+    /// Whether a call has an utterance in one of `statuses`.
+    pub(super) fn has_client_status(&self, sid: &str, statuses: &[&str]) -> bool {
+        self.by_id.values().any(|record| {
+            record
+                .clients
+                .get(sid)
+                .is_some_and(|(_, status)| statuses.contains(&status.as_str()))
+        })
+    }
     /// Stop everything a call still had to play. Returns the rows of original utterances that
     /// no call is playing any more.
     pub(super) fn interrupt_client(&mut self, sid: &str) -> Vec<String> {

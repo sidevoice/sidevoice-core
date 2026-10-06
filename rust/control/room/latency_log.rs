@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::latency::{
     latency_now_micros, LatencyDuration, LatencyEvent, LatencyMark, LatencyReply,
@@ -150,11 +150,17 @@ impl LatencyLog {
                     && mark.event == start_event
                     && mark.utterance_id.as_deref() == if same_uid { uid } else { None }
             });
-            if let Some(micros) = started.and_then(|mark| at_micros.checked_sub(mark.at_micros)) {
-                telemetry.try_observe(
+            if let Some(started) = started {
+                telemetry.stage(
+                    sid,
+                    thread,
+                    revision,
                     stage,
-                    micros as f64 / 1000.0,
-                    &attributes(sid, thread, revision, uid),
+                    started.at_micros,
+                    at_micros,
+                    latency_now_micros(),
+                    &json!({"sidevoice.utterance_id": uid,
+                        "sidevoice.reply_revision": uid.map(|_| revision)}),
                 );
             }
         }
@@ -233,7 +239,15 @@ impl LatencyLog {
             _ => None,
         };
         if let (Some(stage), Some(telemetry)) = (stage, self.telemetry.as_ref()) {
-            telemetry.try_observe(stage, milliseconds, &attributes(sid, thread, revision, uid));
+            // The browser's playback span is the browser's own: the room records its histogram only.
+            if stage == "audio_received_to_playback" {
+                let values = json!({"sidevoice.utterance_id": uid, "sidevoice.thread_id": thread,
+                    "sidevoice.reply_revision": revision});
+                telemetry.observe(sid, stage, milliseconds, &values);
+            } else {
+                let values = json!({"sidevoice.utterance_id": uid});
+                telemetry.duration_stage(sid, thread, revision, stage, milliseconds, &values);
+            }
         }
     }
     fn record_reply_duration(
@@ -344,11 +358,4 @@ fn upsert(durations: &mut Vec<LatencyDuration>, duration: LatencyDuration) {
     } else {
         durations.push(duration);
     }
-}
-
-fn attributes(sid: &str, thread: &str, revision: u64, uid: Option<&str>) -> Value {
-    json!({
-        "sidevoice.session_id": sid, "sidevoice.thread_id": thread,
-        "sidevoice.turn_revision": revision, "sidevoice.utterance_id": uid,
-    })
 }

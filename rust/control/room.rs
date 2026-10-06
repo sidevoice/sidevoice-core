@@ -4,9 +4,9 @@
 //! keeps its collections private; the room's operations are split across the submodules below
 //! by concern and reach the state only through those types.
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use super::telemetry::Telemetry;
+use super::telemetry;
 use crate::storage::PrivateDir;
 
 // The areas of the room's state.
@@ -92,7 +92,7 @@ impl Room {
                 journal: Journal::default(),
                 utterances: Utterances::default(),
                 inflight: Inflight::default(),
-                latency: LatencyLog::new(Telemetry::from_env().map(Arc::new)),
+                latency: LatencyLog::new(telemetry::shared()),
                 client_errors: ClientErrors::default(),
             }),
         })

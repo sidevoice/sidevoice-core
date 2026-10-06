@@ -205,6 +205,13 @@ impl Inner {
 
     /// Stop everything a call had to play, marking `reason` on the rows nobody plays any more.
     pub(super) fn interrupt_client(&mut self, sid: &str, reason: &str) {
+        // A halt that interrupted nothing is not a cancellation: counting it would make every turn look like one.
+        if self
+            .utterances
+            .has_client_status(sid, &["queued", "waiting_for_turn", "playing"])
+        {
+            self.count_cancel(sid, reason);
+        }
         for row_id in self.utterances.interrupt_client(sid) {
             if let Some(row) = self.journal.find_mut(&row_id) {
                 if row.status != "playback_finished" {
@@ -224,6 +231,9 @@ impl Inner {
     /// The user started turn `revision`: hold the call's queue until the turn ends, putting the
     /// utterance it was about to play back at the front.
     pub(super) fn hold_client(&mut self, sid: &str, revision: u64) {
+        if self.utterances.has_client_status(sid, &["playing"]) {
+            self.count_cancel(sid, "newer_turn");
+        }
         let active = self.browsers.get_mut(sid).and_then(|b| b.active.take());
         let held = self.utterances.hold_client(sid, revision);
         if let Some(uid) = active {
@@ -244,5 +254,15 @@ impl Inner {
                 .replay_heard(&original, sid, "playing", "interrupted");
         }
         self.utterances.retire_finished_replays();
+    }
+
+    fn count_cancel(&self, sid: &str, reason: &str) {
+        if let Some(telemetry) = crate::control::telemetry::shared() {
+            let browser = self.browsers.get(sid);
+            let thread = browser
+                .and_then(|b| b.target.as_ref())
+                .map(|t| t.thread.as_str());
+            telemetry.cancelled(sid, reason, thread, browser.map(|b| b.revision));
+        }
     }
 }

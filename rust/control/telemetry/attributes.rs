@@ -2,7 +2,10 @@
 
 use serde_json::{Map, Value};
 
-const ALLOWED: [&str; 24] = [
+/// Ids and names are bounded like every other string the room keeps.
+pub(super) const MAX_VALUE: usize = 200;
+
+pub(super) const ALLOWED: [&str; 24] = [
     "sidevoice.session_id",
     "sidevoice.thread_id",
     "sidevoice.turn_revision",
@@ -38,7 +41,7 @@ pub(super) fn attributes(values: &Value) -> Value {
                 continue;
             }
             let value = match value {
-                Value::String(text) => Value::String(text.chars().take(200).collect()),
+                Value::String(text) => Value::String(text.chars().take(MAX_VALUE).collect()),
                 Value::Bool(_) | Value::Number(_) => value.clone(),
                 _ => continue,
             };
