@@ -3,7 +3,8 @@ name: build
 # The one producer of the core's release assets, called by nightly.yml (every push to main) and release-please.yml
 # (a release). Per target: the tests, then `cargo xtask dist` (release binary, relocatable archive, verified by
 # starting the core from it). Then `cargo xtask manifest`, one attestation over every asset, attach, read back,
-# verify, publish. Dispatched by hand on a branch, it builds and checks everything and publishes nothing.
+# verify, publish. Dispatched by hand, or on a PR that changes the packaging, it builds and checks everything and
+# publishes nothing.
 on:
   workflow_call:
     inputs:
@@ -12,6 +13,9 @@ on:
         type: string
         required: true
   workflow_dispatch:
+  # A change to the packaging itself is proven on its PR, every target, publishing nothing.
+  pull_request:
+    paths: [xtask/**, .github/workflows/build.yml, .github/actions/setup/**]
 
 permissions:
   contents: read
