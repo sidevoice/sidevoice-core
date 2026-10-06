@@ -19,9 +19,10 @@ one. A pull request already runs that packaging on every target.
 
 ## Assets
 
-- `sidevoice-core-rust-<commit>-macos-aarch64.tar.zst`, `…-linux-x86_64.tar.zst`, `…-linux-aarch64.tar.zst`: the
-  relocatable native core per target (`bin/sidevoice-core-rust`, the pinned detector models, its libraries and
-  licence notices). The name carries the source commit; the release tag carries the version.
+- `sidevoice-core-<version>-<target>.tar.zst` for `macos-aarch64`, `linux-x86_64` and `linux-aarch64` (on the nightly,
+  `sidevoice-core-nightly-<target>.tar.zst`, fixed names whose download URLs never change): the relocatable native
+  core per target (`bin/sidevoice-core-rust`, the pinned detector models, its libraries and licence notices). The
+  source commit is in the manifest and in each archive's `native-core.json`.
 - `native-core-manifest.json`: every archive with its digest and size, bound to the source commit.
 - `SHA256SUMS`.
 - `attestation.sigstore.json`: one SLSA provenance attestation whose subjects are every archive and the manifest.
@@ -29,7 +30,7 @@ one. A pull request already runs that packaging on every target.
 The signer is the workflow `release.yml` on `main`, for nightlies and releases alike. Verify an asset with:
 
 ```sh
-gh attestation verify sidevoice-core-rust-<commit>-linux-x86_64.tar.zst \
+gh attestation verify sidevoice-core-0.2.0-linux-x86_64.tar.zst \
   --repo sidevoice/sidevoice-core \
   --bundle attestation.sigstore.json \
   --cert-identity 'https://github.com/sidevoice/sidevoice-core/.github/workflows/release.yml@refs/heads/main' \
