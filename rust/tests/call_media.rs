@@ -7,15 +7,19 @@
 
 mod support;
 
+use std::collections::BTreeSet;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use prost::Message as _;
 use serde_json::{json, Value};
 use support::webrtc_peer::RtcBrowser;
 use support::*;
-use wiremock::matchers::{header, method, path, path_regex};
+use wiremock::matchers::{header, method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const THREAD: &str = "spoken-thread";
@@ -109,12 +113,17 @@ async fn a_spoken_turn_reaches_the_conversation_and_its_reply_plays_on_the_devic
     let _serial = serial().await;
     let collector = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1/metrics"))
+        .and(path_regex("^/v1/(metrics|traces)$"))
+        .and(header("content-type", "application/x-protobuf"))
         .respond_with(ResponseTemplate::new(200))
         .mount(&collector)
         .await;
-    let mut call =
-        call(|_, launch| launch.env("OTEL_EXPORTER_OTLP_ENDPOINT", collector.uri())).await;
+    let mut call = call(|_, launch| {
+        launch
+            .env("OTEL_EXPORTER_OTLP_ENDPOINT", collector.uri())
+            .env("OTEL_METRIC_EXPORT_INTERVAL", "1000")
+    })
+    .await;
     let (core, token) = (&call.core, call.token.clone());
     let pcm = speech();
     for mode in ["smart_turn", "timer"] {
@@ -231,16 +240,40 @@ async fn a_spoken_turn_reaches_the_conversation_and_its_reply_plays_on_the_devic
             browser.turn("finished", Duration::from_secs(20)).await;
         }
     }
-    eventually(Duration::from_secs(10), "the turn's telemetry", || async {
-        let received = collector.received_requests().await.unwrap_or_default();
-        received
-            .iter()
-            .any(|request| {
-                String::from_utf8_lossy(&request.body).contains("sidevoice.turn.endpoint_silence")
-            })
-            .then_some(())
+    // The stage histogram, and the stage span beside the call's span, exported as OTLP protobuf.
+    eventually(Duration::from_secs(15), "the turn's telemetry", || async {
+        let (metrics, spans) = exported(&collector).await;
+        (metrics.contains("sidevoice.turn.endpoint_silence")
+            && spans.contains("endpoint_silence")
+            && spans.contains("voice.call"))
+        .then_some(())
     })
     .await;
+}
+
+/// The metric names and span names the collector has received.
+async fn exported(collector: &MockServer) -> (BTreeSet<String>, BTreeSet<String>) {
+    let (mut metrics, mut spans) = (BTreeSet::new(), BTreeSet::new());
+    for request in collector.received_requests().await.unwrap_or_default() {
+        if request.url.path() == "/v1/metrics" {
+            let export =
+                ExportMetricsServiceRequest::decode(request.body.as_slice()).expect("OTLP metrics");
+            for scope in export
+                .resource_metrics
+                .iter()
+                .flat_map(|r| &r.scope_metrics)
+            {
+                metrics.extend(scope.metrics.iter().map(|metric| metric.name.clone()));
+            }
+        } else {
+            let export =
+                ExportTraceServiceRequest::decode(request.body.as_slice()).expect("OTLP traces");
+            for scope in export.resource_spans.iter().flat_map(|r| &r.scope_spans) {
+                spans.extend(scope.spans.iter().map(|span| span.name.clone()));
+            }
+        }
+    }
+    (metrics, spans)
 }
 
 #[tokio::test(flavor = "multi_thread")]
