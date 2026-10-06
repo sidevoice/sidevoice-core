@@ -6,6 +6,8 @@ rust-version = "1.98"
 publish = false
 
 [features]
+# Test overrides compiled into the binary: provider base URLs, the device transcription timeout, a replay render
+# gate, and no mDNS host candidates. Never in a release build.
 hosted-fixtures = ["dep:rtc"]
 
 [lib]
@@ -15,7 +17,9 @@ path = "rust/lib.rs"
 name = "sidevoice-core-rust"
 path = "rust/main.rs"
 
-# Rust integration tests live under rust/tests/: tests/ holds the Python suite and hosted harnesses.
+# Rust integration tests live under rust/tests/: tests/ holds the Python suite. Each drives the binary as a process
+# or the router in-process, with every peer (browser, connector, room, provider) a local fake written in Rust. The
+# ones that point the core at fake providers need the `hosted-fixtures` overrides (`cargo test --all-features`).
 [[test]]
 name = "node_process"
 path = "rust/tests/node_process.rs"
@@ -35,6 +39,37 @@ path = "rust/tests/speech_filter.rs"
 [[test]]
 name = "integrations"
 path = "rust/tests/integrations.rs"
+
+[[test]]
+name = "node_state"
+path = "rust/tests/node_state.rs"
+
+[[test]]
+name = "connector_link"
+path = "rust/tests/connector_link.rs"
+
+[[test]]
+name = "rendezvous"
+path = "rust/tests/rendezvous.rs"
+
+[[test]]
+name = "webrtc_answer"
+path = "rust/tests/webrtc_answer.rs"
+
+[[test]]
+name = "call_media"
+path = "rust/tests/call_media.rs"
+required-features = ["hosted-fixtures"]
+
+[[test]]
+name = "provider_routes"
+path = "rust/tests/provider_routes.rs"
+required-features = ["hosted-fixtures"]
+
+# Against the latest published connector and web client: `cargo xtask compat` (ignored otherwise).
+[[test]]
+name = "compat"
+path = "rust/tests/compat.rs"
 
 [dependencies]
 async-openai = { version = "=0.41.0", default-features = false, features = ["audio", "model", "rustls", "middleware"] }
@@ -83,6 +118,8 @@ webrtc = "=0.21.0"
 [dev-dependencies]
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics"] }
 prost = "0.14"
+# The browser end of a WebRTC call in the integration tests (the same version webrtc builds on).
+rtc = "=0.21.0"
 wiremock = "=0.6.5"
 
 [patch.crates-io]

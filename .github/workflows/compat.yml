@@ -1,0 +1,33 @@
+name: compat
+
+# Every week: this core against the latest published release of the connector and of the web client
+# (`cargo xtask compat`, xtask/src/compat.rs); on failure, open an issue labelled compat (or comment on the open one).
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: compat
+  cancel-in-progress: false
+
+jobs:
+  compat:
+    name: Against the released connector and web client
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/setup
+      # The connector runs on Node 22 or later.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: cargo xtask compat
+      - if: failure()
+        run: cargo xtask compat-report
