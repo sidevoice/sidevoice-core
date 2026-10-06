@@ -1,22 +1,15 @@
-//! What the core keeps on disk and says about itself, driven as the real process: its command line, the identity
-//! it proves, the requests that must not pass for local or authenticated ones, its log, and the state it repairs
-//! or imports at start — a broken connector credential, a legacy room history.
+//! What the core keeps on disk and says about itself, driven as the real process: the requests that must not
+//! pass for local or authenticated ones, its log, and the state it repairs or imports at start — a broken
+//! connector credential, a legacy room history. Command line, identity proof, log rotation and the trust
+//! boundary are `runtime`, `devices` and `server` unit tests and `node_process`.
 
 mod support;
 
-use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use base64::Engine as _;
-use p256::ecdsa::signature::Verifier;
-use p256::ecdsa::{Signature, VerifyingKey};
-use p256::pkcs8::DecodePublicKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use support::*;
@@ -35,76 +28,6 @@ fn read_json(path: &Path) -> Value {
 
 fn failure_key(data: &Path) -> Value {
     read_json(&data.join("core-failure.json"))["key"].clone()
-}
-
-#[test]
-fn help_lists_the_options_and_an_unreadable_argument_is_refused() {
-    let help = Command::new(CORE)
-        .arg("--help")
-        .env("LC_ALL", "en_US.UTF-8")
-        .output()
-        .unwrap();
-    assert!(help.status.success());
-    let text = String::from_utf8(help.stdout).unwrap();
-    for option in ["Usage:", "--log-file", "--room-credential", "--idle-exit"] {
-        assert!(text.contains(option), "--help names {option}: {text}");
-    }
-    let refused = Command::new(CORE)
-        .arg(OsStr::from_bytes(b"\xff"))
-        .env("LC_ALL", "en_US.UTF-8")
-        .output()
-        .unwrap();
-    assert_eq!(refused.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("Invalid core command-line arguments")
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_node_proves_the_identity_it_names() {
-    let root = tempfile::tempdir().unwrap();
-    let core = Launch::new(root.path().join("core")).start();
-    let health = core.local("GET", "/api/local/health").send().await.json();
-    let fingerprint = health["fingerprint"].as_str().unwrap().to_owned();
-    let public_key = health["public_key"].as_str().unwrap().to_owned();
-    assert_eq!(
-        core.get("/api/rendezvous").send().await.json(),
-        json!({"kind": "node", "fingerprint": fingerprint, "api": 1})
-    );
-    let der = STANDARD.decode(&public_key).unwrap();
-    assert_eq!(URL_SAFE_NO_PAD.encode(Sha256::digest(&der)), fingerprint);
-    let key = VerifyingKey::from_public_key_der(&der).expect("a P-256 public key");
-    let nonce = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
-    let proof = core
-        .get(&format!("/api/device/identity?nonce={nonce}"))
-        .send()
-        .await;
-    assert_eq!(proof.status, 200, "{proof:?}");
-    let proof = proof.json();
-    assert_eq!(
-        (proof["fingerprint"].as_str(), proof["public_key"].as_str()),
-        (Some(fingerprint.as_str()), Some(public_key.as_str()))
-    );
-    let raw = URL_SAFE_NO_PAD
-        .decode(proof["signature"].as_str().unwrap().trim_end_matches('='))
-        .unwrap();
-    let signature = Signature::from_slice(&raw).expect("a raw 64-byte signature");
-    assert!(key
-        .verify(
-            format!("sidevoice-node-identity:{nonce}").as_bytes(),
-            &signature
-        )
-        .is_ok());
-    assert!(key
-        .verify(b"sidevoice-node-identity:different", &signature)
-        .is_err());
-    assert_eq!(
-        core.get("/api/device/identity?nonce=bad")
-            .send()
-            .await
-            .status,
-        400
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -179,28 +102,18 @@ async fn a_forged_upgrade_or_spoofed_local_headers_grant_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_log_rotates_and_never_names_the_room_credential() {
+async fn the_log_never_names_the_room_credential() {
     let root = tempfile::tempdir().unwrap();
     let logs = root.path().join("logs");
     private_dir(&logs);
     let log = logs.join("custom.log");
-    fs::write(&log, vec![b'x'; 5_000_000]).unwrap();
-    fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
     let credential = root.path().join("room-credentials.json");
     let mut core = Launch::new(root.path().join("core"))
-        .arg("--launch-id")
-        .arg("custom-log")
         .arg("--log-file")
         .arg(log.display().to_string())
         .arg("--room-credential")
         .arg(credential.display().to_string())
         .start();
-    assert_eq!(core.ready["launch_id"], "custom-log");
-    assert_eq!(
-        fs::metadata(logs.join("custom.log.1")).unwrap().len(),
-        5_000_000
-    );
-    assert_eq!(mode(&log), 0o600);
     let text = until(STEP, "the ready line in the log", || {
         let text = fs::read_to_string(&log).ok()?;
         text.contains("runtime.log_ready").then_some(text)
@@ -212,7 +125,6 @@ async fn the_log_rotates_and_never_names_the_room_credential() {
     );
     assert_eq!(core.stop(), 0);
 }
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_broken_connector_credential_is_replaced_and_nothing_else_is() {
     let root = tempfile::tempdir().unwrap();
