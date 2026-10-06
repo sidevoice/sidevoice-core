@@ -1,9 +1,14 @@
 //! One bounded, non-room transcription of a selected device's spoken sample.
 
 use super::*;
+use crate::messages::LocalizedMessage;
 use crate::providers::{OpenAiTranscriber, ProviderError, ProviderErrorKind, Transcription};
 use crate::types::SpeechStage;
 use axum::body::Bytes;
+use axum::extract::{Extension, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use std::time::Duration;
 
 mod budget;
