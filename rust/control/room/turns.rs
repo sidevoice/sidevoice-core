@@ -41,8 +41,9 @@ impl Room {
         let mut guard = self.inner.lock().expect("room lock");
         let inner = &mut *guard;
         if let Some(c) = inner.browsers.get_mut(sid) {
-            if c.turn_revision == revision {
+            if c.turn_revision == revision && c.speaking {
                 c.speaking = false;
+                c.quiet_until = Some(std::time::Instant::now() + c.audio_grace);
             }
         }
         for (uid, row_id) in inner.utterances.waiting_for_turn(sid, revision) {

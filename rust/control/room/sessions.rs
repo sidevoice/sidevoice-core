@@ -56,6 +56,15 @@ impl Room {
             browser.language = language.to_owned();
         }
     }
+    pub fn set_audio_grace(&self, sid: &str, seconds: f32) {
+        if let Some(browser) = self.inner.lock().expect("room lock").browsers.get_mut(sid) {
+            browser.audio_grace = std::time::Duration::from_secs_f32(if seconds.is_finite() {
+                seconds.clamp(0.0, 10.0)
+            } else {
+                1.0
+            });
+        }
+    }
     pub fn admission(&self, language: &str) -> Value {
         let inner = self.inner.lock().expect("room lock");
         let max = max_browsers();

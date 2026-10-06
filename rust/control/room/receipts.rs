@@ -71,13 +71,25 @@ impl Room {
             "cancelled_unplayed" => "waiting_for_turn",
             other => other,
         };
-        entry.1 = next.into();
+        let previous = std::mem::replace(&mut entry.1, next.into());
+        if matches!(
+            status,
+            "playback_finished" | "skipped" | "cancelled_playing"
+        ) {
+            record.heard.insert(sid.to_owned());
+        }
+        let catch_up_of = record.replay_of.clone();
         if !record.is_replay() {
             let best = record.best_status().unwrap_or(next).to_owned();
             if let Some(row) = inner.journal.find_mut(&record.row_id) {
                 row.status = best;
                 row.reason = reason(status).map(str::to_owned);
             }
+        }
+        if let Some(original) = catch_up_of {
+            inner
+                .utterances
+                .replay_heard(&original, sid, &previous, next);
         }
         if status != "playing" {
             let browser = inner.browsers.get_mut(sid).expect("browser present");

@@ -313,9 +313,23 @@ async def main():
                                      "revision": revision, "status": "skipped"})[0] == 200
                 queued_history = request(port, "GET", "/api/presentation/history?thread_id=t3-js-thread", token=token)[1]["messages"]
                 assert [row["status"] for row in queued_history[-2:]] == ["playback_finished", "interrupted"], queued_history
+                # A browser that comes to the conversation is first handed what it never heard on it.
+                async with websockets.connect(f"ws://127.0.0.1:{port}/api/presentation/ws",
+                                              subprotocols=["sidevoice", f"sidevoice.token.{token}"]) as returning:
+                    await returning.send(json.dumps({"type": "voice-hello", "data": {}}))
+                    returning_session = (await frame(returning, "voice-session"))["session_id"]
+                    assert request(port, "POST", "/api/presentation/select", token=token,
+                                   body={"session_id": returning_session, "thread_id": "t3-js-thread"})[0] == 200
+                    replay = await frame(returning, "voice-replay")
+                    assert [reply["history_id"] for reply in replay["replies"]] == [
+                        f"{session}:voice:{uid}" for uid in ("t3-js-utterance", "t3-queue-2", "t3-queue-3")], replay
+                    caught = await frame(returning, "voice-speech")
+                    assert caught["replay"] is True and caught["history_id"] == f"{session}:voice:t3-js-utterance", caught
                 async with websockets.connect(f"ws://127.0.0.1:{port}/api/presentation/ws",
                                               subprotocols=["sidevoice", f"sidevoice.token.{token}"]) as second:
-                    await second.send(json.dumps({"type": "voice-hello", "data": {}}))
+                    # This listener asks for no catch-up, so the next live reply is the first it hears.
+                    await second.send(json.dumps({"type": "voice-hello",
+                                                  "data": {"settings": {"replay_on_return_seconds": 0}}}))
                     second_session = (await frame(second, "voice-session"))["session_id"]
                     chosen = request(port, "POST", "/api/presentation/select", token=token,
                                      body={"session_id": second_session, "thread_id": "t3-js-thread"})

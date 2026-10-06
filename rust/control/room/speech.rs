@@ -1,5 +1,4 @@
 //! Speech publication: an agent's reply becoming a journal row and an utterance for its audience.
-use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
@@ -27,7 +26,7 @@ impl Room {
             return rejected(v3);
         };
         if text.is_empty()
-            || text.len() > 6000
+            || text.chars().count() > 6000
             || uid.len() > 200
             || !valid_thread(thread)
             || p.get("language")
@@ -115,9 +114,8 @@ impl Room {
                 uid,
                 UtteranceRecord {
                     row_id,
-                    clients: HashMap::new(),
                     parked: true,
-                    replay_of: None,
+                    ..Default::default()
                 },
             );
         }
@@ -188,8 +186,7 @@ impl Inner {
             UtteranceRecord {
                 row_id,
                 clients,
-                parked: false,
-                replay_of: None,
+                ..Default::default()
             },
         );
         for listener in audience {

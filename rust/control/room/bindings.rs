@@ -75,8 +75,22 @@ impl Binding {
 #[derive(Default)]
 pub(super) struct Bindings {
     by_id: HashMap<String, Binding>,
+    /// What each thread's harness last said about working, for a call that lands on it mid-turn.
+    working: HashMap<String, bool>,
 }
 impl Bindings {
+    pub(super) fn set_working(&mut self, thread: &str, working: bool) {
+        self.working.insert(thread.to_owned(), working);
+    }
+    pub(super) fn working(&self, thread: &str) -> Option<bool> {
+        self.working.get(thread).copied()
+    }
+    /// Connector `cid` is gone: a conversation nobody can reach is not working any more.
+    pub(super) fn forget_working_of(&mut self, cid: &str) {
+        for binding in self.by_id.values().filter(|b| b.connector == cid && b.live) {
+            self.working.remove(&binding.thread);
+        }
+    }
     pub(super) fn get(&self, bid: &str) -> Option<&Binding> {
         self.by_id.get(bid)
     }

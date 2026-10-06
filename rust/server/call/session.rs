@@ -61,6 +61,8 @@ pub(super) async fn run(
         output,
     );
     call.announce().await;
+    call.state
+        .welcome(&call.session, hello.get("data"), &call.settings);
     call.serve().await;
     call.close().await;
 }
