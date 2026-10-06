@@ -1,4 +1,4 @@
-//! The retry policy that reproduces the Python OpenAI SDK: retryable statuses, server hints and backoff.
+//! The retry policy of the official OpenAI SDKs: retryable statuses, server hints and backoff.
 
 use async_openai::{error::OpenAIError, middleware::HttpRequestFactory};
 use rand::Rng;

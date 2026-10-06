@@ -6,7 +6,7 @@ use super::{render, LocalizedMessage};
 
 /// Render the existing flat refusal shape, keeping message parameters at the top level.
 ///
-/// Only fields present in the Python refusal contract are copied. Internal rendering parameters such as
+/// Only fields of the refusal contract are copied. Internal rendering parameters such as
 /// `provider_label` and `seconds_display` are never exposed on the wire.
 pub fn render_refusal(message: &LocalizedMessage, language: &str) -> Map<String, Value> {
     let mut refusal = Map::new();

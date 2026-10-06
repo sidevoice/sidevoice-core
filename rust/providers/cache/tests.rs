@@ -26,7 +26,7 @@ fn speech(byte: u8, len: usize) -> CloudSpeech {
 }
 
 #[test]
-fn key_matches_python_json_dumps_and_separates_synthesis_inputs() {
+fn key_is_stable_and_separates_synthesis_inputs() {
     assert_eq!(
         SynthesisCache::key(choice("voice-a", 1.0), "hola"),
         "e06a96f582532280a444325bc776c0f1"
@@ -110,7 +110,7 @@ async fn cancelling_a_waiter_does_not_cancel_the_shared_render() {
 }
 
 #[tokio::test]
-async fn cache_hit_read_lru_and_base64_byte_limit_match_python_behavior() {
+async fn cache_hit_read_lru_and_base64_byte_limit() {
     let cache = SynthesisCache::with_limits(2, 64);
     let first: CachedSpeech = cache
         .obtain(choice("voice-a", 1.0), "one", || async { Ok(speech(1, 4)) })

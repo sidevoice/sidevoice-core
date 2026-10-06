@@ -1,7 +1,7 @@
 //! What every integration test drives the core with: the real binary as a process, HTTP over its TCP port or its
 //! local socket, a browser's call socket, and the peers on the other end of its links (a connector over Socket.IO
 //! v2 or JSON-RPC v3, the room over Socket.IO), each written here against the wire. Nothing from another
-//! repository, no Docker, no Python.
+//! repository, no Docker.
 #![allow(dead_code)]
 
 pub mod webrtc_peer;

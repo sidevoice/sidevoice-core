@@ -1,8 +1,8 @@
 # Rust core layout
 
-The root `Cargo.toml` declares one package. Rust sources live under `rust/` so the
-existing Python `src/` remains intact. `main.rs` starts the core, and offers a finite,
-machine-readable detector self-test. Only the pipeline module imports Rustvani.
+The root `Cargo.toml` declares one package; its sources live under `rust/`. `main.rs` starts the
+core, and offers a finite, machine-readable detector self-test. Only the pipeline module imports
+Rustvani.
 
 The self-test takes a WAV file and staged asset directory:
 
@@ -18,7 +18,7 @@ paths, so its inference does not trigger a first-use download.
 
 ## Tests
 
-`cargo test --locked` runs the unit tests and the integration tests in `rust/tests/`, most of
+`cargo test --locked` runs the unit tests and the integration tests in `tests/`, most of
 which drive the built binary as a process. Every peer is a local fake written in Rust: a browser's
 call socket and WebRTC track, a connector on the v2 (Socket.IO) and v3 (JSON-RPC) links, the
 room on the rendezvous link, the cloud providers. Nothing reaches the network, and no other

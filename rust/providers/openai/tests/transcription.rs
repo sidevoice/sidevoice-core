@@ -9,7 +9,7 @@ use wiremock::{
 };
 
 #[tokio::test]
-async fn sends_wav_and_python_options_through_async_openai_audio_sdk() {
+async fn sends_wav_and_stage_options_through_async_openai_audio_sdk() {
     let server = MockServer::start().await;
     reply_json(&server, "/v1/audio/transcriptions", JSON_TRANSCRIPTION).await;
     let transcriber = local_transcriber(&server, Duration::from_secs(5), 0);
@@ -63,7 +63,7 @@ async fn whisper_uses_verbose_json_without_logprobs_and_transcription_is_trimmed
 }
 
 #[tokio::test]
-async fn diarization_keeps_the_python_sdk_default_response_format() {
+async fn diarization_keeps_the_sdk_default_response_format() {
     let server = MockServer::start().await;
     reply_json(
         &server,

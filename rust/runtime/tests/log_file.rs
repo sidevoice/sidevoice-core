@@ -1,5 +1,4 @@
-//! The core's own log end to end, ported from the Python suite (`tests/test_node_process.py`
-//! `LogTests`): private, JSON lines naming the launch, rotated at 5 MB keeping two.
+//! The core's own log end to end: private, JSON lines naming the launch, rotated at 5 MB keeping two.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;

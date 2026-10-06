@@ -20,7 +20,7 @@ pub(super) async fn idle_for(state: Arc<AppState>, seconds: f64) {
     let mut since = tokio::time::Instant::now();
     loop {
         tokio::time::sleep(Duration::from_secs_f64(seconds.clamp(0.01, 5.0))).await;
-        // Like Python, a linked connector keeps the core up as much as an open call does.
+        // A linked connector keeps the core up as much as an open call does.
         if state.open_calls() > 0 || state.room.has_connector() {
             since = tokio::time::Instant::now();
         } else if since.elapsed() >= quiet {

@@ -47,7 +47,7 @@ fn private_values_and_unlisted_attributes_never_pass() {
 }
 
 #[test]
-fn the_allow_list_is_python_s_twenty_four_names() {
+fn the_allow_list_is_twenty_four_names() {
     assert_eq!(super::attributes::ALLOWED.len(), 24);
     let every: serde_json::Map<String, serde_json::Value> = super::attributes::ALLOWED
         .iter()

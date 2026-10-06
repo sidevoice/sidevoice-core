@@ -1,4 +1,4 @@
-//! Named-parameter substitution in bundle templates, with the Python `{name:.1f}` format.
+//! Named-parameter substitution in bundle templates, with a `{name:.1f}` fixed-precision format.
 
 use serde_json::{Map, Value};
 

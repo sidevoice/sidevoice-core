@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn defaults_and_configuration_follow_python() {
+fn defaults_and_configuration() {
     let default = Heartbeat::configured(None, None).unwrap();
     assert_eq!(default.interval, Duration::from_secs(15));
     assert_eq!(default.budget, Duration::from_secs(30));

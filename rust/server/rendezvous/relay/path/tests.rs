@@ -30,8 +30,7 @@ fn relay_path_never_crosses_local_or_rendezvous_boundary() {
     assert!(!crate::server::safe_url("http://room.example"));
 }
 
-/// Ported from the Python suite (`tests/test_local_socket.py`, `tests/test_device_pairing.py`):
-/// the real local-only rule, however a path is spelled, never reaches the relay.
+/// The real local-only rule, however a path is spelled, never reaches the relay.
 #[test]
 fn the_room_relays_none_of_it_however_it_is_spelled() {
     let base = loopback();

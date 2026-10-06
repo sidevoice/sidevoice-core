@@ -28,7 +28,7 @@ impl TurnOwner {
             .map(|p| p.deadline)
     }
 
-    /// When an open turn is closed because no audio has arrived for it (Python's audio idle timeout).
+    /// When an open turn is closed because no audio has arrived for it (the audio idle timeout).
     fn idle_deadline(&self) -> Option<Instant> {
         self.speaking
             .as_ref()

@@ -89,7 +89,7 @@ async fn host_agent_action(
     ))
 }
 
-/// The host-agent routes refuse a foreign page by key, as the Python core did (`origin-not-allowed`).
+/// The host-agent routes refuse a foreign page by key (`origin-not-allowed`).
 fn require_page_origin(headers: &HeaderMap) -> Result<(), Refusal> {
     if origin_allowed(headers) {
         Ok(())
@@ -99,7 +99,7 @@ fn require_page_origin(headers: &HeaderMap) -> Result<(), Refusal> {
 }
 
 /// A host-agent request to the connector, with the routes' own deadline around the peer's: `None` when the deadline
-/// passed (504), an error when the connector could not answer at all (502), as the Python core told them apart.
+/// passed (504), an error when the connector could not answer at all (502).
 async fn ask_connector(
     peer: &ConnectorPeer,
     method: &str,

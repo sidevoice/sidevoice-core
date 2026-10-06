@@ -1,4 +1,4 @@
-//! Catalogue, settings and model-check rules shared with the existing Python vectors.
+//! Catalogue, settings and model-check rules.
 //!
 //! The catalogue is embedded data; each submodule owns one set of rules over it.
 
@@ -13,7 +13,6 @@ mod json;
 mod mic;
 mod offers;
 mod options;
-mod python_repr;
 mod runtime;
 mod settings;
 mod stage;

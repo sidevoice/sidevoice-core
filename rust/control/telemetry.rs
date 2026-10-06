@@ -7,7 +7,7 @@
 //! client or span is ever created, and every hook is a check of an `Option`.
 //!
 //! Export uses the standard SDK (`opentelemetry_sdk`) and OTLP/HTTP protobuf
-//! exporter (`opentelemetry-otlp`), as the Python core did. Spans leave through
+//! exporter (`opentelemetry-otlp`). Spans leave through
 //! a batch processor (bounded queue of 2048, dropped when full, one export at a
 //! time); metrics are aggregated in memory and exported periodically as
 //! cumulative explicit-bucket histograms. Neither ever blocks a call path: a
@@ -63,7 +63,7 @@ pub const STAGES: [&str; 10] = [
 
 const DEFAULT_SERVICE_NAME: &str = "sidevoice-core";
 /// Explicit bucket bounds of every stage histogram, in milliseconds. The SDK's
-/// (and Python's) defaults, written down so the export is not left to a default.
+/// defaults, written down so the export is not left to a default.
 pub const BUCKETS_MS: [f64; 15] = [
     0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0,
     10000.0,
@@ -114,7 +114,7 @@ fn admits(stage: &str, milliseconds: f64) -> bool {
         && (0.0..=3_600_000.0).contains(&milliseconds)
 }
 
-/// The counters Python's core kept, by the name a collector sees.
+/// The counters the core keeps, by the name a collector sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Counted {
     /// Playback stalls a browser reported.
@@ -271,7 +271,7 @@ impl Telemetry {
         })
     }
 
-    /// The configuration Python read: `OTEL_EXPORTER_OTLP_ENDPOINT` switches it on,
+    /// The configuration from the environment: `OTEL_EXPORTER_OTLP_ENDPOINT` switches it on,
     /// `OTEL_SERVICE_NAME` names the service.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Option<Self> {
         Self::configure(

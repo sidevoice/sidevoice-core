@@ -1,5 +1,4 @@
-//! Node identity, pairing codes and device tokens, ported from the Python suite
-//! (`tests/test_device_pairing.py` `StoreTests` and the store half of `NodeSurfaceTests`).
+//! Node identity, pairing codes and device tokens, as the store keeps them.
 //! Pairing-secret expiry is `PairingSecrets`' own, covered beside it.
 
 use std::os::unix::fs::PermissionsExt;

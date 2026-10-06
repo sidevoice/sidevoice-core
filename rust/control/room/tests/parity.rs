@@ -1,4 +1,4 @@
-//! Behaviour the Python room had and the Rust room now matches: catch-up of missed replies,
+//! The room's behaviour across calls and conversations: catch-up of missed replies,
 //! the playback bound, the pause after speaking, focus and working state, and input limits.
 use std::time::{Duration, Instant};
 

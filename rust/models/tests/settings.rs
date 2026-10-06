@@ -1,4 +1,4 @@
-//! Field-by-field settings validation and the pinned Python diagnostics.
+//! Field-by-field settings validation and its diagnostics.
 
 use serde_json::{json, Map, Value};
 
@@ -33,7 +33,7 @@ fn incoming_wire_settings_validate_ui_locale_exactly_and_fallback_at_field_bound
 }
 
 #[test]
-fn settings_diagnostics_match_pinned_python_for_enum_number_and_required_fields() {
+fn settings_diagnostics_for_enum_number_and_required_fields() {
     let defaults = defaults();
     let cases = [
         (
@@ -57,7 +57,7 @@ fn settings_diagnostics_match_pinned_python_for_enum_number_and_required_fields(
         assert_eq!(
             settings_from(Some(&input), &defaults).issue.as_deref(),
             Some(expected),
-            "Python settings.py output for {input}"
+            "Settings diagnostic for {input}"
         );
     }
 
@@ -72,8 +72,8 @@ fn settings_diagnostics_match_pinned_python_for_enum_number_and_required_fields(
 }
 
 #[test]
-fn inclusive_float_endpoints_match_the_python_settings_contract() {
-    // Python settings.py accepts both inclusive endpoints for every numeric settings field.
+fn inclusive_float_endpoints_are_accepted() {
+    // Both inclusive endpoints are accepted for every numeric settings field.
     let endpoints = [
         ("audio_grace_seconds", 0.0, 10.0),
         ("replay_on_return_seconds", 0.0, 3600.0),
@@ -114,7 +114,7 @@ fn inclusive_float_endpoints_match_the_python_settings_contract() {
                 .issue
                 .as_deref(),
             Some(expected),
-            "Python settings.py diagnostic for {name}"
+            "Settings diagnostic for {name}"
         );
     }
 }

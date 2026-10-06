@@ -43,7 +43,7 @@ fn cached_reply(
 
 impl AppState {
     /// A call that just joined: its pause after speaking, the conversation its hello names (if
-    /// that one is still in the room), and what it never heard on it (Python `calls.py:53-101`).
+    /// that one is still in the room), and what it never heard on it.
     pub(in crate::server) fn welcome(
         &self,
         session: &str,

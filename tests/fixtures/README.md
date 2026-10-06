@@ -5,5 +5,5 @@ a real voice detector, a real turn, no microphone. SHA-256:
 `a68664544e41df96bc15d2ce5194797e53ab47be223a841639ea16064030eff0`; first committed with the Core at
 `4d6df599239602954a3c6ab503c642eeeab5ca12`.
 
-It is the voice in the Rust integration tests (`rust/tests/`) and the detector self-test `cargo xtask dist` runs
+It is the voice in the integration tests (`tests/`) and the detector self-test `cargo xtask dist` runs
 on every packaged archive.

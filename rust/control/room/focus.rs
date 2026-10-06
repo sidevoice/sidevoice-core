@@ -12,7 +12,7 @@ impl Room {
             return Err(RoomError::new(400, "room.thread_invalid"));
         }
         let mut inner = self.inner.lock().expect("room lock");
-        // As in the Python room, selecting needs no active binding: the conversation may come
+        // Selecting needs no active binding: the conversation may come
         // back, and what was missed on it is replayed by the caller.
         let title = inner
             .bindings

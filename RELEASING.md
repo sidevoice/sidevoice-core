@@ -78,7 +78,7 @@ Build artifacts on Actions runs are kept 7 days, for debugging only. Download fr
 
 `compat` runs every Monday (and by hand): `cargo xtask compat` takes the latest published `vX.Y.Z` release of
 sidevoice-connector and of sidevoice-web (never `nightly`), checks its assets against its `SHA256SUMS`, and runs
-`rust/tests/compat.rs` against them with this core built from `main`: the released connector (`sidevoice-uplink-*.tgz`,
+`tests/compat.rs` against them with this core built from `main`: the released connector (`sidevoice-uplink-*.tgz`,
 run with Node) links to the core, takes a typed input and publishes a reply; every node route the released web
 bundle (`sidevoice-web-*.tar.gz`) names exists. A failure opens an issue labelled `compat`, or comments on the open
 one. A repository with no published release is skipped and said so in the log: today neither has one, so the

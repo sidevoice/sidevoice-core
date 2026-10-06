@@ -1,4 +1,4 @@
-//! The latency view's rules, ported from the Python suite (`tests/test_latency.py` `LatencyTest`):
+//! The latency view's rules:
 //! intervals only within the matching turn, first observation wins, missing is not zero, rows are
 //! bounded, and every client- or provider-supplied duration is allowlisted and range-checked.
 

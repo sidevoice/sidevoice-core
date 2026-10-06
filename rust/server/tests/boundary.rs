@@ -1,8 +1,7 @@
-//! The node's trust boundary over both listeners, ported from the Python suite:
-//! `tests/test_local_socket.py` (what only the socket serves, and that none of it exists over TCP
-//! or to a page; the relay half is beside `relayable`), `tests/test_device_pairing.py` (the token every route
-//! but a few requires, the call socket's token as a subprotocol, revocation), and
-//! `tests/test_desktop_shell.py` (CORS and preflights for desktop origins, a foreign Host refused).
+//! The node's trust boundary over both listeners: what only the socket serves, and that none of it
+//! exists over TCP or to a page (the relay half is beside `relayable`); the token every route but a
+//! few requires, the call socket's token as a subprotocol, revocation; and CORS and preflights for
+//! desktop origins, a foreign Host refused.
 
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;

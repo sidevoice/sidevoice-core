@@ -2,7 +2,7 @@
 //!
 //! "Latest published" is GitHub's `releases/latest` of each repository: the newest `vX.Y.Z` release that is
 //! neither a draft nor a pre-release, so never `nightly`. Each release's assets are downloaded, checked against
-//! its `SHA256SUMS` and unpacked; then `rust/tests/compat.rs` runs with the unpacked artifact named in its
+//! its `SHA256SUMS` and unpacked; then `tests/compat.rs` runs with the unpacked artifact named in its
 //! environment. A repository with no such release yet is reported and skipped: there is nothing published to be
 //! compatible with. `SIDEVOICE_COMPAT_CONNECTOR_TAG` and `SIDEVOICE_COMPAT_WEB_TAG` name another release to check
 //! instead (a candidate, or `nightly`).

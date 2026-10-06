@@ -1,6 +1,5 @@
-//! The complete-turn speech gate with the real Silero model, ported from the Python suite
-//! (`tests/test_speech_filter.py`): silence, noise and clicks never reach a provider; speech does.
-//! Needs the staged Rustvani models (`RUSTVANI_CACHE_DIR`), as `rust-check.yml` provides.
+//! The complete-turn speech gate with the real Silero model: silence, noise and clicks never reach
+//! a provider; speech does. Needs the staged Rustvani models (`RUSTVANI_CACHE_DIR`, `cargo xtask models`).
 
 use sidevoice_core::pipeline::has_speech;
 
