@@ -21,8 +21,19 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const THREAD: &str = "spoken-thread";
 const OTHER: &str = "other-thread";
 
+/// Every call here shares one conversation: a browser coming to it would first be handed every reply it never
+/// heard (replay on return, covered in connector_link), so the calls ask for no catch-up. They also expect a
+/// reply right after a turn, so the pause after speaking is off.
+fn quiet_room(mut settings: Value) -> Value {
+    settings["replay_on_return_seconds"] = json!(0);
+    settings["audio_grace_seconds"] = json!(0);
+    settings
+}
+
 fn timer(merge_window: f64) -> Value {
-    json!({"turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": merge_window})
+    quiet_room(
+        json!({"turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": merge_window}),
+    )
 }
 
 fn decode(audio: &Value) -> Vec<u8> {
@@ -110,8 +121,8 @@ async fn a_spoken_turn_reaches_the_conversation_and_its_reply_plays_on_the_devic
         let mut browser = core
             .join(
                 &token,
-                json!({"turn_end_mode": mode, "merge_window_secs": 0, "user_speech_timeout": 0.5,
-                    "smart_turn_min_silence": 0.5, "smart_turn_max_silence": 1.0}),
+                quiet_room(json!({"turn_end_mode": mode, "merge_window_secs": 0, "user_speech_timeout": 0.5,
+                    "smart_turn_min_silence": 0.5, "smart_turn_max_silence": 1.0})),
             )
             .await;
         let session = browser.session.clone();

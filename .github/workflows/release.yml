@@ -43,7 +43,7 @@ jobs:
           ref: ${{ inputs.tag || github.sha }}
       - uses: ./.github/actions/setup
       - run: cargo test --locked
-      - run: cargo test --locked --all-features
+      - run: cargo test --locked --all-features --test call_media --test provider_routes
       - run: cargo xtask dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

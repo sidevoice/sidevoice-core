@@ -189,8 +189,31 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
         "{history:?}"
     );
 
-    // Two browsers on the same conversation hear the same reply; one finishing it is enough.
-    let mut second = core.join(&token, Value::Null).await;
+    // A browser that comes to the conversation is first handed what it never heard on it, oldest first.
+    let mut returning = core.join(&token, Value::Null).await;
+    core.select(&token, &returning.session, THREAD).await;
+    let replay = returning.frame("voice-replay").await;
+    let replayed: Vec<_> = replay["replies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reply| reply["history_id"].clone())
+        .collect();
+    let expected: Vec<_> = ["reply", "queued-2", "queued-3"]
+        .iter()
+        .map(|uid| json!(format!("{session}:voice:{uid}")))
+        .collect();
+    assert_eq!(replayed, expected, "{replay}");
+    let caught = returning.frame("voice-speech").await;
+    assert_eq!(caught["replay"], true, "{caught}");
+    assert_eq!(caught["history_id"], format!("{session}:voice:reply"));
+    returning.close().await;
+
+    // Two browsers on the same conversation hear the same reply; one finishing it is enough. This listener asks
+    // for no catch-up, so the next live reply is the first it hears.
+    let mut second = core
+        .join(&token, json!({"replay_on_return_seconds": 0}))
+        .await;
     core.select(&token, &second.session, THREAD).await;
     let second_revision = core.revision(&token, &second.session).await;
     let answer = peer

@@ -25,8 +25,10 @@ room on the rendezvous link, the cloud providers. Nothing reaches the network, a
 repository is checked out. The tests that run the voice detectors need the models staged in
 `RUSTVANI_CACHE_DIR` (`cargo xtask models`).
 
-`cargo test --locked --all-features` adds the tests that point the core at fake providers
-through the `hosted-fixtures` overrides (`call_media`, `provider_routes`). CI runs both.
+`cargo test --locked --all-features --test call_media --test provider_routes` runs the tests that
+point the core at fake providers through the `hosted-fixtures` overrides. CI runs both steps: the rest
+of the suite stays on the binary as shipped, because `hosted-fixtures` also turns off mDNS host
+candidates, which `webrtc_answer` checks.
 
 Compatibility with the latest published releases of the connector and the web client is
 `cargo xtask compat`, run weekly by `.github/workflows/compat.yml`.
