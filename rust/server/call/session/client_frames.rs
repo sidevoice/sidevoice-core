@@ -67,6 +67,9 @@ impl Call {
         self.settings.tts = settings.tts;
         self.settings.ui_language = settings.ui_language;
         self.settings.audio_grace_seconds = settings.audio_grace_seconds;
+        self.state
+            .room
+            .set_audio_grace(&self.session, settings.audio_grace_seconds);
         self.settings.replay_on_return_seconds = settings.replay_on_return_seconds;
         self.state
             .call_settings

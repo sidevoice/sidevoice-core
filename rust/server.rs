@@ -80,7 +80,9 @@ impl AppState {
         // Keep leave and the final purge atomic with that admission path.
         let mut audio = self.replay_audio.lock().expect("replay audio lock");
         self.room.leave(session);
-        audio.retain(|uid, _| !uid.starts_with(&format!("{session}:replay:")));
+        audio.retain(|uid, _| {
+            !uid.starts_with(&format!("{session}:replay:")) && self.room.has_replay(uid)
+        });
     }
 
     #[expect(

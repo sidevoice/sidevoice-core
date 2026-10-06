@@ -8,7 +8,20 @@ use super::util::field;
 use super::{Inner, Room};
 
 const MAX_HISTORY: usize = 2000;
+/// How long input waits for a conversation that is not there, unless `VOICE_INPUT_TTL_SECONDS` says.
 const INPUT_TTL: u64 = 600;
+
+fn input_ttl() -> u64 {
+    static TTL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| parse_input_ttl(std::env::var("VOICE_INPUT_TTL_SECONDS").ok().as_deref()))
+}
+pub(super) fn parse_input_ttl(value: Option<&str>) -> u64 {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(INPUT_TTL)
+}
 
 #[derive(Default)]
 pub(super) struct Row {
@@ -46,7 +59,7 @@ impl Row {
     }
     /// Pending input that has waited too long to be worth delivering.
     pub(super) fn expired(&self, now: u64) -> bool {
-        now.saturating_sub(self.queued_at) >= INPUT_TTL
+        now.saturating_sub(self.queued_at) >= input_ttl()
     }
     /// Put this input back in the queue, to be delivered at the next opportunity.
     pub(super) fn requeue(&mut self) {

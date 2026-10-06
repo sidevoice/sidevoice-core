@@ -18,8 +18,18 @@ impl Room {
         if !inner.peers.detach(cid, generation) {
             return;
         }
+        inner.bindings.forget_working_of(cid);
         let ids = inner.bindings.go_offline(cid);
         inner.bindings_went_offline(&ids);
+    }
+    /// Whether any connector is linked: the core does not idle out from under one.
+    pub fn has_connector(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("room lock")
+            .peers
+            .latest()
+            .is_some()
     }
     pub fn current_peer(&self, cid: &str, generation: &str) -> bool {
         self.inner

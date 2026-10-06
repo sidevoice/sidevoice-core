@@ -30,12 +30,19 @@ fn reachability(binding: &Binding, language: &str) -> Value {
     if !binding.live {
         return json!({"state":"offline","detail":render("room.reach_offline")});
     }
-    if binding
+    if let Some(inbound) = binding
         .inbound
         .as_ref()
-        .is_some_and(|inbound| inbound.get("ok") == Some(&Value::Bool(false)))
+        .filter(|inbound| inbound.get("ok") == Some(&Value::Bool(false)))
     {
-        return json!({"state":"holding","detail":render("room.reach_holding"),"remedy":Value::Null});
+        // The connector knows why its harness holds input and how to fix it: say that, not ours.
+        let detail = inbound
+            .get("reason")
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty())
+            .map_or_else(|| render("room.reach_holding"), str::to_owned);
+        let remedy = inbound.get("remedy").cloned().unwrap_or(Value::Null);
+        return json!({"state":"holding","detail":detail,"remedy":remedy});
     }
     if binding.capabilities.get("deliver").and_then(Value::as_str) == Some("unsupported") {
         return json!({"state":"holding","detail":render("room.reach_unsupported")});

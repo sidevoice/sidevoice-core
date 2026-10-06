@@ -166,6 +166,7 @@ fn replay_cancellation_close_and_leave_keep_original_history() {
             .status,
         "playback_finished"
     );
+    room.set_audio_grace(&sid, 0.0);
     room.finish_turn(&sid, turn.revision);
     room.receipt(&sid, "held-replay", turn.revision, "playing")
         .unwrap();

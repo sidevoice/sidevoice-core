@@ -151,7 +151,9 @@ impl Room {
             }
             {
                 let mut inner = self.inner.lock().expect("room lock");
+                let now = std::time::Instant::now();
                 for sid in inner.browsers.ids() {
+                    inner.expire_playback(&sid, now);
                     inner.dispatch_client(&sid);
                 }
             }

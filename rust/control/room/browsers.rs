@@ -1,5 +1,6 @@
 //! Browser calls: each call's focus, turn and playback queue, and the room's recent sessions.
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -42,6 +43,11 @@ pub(super) struct Browser {
     pub(super) sent: u64,
     pub(super) active: Option<String>,
     pub(super) pending: VecDeque<String>,
+    /// The utterance handed to this call, and when it stops being waited on.
+    pub(super) playback_watch: Option<(String, Instant)>,
+    /// The pause after the person stops speaking before a reply starts (`audio_grace_seconds`).
+    pub(super) audio_grace: Duration,
+    pub(super) quiet_until: Option<Instant>,
 }
 impl Browser {
     pub(super) fn new(device: String, language: String, sender: mpsc::Sender<Value>) -> Self {
@@ -57,6 +63,9 @@ impl Browser {
             sent: 0,
             active: None,
             pending: VecDeque::new(),
+            playback_watch: None,
+            audio_grace: Duration::from_secs(1),
+            quiet_until: None,
         }
     }
     /// Send an event to the browser if its channel has room; false if it was dropped.

@@ -46,6 +46,7 @@ mod util;
 pub use error::RoomError;
 pub use latency::{latency_now_micros, LatencyDuration, LatencyEvent, LatencyMark, LatencyReply};
 pub use peers::{ConnectorPeer, PeerError, PeerRequest};
+pub use replay::MissedReply;
 pub use turns::VoiceTurn;
 
 use bindings::Bindings;
