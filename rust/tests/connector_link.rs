@@ -48,7 +48,7 @@ async fn refused_and_turned_away_calls_give_their_seat_back() {
     core.calls_become(8).await;
     for _ in 0..4 {
         let mut refused = Browser::new(core.open_call(&token).await);
-        refused.send("voice-hello", json!({})).await;
+        // A full room refuses before the hello, so none is sent.
         assert_eq!(refused.frame("error").await["reason"], "room_is_full");
         assert_eq!(refused.closed(STEP).await, 1013);
         core.calls_become(8).await;
