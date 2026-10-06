@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
 
-use crate::control::room::latency::{register_latency_reply, MAX_LATENCY_REPLIES};
+use crate::control::room::latency_log::MAX_LATENCY_REPLIES;
 use crate::control::room::Room;
 use crate::storage::PrivateDir;
 
@@ -14,14 +14,12 @@ fn latency_input_keeps_only_recent_turns_and_seeds_recent_reply() {
         room.latency_duration(&sid, "thread", revision, None, "audio_ms", revision as f64);
     }
     let mut inner = room.inner.lock().unwrap();
-    assert_eq!(inner.latency_input.len(), MAX_LATENCY_REPLIES);
-    assert!(!inner
-        .latency_input
-        .contains_key(&(sid.clone(), "thread".into(), 1)));
+    assert_eq!(inner.latency.input_turns(), MAX_LATENCY_REPLIES);
+    assert!(!inner.latency.has_input(&sid, "thread", 1));
     let newest = MAX_LATENCY_REPLIES as u64 + 3;
-    register_latency_reply(&mut inner, &sid, "thread", newest, "reply", "queued");
+    inner.register_latency_reply(&sid, "thread", newest, "reply", "queued");
     assert_eq!(
-        inner.latency_replies[&sid].back().unwrap().input_ms[0].milliseconds,
+        inner.latency.records(&sid).1.last().unwrap().input_ms[0].milliseconds,
         newest as f64
     );
 }

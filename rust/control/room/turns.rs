@@ -2,7 +2,6 @@
 use serde_json::{json, Value};
 
 use super::error::RoomError;
-use super::playback::{dispatch_client, hold_client, sync_row};
 use super::Room;
 
 /// Focus and revision captured atomically when a browser opens a voice turn.
@@ -22,77 +21,46 @@ impl Room {
         let Some(c) = inner.browsers.get_mut(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
         };
-        c.revision += 1;
-        c.turn_revision = c.revision;
+        let revision = c.next_revision(sid);
+        c.turn_revision = revision;
         c.speaking = true;
         c.cancelled_turn = None;
-        let _ = c.sender.try_send(
-            json!({"type":"voice-cancel","data":{"session_id":sid,"revision":c.revision}}),
-        );
+        let bound = c.bound_target();
         let result = VoiceTurn {
             session_id: sid.into(),
-            revision: c.revision,
-            thread_id: c
-                .target
-                .as_ref()
-                .filter(|t| !t.thread.is_empty())
-                .map(|t| t.thread.clone()),
-            binding_id: c
-                .target
-                .as_ref()
-                .filter(|t| !t.thread.is_empty())
-                .map(|t| t.binding_id.clone()),
+            revision,
+            thread_id: bound.map(|t| t.thread.clone()),
+            binding_id: bound.map(|t| t.binding_id.clone()),
             title: c.target.as_ref().and_then(|t| t.title.clone()),
             language: c.language.clone(),
         };
-        hold_client(&mut inner, sid, result.revision);
+        inner.hold_client(sid, revision);
         Ok(result)
     }
     pub fn finish_turn(&self, sid: &str, revision: u64) {
-        let mut inner = self.inner.lock().expect("room lock");
+        let mut guard = self.inner.lock().expect("room lock");
+        let inner = &mut *guard;
         if let Some(c) = inner.browsers.get_mut(sid) {
             if c.turn_revision == revision {
                 c.speaking = false;
             }
         }
-        let waiting: Vec<(String, String)> = inner
-            .utterances
-            .iter()
-            .filter(|(_, u)| {
-                u.clients
-                    .get(sid)
-                    .is_some_and(|(rev, status)| *rev == revision && status == "waiting_for_turn")
-            })
-            .map(|(uid, u)| (uid.clone(), u.row_id.clone()))
-            .collect();
-        for (uid, row_id) in waiting {
-            let Some(row) = inner.rows.iter().find(|r| r.id == row_id) else {
+        for (uid, row_id) in inner.utterances.waiting_for_turn(sid, revision) {
+            let Some(row) = inner.journal.find(&row_id) else {
                 continue;
             };
-            let thread = row.thread.clone();
             let Some(browser) = inner.browsers.get(sid) else {
                 continue;
             };
-            if browser.speaking
-                || browser.revision != revision
-                || browser.target.as_ref().is_none_or(|t| t.thread != thread)
-            {
+            if browser.speaking || browser.revision != revision || !browser.is_on(&row.thread) {
                 continue;
             }
-            if let Some(record) = inner.utterances.get_mut(&uid) {
-                if let Some(entry) = record.clients.get_mut(sid) {
-                    entry.1 = "queued".into();
-                }
-            }
-            if inner
-                .utterances
-                .get(&uid)
-                .is_some_and(|record| record.replay_of.is_none())
-            {
-                sync_row(&mut inner, &row_id, "queued", None);
+            inner.utterances.set_client_status(&uid, sid, "queued");
+            if inner.utterances.get(&uid).is_some_and(|r| !r.is_replay()) {
+                inner.sync_row(&row_id, "queued", None);
             }
         }
-        dispatch_client(&mut inner, sid);
+        inner.dispatch_client(sid);
     }
 
     pub fn cancel_input(&self, sid: &str, revision: u64) -> Result<Value, RoomError> {
@@ -105,9 +73,7 @@ impl Room {
         }
         browser.cancelled_turn = Some(revision);
         let thread = browser.target.as_ref().map(|target| target.thread.clone());
-        let _ = browser
-            .sender
-            .try_send(json!({"type":"voice-user-turn","data":{
+        browser.notify(json!({"type":"voice-user-turn","data":{
             "phase":"cancelled","revision":revision,"thread_id":thread}}));
         Ok(json!({"status":"cancelled"}))
     }

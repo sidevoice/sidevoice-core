@@ -1,4 +1,5 @@
-//! Small helpers shared by every part of the room: clocks, identifiers and input checks.
+//! Small helpers shared by every part of the room: clocks, identifiers, input checks and the
+//! default conversation title.
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -32,4 +33,12 @@ pub(super) fn valid_thread(thread: &str) -> bool {
         && thread
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+}
+/// The title a conversation shows when its agent declared none.
+pub(super) fn default_title(thread: &str, language: &str) -> String {
+    crate::messages::render(
+        &crate::messages::LocalizedMessage::new("room.conversation_title")
+            .with_param("id", thread.chars().take(8).collect::<String>()),
+        language,
+    )
 }

@@ -2,8 +2,8 @@ use serde_json::json;
 use tokio::sync::{mpsc, watch};
 
 use crate::control::room::replay::MAX_REPLAY_RECORDS;
-use crate::control::room::speech::MAX_UTTERANCES;
 use crate::control::room::util::id;
+use crate::control::room::utterances::MAX_UTTERANCES;
 use crate::control::room::{ConnectorPeer, Room};
 use crate::storage::PrivateDir;
 
@@ -59,7 +59,13 @@ fn replay_burst_reserves_live_speech_and_retires_terminal_records() {
     );
     assert_eq!(live["status"], "queued");
     for _ in 0..MAX_REPLAY_RECORDS {
-        let active = room.inner.lock().unwrap().browsers[&sid]
+        let active = room
+            .inner
+            .lock()
+            .unwrap()
+            .browsers
+            .get(&sid)
+            .unwrap()
             .active
             .clone()
             .unwrap();
@@ -69,7 +75,14 @@ fn replay_burst_reserves_live_speech_and_retires_terminal_records() {
             .unwrap();
     }
     assert_eq!(
-        room.inner.lock().unwrap().browsers[&sid].active.as_deref(),
+        room.inner
+            .lock()
+            .unwrap()
+            .browsers
+            .get(&sid)
+            .unwrap()
+            .active
+            .as_deref(),
         Some("next-live")
     );
     room.receipt(&sid, "next-live", revision, "playing")
@@ -86,18 +99,10 @@ fn replay_burst_reserves_live_speech_and_retires_terminal_records() {
         while received.try_recv().is_ok() {}
     }
     let inner = room.inner.lock().unwrap();
-    assert!(inner
-        .utterances
-        .values()
-        .all(|record| record.replay_of.is_none()));
-    assert!(inner.utterances.contains_key("original"));
+    assert_eq!(inner.utterances.replay_count(), 0);
+    assert!(inner.utterances.contains("original"));
     assert_eq!(
-        inner
-            .rows
-            .iter()
-            .find(|row| row.id == history_id)
-            .unwrap()
-            .status,
+        inner.journal.find(&history_id).unwrap().status,
         "playback_finished"
     );
 }
@@ -148,16 +153,15 @@ fn replay_cancellation_close_and_leave_keep_original_history() {
         .lock()
         .unwrap()
         .utterances
-        .contains_key("cancelled-replay"));
+        .contains("cancelled-replay"));
     room.replay_one(&sid, &history_id, "held-replay").unwrap();
     let turn = room.begin_turn(&sid).unwrap();
     assert_eq!(
         room.inner
             .lock()
             .unwrap()
-            .rows
-            .iter()
-            .find(|row| row.id == history_id)
+            .journal
+            .find(&history_id)
             .unwrap()
             .status,
         "playback_finished"
@@ -180,7 +184,7 @@ fn replay_cancellation_close_and_leave_keep_original_history() {
         .lock()
         .unwrap()
         .utterances
-        .contains_key("leaving-replay"));
+        .contains("leaving-replay"));
     room.replay_one(&sid, &history_id, "closed-replay").unwrap();
     room.close_channel("replay-thread").unwrap();
     assert!(!room
@@ -188,23 +192,17 @@ fn replay_cancellation_close_and_leave_keep_original_history() {
         .lock()
         .unwrap()
         .utterances
-        .contains_key("closed-replay"));
+        .contains("closed-replay"));
     assert_eq!(
         room.inner
             .lock()
             .unwrap()
-            .rows
-            .iter()
-            .find(|row| row.id == history_id)
+            .journal
+            .find(&history_id)
             .unwrap()
             .status,
         "playback_finished"
     );
     room.leave(&sid);
-    assert!(room
-        .inner
-        .lock()
-        .unwrap()
-        .utterances
-        .contains_key("original"));
+    assert!(room.inner.lock().unwrap().utterances.contains("original"));
 }

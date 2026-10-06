@@ -2,6 +2,7 @@
 mod input;
 mod latency;
 mod peers;
+mod playback;
 mod pull;
 mod push;
 mod replay;

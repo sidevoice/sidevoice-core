@@ -2,10 +2,17 @@
 use serde_json::{json, Value};
 
 use super::error::RoomError;
-use super::latency::{latency_now_micros, mark_latency, status_latency_reply, LatencyEvent};
-use super::playback::{dispatch_client, status_rank};
-use super::replay::retire_terminal_replays;
+use super::latency::{latency_now_micros, LatencyEvent};
 use super::Room;
+
+const RECEIPTS: [&str; 6] = [
+    "playing",
+    "failed",
+    "playback_finished",
+    "skipped",
+    "cancelled_unplayed",
+    "cancelled_playing",
+];
 
 impl Room {
     pub fn receipt(
@@ -15,43 +22,37 @@ impl Room {
         revision: u64,
         status: &str,
     ) -> Result<Value, RoomError> {
-        if ![
-            "playing",
-            "failed",
-            "playback_finished",
-            "skipped",
-            "cancelled_unplayed",
-            "cancelled_playing",
-        ]
-        .contains(&status)
-        {
+        if !RECEIPTS.contains(&status) {
             return Err(RoomError::new(400, "room.receipt_invalid"));
         }
-        let mut inner = self.inner.lock().expect("room lock");
+        let stale = || RoomError::new(409, "room.stale_utterance");
+        let mut guard = self.inner.lock().expect("room lock");
+        let inner = &mut *guard;
         let Some(browser) = inner.browsers.get(sid) else {
-            return Err(RoomError::new(409, "room.stale_utterance"));
+            return Err(stale());
         };
+        // Skips and cancellations may name an older revision than the call's current one.
         let special = matches!(
             status,
             "skipped" | "cancelled_unplayed" | "cancelled_playing"
         );
         if !special && browser.revision != revision {
-            return Err(RoomError::new(409, "room.stale_utterance"));
+            return Err(stale());
         }
         let active = browser.active.as_deref() == Some(uid);
         if matches!(status, "playing" | "failed" | "playback_finished")
             && (!active || browser.speaking)
         {
-            return Err(RoomError::new(409, "room.stale_utterance"));
+            return Err(stale());
         }
         let Some(record) = inner.utterances.get_mut(uid) else {
-            return Err(RoomError::new(409, "room.stale_utterance"));
+            return Err(stale());
         };
         let Some(entry) = record.clients.get_mut(sid) else {
-            return Err(RoomError::new(409, "room.stale_utterance"));
+            return Err(stale());
         };
         if (special && revision > entry.0) || (!special && entry.0 != revision) {
-            return Err(RoomError::new(409, "room.stale_utterance"));
+            return Err(stale());
         }
         if matches!(
             entry.1.as_str(),
@@ -60,7 +61,7 @@ impl Room {
             if special {
                 return Ok(json!({"status":status}));
             }
-            return Err(RoomError::new(409, "room.stale_utterance"));
+            return Err(stale());
         }
         if status == "cancelled_unplayed" && revision < entry.0 {
             return Ok(json!({"status":status}));
@@ -71,52 +72,31 @@ impl Room {
             other => other,
         };
         entry.1 = next.into();
-        let row_id = record.row_id.clone();
-        let replay = record.replay_of.is_some();
-        let best = record
-            .clients
-            .values()
-            .map(|(_, status)| status.as_str())
-            .max_by_key(|status| status_rank(status))
-            .unwrap_or(next)
-            .to_owned();
-        if let Some(row) = inner
-            .rows
-            .iter_mut()
-            .find(|r| r.id == row_id)
-            .filter(|_| !replay)
-        {
-            row.status = best;
-            row.reason = match status {
-                "skipped" => Some("user_skipped".into()),
-                "cancelled_playing" => Some("user_interrupted".into()),
-                "cancelled_unplayed" => Some("user_speaking".into()),
-                "failed" => Some("playback_failed".into()),
-                _ => None,
-            };
+        if !record.is_replay() {
+            let best = record.best_status().unwrap_or(next).to_owned();
+            if let Some(row) = inner.journal.find_mut(&record.row_id) {
+                row.status = best;
+                row.reason = reason(status).map(str::to_owned);
+            }
         }
-        let browser = inner.browsers.get_mut(sid).expect("browser present");
         if status != "playing" {
+            let browser = inner.browsers.get_mut(sid).expect("browser present");
             if active {
                 browser.active = None;
             }
-            if status == "cancelled_unplayed" && !browser.pending.iter().any(|item| item == uid) {
-                browser.pending.push_front(uid.into());
-            } else if status != "cancelled_unplayed" {
+            if status == "cancelled_unplayed" {
+                if !browser.pending.iter().any(|item| item == uid) {
+                    browser.pending.push_front(uid.into());
+                }
+            } else {
                 browser.pending.retain(|item| item != uid);
             }
-            dispatch_client(&mut inner, sid);
+            inner.dispatch_client(sid);
         }
-        status_latency_reply(&mut inner, sid, uid, status);
+        inner.latency.set_reply_status(sid, uid, status);
         if status == "playing" {
-            if let Some((thread, reply_revision)) = inner
-                .latency_replies
-                .get(sid)
-                .and_then(|rows| rows.iter().find(|row| row.utterance_id == uid))
-                .map(|row| (row.thread_id.clone(), row.revision))
-            {
-                mark_latency(
-                    &mut inner,
+            if let Some((thread, reply_revision)) = inner.latency.reply_turn(sid, uid) {
+                inner.mark_latency(
                     sid,
                     &thread,
                     reply_revision,
@@ -126,7 +106,18 @@ impl Room {
                 );
             }
         }
-        retire_terminal_replays(&mut inner);
+        inner.utterances.retire_finished_replays();
         Ok(json!({"status":status}))
+    }
+}
+
+/// Why a reply's row stopped where it did, as the receipt that stopped it tells.
+fn reason(receipt: &str) -> Option<&'static str> {
+    match receipt {
+        "skipped" => Some("user_skipped"),
+        "cancelled_playing" => Some("user_interrupted"),
+        "cancelled_unplayed" => Some("user_speaking"),
+        "failed" => Some("playback_failed"),
+        _ => None,
     }
 }
