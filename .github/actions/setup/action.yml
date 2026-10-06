@@ -21,4 +21,4 @@ runs:
         fi
     - name: Detector models (pinned by digest in assets/rust-models.json)
       shell: bash
-      run: python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
+      run: cargo xtask models

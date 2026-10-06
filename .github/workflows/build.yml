@@ -1,9 +1,9 @@
 name: build
 
 # The one producer of the core's release assets, called by nightly.yml (every push to main) and release-please.yml
-# (a release). Per target it tests, builds and packages the native core; then it writes the manifest, attests every
-# asset from this workflow, attaches them to the release, reads them back and verifies them, and only then publishes
-# the release. Assets and their signer: RELEASING.md.
+# (a release). Per target: the tests, then `cargo xtask dist` (release binary, relocatable archive, verified by
+# starting the core from it). Then `cargo xtask manifest`, one attestation over every asset, attach, read back,
+# verify, publish. Dispatched by hand on a branch, it builds and checks everything and publishes nothing.
 on:
   workflow_call:
     inputs:
@@ -11,18 +11,19 @@ on:
         description: Where the assets go — `nightly`, or the draft vX.Y.Z release release-please created (built from that tag).
         type: string
         required: true
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Shared by nightly and release runs: one publication at a time, never cancelled half-way.
+# Publications share one group and are never cancelled half-way; a hand-dispatched check has its own.
 concurrency:
-  group: publish
+  group: ${{ inputs.tag && 'publish' || format('build-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
-  bundle:
-    name: Test, build and package (${{ matrix.target }})
+  dist:
+    name: Test and package (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: true
@@ -37,45 +38,22 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.tag != 'nightly' && inputs.tag || github.sha }}
+          ref: ${{ inputs.tag && inputs.tag != 'nightly' && inputs.tag || github.sha }}
       - uses: ./.github/actions/setup
-      - name: Tests
-        run: |
-          if [ "$RUNNER_OS" = Linux ]; then export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt; fi
-          cargo test --locked
-      - name: Release binary and its links
-        run: |
-          set -euo pipefail
-          cargo build --locked --release --bin sidevoice-core-rust
-          file target/release/sidevoice-core-rust
-          if [ "$RUNNER_OS" = macOS ]; then
-            otool -L target/release/sidevoice-core-rust
-          else
-            ldd target/release/sidevoice-core-rust
-          fi
-      - name: Relocatable archive, built and verified
-        id: archive
+      - run: cargo test --locked
         env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          SOURCE_SHA=$(git rev-parse HEAD)
-          ARCHIVE="native/sidevoice-core-rust-${SOURCE_SHA}-${TARGET}.tar.zst"
-          python3 tools/rust_native_bundle.py build --target "$TARGET" \
-            --binary target/release/sidevoice-core-rust --models "$RUSTVANI_CACHE_DIR" \
-            --output "$ARCHIVE" --source-sha "$SOURCE_SHA" --epoch "$(git show -s --format=%ct HEAD)"
-          python3 tools/rust_native_bundle.py verify --archive "$ARCHIVE"
-          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          SSL_CERT_FILE: ${{ runner.os == 'Linux' && '/etc/ssl/certs/ca-certificates.crt' || '/etc/ssl/cert.pem' }}
+      - run: cargo xtask dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: archive-${{ matrix.target }}
-          path: ${{ steps.archive.outputs.archive }}
+          name: dist-${{ matrix.target }}
+          path: native/*.tar.zst
           retention-days: 7
           if-no-files-found: error
 
   publish:
-    name: Attest, attach, verify and publish
-    needs: bundle
+    name: Manifest, attest, publish
+    needs: dist
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -85,76 +63,24 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag }}
-      SIGNER: https://github.com/${{ github.repository }}/.github/workflows/build.yml@refs/heads/main
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.tag != 'nightly' && inputs.tag || github.sha }}
+          ref: ${{ inputs.tag && inputs.tag != 'nightly' && inputs.tag || github.sha }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: archive-*
+          pattern: dist-*
           path: assets
           merge-multiple: true
-      - name: Manifest and checksums, bound to this commit and version
-        run: |
-          set -euo pipefail
-          SOURCE_SHA=$(git rev-parse HEAD)
-          # The attestation names GITHUB_SHA as its source: the archives must come from that very commit.
-          test "$SOURCE_SHA" = "$GITHUB_SHA"
-          if [ "$TAG" != nightly ]; then
-            VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
-            test "v$VERSION" = "$TAG" || { echo "::error::Cargo.toml says $VERSION, the release is $TAG"; exit 1; }
-          fi
-          python3 tools/rust_native_bundle.py manifest --assets assets --source-sha "$SOURCE_SHA"
-          (cd assets && sha256sum -- *.tar.zst native-core-manifest.json > SHA256SUMS && cat SHA256SUMS)
-      - id: attest
+      - run: cargo xtask manifest assets ${{ inputs.tag && inputs.tag != 'nightly' && format('--tag {0}', inputs.tag) || '' }}
+      - if: inputs.tag
+        id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             assets/*.tar.zst
             assets/native-core-manifest.json
-      - run: cp "${{ steps.attest.outputs.bundle-path }}" assets/attestation.sigstore.json
-      - name: Attach to the release (for nightly, move its tag here and replace every asset)
-        env:
-          WHEN: ${{ github.event.head_commit.timestamp }}
-        run: |
-          set -euo pipefail
-          if [ "$TAG" != nightly ]; then
-            gh release upload "$TAG" assets/* --clobber
-            exit 0
-          fi
-          if gh api "repos/$GH_REPO/git/ref/tags/nightly" >/dev/null 2>&1; then
-            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true >/dev/null
-          else
-            gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" >/dev/null
-          fi
-          NOTES="Snapshot of \`main\` at $GITHUB_SHA (committed $WHEN). Not a version: the \`nightly\` tag moves to every commit on \`main\` whose build passes, and these assets are replaced each time. Pin a \`vX.Y.Z\` release instead."
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release edit nightly --title "Nightly (main)" --notes "$NOTES" --prerelease --latest=false
-            gh release upload nightly assets/* --clobber
-            gh release view nightly --json assets -q '.assets[].name' | while read -r name; do
-              [ -e "assets/$name" ] || gh release delete-asset nightly "$name" --yes
-            done
-          else
-            gh release create nightly assets/* --verify-tag --title "Nightly (main)" --notes "$NOTES" \
-              --draft --prerelease --latest=false
-          fi
-      - name: Read every asset back from the release and verify it against the attestation
-        run: |
-          set -euo pipefail
-          mkdir check
-          gh release download "$TAG" --dir check
-          (cd check && sha256sum -c SHA256SUMS)
-          for asset in check/*.tar.zst check/native-core-manifest.json; do
-            cmp "$asset" "assets/$(basename "$asset")"
-            env -u GH_TOKEN gh attestation verify "$asset" --repo "$GH_REPO" \
-              --bundle check/attestation.sigstore.json --cert-identity "$SIGNER" --deny-self-hosted-runners
-          done
-      - name: "Publish (a version with a -suffix stays a pre-release; nightly is never latest)"
-        run: |
-          set -euo pipefail
-          if [ "$TAG" = nightly ] || [[ "$TAG" == *-* ]]; then
-            gh release edit "$TAG" --draft=false --prerelease --latest=false
-          else
-            gh release edit "$TAG" --draft=false --prerelease=false --latest
-          fi
+      - if: inputs.tag
+        run: cp "${{ steps.attest.outputs.bundle-path }}" assets/attestation.sigstore.json
+      - if: inputs.tag
+        run: cargo xtask publish assets "$TAG"

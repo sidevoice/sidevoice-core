@@ -8,11 +8,14 @@ Releases of this repository.
 
 | Act | Who | What happens |
 |---|---|---|
-| Open / update a PR | anyone | `check`: format, Clippy, the Rust tests, and a second OS user who must not reach the core's local socket. **PR title is a conventional commit**. Nothing is built for release and nothing is published. |
+| Open / update a PR | anyone | `check`: format, Clippy and the Rust tests. **PR title is a conventional commit**. Nothing is built for release and nothing is published. |
 | Squash-merge into `main` | reviewer | The PR title becomes the commit. `nightly` calls `build`: per target it runs the tests, builds and packages the native core; then it attests the assets, attaches them to the `nightly` pre-release, reads them back, verifies them and publishes. release-please opens or updates the **release PR** ("chore(main): release X.Y.Z"). |
 | Merge the release PR | a maintainer | **This is the release.** release-please tags `vX.Y.Z` and creates a draft GitHub Release whose notes are that version's changelog; `build` runs from the tag, attaches and verifies the assets, and publishes the Release. |
 
-The tests are part of the build: an asset is only produced on a target where the whole suite passed.
+The tests are part of the build: an asset is only produced on a target where the whole suite passed. Everything
+besides the GitHub steps is code in `xtask/` (`cargo xtask models | dist | verify | manifest | publish`): run
+`cargo xtask dist` on a machine to get that machine's archive, built, packaged and verified exactly as the release
+one. Dispatching `build` by hand on a branch builds and checks every target and publishes nothing.
 
 ## Assets
 

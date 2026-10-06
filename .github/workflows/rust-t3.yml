@@ -47,7 +47,7 @@ jobs:
       - name: Build Core and actual Rust v3 peer
         run: |
           set -euo pipefail
-          python3 scripts/stage_rust_models.py "$RUSTVANI_CACHE_DIR"
+          cargo xtask models "$RUSTVANI_CACHE_DIR"
           cargo build --locked --bin sidevoice-core-rust
           cargo build --locked --manifest-path peer/connector-rust/packages/connector-rust/Cargo.toml
       - name: Build offline execution container

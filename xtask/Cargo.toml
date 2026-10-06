@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Build tooling for the core: detector models, relocatable release archives and their manifest."
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
