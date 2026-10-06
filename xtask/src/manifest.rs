@@ -1,13 +1,14 @@
 //! `cargo xtask manifest DIR [--tag vX.Y.Z]`: `native-core-manifest.json` and `SHA256SUMS` for every target.
 
 use std::env;
+use std::fs;
 use std::path::Path;
 
 use serde_json::json;
 
 use crate::archive::unpack_checked;
 use crate::util::*;
-use crate::{Result, ENTRYPOINT, KIND, ROOT_NAME, TARGETS};
+use crate::{Result, ENTRYPOINT, KIND, TARGETS};
 
 pub(crate) fn manifest(dir: &Path, tag: Option<&str>) -> Result<()> {
     let repo = repo();
@@ -43,10 +44,19 @@ pub(crate) fn manifest(dir: &Path, tag: Option<&str>) -> Result<()> {
             return Err(format!("Cargo.toml says {version}, the release is {tag}"));
         }
     }
+    // Fixed names for the nightly, so its download URLs never change; the version for a release. The commit is
+    // in the manifest and in every archive's inventory.
+    let label = tag
+        .map(|tag| tag.trim_start_matches('v'))
+        .unwrap_or("nightly");
     let mut bundles = serde_json::Map::new();
     let mut sums = Vec::new();
     for target in TARGETS {
-        let name = format!("{ROOT_NAME}-{source_sha}-{target}.tar.zst");
+        let built = dir.join(format!("sidevoice-core-{target}.tar.zst"));
+        let name = format!("sidevoice-core-{label}-{target}.tar.zst");
+        if built.exists() {
+            fs::rename(&built, dir.join(&name)).map_err(|error| format!("{name}: {error}"))?;
+        }
         let work = TempDir::new("sidevoice-manifest-check")?;
         let (_, inventory) = unpack_checked(&dir.join(&name), &work.0)?;
         if inventory["target"] != target || inventory["source_sha"] != source_sha.as_str() {

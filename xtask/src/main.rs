@@ -2,7 +2,7 @@
 //!
 //! - `models [DIR]`: stage the detector models pinned in `assets/rust-models.json` (default `$RUSTVANI_CACHE_DIR`).
 //! - `dist`: build the release binary for this host and package it, with its models, native libraries and licence
-//!   notices, as the relocatable archive `native/sidevoice-core-rust-<commit>-<target>.tar.zst`; then `verify` it.
+//!   notices, as the relocatable archive `native/sidevoice-core-<target>.tar.zst`; then `verify` it.
 //! - `verify ARCHIVE`: unpack it somewhere else, check its inventory, and start the core from there.
 //! - `manifest DIR [--tag vX.Y.Z]`: check every target's archive in DIR and write `native-core-manifest.json` and
 //!   `SHA256SUMS`; with a tag, the crate version must be that release.

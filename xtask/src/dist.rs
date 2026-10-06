@@ -99,7 +99,7 @@ pub(crate) fn dist() -> Result<()> {
     write_tar(&work.0, &raw, epoch)?;
     let archive = repo
         .join("native")
-        .join(format!("{ROOT_NAME}-{source_sha}-{target}.tar.zst"));
+        .join(format!("sidevoice-core-{target}.tar.zst"));
     mkdir(archive.parent().expect("has a parent"))?;
     run(
         "zstd",
