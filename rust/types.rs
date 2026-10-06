@@ -37,27 +37,3 @@ pub struct CallSettings {
     pub audio_grace_seconds: f32,
     pub replay_on_return_seconds: f32,
 }
-
-#[derive(Clone, Debug)]
-pub struct CallIds {
-    pub room_id: String,
-    pub session_id: String,
-    pub revision: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct TranscriptResult {
-    pub session_id: String,
-    pub request_id: String,
-    pub text: String,
-    pub language: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct SpeechResult {
-    pub utterance_id: String,
-    pub revision: u64,
-    pub audio: Vec<u8>,
-    pub mime_type: String,
-    pub alignment: Option<Value>,
-}
