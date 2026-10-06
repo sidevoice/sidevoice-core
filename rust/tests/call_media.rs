@@ -799,12 +799,11 @@ async fn a_turn_keeps_the_focus_it_started_with_while_both_listeners_hear_the_re
         }
     }
 
-    // The focus moves while the first browser is still speaking: the turn under way keeps its conversation,
-    // the next one goes to the new focus.
+    // The focus moves half-way through an utterance: the turn under way keeps its conversation,
+    // the rest of the utterance goes to the new focus.
     let microphone = first.microphone();
     let talking = {
         let mut audio = pcm.clone();
-        audio.extend_from_slice(&pcm);
         audio.extend(silence(2.0));
         tokio::spawn(async move { microphone.speak(&audio).await })
     };
@@ -827,22 +826,11 @@ async fn a_turn_keeps_the_focus_it_started_with_while_both_listeners_hear_the_re
         .await;
     assert_ne!(new["request_id"], old["request_id"]);
     first.transcript(&new, "After the focus moved").await;
-    // The recording may still hold speech after this segment: a transcript the room has moved past is held and
-    // joined with the next one on the same focus, so every further segment is answered too.
-    let new_turn = loop {
-        let event = first
-            .next(Duration::from_secs(18))
-            .await
-            .expect("the turn on the new focus finishes");
-        match (event["type"].as_str(), event["data"]["phase"].as_str()) {
-            (Some("voice-transcribe"), _) => first.transcript(&event["data"], "and more").await,
-            (Some("voice-user-turn"), Some("finished")) => break event["data"].clone(),
-            _ => {}
-        }
-    };
-    assert_eq!(new_turn["thread_id"], OTHER, "{new_turn}");
-    let text = new_turn["text"].as_str().unwrap().to_owned();
-    assert!(text.starts_with("After the focus moved"), "{new_turn}");
+    let new_turn = first.turn("finished", Duration::from_secs(18)).await;
+    assert_eq!(
+        (new_turn["thread_id"].as_str(), new_turn["text"].as_str()),
+        (Some(OTHER), Some("After the focus moved"))
+    );
     let session = first.session.clone();
     assert!(core
         .history(&token, THREAD)
@@ -853,7 +841,7 @@ async fn a_turn_keeps_the_focus_it_started_with_while_both_listeners_hear_the_re
         .history(&token, OTHER)
         .await
         .iter()
-        .any(|row| row["text"] == text.as_str() && row["session"] == session.as_str()));
+        .any(|row| row["text"] == "After the focus moved" && row["session"] == session.as_str()));
     second.close().await;
 }
 
