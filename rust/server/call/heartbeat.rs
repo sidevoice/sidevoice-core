@@ -1,5 +1,5 @@
 //! The browser link's keepalive: the room asks a quiet browser to say something, and a browser that
-//! never answers gives its seat back, as Python's `pipeline/heartbeat.py` does.
+//! never answers gives its seat back.
 //!
 //! Behind a tunnel or a proxy a closed tab does not reach the room as a socket close, so its seat
 //! would stay taken (2026-09-22). The room asks with `voice-ping`; the page answers `voice-pong`.
@@ -42,7 +42,7 @@ impl Heartbeat {
         )
     }
 
-    /// Python's `heartbeat_settings`: an interval of zero turns the keepalive off; anything
+    /// The keepalive settings: an interval of zero turns the keepalive off; anything
     /// unreadable or negative falls back to the default rather than to no keepalive at all; a budget
     /// of zero misses means the default, since "ask nothing" is said with the interval.
     pub fn configured(seconds: Option<&str>, misses: Option<&str>) -> Option<Self> {

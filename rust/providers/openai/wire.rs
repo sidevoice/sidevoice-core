@@ -23,7 +23,7 @@ pub(super) fn is_transcription_model(id: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || "._:-".contains(ch))
 }
 
-/// The response format the Python SDK requested for a model, and the logprobs it asked for with it.
+/// The response format to request for a model, and the logprobs to ask for with it.
 pub(super) fn response_shape(
     model: &str,
 ) -> (
@@ -42,7 +42,7 @@ pub(super) fn response_shape(
     (response_format, include)
 }
 
-/// Parses only the response fields Python consumes, so null token logprobs remain compatible.
+/// Parses only the response fields the core consumes, so null token logprobs are accepted.
 pub(super) fn parse_transcription(body: &[u8]) -> Result<Transcription, ProviderError> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|_| ProviderError::new(ProviderErrorKind::MalformedResponse, None))?;

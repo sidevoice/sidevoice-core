@@ -19,7 +19,7 @@ use crate::server::AppState;
 use super::provider_errors::catalog_error;
 
 pub(super) async fn languages() -> Json<Value> {
-    // Python's load_settings().model_dump() includes null builds. Settings still
+    // The defaults are sent with null builds. Settings still
     // belong to the device; this route only supplies the catalogue defaults.
     let mut settings = serde_json::to_value(crate::models::default_settings(None, None))
         .expect("default settings serialize");
@@ -27,8 +27,8 @@ pub(super) async fn languages() -> Json<Value> {
         settings[stage]["build"] = Value::Null;
     }
     settings["replay_on_return_seconds"] = json!(120);
-    // CallSettings uses f32 for detector input; Python's response is its
-    // original decimal defaults rather than the f32 runtime representation.
+    // CallSettings uses f32 for detector input; the response gives the decimal
+    // defaults rather than their f32 runtime representation.
     settings["smart_turn_min_silence"] = json!(0.9);
     settings["vad_confidence"] = json!(0.6);
     settings["vad_start_secs"] = json!(0.4);

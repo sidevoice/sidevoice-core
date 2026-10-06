@@ -137,7 +137,7 @@ fn device_timeout() -> Duration {
     Duration::from_secs(90)
 }
 
-/// The language a recogniser is asked for: none when the stage detects it (`auto`), as in Python.
+/// The language a recogniser is asked for: none when the stage detects it (`auto`).
 pub(super) fn recognition_language(settings: &CallSettings) -> Option<&str> {
     settings
         .stt

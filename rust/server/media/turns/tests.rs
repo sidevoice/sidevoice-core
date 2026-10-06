@@ -233,7 +233,7 @@ async fn an_open_turn_closes_when_its_audio_stops() {
 }
 
 #[test]
-fn audio_idle_timeout_reads_like_python() {
+fn audio_idle_timeout_reads_the_environment() {
     assert_eq!(audio_idle_timeout(None), Some(Duration::from_secs(5)));
     assert_eq!(
         audio_idle_timeout(Some("2.5")),

@@ -107,8 +107,7 @@ where
 {
     // These are observations at the SDK stream boundary: method return after successful
     // headers, first nonempty Bytes item, and stream exhaustion. hpx may buffer or coalesce
-    // body data differently from Python aiohttp's iter_any(), so first-byte parity is not
-    // guaranteed even though the public timing key and observed event are retained.
+    // body data, so the first byte is when hpx yields it, not necessarily when it arrived.
     record_elapsed(timings_ms, "request_to_headers_ms", started);
     let mut body = Vec::new();
     let mut first_chunk_recorded = false;

@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn filters_other_sessions_and_preserves_python_shape() {
+fn filters_other_sessions_and_keeps_the_response_shape() {
     let marks = [
         Mark {
             session_id: "own",

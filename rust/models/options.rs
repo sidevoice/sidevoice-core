@@ -7,9 +7,21 @@ use serde_json::{Map, Number, Value};
 use super::{
     catalog::speech_catalogue_language,
     json::{field_str, strings, values},
-    python_repr::shown,
 };
 use crate::messages::LocalizedMessage;
+
+/// The characters of a refused value shown in its diagnostic, as JSON, before it is cut short.
+const SHOWN_LIMIT: usize = 40;
+
+/// A refused value as its diagnostic shows it: its JSON, cut to `SHOWN_LIMIT` characters ending in `…`.
+fn shown(value: &Value) -> String {
+    let json = value.to_string();
+    if json.chars().count() <= SHOWN_LIMIT {
+        json
+    } else {
+        json.chars().take(SHOWN_LIMIT - 1).collect::<String>() + "…"
+    }
+}
 
 /// The first option that failed, carried as data until the settings boundary renders it.
 #[derive(Clone, Debug)]

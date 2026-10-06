@@ -4,7 +4,6 @@ mod check;
 mod credentials;
 mod defaults;
 mod mic;
-mod python_repr;
 mod resolution;
 mod runtime;
 mod settings;

@@ -1,5 +1,4 @@
-//! Provider keys, verified before they are stored, ported from the Python suite
-//! (`tests/test_integrations.py` `RouteTests` and `OrderingTests`). The provider is a local
+//! Provider keys, verified before they are stored. The provider is a local
 //! fixture, so the test runs only with the `hosted-fixtures` feature that points verification at it:
 //! CI runs the suite with `--all-features`; locally, `cargo test --features hosted-fixtures --test integrations`.
 

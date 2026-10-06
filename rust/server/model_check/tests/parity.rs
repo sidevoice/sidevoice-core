@@ -1,5 +1,4 @@
-//! Model-check admission cases ported from the Python suite (`tests/test_model_check.py`
-//! `BudgetTest`) beyond the ones beside the budget: a remembered pass and a shared run cost
+//! Model-check admission cases beyond the ones beside the budget: a remembered pass and a shared run cost
 //! nothing against the device and provider limits.
 
 use serde_json::json;

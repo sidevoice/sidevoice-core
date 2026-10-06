@@ -1,5 +1,4 @@
-//! The core as the connector starts it, driven as a real process: ported from the Python suite
-//! (`tests/test_node_process.py` and the file-mode half of `tests/test_local_socket.py`).
+//! The core as the connector starts it, driven as a real process.
 //!
 //! A core says where it listens in its ready file, serves its own user alone through a 0600
 //! socket in a 0700 directory, leaves when nothing uses it, and — when it cannot start — says
@@ -605,7 +604,7 @@ fn a_directory_another_core_holds() {
 }
 
 #[test]
-#[ignore = "parity gap: refusal messages carry no parameters (Python names the socket path, the port and the directory mode)"]
+#[ignore = "known gap: refusal messages carry no parameters (they should name the socket path, the port and the directory mode)"]
 fn a_refusal_names_what_it_refused() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("core");
@@ -677,7 +676,7 @@ fn a_data_directory_that_is_a_link_is_not_written_through() {
 }
 
 #[test]
-#[ignore = "parity gap: a symlinked data directory spelled `core/`, `core/.` or `core//` is followed and written through"]
+#[ignore = "known gap: a symlinked data directory spelled `core/`, `core/.` or `core//` is followed and written through"]
 fn a_data_directory_that_is_a_link_is_not_written_through_however_it_is_spelled() {
     for suffix in ["/", "/.", "//"] {
         let root = tempfile::tempdir().unwrap();

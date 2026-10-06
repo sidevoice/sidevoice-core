@@ -72,7 +72,7 @@ impl Default for SynthesisCache {
 }
 
 impl SynthesisCache {
-    /// Creates a cache with the pinned Python limits: 64 entries and 32 MiB encoded audio.
+    /// Creates a cache with the default limits: 64 entries and 32 MiB encoded audio.
     pub fn new() -> Self {
         Self::with_limits(DEFAULT_MAX_ITEMS, DEFAULT_MAX_BYTES)
     }
@@ -87,10 +87,10 @@ impl SynthesisCache {
         }
     }
 
-    /// Stable first 32 lowercase SHA-256 hex characters over Python's JSON array key shape.
+    /// Stable first 32 lowercase SHA-256 hex characters over a JSON array of the synthesis inputs.
     pub fn key(choice: SynthesisChoice<'_>, text: &str) -> String {
-        // Python's json.dumps defaults to a space after each array comma. Preserve those spaces as
-        // they are part of the existing cache key, while serde_json provides matching UTF-8 escaping.
+        // A space follows each array comma: the spaces are part of the existing cache key, and
+        // serde_json escapes each value.
         let material = format!(
             "[{}, {}, {}, {}, {}]",
             serde_json::to_string(choice.place).expect("serializing a string cannot fail"),
@@ -182,7 +182,7 @@ impl SynthesisCache {
         }
     }
 
-    /// Returns the observable cache accounting used by the Python implementation.
+    /// Returns the observable cache accounting.
     pub fn stats(&self) -> SynthesisCacheStats {
         let state = self.inner.lock();
         SynthesisCacheStats {

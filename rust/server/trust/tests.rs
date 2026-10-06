@@ -105,7 +105,7 @@ fn credentials_travel_only_over_a_safe_transport() {
     }
 }
 
-/// Spellings ported from the Python suite (`tests/test_local_socket.py` `LocalOnlyRuleTests`).
+/// Every spelling of a local-only path is read as that path.
 #[test]
 fn the_local_only_rule_reads_the_path_however_it_is_spelled() {
     for path in [

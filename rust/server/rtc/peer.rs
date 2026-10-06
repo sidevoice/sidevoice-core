@@ -42,7 +42,7 @@ pub(super) async fn build(
         .with_interceptor_registry(registry)
         .with_handler(handler)
         .with_udp_addrs(vec!["0.0.0.0:0".to_owned(), "127.0.0.1:0".to_owned()]);
-    // The hosted network has no multicast route; aiortc offers numeric host candidates.
+    // The hosted network has no multicast route: offer numeric host candidates.
     #[cfg(feature = "hosted-fixtures")]
     let builder = builder.with_setting_engine(
         SettingEngineBuilder::new()

@@ -11,7 +11,7 @@ use crate::{messages::LocalizedMessage, types::SpeechStage};
 /// The transcription runtime a client reports (in its hello and in `voice-stt-ready`), or `None` when it
 /// reports none: a catalogue model of the stt task, on one of that model's engines, and the accelerator it
 /// runs on. What the stats show, not what the node obeys. A load that fell back keeps its reason.
-/// `Err` is a report this node cannot read (Python's `browser_runtime`).
+/// `Err` is a report this node cannot read.
 pub fn browser_runtime(
     data: Option<&Value>,
 ) -> Result<Option<Map<String, Value>>, LocalizedMessage> {
@@ -74,7 +74,7 @@ fn unsupported_runtime() -> LocalizedMessage {
 
 /// What the room may show about a call's transcription: where and with which model, in which language
 /// (none when detected), and the runtime the client reported. Never the stage's context, which is the
-/// person's own words to the recogniser (Python's `call.transcription`).
+/// person's own words to the recogniser.
 pub fn call_transcription(stage: &SpeechStage, runtime: Option<&Map<String, Value>>) -> Value {
     let mut view = Map::new();
     view.insert("place".into(), Value::from(stage.place.as_str()));

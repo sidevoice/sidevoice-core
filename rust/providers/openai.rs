@@ -19,7 +19,7 @@ const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
-const PYTHON_MAX_RETRIES: usize = 2;
+const MAX_RETRIES: usize = 2;
 
 pub struct OpenAiTranscriber {
     client: Client<OpenAIConfig>,
@@ -40,7 +40,7 @@ impl OpenAiTranscriber {
                 &base,
                 TRANSCRIPTION_TIMEOUT,
                 CONNECT_TIMEOUT,
-                PYTHON_MAX_RETRIES,
+                MAX_RETRIES,
             )?,
         })
     }

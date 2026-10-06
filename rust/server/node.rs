@@ -48,7 +48,7 @@ struct PairRoom {
     code: String,
 }
 
-/// A pairing the connector refused: its own reason when it gave one (passed through as the Python core did), else
+/// A pairing the connector refused: its own reason when it gave one (passed through), else
 /// the generic one.
 pub(super) fn pair_refused(answer: &Value, headers: &HeaderMap) -> axum::response::Response {
     match answer

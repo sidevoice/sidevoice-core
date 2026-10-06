@@ -45,7 +45,7 @@ fn patience_maps_only_the_existing_room_presets() {
 #[test]
 fn device_detector_tuning_never_reaches_the_call() {
     // A device that stored the old numbers, or sends its own, keeps none of them: only its patience
-    // shapes the room's numbers (Python `mic_settings`, the 2026-09-20 regression).
+    // shapes the room's numbers (the 2026-09-20 regression).
     let defaults = defaults();
     let loaded = crate::models::settings_from(
         Some(&json!({
@@ -93,7 +93,7 @@ fn device_detector_tuning_never_reaches_the_call() {
     assert_eq!(call.audio_grace_seconds, 3.0);
     assert_eq!(call.stt.model, loaded.settings.stt.model);
 
-    // The hello's `mic.turn_patience` wins over the stored one, as in Python.
+    // The hello's `mic.turn_patience` wins over the stored one.
     let (fast, _) = mic_settings(&loaded.settings, Some(&json!({"turn_patience": "fast"})));
     assert_eq!(fast.applied_to(&loaded.settings).merge_window_secs, 0.0);
 }

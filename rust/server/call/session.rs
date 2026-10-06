@@ -44,7 +44,7 @@ pub(super) async fn run(
         let _ = socket.send(close(UNPAIRED, &close_reason)).await;
         return;
     };
-    // A full room is said before the hello, as the Python core did: the browser need not send anything to learn it.
+    // A full room is said before the hello: the browser need not send anything to learn it.
     let admission = state.room.admission(&language);
     if admission["admitted"] == Value::Bool(false) {
         refuse_full(&mut socket, &admission).await;

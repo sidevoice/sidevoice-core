@@ -1,5 +1,5 @@
-//! Who may hear a reply, ported from the Python suite's policy table (`tests/test_publication.py`).
-//! Rust keeps the policy inside `Room::publish`, so each row is set up through the room itself.
+//! Who may hear a reply, as a policy table. The core keeps the policy inside `Room::publish`, so
+//! each row is set up through the room itself.
 
 use serde_json::{json, Value};
 use sidevoice_core::control::room::{ConnectorPeer, PeerRequest, Room};

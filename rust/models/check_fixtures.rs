@@ -12,7 +12,7 @@ const CHECK_EN_WAV: &[u8] = include_bytes!("../../assets/catalog/models/checks/s
 
 static CHECKS: OnceLock<Value> = OnceLock::new();
 
-/// The check rules and fixtures shared with the Python implementation.
+/// The model-check rules and fixtures, from the catalogue.
 pub(super) fn checks() -> &'static Value {
     CHECKS.get_or_init(|| {
         serde_json::from_str(CHECKS_JSON).expect("embedded check rules are valid JSON")

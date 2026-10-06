@@ -8,7 +8,6 @@
 <p>
   <a href="https://github.com/sidevoice/sidevoice-core/actions/workflows/release.yml"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/github/ci/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&workflow=release.yml&branch=main&mode=dark" /><img alt="CI status" src="https://shieldcn.dev/github/ci/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&workflow=release.yml&branch=main&mode=light" /></picture></a>
   <a href="LICENSE"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/github/license/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&mode=dark" /><img alt="licence" src="https://shieldcn.dev/github/license/sidevoice/sidevoice-core.svg?variant=secondary&size=sm&mode=light" /></picture></a>
-  <picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/python-3.12+.svg?variant=secondary&size=sm&logo=python&mode=dark" /><img alt="requires Python 3.12 or newer" src="https://shieldcn.dev/badge/python-3.12+.svg?variant=secondary&size=sm&logo=python&mode=light" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/status-beta.svg?variant=secondary&size=sm&mode=dark" /><img alt="status: beta" src="https://shieldcn.dev/badge/status-beta.svg?variant=secondary&size=sm&mode=light" /></picture>
 </p>
 
@@ -49,21 +48,24 @@ Beta. What works today:
 
 Reaching your machine from outside your network needs a relay; that part is still being built.
 
-## Run it from source
+## Build it from source
 
-Python 3.12 and [uv](https://docs.astral.sh/uv/):
+Rust 1.98, and libopus with `pkg-config` (`apt install libopus-dev pkg-config`, `brew install opus`). The voice
+detectors' models are pinned by digest in `assets/rust-models.json`; `cargo xtask models` fetches, verifies and stages
+them in `RUSTVANI_CACHE_DIR`, where the core and its tests read them:
 
 ```sh
-uv venv --python 3.12 && uv pip install -e '.[test]'
-.venv/bin/python -m pytest -q
-.venv/bin/sidevoice-core            # listens on 127.0.0.1:8768
+export RUSTVANI_CACHE_DIR=~/.cache/sidevoice-models
+cargo xtask models
+cargo test --locked --all-features
+cargo run --locked --release        # listens on 127.0.0.1:8768
 ```
 
-`sidevoice-core --help` lists its options. The connector starts it as `sidevoice-core --data-dir D --port P`;
-`D/core.json` (mode 0600) then says where it listens and which credential the connector links with.
+`--help` lists its options. The connector starts it as `sidevoice-core-rust --data-dir D --port P`; `D/core.json`
+(mode 0600) then says where it listens and which credential the connector links with. `cargo xtask dist` builds,
+packages and verifies this machine's release archive, exactly as a release does ([`RELEASING.md`](RELEASING.md)).
 
-Two test modules run the real connector and the web client's catalogue code. They need a checkout of those
-repositories, named by `SIDEVOICE_REPOSITORY`, and skip without it.
+Compatibility with the latest published connector and web client is `cargo xtask compat`, run weekly in CI.
 
 ## Configuration
 
@@ -102,15 +104,19 @@ Please report vulnerabilities privately through
 ## Layout
 
 ```
-src/sidevoice_core/
-  runtime.py     where the core keeps its files, which version it is
-  pipeline/      one Pipecat pipeline per call, and the speech providers
-  control/       conversations, history, listeners, the connector link, devices
-  server/        the web surface (FastAPI + Socket.IO) that carries both
-assets/catalog/  the model and voice catalogues, resolver vectors and model-check clips (both cores read these)
+rust/              the core: one crate, the binary sidevoice-core-rust
+  runtime/         process configuration, launch handshake, listeners, shutdown
+  server/          the device and connector surfaces (HTTP, WebSocket, Socket.IO, WebRTC) and the calls they carry
+  control/         conversations, devices and pairing, latency, telemetry
+  pipeline/        voice activity and end of turn, behind Rustvani
+  providers/       the OpenAI and ElevenLabs adapters and the synthesis cache
+  models/          catalogue, settings and model-check rules
+  messages/        the per-language message bundles
+  storage/         private files and process locks
+tests/             integration tests, with their recorded voice and provider responses
+xtask/             build tooling: models, release archives, manifest, compatibility (`cargo xtask`)
+assets/catalog/    the model and voice catalogues, resolver vectors and model-check clips
 ```
-
-`pipeline` never imports `control`, and neither imports a web framework; `tests/test_boundaries.py` enforces both.
 
 ## Contributing
 

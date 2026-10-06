@@ -34,10 +34,10 @@ use crate::{
 const MAX_TURN_BYTES: usize = 16_000 * 2 * 60;
 const PRE_ROLL_BYTES: usize = 16_000 * 2;
 /// How long an open turn waits for audio that stopped arriving (a muted or lost microphone) before it
-/// is closed as if the person had stopped speaking. Python's `VOICE_AUDIO_IDLE_TIMEOUT`, 5 s.
+/// is closed as if the person had stopped speaking. `VOICE_AUDIO_IDLE_TIMEOUT` overrides it.
 const AUDIO_IDLE_SECONDS: f64 = 5.0;
 
-/// `VOICE_AUDIO_IDLE_TIMEOUT` as Python reads it: unreadable is the default, negative is zero, and
+/// `VOICE_AUDIO_IDLE_TIMEOUT` as the core reads it: unreadable is the default, negative is zero, and
 /// zero turns the check off.
 pub(super) fn audio_idle_timeout(value: Option<&str>) -> Option<Duration> {
     let seconds = match value.map(|value| value.trim().parse::<f64>()) {

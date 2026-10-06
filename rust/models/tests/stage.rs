@@ -35,20 +35,20 @@ fn stage_rules_reject_cross_task_models_provider_builds_and_unknown_options() {
         assert_eq!(
             loaded.issue.as_deref(),
             Some(expected),
-            "Pinned Python settings.py output for {input}"
+            "Settings diagnostic for {input}"
         );
     }
 }
 
 #[test]
-fn known_option_diagnostics_match_pinned_python_and_keep_atomic_stage_fallback() {
+fn known_option_diagnostics_show_the_refused_value_as_json_and_keep_atomic_stage_fallback() {
     let defaults = defaults();
     let overlong_context = "x".repeat(401);
     let overlong_voice = "x".repeat(121);
     let cases = [
         (
             json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"de"}}}),
-            "language: 'de' is not one of its languages",
+            "language: \"de\" is not one of its languages",
             "stt",
         ),
         (
@@ -58,17 +58,17 @@ fn known_option_diagnostics_match_pinned_python_and_keep_atomic_stage_fallback()
         ),
         (
             json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":null}}}),
-            "language: None is not one of its languages",
+            "language: null is not one of its languages",
             "stt",
         ),
         (
             json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":true}}}),
-            "language: True is not one of its languages",
+            "language: true is not one of its languages",
             "stt",
         ),
         (
             json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":["de"]}}}),
-            "language: ['de'] is not one of its languages",
+            "language: [\"de\"] is not one of its languages",
             "stt",
         ),
         (
@@ -78,17 +78,17 @@ fn known_option_diagnostics_match_pinned_python_and_keep_atomic_stage_fallback()
         ),
         (
             json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"a\nb"}}}),
-            "language: 'a\\nb' is not one of its languages",
+            "language: \"a\\nb\" is not one of its languages",
             "stt",
         ),
         (
             json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"\u{200b}"}}}),
-            "language: '\\u200b' is not one of its languages",
+            "language: \"\u{200b}\" is not one of its languages",
             "stt",
         ),
         (
             json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "options":{"language":"x".repeat(50)}}}),
-            "language: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… is not one of its languages",
+            "language: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… is not one of its languages",
             "stt",
         ),
         (
@@ -118,12 +118,12 @@ fn known_option_diagnostics_match_pinned_python_and_keep_atomic_stage_fallback()
         ),
         (
             json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"voice":{"de":"af_heart"}}}}),
-            "voice: 'de' is not a speech language",
+            "voice: \"de\" is not a speech language",
             "tts",
         ),
         (
             json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"voice":{"en":"no-such-voice"}}}}),
-            "voice: 'no-such-voice' is not a voice of this model",
+            "voice: \"no-such-voice\" is not a voice of this model",
             "tts",
         ),
         (
@@ -133,7 +133,7 @@ fn known_option_diagnostics_match_pinned_python_and_keep_atomic_stage_fallback()
         ),
         (
             json!({"tts":{"place":"device", "model":"kokoro-82m-v1.0", "options":{"voice":{"en":"em_alex"}}}}),
-            "voice: 'em_alex' does not speak en",
+            "voice: \"em_alex\" does not speak en",
             "tts",
         ),
         (
@@ -143,7 +143,7 @@ fn known_option_diagnostics_match_pinned_python_and_keep_atomic_stage_fallback()
         ),
         (
             json!({"tts":{"place":"elevenlabs", "model":"eleven_v3", "options":{"voice":{"xx":"v"}}}}),
-            "voice: 'xx' is not a speech language",
+            "voice: \"xx\" is not a speech language",
             "tts",
         ),
         (
@@ -175,7 +175,7 @@ fn known_option_diagnostics_match_pinned_python_and_keep_atomic_stage_fallback()
         assert_eq!(
             loaded.issue.as_deref(),
             Some(expected.as_str()),
-            "Pinned Python settings.py output for {task} option in {input}"
+            "Settings diagnostic for {task} option in {input}"
         );
         if task == "stt" {
             assert_eq!(loaded.settings.stt.place, defaults.stt.place);

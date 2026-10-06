@@ -40,7 +40,7 @@ pub(super) struct Admitted {
 }
 
 /// Waits for the client's first text frame, answering pings meanwhile. No hello in time is a call with the default
-/// settings, as in the Python core.
+/// settings.
 pub(super) async fn await_hello(
     socket: &mut WebSocket,
     registration: &mut CallRegistration,
@@ -80,7 +80,7 @@ pub(super) async fn admit(
     let hello = hello.get("data");
     let loaded = crate::models::settings_from(hello.and_then(|v| v.get("settings")), &defaults);
     // The detector runs on the room's numbers shaped by the device's patience; the device's own
-    // tuning, sent or stored, never reaches it (Python `mic_settings`, the 2026-09-20 regression).
+    // tuning, sent or stored, never reaches it (the 2026-09-20 regression).
     let (mic, mic_problem) =
         crate::models::mic_settings(&loaded.settings, hello.and_then(|v| v.get("mic")));
     let settings = mic.applied_to(&loaded.settings);

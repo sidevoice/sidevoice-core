@@ -12,7 +12,7 @@ use wiremock::{
 };
 
 #[tokio::test]
-async fn timestamp_synthesis_uses_typed_sdk_stream_and_preserves_all_python_timings() {
+async fn timestamp_synthesis_uses_typed_sdk_stream_and_records_every_timing() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/text-to-speech/voice123/stream/with-timestamps"))

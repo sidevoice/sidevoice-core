@@ -37,7 +37,7 @@ pub(in crate::server) fn layer(app: Router, state: Arc<AppState>) -> Router {
 }
 
 /// Why a v2 connection is refused, said in its `connect_error`, or None when it is admitted. The credential is checked
-/// first and then the protocol, as the Python core did, so a wrong token never learns which protocol is spoken here.
+/// first and then the protocol, so a wrong token never learns which protocol is spoken here.
 fn refusal(
     auth: Option<&Value>,
     authenticate: impl FnOnce(&str, &str, &Value) -> bool,

@@ -125,7 +125,7 @@ pub(super) async fn save(
         .lock()
         .expect("integration revisions lock");
     if revisions.get(&provider) != Some(&ticket) {
-        // Keyed like the Python core's refusal, which the page translates by this key.
+        // A keyed refusal, which the page translates by this key.
         let refusal = crate::messages::render_refusal(
             &crate::messages::LocalizedMessage::new("integration_superseded"),
             crate::server::request::accept_language(&headers),

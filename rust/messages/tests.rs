@@ -50,7 +50,7 @@ fn t1_runtime_keys_are_present_and_render_without_parameters() {
 }
 
 #[test]
-fn refusal_conversion_matches_flat_python_wire_shapes_and_omits_render_only_params() {
+fn refusal_conversion_keeps_the_flat_wire_shape_and_omits_render_only_params() {
     let missing_key = LocalizedMessage::new("provider_key_missing")
         .with_param("provider", json!("openai"))
         .with_param("provider_label", json!("OpenAI"));
@@ -88,7 +88,7 @@ fn refusal_conversion_matches_flat_python_wire_shapes_and_omits_render_only_para
 }
 
 #[test]
-fn english_templates_retain_the_pinned_python_messages() {
+fn english_templates_keep_their_wording() {
     let expected = [
         (
             "speech_language_unsupported",

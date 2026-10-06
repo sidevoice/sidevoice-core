@@ -17,59 +17,17 @@ path = "rust/lib.rs"
 name = "sidevoice-core-rust"
 path = "rust/main.rs"
 
-# Rust integration tests live under rust/tests/: tests/ holds the Python suite. Each drives the binary as a process
-# or the router in-process, with every peer (browser, connector, room, provider) a local fake written in Rust. The
-# ones that point the core at fake providers need the `hosted-fixtures` overrides (`cargo test --all-features`).
-[[test]]
-name = "node_process"
-path = "rust/tests/node_process.rs"
-
-[[test]]
-name = "publication"
-path = "rust/tests/publication.rs"
-
-[[test]]
-name = "latency"
-path = "rust/tests/latency.rs"
-
-[[test]]
-name = "speech_filter"
-path = "rust/tests/speech_filter.rs"
-
-[[test]]
-name = "integrations"
-path = "rust/tests/integrations.rs"
-
-[[test]]
-name = "node_state"
-path = "rust/tests/node_state.rs"
-
-[[test]]
-name = "connector_link"
-path = "rust/tests/connector_link.rs"
-
-[[test]]
-name = "rendezvous"
-path = "rust/tests/rendezvous.rs"
-
-[[test]]
-name = "webrtc_answer"
-path = "rust/tests/webrtc_answer.rs"
-
+# Integration tests are the files in tests/, found by Cargo. Each drives the binary as a process or the router
+# in-process, with every peer (browser, connector, room, provider) a local fake written in Rust. The ones that point
+# the core at fake providers need the `hosted-fixtures` overrides (`cargo test --all-features`). `compat` runs
+# against the latest published connector and web client through `cargo xtask compat` (ignored otherwise).
 [[test]]
 name = "call_media"
-path = "rust/tests/call_media.rs"
 required-features = ["hosted-fixtures"]
 
 [[test]]
 name = "provider_routes"
-path = "rust/tests/provider_routes.rs"
 required-features = ["hosted-fixtures"]
-
-# Against the latest published connector and web client: `cargo xtask compat` (ignored otherwise).
-[[test]]
-name = "compat"
-path = "rust/tests/compat.rs"
 
 [dependencies]
 async-openai = { version = "=0.41.0", default-features = false, features = ["audio", "model", "rustls", "middleware"] }

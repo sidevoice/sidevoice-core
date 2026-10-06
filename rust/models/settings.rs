@@ -18,7 +18,7 @@ pub struct SettingsLoad {
     pub issue: Option<String>,
 }
 
-/// One invalid field, at its wire path, with the reason pinned to Python's settings.py.
+/// One invalid field, at its wire path, with the reason it was refused.
 #[derive(Clone, Debug)]
 pub(super) struct SettingDiagnostic {
     path: String,
@@ -34,7 +34,7 @@ impl SettingDiagnostic {
     }
 }
 
-/// The order Python reports fields in, which is the settings model's declaration order.
+/// The order invalid fields are reported in: the order the settings declare them.
 const FIELD_ORDER: [&str; 14] = [
     "ui_language",
     "stt",

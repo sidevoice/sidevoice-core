@@ -114,7 +114,7 @@ const NOTES: [&str; 5] = [
 /// The first mark of each event, per turn (`utterance_id: None`) or per spoken reply.
 type MarkIndex<'a> = HashMap<(&'a str, u64, Option<&'a str>), HashMap<Event, u64>>;
 
-/// Preserve the Python `/api/presentation/latency` response shape. Only the
+/// The `/api/presentation/latency` response, in the shape the web client reads. Only the
 /// authenticated session's live Room view may be passed to this formatter.
 pub fn snapshot(
     session_id: &str,

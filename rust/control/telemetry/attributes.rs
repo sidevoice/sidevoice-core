@@ -32,7 +32,7 @@ pub(super) const ALLOWED: [&str; 24] = [
     "sidevoice.build_id",
 ];
 
-/// Exact Python allowlist, with strings bounded before they reach a collector.
+/// The exact allowlist, with strings bounded before they reach a collector.
 pub(super) fn attributes(values: &Value) -> Value {
     let mut kept = Map::new();
     if let Some(values) = values.as_object() {

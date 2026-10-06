@@ -1,4 +1,4 @@
-//! Contracts the Python core kept and the Rust core restores: open routes, pairing codes, origin refusals and the
+//! Contracts the clients rely on: open routes, pairing codes, origin refusals and the
 //! call socket's admission.
 
 use std::sync::Arc;

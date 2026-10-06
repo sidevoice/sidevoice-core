@@ -1,6 +1,4 @@
-//! The private-directory and private-file rules, ported from the Python suite
-//! (`tests/test_local_socket.py` `DirectoryTests`, `tests/test_integrations.py`
-//! `PrivateFileTests`, `tests/test_node_process.py` lock cases).
+//! The private-directory and private-file rules, and the process lock.
 
 use super::*;
 
@@ -58,7 +56,7 @@ fn a_link_to_a_directory_is_not_the_directory() {
 }
 
 #[test]
-#[ignore = "parity gap: a trailing `/`, `/.` or `//` on a symlinked data directory is followed (lstat resolves it)"]
+#[ignore = "known gap: a trailing `/`, `/.` or `//` on a symlinked data directory is followed (lstat resolves it)"]
 fn a_link_is_refused_however_it_is_spelled() {
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("elsewhere");

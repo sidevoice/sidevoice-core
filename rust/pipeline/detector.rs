@@ -167,13 +167,13 @@ impl CallDetector {
     }
 }
 
-/// The VAD's stop in timer mode before the speech timeout runs (Python's fixed 0.2 s).
+/// The VAD's stop in timer mode before the speech timeout runs (a fixed 0.2 s).
 const TIMER_VAD_STOP_SECS: f32 = 0.2;
 
 /// How long a pause Rustvani's VAD waits before it reports the end of speech. In smart-turn mode it
-/// is the floor before smart-turn is asked. In timer mode Python's VAD reports the pause and its
+/// is the floor before smart-turn is asked. In timer mode the VAD reports the pause and the
 /// speech timeout then runs on top, so the single Rustvani stop folds both. `VOICE_VAD_STOP_SECS`
-/// replaces the VAD's part in either mode, as in Python (`pipeline/call.py`, `vad_analyzer`).
+/// replaces the VAD's part in either mode.
 pub fn vad_stop_secs(settings: &CallSettings, configured: Option<f32>) -> f32 {
     if settings.turn_end_mode == "smart_turn" {
         configured.unwrap_or(settings.smart_turn_min_silence)

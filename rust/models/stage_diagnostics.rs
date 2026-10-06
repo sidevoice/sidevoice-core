@@ -1,4 +1,4 @@
-//! Python's explanation of a refused stage, derived from the first field that failed.
+//! The explanation of a refused stage, derived from the first field that failed.
 
 use serde_json::{Map, Value};
 
