@@ -121,6 +121,10 @@ impl CallMedia {
         self.detector.listening_bar(playing).await;
     }
 
+    pub(super) async fn reset_detector(&self) {
+        self.detector.reset().await;
+    }
+
     /// Raises the listening bar while one of our utterances plays, lowering it when that one ends.
     pub(in crate::server) async fn admitted_receipt(&self, uid: &str, status: &str) {
         let change = {

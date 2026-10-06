@@ -9,7 +9,11 @@ mod queue;
 #[cfg(test)]
 mod tests;
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -29,6 +33,20 @@ use crate::{
 
 const MAX_TURN_BYTES: usize = 16_000 * 2 * 60;
 const PRE_ROLL_BYTES: usize = 16_000 * 2;
+/// How long an open turn waits for audio that stopped arriving (a muted or lost microphone) before it
+/// is closed as if the person had stopped speaking. Python's `VOICE_AUDIO_IDLE_TIMEOUT`, 5 s.
+const AUDIO_IDLE_SECONDS: f64 = 5.0;
+
+/// `VOICE_AUDIO_IDLE_TIMEOUT` as Python reads it: unreadable is the default, negative is zero, and
+/// zero turns the check off.
+pub(super) fn audio_idle_timeout(value: Option<&str>) -> Option<Duration> {
+    let seconds = match value.map(|value| value.trim().parse::<f64>()) {
+        None => AUDIO_IDLE_SECONDS,
+        Some(Ok(seconds)) if seconds.is_finite() => seconds.max(0.0),
+        Some(_) => AUDIO_IDLE_SECONDS,
+    };
+    (seconds > 0.0).then(|| Duration::from_secs_f64(seconds))
+}
 
 pub(in crate::server) struct TurnOwner {
     media: Arc<CallMedia>,
@@ -45,6 +63,8 @@ pub(in crate::server) struct TurnOwner {
     catchup: Option<Catchup>,
     catchups: u64,
     pending: Option<PendingTurn>,
+    idle_timeout: Option<Duration>,
+    last_audio: Instant,
     pub(in crate::server) finished: mpsc::Receiver<RecognitionDone>,
     finished_tx: mpsc::Sender<RecognitionDone>,
 }
@@ -74,6 +94,10 @@ impl TurnOwner {
             catchup: None,
             catchups: 0,
             pending: None,
+            idle_timeout: audio_idle_timeout(
+                std::env::var("VOICE_AUDIO_IDLE_TIMEOUT").ok().as_deref(),
+            ),
+            last_audio: Instant::now(),
             finished,
             finished_tx,
         }
@@ -89,6 +113,7 @@ impl TurnOwner {
 
     /// Speech goes to the open turn; silence keeps only the pre-roll before the next one.
     fn buffer(&mut self, bytes: Vec<u8>) {
+        self.last_audio = Instant::now();
         if let Some((_, pcm)) = &mut self.speaking {
             if pcm.len() + bytes.len() <= MAX_TURN_BYTES {
                 pcm.extend_from_slice(&bytes);

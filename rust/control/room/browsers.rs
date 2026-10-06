@@ -48,6 +48,8 @@ pub(super) struct Browser {
     /// The pause after the person stops speaking before a reply starts (`audio_grace_seconds`).
     pub(super) audio_grace: Duration,
     pub(super) quiet_until: Option<Instant>,
+    /// What the room may show about this call's transcription (place, model, the reported runtime).
+    pub(super) transcription: Value,
 }
 impl Browser {
     pub(super) fn new(device: String, language: String, sender: mpsc::Sender<Value>) -> Self {
@@ -66,6 +68,7 @@ impl Browser {
             playback_watch: None,
             audio_grace: Duration::from_secs(1),
             quiet_until: None,
+            transcription: Value::Null,
         }
     }
     /// Send an event to the browser if its channel has room; false if it was dropped.

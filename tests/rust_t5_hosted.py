@@ -149,7 +149,8 @@ async def no_transcription(ws, seconds=0.7):
 
 
 async def review_voice_cases(url, protocols, port, token, peer, pcm):
-    settings = {"turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0}
+    # The detector is tuned by the room; a device only chooses its patience ("fast": no merge window).
+    settings = {"turn_patience": "fast"}
     async with websockets.connect(url, subprotocols=protocols) as ws:
         await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {**settings, **NO_CATCH_UP}}}))
         session = (await frame(ws, "voice-session"))["session_id"]
@@ -198,7 +199,7 @@ async def review_voice_cases(url, protocols, port, token, peer, pcm):
 
     async with websockets.connect(url, subprotocols=protocols) as ws:
         await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {**NO_CATCH_UP,
-            **settings, "merge_window_secs": 2.0}}}))
+            **settings, "turn_patience": "calm"}}}))
         session = (await frame(ws, "voice-session"))["session_id"]
         assert request(port, "POST", "/api/presentation/select", token=token,
                        body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
@@ -232,7 +233,7 @@ async def two_listener_focus_case(url, protocols, port, token, peer, pcm):
     assert peer.event("second-binding")["binding"]["binding_id"]
     async with websockets.connect(url, subprotocols=protocols) as first, \
                websockets.connect(url, subprotocols=protocols) as second:
-        settings = {"turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0}
+        settings = {"turn_patience": "fast"}
         for ws in (first, second):
             await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {**settings, **NO_CATCH_UP}}}))
         sessions = [(await frame(ws, "voice-session"))["session_id"] for ws in (first, second)]
@@ -303,7 +304,7 @@ async def two_listener_focus_case(url, protocols, port, token, peer, pcm):
 async def playback_gate_case(url, protocols, port, token, peer, pcm):
     async with websockets.connect(url, subprotocols=protocols) as ws:
         await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {**NO_CATCH_UP,
-            "turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0}}}))
+            "turn_patience": "fast"}}}))
         session = (await frame(ws, "voice-session"))["session_id"]
         assert request(port, "POST", "/api/presentation/select", token=token,
                        body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
@@ -390,11 +391,9 @@ async def main():
             peer.event("binding")
             url = f"ws://127.0.0.1:{port}/api/presentation/ws"
             protocols = ["sidevoice", f"sidevoice.token.{token}"]
-            for mode in ("smart_turn", "timer"):
+            for patience in ("normal", "fast"):
                 async with websockets.connect(url, subprotocols=protocols) as ws:
-                    settings = {"turn_end_mode": mode, "merge_window_secs": 0,
-                                "user_speech_timeout": 0.5, "smart_turn_min_silence": 0.5,
-                                "smart_turn_max_silence": 1.0}
+                    settings = {"turn_patience": patience}
                     await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {**settings, **NO_CATCH_UP}}}))
                     session = (await frame(ws, "voice-session"))["session_id"]
                     chosen = request(port, "POST", "/api/presentation/select", token=token,
@@ -407,7 +406,7 @@ async def main():
                     peer.method("input.deliver")
                     await frame(ws, "voice-input-receipt", status="delivered")
                     revision = request(port, "GET", f"/api/presentation?session_id={session}", token=token)[1]["room"]["revision"]
-                    uid = f"t5-{mode}-{uuid.uuid4()}"
+                    uid = f"t5-{patience}-{uuid.uuid4()}"
                     peer.send({"op": "publish", "session_id": session, "revision": revision,
                                "event_id": uid, "utterance_id": uid, "text": "Reply from pinned peer"})
                     assert peer.event("published")["answer"]["status"] == "queued"
@@ -428,7 +427,7 @@ async def main():
                     second = request(port, "POST", "/api/device/pair",
                                      body={"secret": secret, "name": "Other T5 browser"})[1]["token"]
                     assert request(port, "GET", f"/api/presentation/latency?session_id={session}", token=second)[0] == 404
-                    if mode == "timer":
+                    if patience == "fast":
                         stale_uid = f"t5-barge-{uuid.uuid4()}"
                         peer.send({"op": "publish", "session_id": session, "revision": revision,
                                    "event_id": stale_uid, "utterance_id": stale_uid, "text": "Interrupted reply"})
@@ -447,7 +446,7 @@ async def main():
                         assert (await frame(ws, "voice-user-turn"))["phase"] == "finished"
             async with websockets.connect(url, subprotocols=protocols) as ws:
                 await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {**NO_CATCH_UP,
-                    "turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0,
+                    "turn_patience": "fast",
                     "tts": {"place": "elevenlabs", "model": "eleven_v3",
                             "options": {"voice": {"en": "fixturevoice"}}}}}}))
                 session = (await frame(ws, "voice-session"))["session_id"]
@@ -589,7 +588,7 @@ async def main():
                 assert not any(row["id"] == f"{session}:user-turn:{started['revision']}" for row in history)
             async with websockets.connect(url, subprotocols=protocols) as ws:
                 await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {**NO_CATCH_UP,
-                    "turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 3.0}}}))
+                    "turn_patience": "calm"}}}))
                 session = (await frame(ws, "voice-session"))["session_id"]
                 assert request(port, "POST", "/api/presentation/select", token=token,
                                body={"session_id": session, "thread_id": "t3-js-thread"})[0] == 200
@@ -610,7 +609,7 @@ async def main():
             await playback_gate_case(url, protocols, port, token, peer, pcm)
             async with websockets.connect(url, subprotocols=protocols) as ws:
                 await ws.send(json.dumps({"type": "voice-hello", "data": {"settings": {**NO_CATCH_UP,
-                    "turn_end_mode": "timer", "user_speech_timeout": 0.5, "merge_window_secs": 0}}}))
+                    "turn_patience": "fast"}}}))
                 session = (await frame(ws, "voice-session"))["session_id"]
                 chosen = request(port, "POST", "/api/presentation/select", token=token,
                                  body={"session_id": session, "thread_id": "t3-js-thread"})

@@ -21,6 +21,24 @@ pub struct MicSettings {
     pub merge_window_secs: f32,
 }
 
+impl MicSettings {
+    /// The call's settings with this detector tuning in place of whatever the device sent or stored.
+    /// A device chooses its patience and nothing else about turn detection (see `mic_settings`).
+    pub fn applied_to(&self, settings: &CallSettings) -> CallSettings {
+        CallSettings {
+            turn_end_mode: self.turn_end_mode.clone(),
+            user_speech_timeout: self.user_speech_timeout,
+            smart_turn_min_silence: self.smart_turn_min_silence,
+            smart_turn_max_silence: self.smart_turn_max_silence,
+            vad_confidence: self.vad_confidence,
+            vad_min_volume: self.vad_min_volume,
+            vad_start_secs: self.vad_start_secs,
+            merge_window_secs: self.merge_window_secs,
+            ..settings.clone()
+        }
+    }
+}
+
 /// Convert the device's one-word patience choice to the room's microphone detector values.
 pub fn mic_settings(
     settings: &CallSettings,

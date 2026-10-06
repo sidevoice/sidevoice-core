@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::server::call::admission::unavailable_refusal;
+use crate::server::call::admission::{runtime_refusal, unavailable_refusal};
 use crate::server::call::text;
 use crate::server::media::Source;
 
@@ -33,6 +33,7 @@ impl Call {
             Some("voice-transcript-error") => self.media.transcript(&data, true, &self.session),
             Some("voice-catchup") => self.turns.catchup_slice(&data).await,
             Some("voice-settings") => self.update_settings(&data).await,
+            Some("voice-stt-ready") => self.runtime_ready(&data).await,
             _ => {}
         }
     }
@@ -78,6 +79,25 @@ impl Call {
             .lock()
             .expect("call settings lock")
             .insert(self.session.clone(), self.settings.clone());
+    }
+
+    /// Records the transcription runtime the browser loaded, for the room's stats only.
+    async fn runtime_ready(&mut self, data: &Value) {
+        match crate::models::browser_runtime(Some(data)) {
+            Ok(Some(runtime)) => {
+                if let Some(view) = self.transcription.as_object_mut() {
+                    view.extend(runtime);
+                }
+                self.state
+                    .room
+                    .set_transcription(&self.session, self.transcription.clone());
+            }
+            Ok(None) => {}
+            Err(problem) => {
+                let refusal = json!({"type":"error","data":runtime_refusal(&problem, &self.settings.ui_language)});
+                let _ = self.socket.send(text(&refusal)).await;
+            }
+        }
     }
 }
 

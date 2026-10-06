@@ -17,6 +17,10 @@ pub(super) struct PendingTurn {
 
 impl TurnOwner {
     pub(in crate::server) fn deadline(&self) -> Option<Instant> {
+        self.idle_deadline().or_else(|| self.delivery_deadline())
+    }
+
+    fn delivery_deadline(&self) -> Option<Instant> {
         self.pending
             .as_ref()
             // A resumed segment keeps the first transcript open through recognition.
@@ -24,10 +28,27 @@ impl TurnOwner {
             .map(|p| p.deadline)
     }
 
+    /// When an open turn is closed because no audio has arrived for it (Python's audio idle timeout).
+    fn idle_deadline(&self) -> Option<Instant> {
+        self.speaking
+            .as_ref()
+            .and(self.idle_timeout)
+            .map(|timeout| self.last_audio + timeout)
+    }
+
     pub(in crate::server) async fn expired(&mut self) {
+        let now = Instant::now();
+        if self.idle_deadline().is_some_and(|deadline| now >= deadline) {
+            // The microphone went quiet mid-turn (muted, or the source went away): what was said
+            // so far is the turn, and the detector starts over for whatever comes next.
+            let silence = now.duration_since(self.last_audio).as_secs_f32();
+            self.stop_speaking(silence).await;
+            self.media.reset_detector().await;
+            return;
+        }
         if self
-            .deadline()
-            .is_some_and(|deadline| Instant::now() >= deadline)
+            .delivery_deadline()
+            .is_some_and(|deadline| now >= deadline)
         {
             if let Some(pending) = self.pending.take() {
                 self.deliver(pending.turn, pending.text, pending.transcribed_at)

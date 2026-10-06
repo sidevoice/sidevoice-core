@@ -174,9 +174,7 @@ async def main():
                 return None
 
             await peer.tell("relay.data", {"channel": "t6-call", "data": json.dumps({
-                "type": "voice-hello", "data": {"settings": {
-                    "turn_end_mode": "timer", "user_speech_timeout": 0.5,
-                    "merge_window_secs": 0}}})})
+                "type": "voice-hello", "data": {"settings": {"turn_patience": "fast"}}})})
             session = await until(lambda: call_event("voice-session"))
             with wave.open("tests/fixtures/hola-sala-16k.wav", "rb") as recording:
                 assert recording.getframerate() == 16000 and recording.getnchannels() == 1

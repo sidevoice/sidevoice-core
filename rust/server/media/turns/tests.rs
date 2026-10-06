@@ -1,12 +1,16 @@
 //! Unit tests of the turn owner: the recognition queue, browser events and catch-up slices.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use base64::Engine;
 use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::{
+    audio_idle_timeout,
     catchup::{slice_header, started_at, Catchup, SliceError},
     events,
     queue::MAX_RECOGNITION_QUEUE,
@@ -192,4 +196,53 @@ fn catchup_header_and_start_time_are_validated() {
         None
     );
     assert_eq!(started_at(&json!({}), now), None);
+}
+
+#[tokio::test]
+async fn an_open_turn_closes_when_its_audio_stops() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = PrivateDir::open(directory.path().join("private")).unwrap();
+    let room = Arc::new(Room::load(dir.clone()).unwrap());
+    let (events, _received) = mpsc::channel(64);
+    let sid = room
+        .join("device".into(), "en".into(), events.clone())
+        .unwrap();
+    let settings = crate::models::default_settings(None, None);
+    let (media, _frames, _focus) = CallMedia::start(&settings).unwrap();
+    let mut owner = TurnOwner::new(media, room.clone(), settings, sid, events, dir);
+    owner.idle_timeout = Some(Duration::from_millis(30));
+
+    // No turn open: a quiet microphone is nothing to close.
+    assert!(owner.deadline().is_none());
+    owner.frame(CallFrame::Audio(vec![0; 640])).await;
+    owner.frame(CallFrame::Started).await;
+    assert!(owner.speaking.is_some());
+    owner.frame(CallFrame::Audio(vec![0; 640])).await;
+    let deadline = owner.deadline().expect("an open turn waits for its audio");
+    assert!(deadline <= Instant::now() + Duration::from_millis(30));
+
+    // Audio still arriving keeps the turn open.
+    owner.expired().await;
+    assert!(owner.speaking.is_some());
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    owner.expired().await;
+    assert!(owner.speaking.is_none(), "the idle turn was closed");
+    assert!(owner.active.is_some(), "and handed to recognition");
+    owner.close().await;
+}
+
+#[test]
+fn audio_idle_timeout_reads_like_python() {
+    assert_eq!(audio_idle_timeout(None), Some(Duration::from_secs(5)));
+    assert_eq!(
+        audio_idle_timeout(Some("2.5")),
+        Some(Duration::from_millis(2500))
+    );
+    assert_eq!(audio_idle_timeout(Some("0")), None);
+    assert_eq!(audio_idle_timeout(Some("-3")), None);
+    assert_eq!(
+        audio_idle_timeout(Some("later")),
+        Some(Duration::from_secs(5))
+    );
 }
