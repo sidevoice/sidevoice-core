@@ -17,8 +17,9 @@ use crate::Result;
 pub(crate) const FLOOR: &str = "2.28";
 
 /// A distribution whose C library is glibc [`FLOOR`]: AlmaLinux 8, pinned by its multi-architecture index.
+/// From ECR Public's copy of the official image (same digest): Docker Hub's anonymous pull limit fails CI runners.
 pub(crate) const FLOOR_IMAGE: &str =
-    "almalinux:8@sha256:8b469a3a78515e8a18ea8fc727e6a3679e1d0c5ba6f58d5b30be3d0d9b86cffe";
+    "public.ecr.aws/docker/library/almalinux:8@sha256:8b469a3a78515e8a18ea8fc727e6a3679e1d0c5ba6f58d5b30be3d0d9b86cffe";
 
 /// This machine's Rust target triple on Linux, the one `cargo zigbuild` builds for.
 pub(crate) fn host_triple() -> Result<&'static str> {
