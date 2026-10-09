@@ -230,6 +230,8 @@ async fn a_spoken_turn_reaches_the_conversation_and_its_reply_plays_on_the_devic
                 .await;
             browser.turn("finished", Duration::from_secs(20)).await;
         }
+        // Hanging up ends the call, and with it the call's span.
+        browser.close().await;
     }
     // The stage histogram, and the stage span beside the call's span, exported as OTLP protobuf.
     eventually(Duration::from_secs(15), "the turn's telemetry", || async {
