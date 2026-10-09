@@ -166,6 +166,36 @@ impl Outbound {
     }
 }
 
+/// What a returning page is given after the session: the frames it missed, and the replies it never received.
+pub(super) struct Missed {
+    /// The utterances of replies sent toward the page that never reached it: the room marks them unheard.
+    pub(super) unreceived: Vec<String>,
+    /// Every other frame after the page's `last_seq`, in order.
+    pub(super) frames: Vec<String>,
+}
+
+/// What a page that handled every frame up to `last_seq` missed; none when some of it is no longer kept. What the
+/// room had already queued for the call (`queued`) and the call had not sent yet is taken first, numbered with the
+/// rest: a reply still on its way when the socket went counts as unreceived like one sent into the dead socket.
+/// Nothing the person did not hear is played late, so no reply is sent again.
+pub(super) fn missed_on_return(
+    outbound: &mut Outbound,
+    queued: &mut mpsc::Receiver<Value>,
+    last_seq: u64,
+) -> Option<Missed> {
+    while let Ok(event) = queued.try_recv() {
+        outbound.stamp(event);
+    }
+    let (replies, frames): (Vec<_>, Vec<_>) = outbound
+        .since(last_seq)?
+        .into_iter()
+        .partition(|(kind, _, _)| kind == "voice-reply");
+    Some(Missed {
+        unreceived: replies.into_iter().filter_map(|(_, uid, _)| uid).collect(),
+        frames: frames.into_iter().map(|(_, _, text)| text).collect(),
+    })
+}
+
 struct Sent {
     seq: u64,
     kind: String,

@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{client_msg_id, resume_window, Outbound, ResumableCalls, SeenMessages, RING_FRAMES};
+use super::{
+    client_msg_id, missed_on_return, resume_window, Outbound, ResumableCalls, SeenMessages,
+    RING_FRAMES,
+};
 
 fn seq(text: &str) -> u64 {
     serde_json::from_str::<Value>(text).unwrap()["seq"]
@@ -124,4 +127,22 @@ fn ids_and_windows_are_read_defensively() {
     assert_eq!(resume_window(Some("0")), Duration::ZERO);
     assert_eq!(resume_window(Some("-1")), Duration::from_secs(60));
     assert_eq!(resume_window(Some("soon")), Duration::from_secs(60));
+}
+
+/// A reply the room had queued for the call when its socket went, but the call had not sent yet, is not sent to the
+/// returning page: it counts as unreceived, while the rest that waited goes out in order.
+#[tokio::test]
+async fn a_reply_still_queued_when_the_page_returns_is_unreceived_not_sent() {
+    let mut outbound = Outbound::default();
+    outbound.stamp(json!({"type":"voice-ping","data":{}}));
+    let (room, mut queued) = tokio::sync::mpsc::channel(8);
+    room.try_send(json!({"type":"voice-reply","data":{"utterance_id":"late"}}))
+        .unwrap();
+    room.try_send(json!({"type":"voice-state","data":{"n":1}}))
+        .unwrap();
+    let missed = missed_on_return(&mut outbound, &mut queued, 1).unwrap();
+    assert_eq!(missed.unreceived, ["late"]);
+    assert_eq!(missed.frames.len(), 1);
+    assert!(missed.frames[0].contains("voice-state"));
+    assert!(queued.try_recv().is_err(), "nothing is left to send later");
 }

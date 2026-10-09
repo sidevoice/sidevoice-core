@@ -14,7 +14,7 @@ use crate::server::AppState;
 use super::admission::{admit, await_hello, refuse_full, Admitted};
 use super::heartbeat::{Beat, Heartbeat};
 use super::registration::CallRegistration;
-use super::resume::{new_token, resume_window, Outbound, Reattach};
+use super::resume::{missed_on_return, new_token, resume_window, Missed, Outbound, Reattach};
 use super::{close, UNPAIRED};
 
 mod client_frames;
@@ -260,19 +260,15 @@ impl Call {
             last_seq,
             answer,
         } = attach;
-        let Some(missed) = self.outbound.since(last_seq) else {
+        let Some(Missed { unreceived, frames }) =
+            missed_on_return(&mut self.outbound, &mut self.output, last_seq)
+        else {
             let _ = answer.send(Err((socket, "gap")));
             return Flow::Stop;
         };
         if answer.send(Ok(())).is_err() {
             return Flow::Continue;
         }
-        // Nothing the person did not hear is played late: a reply the page never got is not sent again,
-        // and the room marks it unheard together with whatever was published while the page was away.
-        let (replies, missed): (Vec<_>, Vec<_>) = missed
-            .into_iter()
-            .partition(|(kind, _, _)| kind == "voice-reply");
-        let unreceived: Vec<String> = replies.into_iter().filter_map(|(_, uid, _)| uid).collect();
         self.socket = Some(socket);
         self.parked_until = None;
         self.last_frame = tokio::time::Instant::now();
@@ -281,7 +277,7 @@ impl Call {
         self.state.resumable.renew(&self.session, &self.token);
         let session = self.session_frame(json!({"resumed": true}));
         self.deliver(session.to_string()).await;
-        for (_, _, frame) in missed {
+        for frame in frames {
             self.deliver(frame).await;
         }
         Flow::Continue

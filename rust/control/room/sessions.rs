@@ -59,13 +59,15 @@ impl Room {
         }
     }
     /// The page is back: what was published while it was away, and a reply handed to it that never
-    /// arrived, are marked unheard instead of played, and its agent is told.
+    /// arrived, are marked unheard instead of played, and its agent is told. Under one lock with the call's return:
+    /// a reply published meanwhile is either marked unheard here or sent to the page that is back.
     pub fn resume(&self, sid: &str, unreceived: &[String]) {
-        let mut guard = self.inner.lock().expect("room lock");
-        guard.drop_unheard(sid, unreceived);
-        guard.offer_note(sid);
-        drop(guard);
-        self.park(sid, false);
+        let mut inner = self.inner.lock().expect("room lock");
+        inner.drop_unheard(sid, unreceived);
+        inner.offer_note(sid);
+        if let Some(browser) = inner.browsers.get_mut(sid) {
+            browser.parked = None;
+        }
     }
     pub fn owns_session(&self, sid: &str, device: &str) -> bool {
         self.inner
