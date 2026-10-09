@@ -1,6 +1,5 @@
 //! Stable message keys rendered from per-language bundles, with English as the fallback.
 
-mod refusal;
 mod template;
 
 #[cfg(test)]
@@ -9,8 +8,6 @@ mod tests;
 use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
-
-pub use refusal::render_refusal;
 
 static ENGLISH: OnceLock<Value> = OnceLock::new();
 static SPANISH: OnceLock<Value> = OnceLock::new();
