@@ -158,6 +158,8 @@ struct Call {
     resume_window: Duration,
     parked_until: Option<tokio::time::Instant>,
     reattach: mpsc::Receiver<Reattach>,
+    /// Socket PCM bytes received in this call, so a returning page knows what never arrived.
+    audio_received: u64,
 }
 
 impl Call {
@@ -245,6 +247,7 @@ impl Call {
             resume_window: resume_window(std::env::var("VOICE_RESUME_SECONDS").ok().as_deref()),
             parked_until: None,
             reattach,
+            audio_received: 0,
         }
     }
 
@@ -339,7 +342,8 @@ impl Call {
         self.state.room.resume(&self.session, &unreceived);
         self.token = new_token();
         self.state.resumable.renew(&self.session, &self.token);
-        let session = self.session_frame(json!({"resumed": true}));
+        let session =
+            self.session_frame(json!({"resumed": true, "audio_received": self.audio_received}));
         self.deliver(session.to_string()).await;
         for (_, _, frame) in missed {
             self.deliver(frame).await;
@@ -520,6 +524,7 @@ impl Call {
                 }
             }
             Some(Ok(Message::Binary(pcm))) => {
+                self.audio_received += pcm.len() as u64;
                 self.media.feed(media::Source::Socket, pcm.to_vec()).await;
             }
             Some(Ok(Message::Text(raw))) if raw.len() <= MAX_CLIENT_TEXT => {
