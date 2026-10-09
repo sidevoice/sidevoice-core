@@ -358,7 +358,7 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
 
     let revision = core.revision(&token, &session).await;
     let uid = format!("cloud-{}", message_id());
-    publish(
+    let answer = publish(
         &call.peer,
         &call.binding,
         &session,
@@ -367,6 +367,17 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
         "Cloud fixture reply",
     )
     .await;
+    // DIAGNOSTIC (temporary)
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let snapshot = core
+        .get(&format!("/api/presentation?session_id={session}"))
+        .token(&token)
+        .send()
+        .await
+        .json();
+    eprintln!("DIAG revision={revision} answer={answer}");
+    eprintln!("DIAG room={} call={}", snapshot["room"], snapshot["call"]);
+    eprintln!("DIAG history={:?}", core.history(&token, THREAD).await);
     let audio = browser
         .frame_within("voice-speech-audio", Duration::from_secs(20))
         .await;
