@@ -147,11 +147,14 @@ impl Inner {
                     page.more = true;
                 } else {
                     let payload = row.payload.clone().unwrap_or_default();
-                    page.messages
-                        .push(json!({"message_id":payload["message_id"],
+                    let mut message = json!({"message_id":payload["message_id"],
                         "session_id":payload["session_id"], "revision":payload["revision"],
                         "channel":"voice", "text":row.text, "arrival_time":row.time,
-                        "cursor":row.seq}));
+                        "cursor":row.seq});
+                    if let Some(unheard) = payload.get("unheard") {
+                        message["unheard"] = unheard.clone();
+                    }
+                    page.messages.push(message);
                     if row.status == "pending" {
                         row.status = "delivered".into();
                         row.pull_claimed_by = Some(bid.to_owned());

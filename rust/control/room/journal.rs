@@ -112,6 +112,22 @@ impl Journal {
     pub(super) fn find(&self, id: &str) -> Option<&Row> {
         self.rows.iter().find(|r| r.id == id)
     }
+    /// The person's message whose words are `text`.
+    #[cfg(test)]
+    pub(super) fn find_input(&self, text: &str) -> Option<&Row> {
+        self.rows
+            .iter()
+            .find(|row| row.role == "user" && row.text == text)
+    }
+    /// Whether call `sid` already sent `thread` a message from a turn after `revision`.
+    pub(super) fn has_newer_input(&self, sid: &str, thread: &str, revision: u64) -> bool {
+        self.rows.iter().any(|row| {
+            row.role == "user"
+                && row.session == sid
+                && row.thread == thread
+                && row.revision > revision
+        })
+    }
     pub(super) fn find_mut(&mut self, id: &str) -> Option<&mut Row> {
         self.rows.iter_mut().find(|r| r.id == id)
     }

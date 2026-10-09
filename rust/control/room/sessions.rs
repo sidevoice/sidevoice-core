@@ -67,10 +67,11 @@ impl Room {
         }
     }
     /// The page is back: what was published while it was away, and a reply handed to it that never
-    /// arrived, are marked unheard instead of played.
+    /// arrived, are marked unheard instead of played, and its agent is told.
     pub fn resume(&self, sid: &str, unreceived: &[String]) {
         let mut guard = self.inner.lock().expect("room lock");
         guard.drop_unheard(sid, unreceived);
+        guard.offer_note(sid);
         drop(guard);
         self.park(sid, false);
     }

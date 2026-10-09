@@ -6,10 +6,18 @@ use serde_json::{json, Value};
 use super::latency::{latency_now_micros, LatencyEvent};
 use super::peers::{ConnectorPeer, PeerError};
 use super::util::{field, seconds};
-use super::Room;
+use super::{Inner, Room};
 use crate::control::telemetry::Counted;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
+/// Seconds before another attempt, by attempts made so far.
+const RETRY_SECONDS: [u64; 4] = [2, 5, 15, 60];
+/// Attempts after which a note is given up.
+const NOTE_ATTEMPTS: usize = 5;
+
+fn retry_after(attempts: usize) -> u64 {
+    RETRY_SECONDS[attempts.clamp(1, RETRY_SECONDS.len()) - 1]
+}
 
 fn valid_delivery_ack(value: &Value) -> Option<&str> {
     let fields = value.as_object()?;
@@ -69,11 +77,15 @@ impl Room {
                 continue;
             };
             let payload = row.payload.as_ref().unwrap();
-            let data = json!({"event_id":row.id,"binding_id":binding.id,"thread":row.thread,"text":row.text,"channel":"voice","session_id":payload["session_id"],"revision":payload["revision"],"message_id":payload["message_id"]});
+            let mut data = json!({"event_id":row.id,"binding_id":binding.id,"thread":row.thread,"text":row.text,"channel":"voice","session_id":payload["session_id"],"revision":payload["revision"],"message_id":payload["message_id"]});
+            if let Some(unheard) = payload.get("unheard") {
+                data["unheard"] = unheard.clone();
+            }
             row.status = "sending".into();
             inner.inflight.start(&binding.id, &row.id);
             work.push((binding.id.clone(), row.id.clone(), peer, data));
         }
+        work.extend(inner.due_notes(now));
         work
     }
     pub fn settle_delivery(
@@ -96,13 +108,17 @@ impl Room {
         }
         let harness = b.harness.clone();
         inner.inflight.finish(bid);
+        let status = answer.as_ref().ok().and_then(valid_delivery_ack);
+        if let Some(thread) = inner.unheard.note_thread(rid) {
+            settle_note(inner, &thread, status);
+            return;
+        }
         let Some(row) = inner.journal.find_mut(rid) else {
             return;
         };
         if row.status == "read" {
             return;
         }
-        let status = answer.as_ref().ok().and_then(valid_delivery_ack);
         let new_status = match status {
             Some("accepted") => "delivered",
             Some("unknown") => "unconfirmed",
@@ -122,7 +138,7 @@ impl Room {
         };
         if new_status == "pending" {
             row.attempts += 1;
-            row.next_attempt = seconds() + [2, 5, 15, 60][row.attempts.min(4) - 1];
+            row.next_attempt = seconds() + retry_after(row.attempts);
         }
         let input = row.input_ref();
         if let (Some(telemetry), "pending") = (crate::control::telemetry::shared(), new_status) {
@@ -167,5 +183,83 @@ impl Room {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+    }
+}
+
+impl Inner {
+    /// The notes due now, each to its conversation's push binding: `input.deliver` on the
+    /// `note` channel, no words of the person's, and what they did not hear. A note for a call
+    /// that left its conversation is dropped; the list waits for the next message there.
+    fn due_notes(&mut self, now: u64) -> Vec<(String, String, ConnectorPeer, Value)> {
+        let mut work = Vec::new();
+        for thread in self.unheard.due_notes(now) {
+            let pull = self
+                .bindings
+                .delivery_target(&thread)
+                .is_some_and(|b| b.pull_input);
+            let Some(session) = self.unheard.note_mut(&thread).map(|n| n.session.clone()) else {
+                continue;
+            };
+            let Some(revision) = self
+                .browsers
+                .get(&session)
+                .filter(|browser| browser.is_on(&thread))
+                .map(|browser| browser.revision)
+            else {
+                self.unheard.drop_note(&thread);
+                continue;
+            };
+            let untold = self
+                .unheard
+                .note_mut(&thread)
+                .is_some_and(|n| n.told.is_none());
+            if pull || (untold && !self.unheard.has(&thread)) {
+                // A pull binding gets the list with the next message it fetches; a message sent
+                // meanwhile already took it.
+                self.unheard.drop_note(&thread);
+                continue;
+            }
+            let Some((bid, peer)) = self
+                .bindings
+                .push_target(&thread, |bid| self.inflight.is_busy(bid))
+                .and_then(|b| Some((b.id.clone(), self.peers.get(&b.connector).cloned()?)))
+            else {
+                continue;
+            };
+            let told = match self.unheard.note_mut(&thread).and_then(|n| n.told.clone()) {
+                Some(told) => told,
+                None => match self.unheard.take(&thread, &self.journal) {
+                    Some(told) => told,
+                    None => {
+                        self.unheard.drop_note(&thread);
+                        continue;
+                    }
+                },
+            };
+            let note = self.unheard.note_mut(&thread).expect("note present");
+            note.told = Some(told.clone());
+            note.due = u64::MAX;
+            let data = json!({"event_id":note.id,"binding_id":bid,"thread":thread,"text":"","channel":"note",
+                "session_id":session,"revision":revision,"message_id":note.id,"unheard":told});
+            self.inflight.start(&bid, &note.id);
+            work.push((bid, note.id.clone(), peer, data));
+        }
+        work
+    }
+}
+
+/// A note the connector took (or will never take) is done; any other answer is tried again later,
+/// up to [`NOTE_ATTEMPTS`].
+fn settle_note(inner: &mut Inner, thread: &str, status: Option<&str>) {
+    let Some(note) = inner.unheard.note_mut(thread) else {
+        return;
+    };
+    note.attempts += 1;
+    if matches!(status, Some("accepted" | "unknown" | "unsupported"))
+        || note.attempts >= NOTE_ATTEMPTS
+    {
+        inner.unheard.drop_note(thread);
+    } else {
+        note.due = seconds() + retry_after(note.attempts);
     }
 }

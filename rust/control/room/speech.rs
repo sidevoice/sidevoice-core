@@ -52,6 +52,10 @@ impl Room {
         }
         let asker = inner.browsers.get(&sid);
         let reason = refusal(inner.browsers.is_recent(&sid), asker, thread, revision);
+        // A reply to a turn the person already followed with a message is never spoken.
+        let deferred = reason.is_some_and(deferrable)
+            && !(reason == Some("newer_turn")
+                && inner.journal.has_newer_input(&sid, thread, revision));
         let capacity = inner.utterances.original_count() >= MAX_UTTERANCES
             || audience.iter().any(|id| {
                 inner
@@ -59,7 +63,7 @@ impl Room {
                     .get(id)
                     .is_some_and(|b| b.pending.len() >= MAX_PENDING)
             });
-        let can_speak = reason.is_none_or(deferrable) && !audience.is_empty() && !capacity;
+        let can_speak = (reason.is_none() || deferred) && !audience.is_empty() && !capacity;
         let waiting = can_speak
             && audience
                 .iter()
@@ -71,7 +75,7 @@ impl Room {
         } else {
             "queued"
         };
-        let spoken_revision = if reason.is_some_and(deferrable) {
+        let spoken_revision = if deferred {
             asker.map_or(revision, |b| b.revision)
         } else {
             revision
@@ -102,6 +106,9 @@ impl Room {
             queued_at: seconds(),
             ..Row::default()
         });
+        if !can_speak {
+            inner.track_unheard(&row_id);
+        }
         if can_speak {
             inner.speak(uid, row_id, &audience, thread, revision, status);
         } else if matches!(
