@@ -123,11 +123,7 @@ fn a_reply_spoken_over_is_cut_and_the_next_message_tells_the_agent() {
     );
     // Told once: the next message carries nothing.
     say(&room, &sid, "Thanks.");
-    let messages = deliveries(&room, "voice");
-    assert!(
-        messages.iter().all(|m| m.get("unheard").is_none()),
-        "{messages:?}"
-    );
+    assert_eq!(told(&room, "Thanks."), None);
 }
 
 #[test]
@@ -199,10 +195,9 @@ fn a_reply_to_a_turn_the_person_already_followed_is_not_spoken() {
         ("text_only".into(), Some("newer_turn".into()))
     );
     say(&room, &sid, "Go on.");
-    let messages = deliveries(&room, "voice");
-    let told = messages.iter().find(|m| m["text"] == "Go on.").unwrap();
+    let unheard = told(&room, "Go on.").unwrap();
     assert_eq!(
-        told["unheard"]["replies"][0]["text"],
+        unheard["replies"][0]["text"],
         "An answer to the old question."
     );
 }
@@ -254,9 +249,7 @@ fn what_was_published_while_away_becomes_a_bounded_note_on_return() {
     );
     assert!(room.inner.lock().unwrap().unheard.note_mut("t").is_none());
     say(&room, &sid, "Where are we?");
-    assert!(deliveries(&room, "voice")
-        .iter()
-        .all(|m| m.get("unheard").is_none()));
+    assert_eq!(told(&room, "Where are we?"), None);
 }
 
 #[test]
