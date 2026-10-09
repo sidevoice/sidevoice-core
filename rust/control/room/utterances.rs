@@ -20,6 +20,8 @@ pub(super) struct UtteranceRecord {
     pub(super) dispatched: bool,
     /// A repetition the person asked for from the bubble, not a catch-up.
     pub(super) requested: bool,
+    /// How many of its characters were heard before it was cut, when the call reports it.
+    pub(super) heard_chars: Option<usize>,
 }
 impl UtteranceRecord {
     pub(super) fn is_replay(&self) -> bool {

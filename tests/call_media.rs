@@ -364,6 +364,7 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
     spoken_turn(&mut browser, &pcm, "Hola from the recorded call").await;
     accept_delivery(&mut call.peer).await;
     let (uid, audio) = cloud_reply(&call, core, &token, &mut browser).await;
+    let revision = audio["revision"].as_u64().unwrap();
     assert_eq!(
         (audio["utterance_id"].as_str(), audio["place"].as_str()),
         (Some(uid.as_str()), Some("elevenlabs"))
