@@ -11,6 +11,8 @@ use super::util::id;
 
 /// How many recent session IDs the room remembers, including calls that already ended.
 const RECENT_SESSIONS: usize = 64;
+/// How many of a call's turns may wait for their words at once; starting one more forgets the oldest.
+pub(super) const MAX_OPEN_TURNS: usize = 8;
 
 /// The conversation a call is focused on; an empty thread means it is focused on none.
 #[derive(Clone)]
@@ -40,9 +42,11 @@ pub(super) struct Browser {
     pub(super) revision: u64,
     pub(super) turn_revision: u64,
     pub(super) speaking: bool,
-    /// The turn the person is speaking, with the focus it started on; its words go there.
-    pub(super) turn: Option<VoiceTurn>,
-    pub(super) cancelled_turn: Option<u64>,
+    /// The turn the person is speaking now, by revision, if any.
+    pub(super) open_turn: Option<u64>,
+    /// The turns started and not yet ended, oldest first, each with the focus it started on: its words go there
+    /// when they come, even after a newer turn started or the focus moved. At most [`MAX_OPEN_TURNS`].
+    pub(super) turns: VecDeque<VoiceTurn>,
     pub(super) sent: u64,
     /// Since when the call has had no socket: nothing new is handed to it until its page is back.
     pub(super) parked: Option<Instant>,
@@ -57,8 +61,8 @@ impl Browser {
             revision: 0,
             turn_revision: 0,
             speaking: false,
-            turn: None,
-            cancelled_turn: None,
+            open_turn: None,
+            turns: VecDeque::new(),
             sent: 0,
             parked: None,
         }
@@ -76,11 +80,12 @@ impl Browser {
         self.revision += 1;
         self.revision
     }
-    /// Move the call to another focus under a new revision, ending any turn in progress.
+    /// Move the call to another focus under a new revision. The person is no longer speaking to the old focus; the
+    /// words of a turn already started still go there when they come.
     pub(super) fn refocus(&mut self, target: Target) {
         self.next_revision();
         self.speaking = false;
-        self.turn = None;
+        self.open_turn = None;
         self.target = Some(target);
     }
     pub(super) fn is_on(&self, thread: &str) -> bool {

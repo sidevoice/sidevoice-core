@@ -71,14 +71,10 @@ impl Room {
         if text.trim().is_empty() {
             return Err(RoomError::new(422, "room.text_empty"));
         }
-        let mut inner = self.inner.lock().expect("room lock");
-        if inner
-            .browsers
-            .get(&turn.session_id)
-            .is_some_and(|browser| browser.cancelled_turn == Some(turn.revision))
-        {
+        if turn.cancelled {
             return Err(RoomError::new(409, "room.input_ended"));
         }
+        let mut inner = self.inner.lock().expect("room lock");
         if !inner.browsers.is_recent(&turn.session_id) {
             return Err(RoomError::new(409, "room.focus_changed"));
         }
@@ -110,7 +106,8 @@ impl Room {
         }))
     }
     /// A turn the call spoke and transcribed while it had no room (`client_id` is the client message that brought it)
-    /// is its own input row, never a live voice revision, sent to the conversation the call is on now.
+    /// is its own input row, sent to the conversation the call is on now. It takes the call's next revision, like a
+    /// turn: it is newer than every turn before it, so a reply to one of those is superseded by it.
     pub fn offline_input(
         &self,
         sid: &str,
@@ -123,21 +120,22 @@ impl Room {
         }
         let row_id = format!("{sid}:user-offline:{client_id}");
         let mut inner = self.inner.lock().expect("room lock");
-        let Some(browser) = inner.browsers.get(sid) else {
+        let Some(browser) = inner.browsers.get_mut(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
         };
         let language = browser.language.clone();
-        let target = browser.bound_target().cloned();
-        let Some(target) = target else {
+        let Some(target) = browser.bound_target().cloned() else {
             return Ok(inner.not_sent(sid, row_id, 0));
         };
+        let revision = browser.next_revision();
+        browser.turn_revision = revision;
         let (thread, binding) = (target.thread.as_str(), target.binding_id.as_str());
         let message_id = id();
         Ok(inner.queue_input(InputDraft {
             row_id,
             text,
             session_id: sid,
-            revision: 0,
+            revision,
             thread_id: thread,
             binding_id: binding,
             title: target.title.clone(),
