@@ -170,6 +170,9 @@ impl Inner {
         let Some((uid, deadline)) = browser.playback_watch.clone() else {
             return;
         };
+        if browser.parked.is_some() {
+            return;
+        }
         if browser.active.as_deref() != Some(uid.as_str()) {
             browser.playback_watch = None;
             return;
@@ -190,6 +193,25 @@ impl Inner {
             });
         if open {
             self.set_status_synced(&uid, sid, "failed", Some("unconfirmed"));
+            self.latency.set_reply_status(sid, &uid, "failed");
+        }
+        self.utterances.retire_finished_replays();
+    }
+
+    /// What a returning call never received stays written and is marked unheard: it is not played
+    /// late. `unreceived` are the utterances whose speech never reached the page; one it did receive
+    /// may still be playing there.
+    pub(super) fn drop_unheard(&mut self, sid: &str, unreceived: &[String]) {
+        let Some(browser) = self.browsers.get_mut(sid) else {
+            return;
+        };
+        let mut dropped: Vec<String> = browser.pending.drain(..).collect();
+        if let Some(active) = browser.active.take_if(|active| unreceived.contains(active)) {
+            browser.playback_watch = None;
+            dropped.push(active);
+        }
+        for uid in dropped {
+            self.set_status_synced(&uid, sid, "interrupted", Some("unheard"));
             self.latency.set_reply_status(sid, &uid, "failed");
         }
         self.utterances.retire_finished_replays();

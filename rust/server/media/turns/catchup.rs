@@ -92,27 +92,34 @@ fn now_millis() -> u64 {
 }
 
 impl TurnOwner {
-    pub(in crate::server) async fn catchup_slice(&mut self, data: &Value) {
+    /// Takes one slice; true once the catch-up is settled (queued, or refused for good), so that
+    /// sending it again would change nothing.
+    pub(in crate::server) async fn catchup_slice(&mut self, data: &Value) -> bool {
         let Some((rate, seq)) = slice_header(data) else {
             self.catchup = None;
-            return;
+            return false;
         };
         if seq == 0 {
             self.catchup = Some(Catchup::begin(data, rate, now_millis()));
         }
         let Some(catchup) = &mut self.catchup else {
-            return;
+            return false;
         };
         match catchup.append(data, rate, seq) {
-            Ok(false) => {}
+            Ok(false) => false,
             Ok(true) => {
                 let catchup = self.catchup.take().expect("catchup exists");
                 self.queue_catchup(catchup).await;
+                true
             }
-            Err(SliceError::Invalid) => self.catchup = None,
+            Err(SliceError::Invalid) => {
+                self.catchup = None;
+                false
+            }
             Err(SliceError::TooLong) => {
                 self.catchup = None;
                 self.report("voice.catchup_too_long").await;
+                true
             }
         }
     }

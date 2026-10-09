@@ -438,6 +438,22 @@ impl Core {
         browser.welcome = session;
         browser
     }
+
+    /// A page coming back after a drop: a new socket whose hello asks for `session` with its token and
+    /// the last frame it handled. The session it lands on, resumed or new.
+    pub async fn resume(&self, token: &str, session: &str, resume: &str, last_seq: u64) -> Browser {
+        let mut browser = Browser::new(self.open_call(token).await);
+        browser
+            .send(
+                "voice-hello",
+                json!({"resume": {"session_id": session, "token": resume, "last_seq": last_seq}}),
+            )
+            .await;
+        let welcome = browser.frame("voice-session").await;
+        browser.session = welcome["session_id"].as_str().unwrap().to_owned();
+        browser.welcome = welcome;
+        browser
+    }
 }
 
 impl Drop for Core {
@@ -700,6 +716,8 @@ pub struct Browser {
     pub session: String,
     pub welcome: Value,
     pub close_code: Option<u16>,
+    /// The highest `seq` among the frames read so far.
+    pub last_seq: u64,
 }
 
 impl Browser {
@@ -711,6 +729,7 @@ impl Browser {
             session: String::new(),
             welcome: Value::Null,
             close_code: None,
+            last_seq: 0,
         }
     }
 
@@ -758,6 +777,9 @@ impl Browser {
                 continue;
             };
             let event: Value = serde_json::from_str(text.as_str()).expect("a JSON event");
+            if let Some(seq) = event["seq"].as_u64() {
+                self.last_seq = self.last_seq.max(seq);
+            }
             if event["type"] == "voice-ping" {
                 self.send("voice-pong", json!({"session_id": self.session}))
                     .await;
@@ -847,8 +869,20 @@ impl Browser {
         self.close_code.unwrap()
     }
 
-    pub async fn close(self) {
+    /// The network goes: the socket ends without a hang-up, so the core parks the call.
+    pub async fn drop_link(self) {
         let _ = self.tx.send(Message::Close(None));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    /// Hangs up, as the page does: a close with code 1000 ends the call instead of parking it.
+    pub async fn close(self) {
+        let _ = self.tx.send(Message::Close(Some(
+            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                reason: "".into(),
+            },
+        )));
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

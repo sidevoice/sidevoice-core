@@ -10,6 +10,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use uuid::Uuid;
 
+use crate::server::call::client_msg_id;
 use crate::server::refusal::{refuse, require_origin, room_refusal, Handled};
 use crate::server::request::room_payload;
 use crate::server::{AppState, AuthenticatedDevice};
@@ -80,11 +81,20 @@ pub(super) async fn cancel_input(
 
 pub(super) async fn receipt(
     State(state): State<Arc<AppState>>,
+    Extension(device): Extension<AuthenticatedDevice>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Handled {
     require_origin(&headers)?;
     let data = room_payload(&body, &headers)?;
+    // A receipt the page sends again after a drop gets the answer it got the first time.
+    let id = client_msg_id(&data).map(str::to_owned);
+    if let Some(answer) = id
+        .as_deref()
+        .and_then(|id| state.seen.answer(&device.0, id))
+    {
+        return Ok(Json(answer).into_response());
+    }
     let sid = data["session_id"].as_str().unwrap_or("");
     let uid = data["utterance_id"].as_str().unwrap_or("");
     let status = data["status"].as_str().unwrap_or("");
@@ -97,6 +107,9 @@ pub(super) async fn receipt(
             status,
         )
         .map_err(|error| room_refusal(error, &headers))?;
+    if let Some(id) = &id {
+        state.seen.remember(&device.0, id, accepted.clone());
+    }
     state.prune_replay_audio();
     let media = state.media.lock().expect("media lock").get(sid).cloned();
     if let Some(media) = media {

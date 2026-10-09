@@ -35,5 +35,4 @@ pub struct CallSettings {
     pub vad_start_secs: f32,
     pub merge_window_secs: f32,
     pub audio_grace_seconds: f32,
-    pub replay_on_return_seconds: f32,
 }

@@ -25,11 +25,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const THREAD: &str = "spoken-thread";
 const OTHER: &str = "other-thread";
 
-/// Every call here shares one conversation: a browser coming to it would first be handed every reply it never
-/// heard (replay on return, covered in connector_link), so the calls ask for no catch-up. They also expect a
-/// reply right after a turn, so the pause after speaking is off.
+/// The calls here expect a reply right after a turn, so the pause after speaking is off.
 fn quiet_room(mut settings: Value) -> Value {
-    settings["replay_on_return_seconds"] = json!(0);
     settings["audio_grace_seconds"] = json!(0);
     settings
 }

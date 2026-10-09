@@ -42,8 +42,8 @@ fn cached_reply(
 }
 
 impl AppState {
-    /// A call that just joined: its pause after speaking, the conversation its hello names (if
-    /// that one is still in the room), and what it never heard on it.
+    /// A call that just joined: its pause after speaking, and the conversation its hello names (if
+    /// that one is still in the room). What it did not hear is not played to it again.
     pub(in crate::server) fn welcome(
         &self,
         session: &str,
@@ -58,64 +58,6 @@ impl AppState {
         {
             self.room.restore_focus(session, thread);
         }
-        let sessions: Vec<String> = hello
-            .and_then(|data| data.get("sessions"))
-            .and_then(Value::as_array)
-            .map(|items| {
-                let named: Vec<String> = items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .filter(|item| !item.is_empty() && item.len() <= 64)
-                    .map(str::to_owned)
-                    .collect();
-                named[named.len().saturating_sub(8)..].to_vec()
-            })
-            .unwrap_or_default();
-        self.replay_missed(session, settings, &sessions);
-    }
-
-    /// Queue what this browser never heard through on its conversation. A paid render is used
-    /// from the cache, pinned for the catch-up, or not at all: it is never bought twice. A reply
-    /// never rendered (parked, or left before its turn) is rendered now for the first time.
-    pub(in crate::server) fn replay_missed(
-        &self,
-        session: &str,
-        settings: &CallSettings,
-        sessions: &[String],
-    ) {
-        let missed = self.room.missed_replies(
-            session,
-            f64::from(settings.replay_on_return_seconds),
-            sessions,
-        );
-        if missed.is_empty() {
-            return;
-        }
-        let mut audio = self.replay_audio.lock().expect("replay audio lock");
-        let mut queued = Vec::new();
-        let mut skipped = Vec::new();
-        for reply in missed {
-            let uid = format!("{}:replay:{session}", reply.utterance_id);
-            let cloud = matches!(
-                crate::models::resolve_voice(settings, reply.language.as_deref()),
-                Ok(voice) if voice.place != "device"
-            );
-            if cloud {
-                match cached_reply(self, settings, &reply.text, reply.language.as_deref()) {
-                    Some((speech, voice)) => {
-                        audio.insert(uid.clone(), Arc::new(PinnedReplay { speech, voice }));
-                    }
-                    None if reply.rendered => {
-                        skipped.push(reply.history_id);
-                        continue;
-                    }
-                    None => {}
-                }
-            }
-            queued.push((uid, reply.utterance_id));
-        }
-        self.room.replay_missed(session, &queued, &skipped);
-        audio.retain(|uid, _| self.room.has_replay(uid));
     }
 }
 

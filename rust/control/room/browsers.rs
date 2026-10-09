@@ -50,6 +50,8 @@ pub(super) struct Browser {
     pub(super) quiet_until: Option<Instant>,
     /// What the room may show about this call's transcription (place, model, the reported runtime).
     pub(super) transcription: Value,
+    /// Since when the call has had no socket: nothing new is handed to it until its page is back.
+    pub(super) parked: Option<Instant>,
 }
 impl Browser {
     pub(super) fn new(device: String, language: String, sender: mpsc::Sender<Value>) -> Self {
@@ -69,6 +71,7 @@ impl Browser {
             audio_grace: Duration::from_secs(1),
             quiet_until: None,
             transcription: Value::Null,
+            parked: None,
         }
     }
     /// Send an event to the browser if its channel has room; false if it was dropped.
@@ -102,7 +105,7 @@ impl Browser {
     }
     /// The utterance to play next, unless one is playing or the user is speaking.
     pub(super) fn next_to_play(&self) -> Option<&String> {
-        if self.active.is_some() || self.speaking {
+        if self.active.is_some() || self.speaking || self.parked.is_some() {
             return None;
         }
         self.pending.front()

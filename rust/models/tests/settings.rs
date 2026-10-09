@@ -76,7 +76,6 @@ fn inclusive_float_endpoints_are_accepted() {
     // Both inclusive endpoints are accepted for every numeric settings field.
     let endpoints = [
         ("audio_grace_seconds", 0.0, 10.0),
-        ("replay_on_return_seconds", 0.0, 3600.0),
         ("user_speech_timeout", 0.5, 15.0),
         ("smart_turn_min_silence", 0.1, 3.0),
         ("smart_turn_max_silence", 0.5, 15.0),

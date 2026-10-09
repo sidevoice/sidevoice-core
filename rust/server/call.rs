@@ -19,9 +19,13 @@ use super::AppState;
 mod admission;
 mod heartbeat;
 mod registration;
+mod resume;
 mod session;
 
 pub(super) use registration::CallRegistry;
+#[cfg(test)]
+pub(super) use resume::Reattach;
+pub(super) use resume::{client_msg_id, ResumableCalls, SeenMessages};
 
 const SUBPROTOCOL: &str = "sidevoice";
 const TOKEN_PREFIX: &str = "sidevoice.token.";

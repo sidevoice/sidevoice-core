@@ -51,6 +51,9 @@ pub struct AppState {
     pub identity: NodeIdentity,
     registry: Mutex<DeviceRegistry>,
     calls: call::CallRegistry,
+    /// Every live call a page may come back to, and the client messages already taken.
+    resumable: call::ResumableCalls,
+    seen: call::SeenMessages,
     media: Mutex<HashMap<String, Arc<media::CallMedia>>>,
     cancel_input: Mutex<HashMap<String, tokio::sync::mpsc::Sender<u64>>>,
     call_settings: Mutex<HashMap<String, crate::types::CallSettings>>,
@@ -111,6 +114,8 @@ impl AppState {
             identity,
             registry: Mutex::new(registry),
             calls: call::CallRegistry::default(),
+            resumable: call::ResumableCalls::default(),
+            seen: call::SeenMessages::default(),
             media: Mutex::new(HashMap::new()),
             cancel_input: Mutex::new(HashMap::new()),
             call_settings: Mutex::new(HashMap::new()),

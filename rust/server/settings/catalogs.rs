@@ -26,7 +26,6 @@ pub(super) async fn languages() -> Json<Value> {
     for stage in ["stt", "tts"] {
         settings[stage]["build"] = Value::Null;
     }
-    settings["replay_on_return_seconds"] = json!(120);
     // CallSettings uses f32 for detector input; the response gives the decimal
     // defaults rather than their f32 runtime representation.
     settings["smart_turn_min_silence"] = json!(0.9);
