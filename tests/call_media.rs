@@ -319,6 +319,11 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
     core.select(&token, &session, THREAD).await;
     spoken_turn(&mut browser, &pcm, "Hola from the recorded call").await;
     accept_delivery(&mut call.peer).await;
+    // A reply answers the latest thing said, and the recording may end in a turn of its own: one to
+    // a turn the person already followed with a message is never played.
+    browser
+        .settle(Duration::from_millis(1500), Duration::from_secs(20))
+        .await;
 
     let revision = core.revision(&token, &session).await;
     let uid = format!("cloud-{}", message_id());

@@ -107,23 +107,26 @@ impl Unheard {
     }
 
     /// What `thread`'s agent is told, emptying the list: how many replies went unheard, and the
-    /// newest [`TOLD_REPLIES`] of them, oldest first, each cut to [`TOLD_CHARS`].
+    /// newest [`TOLD_REPLIES`] of them in the order they were published, each cut to [`TOLD_CHARS`].
     pub(super) fn take(&mut self, thread: &str, journal: &Journal) -> Option<Value> {
         let pending = self.by_thread.remove(thread)?;
         let count = pending.overflow + pending.rows.len();
         if count == 0 {
             return None;
         }
-        let shown = pending.rows.len().saturating_sub(TOLD_REPLIES);
-        let replies: Vec<Value> = pending
+        let mut rows: Vec<_> = pending
             .rows
             .iter()
-            .skip(shown)
-            .filter_map(|(row_id, cut)| {
-                let text = &journal.find(row_id)?.text;
-                let truncated = text.chars().count() > TOLD_CHARS;
-                let text: String = text.chars().take(TOLD_CHARS).collect();
-                Some(json!({"text":text,"truncated":truncated,"cut":cut}))
+            .filter_map(|(row_id, cut)| Some((journal.find(row_id)?, *cut)))
+            .collect();
+        rows.sort_by_key(|(row, _)| row.seq);
+        let shown = rows.len().saturating_sub(TOLD_REPLIES);
+        let replies: Vec<Value> = rows[shown..]
+            .iter()
+            .map(|(row, cut)| {
+                let truncated = row.text.chars().count() > TOLD_CHARS;
+                let text: String = row.text.chars().take(TOLD_CHARS).collect();
+                json!({"text":text,"truncated":truncated,"cut":cut})
             })
             .collect();
         Some(json!({"count":count,"replies":replies}))
