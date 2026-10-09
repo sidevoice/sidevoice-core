@@ -286,3 +286,27 @@ fn a_reply_played_to_the_end_is_not_reported() {
     report(&room, &sid, "r1", "heard");
     assert!(!room.inner.lock().unwrap().unheard.has("t"));
 }
+
+#[test]
+fn how_far_a_cut_reply_was_heard_reaches_the_agent_when_known() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    let asked = revision(&room, &sid);
+    reply(
+        &room,
+        &sid,
+        "t",
+        "r1",
+        "The build is green and deployed.",
+        asked,
+    );
+    report(&room, &sid, "r1", "playing");
+    room.playback(&sid, "r1", "interrupted", None, Some(12), &Value::Null)
+        .unwrap();
+    say(&room, &sid, "Stop.");
+    let unheard = told(&room, "Stop.").unwrap();
+    assert_eq!(
+        unheard["replies"][0],
+        json!({"text":"The build is green and deployed.","truncated":false,"cut":true,"heard_chars":12})
+    );
+}

@@ -1,10 +1,11 @@
 //! What the person did not hear, per conversation, until the agent is told.
 //!
 //! A reply counts as unheard when it ends without being played to the person:
-//! - cut while it played, because the person spoke over it (`user_interrupted`). The whole reply counts,
-//!   flagged `cut`: its start was heard, and the call says how many of its characters were (`heard_chars`);
-//! - dropped before it played: superseded by a newer message (`newer_turn`), not received by a call that
-//!   dropped (`unheard`), stopped by a change of conversation or the end of the call
+//! - cut while it played, because the person spoke over it (`user_interrupted`): the whole reply
+//!   counts, flagged `cut` (its start was heard), with `heard_chars` when the call said how far
+//!   playback got;
+//! - dropped before it played: superseded by a newer message (`newer_turn`), not received by a call
+//!   that dropped (`unheard`), stopped by a change of conversation or the end of the call
 //!   (`focus_changed`, `call_ended`, `session_changed`), refused for a full queue or failed on the
 //!   page (`queue_full`, `playback_failed`);
 //! - published with nobody listening on its conversation (`text_only`).
@@ -52,10 +53,18 @@ pub(super) fn unheard(status: &str, reason: Option<&str>) -> Option<bool> {
     }
 }
 
+/// One unheard reply: its row, whether it was cut while playing, and how many of its characters
+/// were heard first, when known.
+struct Missed {
+    row_id: String,
+    cut: bool,
+    heard_chars: Option<usize>,
+}
+
 #[derive(Default)]
 struct Pending {
-    /// Row ids, oldest first, each with whether it was cut while playing.
-    rows: VecDeque<(String, bool)>,
+    /// Oldest first.
+    rows: VecDeque<Missed>,
     /// Unheard replies no longer in `rows`.
     overflow: usize,
 }
@@ -77,16 +86,28 @@ pub(super) struct Unheard {
 }
 
 impl Unheard {
-    /// A reply on `thread` ended unheard (`Some(cut)`) or was heard (`None`).
-    pub(super) fn update(&mut self, thread: &str, row_id: &str, unheard: Option<bool>) {
+    /// A reply on `thread` ended unheard (`Some(cut)`, with `heard_chars` when known) or was
+    /// heard (`None`).
+    pub(super) fn update(
+        &mut self,
+        thread: &str,
+        row_id: &str,
+        unheard: Option<bool>,
+        heard_chars: Option<usize>,
+    ) {
         match unheard {
             Some(cut) => {
                 let pending = self.by_thread.entry(thread.to_owned()).or_default();
-                if let Some(entry) = pending.rows.iter_mut().find(|(id, _)| id == row_id) {
-                    entry.1 |= cut;
+                if let Some(entry) = pending.rows.iter_mut().find(|m| m.row_id == row_id) {
+                    entry.cut |= cut;
+                    entry.heard_chars = heard_chars.or(entry.heard_chars);
                     return;
                 }
-                pending.rows.push_back((row_id.to_owned(), cut));
+                pending.rows.push_back(Missed {
+                    row_id: row_id.to_owned(),
+                    cut,
+                    heard_chars,
+                });
                 if pending.rows.len() > KEPT_PER_THREAD {
                     pending.rows.pop_front();
                     pending.overflow += 1;
@@ -94,7 +115,7 @@ impl Unheard {
             }
             None => {
                 if let Some(pending) = self.by_thread.get_mut(thread) {
-                    pending.rows.retain(|(id, _)| id != row_id);
+                    pending.rows.retain(|m| m.row_id != row_id);
                 }
             }
         }
@@ -107,7 +128,8 @@ impl Unheard {
     }
 
     /// What `thread`'s agent is told, emptying the list: how many replies went unheard, and the
-    /// newest [`TOLD_REPLIES`] of them in the order they were published, each cut to [`TOLD_CHARS`].
+    /// newest [`TOLD_REPLIES`] of them in the order they were published, each cut to [`TOLD_CHARS`],
+    /// with `heard_chars` where known.
     pub(super) fn take(&mut self, thread: &str, journal: &Journal) -> Option<Value> {
         let pending = self.by_thread.remove(thread)?;
         let count = pending.overflow + pending.rows.len();
@@ -117,17 +139,17 @@ impl Unheard {
         let mut rows: Vec<_> = pending
             .rows
             .iter()
-            .filter_map(|(row_id, cut)| Some((journal.find(row_id)?, *cut)))
+            .filter_map(|missed| Some((journal.find(&missed.row_id)?, missed)))
             .collect();
         rows.sort_by_key(|(row, _)| row.seq);
         let shown = rows.len().saturating_sub(TOLD_REPLIES);
         let replies: Vec<Value> = rows[shown..]
             .iter()
-            .map(|(row, cut)| {
+            .map(|(row, missed)| {
                 let truncated = row.text.chars().count() > TOLD_CHARS;
                 let text: String = row.text.chars().take(TOLD_CHARS).collect();
-                let mut reply = json!({"text":text,"truncated":truncated,"cut":cut});
-                if let Some(heard) = row.heard_chars.filter(|_| *cut) {
+                let mut reply = json!({"text":text,"truncated":truncated,"cut":missed.cut});
+                if let Some(heard) = missed.heard_chars {
                     reply["heard_chars"] = json!(heard);
                 }
                 reply
@@ -193,7 +215,10 @@ impl Inner {
         let verdict = unheard(&row.status, row.reason.as_deref());
         if verdict.is_some() || row.status == "playback_finished" {
             let thread = row.thread.clone();
-            self.unheard.update(&thread, row_id, verdict);
+            let heard_chars = row
+                .heard_chars
+                .and_then(|heard| usize::try_from(heard).ok());
+            self.unheard.update(&thread, row_id, verdict, heard_chars);
         }
     }
 
