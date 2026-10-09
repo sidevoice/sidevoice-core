@@ -31,7 +31,8 @@ async fn refused_and_turned_away_calls_give_their_seat_back() {
         refused
             .send(
                 "voice-hello",
-                json!({"settings": {"tts": {"place": "host", "model": "kokoro-82m-v1.0"}}}),
+                json!({"settings": {"tts": {"place": "host", "model": "kokoro-82m-v1.0"}},
+                    "device_models": device_models()}),
             )
             .await;
         assert_eq!(

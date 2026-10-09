@@ -1,19 +1,22 @@
 //! The transcription runtime a client reports, and what the room may show about a call's transcription.
 
+use std::sync::Arc;
+
 use serde_json::{Map, Value};
 
-use super::{
-    catalog::{find_model, task_for_model},
-    json::{field_str, values},
+use super::device_models::{model_for, offered, runs_on};
+use crate::{
+    messages::LocalizedMessage,
+    types::{DeviceModels, SpeechStage},
 };
-use crate::{messages::LocalizedMessage, types::SpeechStage};
 
 /// The transcription runtime a client reports (in its hello and in `voice-stt-ready`), or `None` when it
-/// reports none: a catalogue model of the stt task, on one of that model's engines, and the accelerator it
-/// runs on. What the stats show, not what the node obeys. A load that fell back keeps its reason.
+/// reports none: a reported model of the stt task, on the backend of one of its available builds, and the
+/// accelerator it runs on. What the stats show, not what the node obeys. A load that fell back keeps its reason.
 /// `Err` is a report this node cannot read.
 pub fn browser_runtime(
     data: Option<&Value>,
+    report: Option<&Arc<DeviceModels>>,
 ) -> Result<Option<Map<String, Value>>, LocalizedMessage> {
     let Some(data) = data.and_then(Value::as_object) else {
         return Ok(None);
@@ -21,19 +24,13 @@ pub fn browser_runtime(
     let model = data
         .get("model")
         .and_then(Value::as_str)
-        .and_then(find_model)
-        .filter(|model| task_for_model(model) == Some("stt"))
+        .and_then(|model| model_for(offered(report), "stt", model))
         .ok_or_else(unsupported_runtime)?;
     let engine = data
         .get("engine")
         .and_then(Value::as_str)
         .ok_or_else(unsupported_runtime)?;
-    if !model
-        .get("builds")
-        .into_iter()
-        .flat_map(values)
-        .any(|build| field_str(build, "engine") == Some(engine))
-    {
+    if !runs_on(model, engine) {
         return Err(unsupported_runtime());
     }
     let accelerator = data
@@ -42,7 +39,7 @@ pub fn browser_runtime(
         .filter(|value| (1..=40).contains(&value.chars().count()))
         .ok_or_else(unsupported_runtime)?;
     let mut runtime = Map::new();
-    runtime.insert("model".into(), model["id"].clone());
+    runtime.insert("model".into(), Value::from(model.id.as_str()));
     runtime.insert("engine".into(), Value::from(engine));
     runtime.insert("accelerator".into(), Value::from(accelerator));
     runtime.insert(

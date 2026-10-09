@@ -4,10 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    catalog::{find_model, model_schema, provider_schema, speech_catalogue_language},
+    catalog::{provider_schema, speech_catalogue_language},
+    device_models::{device_schema, model_for, offered, primary},
     json::{field_str, values},
 };
-use crate::{messages::LocalizedMessage, types::CallSettings};
+use crate::{
+    messages::LocalizedMessage,
+    types::{CallSettings, DeviceModel},
+};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ResolvedVoice {
@@ -34,18 +38,23 @@ pub fn resolve_voice(
     if stage.place == "host" {
         return Err(LocalizedMessage::new("place_host_unavailable"));
     }
+    let reported = model_for(
+        offered(settings.device_models.as_ref()),
+        "tts",
+        &stage.model,
+    );
     let schema = if stage.place == "device" {
-        model_schema(find_model(&stage.model).ok_or_else(voice_unavailable)?)
+        device_schema("tts", reported.ok_or_else(voice_unavailable)?)
     } else {
-        provider_schema(&stage.place, "tts")
+        provider_schema(&stage.place, "tts").clone()
     };
-    let voice_option = values(schema)
+    let voice_option = values(&schema)
         .iter()
         .find(|option| field_str(option, "kind") == Some("voice"));
     let chosen = stage.options.get("voice");
     let voice =
         if voice_option.is_some_and(|option| field_str(option, "from") == Some("model.voices")) {
-            model_voice(&stage.model, chosen, language)?
+            model_voice(reported.ok_or_else(voice_unavailable)?, chosen, language)
         } else {
             provider_voice(chosen, language)
         };
@@ -58,7 +67,7 @@ pub fn resolve_voice(
         .get("speed")
         .and_then(Value::as_f64)
         .or_else(|| {
-            values(schema)
+            values(&schema)
                 .iter()
                 .find(|option| field_str(option, "id") == Some("speed"))
                 .and_then(|option| option.get("default"))
@@ -87,30 +96,22 @@ fn picked<'a>(chosen: Option<&'a Value>, language: &str) -> Option<&'a Value> {
     }
 }
 
-/// A catalogue voice: the picked one if the model lists it for `language`, else the model's first that does.
+/// A reported voice: the picked one if the model lists it for `language`, else the model's first that does.
 fn model_voice<'a>(
-    model_id: &str,
+    model: &'a DeviceModel,
     chosen: Option<&'a Value>,
     language: &str,
-) -> Result<Option<&'a str>, LocalizedMessage> {
-    let model = find_model(model_id).ok_or_else(voice_unavailable)?;
+) -> Option<&'a str> {
     let spoken = model
-        .get("voices")
-        .into_iter()
-        .flat_map(values)
-        .filter(|entry| {
-            field_str(entry, "language").unwrap_or("").split('-').next() == Some(language)
-        })
+        .voices
+        .iter()
+        .filter(|voice| voice.languages.iter().any(|tag| primary(tag) == language))
         .collect::<Vec<_>>();
-    let first_spoken = spoken.first().and_then(|entry| field_str(entry, "id"));
-    Ok(picked(chosen, language)
+    let first_spoken = spoken.first().map(|voice| voice.id.as_str());
+    picked(chosen, language)
         .and_then(Value::as_str)
-        .filter(|picked| {
-            spoken
-                .iter()
-                .any(|entry| field_str(entry, "id") == Some(*picked))
-        })
-        .or(first_spoken))
+        .filter(|picked| spoken.iter().any(|voice| voice.id == *picked))
+        .or(first_spoken)
 }
 
 /// A provider voice: the picked one, else the first voice chosen for any language.

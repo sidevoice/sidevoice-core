@@ -34,6 +34,7 @@ impl Call {
             Some("voice-catchup") => self.turns.catchup_slice(&data).await,
             Some("voice-settings") => self.update_settings(&data).await,
             Some("voice-stt-ready") => self.runtime_ready(&data).await,
+            Some("voice-device-models") => self.device_models(&data).await,
             _ => {}
         }
     }
@@ -68,6 +69,7 @@ impl Call {
             .room
             .set_language(&self.session, &settings.ui_language);
         self.settings.tts = settings.tts;
+        self.settings.device_models = settings.device_models;
         self.settings.ui_language = settings.ui_language;
         self.settings.audio_grace_seconds = settings.audio_grace_seconds;
         self.state
@@ -81,9 +83,21 @@ impl Call {
             .insert(self.session.clone(), self.settings.clone());
     }
 
+    /// Takes the device's new report of its models for the settings it sends from now on; the running ones stay.
+    async fn device_models(&mut self, data: &Value) {
+        match crate::models::device_models(data.get("device_models")) {
+            Ok(report) => self.defaults.device_models = report,
+            Err(problem) => {
+                self.defaults.device_models = None;
+                let refusal = json!({"type":"error","data":runtime_refusal(&problem, &self.settings.ui_language)});
+                let _ = self.socket.send(text(&refusal)).await;
+            }
+        }
+    }
+
     /// Records the transcription runtime the browser loaded, for the room's stats only.
     async fn runtime_ready(&mut self, data: &Value) {
-        match crate::models::browser_runtime(Some(data)) {
+        match crate::models::browser_runtime(Some(data), self.defaults.device_models.as_ref()) {
             Ok(Some(runtime)) => {
                 if let Some(view) = self.transcription.as_object_mut() {
                     view.extend(runtime);

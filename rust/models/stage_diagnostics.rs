@@ -4,14 +4,19 @@ use serde_json::{Map, Value};
 
 use super::{
     settings::SettingDiagnostic,
-    stage::{catalogue_model, provider_serves, valid_model_id},
+    stage::{provider_serves, reported_model, valid_model_id},
 };
-use crate::messages::LocalizedMessage;
+use crate::{messages::LocalizedMessage, types::DeviceModels};
 
-pub(super) fn stage_diagnostics(task: &str, field: &str, input: &Value) -> Vec<SettingDiagnostic> {
+pub(super) fn stage_diagnostics(
+    task: &str,
+    field: &str,
+    input: &Value,
+    report: &DeviceModels,
+) -> Vec<SettingDiagnostic> {
     let diagnostic = input
         .as_object()
-        .and_then(|object| field_diagnostics(task, field, object));
+        .and_then(|object| field_diagnostics(task, field, object, report));
     diagnostic.unwrap_or_else(|| {
         vec![SettingDiagnostic::new(
             task,
@@ -25,6 +30,7 @@ fn field_diagnostics(
     task: &str,
     field: &str,
     object: &Map<String, Value>,
+    report: &DeviceModels,
 ) -> Option<Vec<SettingDiagnostic>> {
     let missing = ["place", "model"]
         .into_iter()
@@ -56,7 +62,7 @@ fn field_diagnostics(
         "model" => object
             .get("model")
             .and_then(Value::as_str)
-            .and_then(|model| model_message(task, model, place)),
+            .and_then(|model| model_message(task, model, place, report)),
         "place" => place.and_then(|place| place_message(task, place)),
         "build" if place.is_some_and(|place| !matches!(place, "device" | "host")) => {
             Some(LocalizedMessage::new("settings.provider_build_invalid"))
@@ -66,11 +72,18 @@ fn field_diagnostics(
     message.map(|message| vec![SettingDiagnostic::new(task, message)])
 }
 
-fn model_message(task: &str, model: &str, place: Option<&str>) -> Option<LocalizedMessage> {
+fn model_message(
+    task: &str,
+    model: &str,
+    place: Option<&str>,
+    report: &DeviceModels,
+) -> Option<LocalizedMessage> {
     if !valid_model_id(model) {
         return Some(LocalizedMessage::new("settings.model_id_invalid").with_param("model", model));
     }
-    if matches!(place, Some("device" | "host")) && catalogue_model(task, model, None).is_err() {
+    if matches!(place, Some("device" | "host"))
+        && reported_model(report, task, model, None).is_err()
+    {
         return Some(
             LocalizedMessage::new("settings.model_task_invalid")
                 .with_param("model", model)

@@ -1,6 +1,8 @@
 //! Application values shared across the call, room and transport boundaries.
 //! Validation and catalogue resolution belong to the model owner in T2.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -36,4 +38,47 @@ pub struct CallSettings {
     pub merge_window_secs: f32,
     pub audio_grace_seconds: f32,
     pub replay_on_return_seconds: f32,
+    /// The models and builds the device reported for this call, against which its device stages were read.
+    /// `None` when it reported none. Never serialized: it is the device's report, not a setting.
+    #[serde(skip)]
+    pub device_models: Option<Arc<DeviceModels>>,
+}
+
+/// The models and builds a device offers, as it reported them (from sidevoice-engine's `models()`), kept to what
+/// the core reads. Ids are the engine's own.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct DeviceModels {
+    pub models: Vec<DeviceModel>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct DeviceModel {
+    pub id: String,
+    /// The tasks it serves: "stt", "tts".
+    pub capabilities: Vec<String>,
+    /// BCP 47 tags.
+    #[serde(default)]
+    pub languages: Vec<String>,
+    #[serde(default)]
+    pub voices: Vec<DeviceVoice>,
+    #[serde(default)]
+    pub installed: bool,
+    pub builds: Vec<DeviceBuild>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct DeviceVoice {
+    pub id: String,
+    /// BCP 47 tags.
+    pub languages: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct DeviceBuild {
+    /// The backend that runs it: what a stage's `build.engine` names.
+    pub backend: String,
+    /// The accelerator it would run on there, when the device says.
+    #[serde(default)]
+    pub accelerator: Option<String>,
+    pub available: bool,
 }

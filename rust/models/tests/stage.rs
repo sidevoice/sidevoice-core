@@ -11,7 +11,7 @@ fn stage_rules_reject_cross_task_models_provider_builds_and_unknown_options() {
     let cases = [
         (
             json!({"stt":{"place":"device", "model":"kokoro-82m-v1.0"}}),
-            "Some device settings were not valid and use their defaults: stt Value error, 'kokoro-82m-v1.0' is not a stt model of the catalogue",
+            "Some device settings were not valid and use their defaults: stt Value error, 'kokoro-82m-v1.0' is not a stt model this device offers",
         ),
         (
             json!({"stt":{"place":"openai", "model":"gpt-4o-transcribe", "build":{"engine":"sherpa-onnx", "accelerator":"cpu"}}}),
@@ -27,7 +27,7 @@ fn stage_rules_reject_cross_task_models_provider_builds_and_unknown_options() {
         ),
         (
             json!({"tts":{"place":"device", "model":"missing"}}),
-            "Some device settings were not valid and use their defaults: tts Value error, 'missing' is not a tts model of the catalogue",
+            "Some device settings were not valid and use their defaults: tts Value error, 'missing' is not a tts model this device offers",
         ),
     ];
     for (input, expected) in cases {

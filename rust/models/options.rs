@@ -1,4 +1,4 @@
-//! Validation of a stage's options against the catalogue option schema of its model or provider.
+//! Validation of a stage's options against the option schema of its device model or provider.
 
 use std::collections::HashMap;
 
@@ -6,9 +6,10 @@ use serde_json::{Map, Number, Value};
 
 use super::{
     catalog::speech_catalogue_language,
+    device_models::primary,
     json::{field_str, strings, values},
 };
-use crate::messages::LocalizedMessage;
+use crate::{messages::LocalizedMessage, types::DeviceModel};
 
 /// The characters of a refused value shown in its diagnostic, as JSON, before it is cut short.
 const SHOWN_LIMIT: usize = 40;
@@ -116,7 +117,7 @@ pub(super) fn normalized_default(option: &Value, default: &Value) -> Value {
 pub(super) fn validate_options(
     schema: &Value,
     given: &Map<String, Value>,
-    model: Option<&Value>,
+    model: Option<&DeviceModel>,
 ) -> Result<Map<String, Value>, OptionFailure> {
     let mut known = HashMap::new();
     for option in values(schema) {
@@ -155,7 +156,7 @@ fn option_value(
     option: &Value,
     name: &str,
     value: &Value,
-    model: Option<&Value>,
+    model: Option<&DeviceModel>,
 ) -> Result<Value, OptionFailure> {
     match field_str(option, "kind") {
         Some("language") => language_value(option, name, value),
@@ -224,7 +225,7 @@ fn voice_value(
     option: &Value,
     name: &str,
     value: &Value,
-    model: Option<&Value>,
+    model: Option<&DeviceModel>,
 ) -> Result<Value, OptionFailure> {
     if option.get("per_language").and_then(Value::as_bool) != Some(true) {
         return Ok(Value::String(voice_id(option, name, value, model, None)?));
@@ -254,7 +255,7 @@ fn voice_id(
     option: &Value,
     name: &str,
     voice: &Value,
-    model: Option<&Value>,
+    model: Option<&DeviceModel>,
     language: Option<&str>,
 ) -> Result<String, OptionFailure> {
     if field_str(option, "from") == Some("model.voices") {
@@ -273,15 +274,14 @@ fn voice_id(
 fn model_voice_id(
     name: &str,
     voice: &Value,
-    model: Option<&Value>,
+    model: Option<&DeviceModel>,
     language: Option<&str>,
 ) -> Result<String, OptionFailure> {
     let found = voice.as_str().and_then(|voice_id| {
         model
-            .and_then(|model| model.get("voices"))
             .into_iter()
-            .flat_map(values)
-            .find(|candidate| field_str(candidate, "id") == Some(voice_id))
+            .flat_map(|model| &model.voices)
+            .find(|candidate| candidate.id == voice_id)
     });
     let Some(found) = found else {
         return Err(OptionFailure::new(
@@ -291,9 +291,12 @@ fn model_voice_id(
             },
         ));
     };
-    let voice = voice.as_str().expect("matched catalogue voice is a string");
+    let voice = voice.as_str().expect("matched reported voice is a string");
     if let Some(language) = language {
-        let speaks = field_str(found, "language").unwrap_or("").split('-').next() == Some(language);
+        let speaks = found
+            .languages
+            .iter()
+            .any(|spoken| primary(spoken) == language);
         if !speaks {
             return Err(OptionFailure::new(
                 name,

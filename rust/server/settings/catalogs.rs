@@ -1,10 +1,9 @@
-//! What a device may choose from: default settings, the model catalogue, and the
-//! providers' transcription models and voices.
+//! What a device may choose from: default settings and the providers' transcription models and voices.
 
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
@@ -33,15 +32,6 @@ pub(super) async fn languages() -> Json<Value> {
     settings["vad_confidence"] = json!(0.6);
     settings["vad_start_secs"] = json!(0.4);
     Json(settings)
-}
-
-pub(super) async fn model_catalog(headers: HeaderMap) -> Handled {
-    require_origin(&headers)?;
-    Ok((
-        [(header::CONTENT_TYPE, "application/json")],
-        crate::models::catalog_text(),
-    )
-        .into_response())
 }
 
 pub(super) async fn transcription_models(

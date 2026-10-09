@@ -3,6 +3,7 @@
 use serde_json::{Map, Value};
 
 use super::{
+    device_models::offered,
     stage::{parse_stage, StageFailure},
     stage_diagnostics::stage_diagnostics,
 };
@@ -203,15 +204,17 @@ fn stage_fields(
     settings: &mut CallSettings,
     invalid: &mut Vec<SettingDiagnostic>,
 ) {
+    let device_models = settings.device_models.clone();
+    let report = offered(device_models.as_ref());
     for task in ["stt", "tts"] {
         let Some(value) = object.get(task) else {
             continue;
         };
-        match parse_stage(task, value) {
+        match parse_stage(task, value, report) {
             Ok(stage) if task == "stt" => settings.stt = stage,
             Ok(stage) => settings.tts = stage,
             Err(StageFailure::Field(field)) => {
-                invalid.extend(stage_diagnostics(task, &field, value))
+                invalid.extend(stage_diagnostics(task, &field, value, report))
             }
             Err(StageFailure::Option(option)) => {
                 invalid.push(SettingDiagnostic::new(task, option.message()))

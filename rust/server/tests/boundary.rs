@@ -322,7 +322,6 @@ async fn every_other_route_on_the_socket_still_wants_a_token() {
         "/api/presentation/admission",
         "/api/device/devices",
         "/api/connectors",
-        "/api/models/catalog",
     ] {
         for headers in [&[][..], &[("authorization", "Bearer guessed")]] {
             let (status, _, _) = send(&node.socket(), "GET", path, headers, None).await;
@@ -376,7 +375,6 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
             Some(json!({"key": "sk-guessed"})),
         ),
         ("DELETE", "/api/presentation/integrations/openai", None),
-        ("GET", "/api/models/catalog", None),
         (
             "POST",
             "/api/models/check",
@@ -416,7 +414,6 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
         "/api/presentation/admission",
         "/api/connectors",
         "/api/presentation/rtc/config",
-        "/api/models/catalog",
     ] {
         let (status, _, _) = send(&node.tcp(), "GET", path, &with_token, None).await;
         assert_eq!(status, StatusCode::OK, "{path}");

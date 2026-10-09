@@ -163,7 +163,8 @@ async fn the_room_relays_requests_and_calls_and_the_link_follows_the_pairing() {
         )
         .await;
     assert_eq!(opened.data, json!({"ok": true}));
-    let hello = json!({"type": "voice-hello", "data": {"settings": {"turn_patience": "fast"}}});
+    let hello = json!({"type": "voice-hello",
+        "data": {"settings": {"turn_patience": "fast"}, "device_models": device_models()}});
     link.emit(
         "relay.data",
         json!({"channel": "call", "data": hello.to_string()}),

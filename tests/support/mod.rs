@@ -424,13 +424,13 @@ impl Core {
             .0
     }
 
-    /// A browser in a call: hello sent with these settings, session assigned.
+    /// A browser in a call: hello sent with these settings and the test device's models, session assigned.
     pub async fn join(&self, token: &str, settings: Value) -> Browser {
         let mut browser = Browser::new(self.open_call(token).await);
         let hello = if settings.is_null() {
-            json!({})
+            json!({"device_models": device_models()})
         } else {
-            json!({"settings": settings})
+            json!({"settings": settings, "device_models": device_models()})
         };
         browser.send("voice-hello", hello).await;
         let session = browser.frame("voice-session").await;
@@ -1513,4 +1513,23 @@ pub async fn publish(
 
 pub fn message_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// The models a test device reports in its hello, shaped as a client builds them from sidevoice-engine's `models()`.
+pub fn device_models() -> Value {
+    let builds = json!([
+        {"id": "sherpa-onnx-int8", "backend": "sherpa-onnx", "accelerator": "cpu", "available": true},
+        {"id": "transformers-js-q8", "backend": "transformers-js", "accelerator": "wasm", "available": true}]);
+    let whisper = |id: &str| {
+        json!({"id": id, "capabilities": ["stt"], "languages": ["es", "en", "fr", "it", "pt", "hi"],
+               "installed": true, "builds": builds})
+    };
+    let voice = |id: &str, language: &str| json!({"id": id, "languages": [language]});
+    json!({"version": 1, "models": [
+        whisper("whisper-tiny"), whisper("whisper-base"), whisper("whisper-small"),
+        {"id": "kokoro-82m-v1.0", "capabilities": ["tts"], "languages": ["en-US", "en-GB", "es"], "installed": true,
+         "voices": [voice("ef_dora", "es"), voice("em_alex", "es"), voice("af_heart", "en-US"),
+                    voice("af_bella", "en-US"), voice("bf_emma", "en-GB"), voice("ff_siwis", "fr"),
+                    voice("if_sara", "it"), voice("pf_dora", "pt-BR"), voice("hf_alpha", "hi")],
+         "builds": builds}]})
 }

@@ -15,7 +15,6 @@ mod provider_errors;
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/presentation/languages", get(catalogs::languages))
-        .route("/api/models/catalog", get(catalogs::model_catalog))
         .route(
             "/api/presentation/transcription/models",
             get(catalogs::transcription_models),

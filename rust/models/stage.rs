@@ -1,13 +1,15 @@
-//! Parsing one speech stage (`stt` or `tts`) from wire JSON with the catalogue's rules.
+//! Parsing one speech stage (`stt` or `tts`) from wire JSON: a provider's against the provider catalogue, a device's
+//! against the models the device reported.
 
 use serde_json::{Map, Value};
 
 use super::{
-    catalog::{find_model, find_provider, model_schema, provider_schema, task_for_model},
-    json::{field_str, strings, values},
+    catalog::{find_provider, provider_schema},
+    device_models::{device_schema, model_for, offered, runs_on},
+    json::strings,
     options::{validate_options, OptionFailure},
 };
-use crate::types::{ModelBuild, SpeechStage};
+use crate::types::{DeviceModel, DeviceModels, ModelBuild, SpeechStage};
 
 /// Why a stage was refused: the first field that failed, or the first option that failed.
 #[derive(Clone, Debug)]
@@ -22,14 +24,18 @@ impl From<String> for StageFailure {
     }
 }
 
-/// Parse a provider stage for the hosted model try route with the call's catalogue rules.
+/// Parse a provider stage for the hosted model try route with the call's rules.
 pub fn provider_check_stage(task: &str, input: &Value) -> Option<SpeechStage> {
-    parse_stage(task, input)
+    parse_stage(task, input, offered(None))
         .ok()
         .filter(|stage| !matches!(stage.place.as_str(), "device" | "host"))
 }
 
-pub(super) fn parse_stage(task: &str, input: &Value) -> Result<SpeechStage, StageFailure> {
+pub(super) fn parse_stage(
+    task: &str,
+    input: &Value,
+    report: &DeviceModels,
+) -> Result<SpeechStage, StageFailure> {
     if !matches!(task, "stt" | "tts") {
         return Err("stage".to_owned().into());
     }
@@ -55,17 +61,17 @@ pub(super) fn parse_stage(task: &str, input: &Value) -> Result<SpeechStage, Stag
     };
 
     let (model, schema) = if matches!(place.as_str(), "device" | "host") {
-        let model = catalogue_model(task, &model_id, build.as_ref())?;
-        (Some(model), model_schema(model))
+        let model = reported_model(report, task, &model_id, build.as_ref())?;
+        (Some(model), device_schema(task, model))
     } else {
         provider_serves(task, &place)?;
         if build.is_some() {
             return Err("build".to_owned().into());
         }
-        (None, provider_schema(&place, task))
+        (None, provider_schema(&place, task).clone())
     };
 
-    let options = validate_options(schema, &given, model).map_err(StageFailure::Option)?;
+    let options = validate_options(&schema, &given, model).map_err(StageFailure::Option)?;
     Ok(SpeechStage {
         place,
         model: model_id,
@@ -74,27 +80,18 @@ pub(super) fn parse_stage(task: &str, input: &Value) -> Result<SpeechStage, Stag
     })
 }
 
-/// The catalogue model a device or host stage names, which must serve `task` and list the chosen build.
-pub(super) fn catalogue_model(
+/// The reported model a device or host stage names, which must serve `task` and run the chosen build's backend.
+pub(super) fn reported_model<'a>(
+    report: &'a DeviceModels,
     task: &str,
     model_id: &str,
     build: Option<&ModelBuild>,
-) -> Result<&'static Value, StageFailure> {
-    let Some(model) = find_model(model_id) else {
+) -> Result<&'a DeviceModel, StageFailure> {
+    let Some(model) = model_for(report, task, model_id) else {
         return Err("model".to_owned().into());
     };
-    if task_for_model(model) != Some(task) {
-        return Err("model".to_owned().into());
-    }
-    if let Some(build) = build {
-        let listed = model
-            .get("builds")
-            .into_iter()
-            .flat_map(values)
-            .any(|candidate| field_str(candidate, "engine") == Some(build.engine.as_str()));
-        if !listed {
-            return Err("build.engine".to_owned().into());
-        }
+    if build.is_some_and(|build| !runs_on(model, &build.engine)) {
+        return Err("build.engine".to_owned().into());
     }
     Ok(model)
 }

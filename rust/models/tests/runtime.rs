@@ -2,17 +2,22 @@
 
 use serde_json::{json, Value};
 
-use super::support::defaults;
+use super::support::{defaults, report};
 use crate::models::{browser_runtime, call_transcription};
 
 #[test]
-fn browser_runtime_is_validated_against_the_catalogue() {
-    assert_eq!(browser_runtime(None), Ok(None));
-    assert_eq!(browser_runtime(Some(&json!("webgpu"))), Ok(None));
-    let runtime = browser_runtime(Some(&json!({
-        "session_id": "ignored", "model": "whisper-base", "engine": "transformers-js",
-        "accelerator": "webgpu", "cached": true
-    })))
+fn browser_runtime_is_validated_against_the_reported_models() {
+    let report = report();
+    let report = Some(&report);
+    assert_eq!(browser_runtime(None, report), Ok(None));
+    assert_eq!(browser_runtime(Some(&json!("webgpu")), report), Ok(None));
+    let runtime = browser_runtime(
+        Some(&json!({
+            "session_id": "ignored", "model": "whisper-base", "engine": "transformers-js",
+            "accelerator": "webgpu", "cached": true
+        })),
+        report,
+    )
     .unwrap()
     .unwrap();
     assert_eq!(
@@ -22,7 +27,7 @@ fn browser_runtime_is_validated_against_the_catalogue() {
     let fell_back = browser_runtime(Some(&json!({
         "model": "whisper-base", "engine": "transformers-js", "accelerator": "wasm",
         "cached": "yes", "fallback_from": "webgpu-and-much-more-text", "fallback_error": "x".repeat(400)
-    })))
+    })), report)
     .unwrap()
     .unwrap();
     assert_eq!(fell_back["cached"], false);
@@ -32,15 +37,22 @@ fn browser_runtime_is_validated_against_the_catalogue() {
         json!({}),
         json!({"model":"kokoro-82m-v1.0","engine":"transformers-js","accelerator":"wasm"}),
         json!({"model":"whisper-base","engine":"other","accelerator":"wasm"}),
+        json!({"model":"whisper-base","engine":"mlx","accelerator":"metal"}),
         json!({"model":"whisper-base","engine":"transformers-js","accelerator":""}),
         json!({"model":"whisper-base","engine":"transformers-js","accelerator":"a".repeat(41)}),
     ] {
         assert_eq!(
-            browser_runtime(Some(&refused)).unwrap_err().key,
+            browser_runtime(Some(&refused), report).unwrap_err().key,
             "voice.transcription_runtime_unsupported",
             "{refused}"
         );
     }
+    let known = json!({"model":"whisper-base","engine":"transformers-js","accelerator":"wasm"});
+    assert_eq!(
+        browser_runtime(Some(&known), None).unwrap_err().key,
+        "voice.transcription_runtime_unsupported",
+        "a device that reported no models runs none"
+    );
 
     let mut stage = defaults().stt;
     stage.options.insert("language".into(), json!("auto"));

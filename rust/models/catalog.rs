@@ -1,4 +1,4 @@
-//! The embedded model and speech-language catalogues, and lookups into them.
+//! The embedded remote-provider and speech-language catalogues, and lookups into them.
 
 use std::sync::OnceLock;
 
@@ -6,22 +6,16 @@ use serde_json::Value;
 
 use super::json::{field_str, values};
 
-pub(super) const CATALOG_JSON: &str = include_str!("../../assets/catalog/models/catalog.json");
+const PROVIDERS_JSON: &str = include_str!("../../assets/catalog/providers.json");
 const VOICE_CATALOG_JSON: &str = include_str!("../../assets/catalog/pipeline/catalog.json");
 
-static CATALOG: OnceLock<Value> = OnceLock::new();
+static PROVIDERS: OnceLock<Value> = OnceLock::new();
 static VOICE_CATALOG: OnceLock<Value> = OnceLock::new();
 static NULL: Value = Value::Null;
 
-/// The exact catalogue bytes served to existing clients.
-pub fn catalog_text() -> &'static str {
-    CATALOG_JSON
-}
-
-/// The one model catalogue used for validation and resolution.
-pub fn catalog() -> &'static Value {
-    CATALOG.get_or_init(|| {
-        serde_json::from_str(CATALOG_JSON).expect("embedded model catalogue is valid JSON")
+fn providers() -> &'static Value {
+    PROVIDERS.get_or_init(|| {
+        serde_json::from_str(PROVIDERS_JSON).expect("embedded provider catalogue is valid JSON")
     })
 }
 
@@ -35,45 +29,26 @@ pub fn voice_languages() -> &'static Value {
     &voice_catalog()["languages"]
 }
 
-/// Whether `language` is one of the speech languages, which are wider than the UI locales.
-pub(super) fn speech_catalogue_language(language: &str) -> bool {
+/// The speech languages, in catalogue order; wider than the UI locales.
+pub(super) fn speech_languages() -> impl Iterator<Item = &'static str> {
     voice_catalog()
         .get("languages")
         .into_iter()
         .flat_map(values)
-        .any(|entry| field_str(entry, "id") == Some(language))
+        .filter_map(|entry| field_str(entry, "id"))
 }
 
-pub(super) fn find_model(model_id: &str) -> Option<&'static Value> {
-    catalog()
-        .get("models")
-        .into_iter()
-        .flat_map(values)
-        .find(|model| field_str(model, "id") == Some(model_id))
+/// Whether `language` is one of the speech languages.
+pub(super) fn speech_catalogue_language(language: &str) -> bool {
+    speech_languages().any(|candidate| candidate == language)
 }
 
 pub(super) fn find_provider(provider_id: &str) -> Option<&'static Value> {
-    catalog()
+    providers()
         .get("providers")
         .into_iter()
         .flat_map(values)
         .find(|provider| field_str(provider, "id") == Some(provider_id))
-}
-
-pub(super) fn task_for_model(model: &Value) -> Option<&str> {
-    field_str(model, "family")
-        .and_then(|family| catalog().get("families")?.get(family))
-        .and_then(|family| field_str(family, "task"))
-}
-
-/// The option schema of a model's family, or JSON null when it has none.
-pub(super) fn model_schema(model: &Value) -> &'static Value {
-    let family = field_str(model, "family").unwrap_or("");
-    catalog()
-        .get("families")
-        .and_then(|families| families.get(family))
-        .and_then(|family| family.get("options"))
-        .unwrap_or(&NULL)
 }
 
 /// The option schema a provider declares for one task, or JSON null when it has none.

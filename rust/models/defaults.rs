@@ -1,25 +1,30 @@
-//! Default call settings from the device's reported capabilities and system language.
+//! Default call settings from the models the device reported and its system language.
+
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use super::{
-    catalog::{catalog, find_model, model_schema, speech_catalogue_language, task_for_model},
+    catalog::speech_catalogue_language,
+    device_models::{device_schema, primary, serves},
     json::{field_str, strings, values},
-    offers::offers,
     options::normalized_default,
 };
-use crate::{messages::ui_locale, types::CallSettings, types::SpeechStage};
+use crate::{
+    messages::ui_locale,
+    types::{CallSettings, DeviceModels, SpeechStage},
+};
 
-/// Build settings defaults from the device's reported capabilities and language.
+/// Build settings defaults from the device's reported models and language.
 /// UI locales are only `en` and `es`; speech-language options retain the catalogue's wider set.
 pub fn default_settings(
     system_language: Option<&str>,
-    device_capabilities: Option<&Value>,
+    device_models: Option<Arc<DeviceModels>>,
 ) -> CallSettings {
     let speech_language = system_language.map(normalize_speech_language);
     let ui_language = system_language.map(ui_locale).unwrap_or("en").to_owned();
-    let stt = default_stage("stt", device_capabilities, speech_language.as_deref());
-    let tts = default_stage("tts", device_capabilities, speech_language.as_deref());
+    let stt = default_stage("stt", device_models.as_deref(), speech_language.as_deref());
+    let tts = default_stage("tts", device_models.as_deref(), speech_language.as_deref());
     CallSettings {
         stt,
         tts,
@@ -35,11 +40,12 @@ pub fn default_settings(
         merge_window_secs: 0.5,
         audio_grace_seconds: 1.0,
         replay_on_return_seconds: 120.0,
+        device_models,
     }
 }
 
 fn normalize_speech_language(tag: &str) -> String {
-    let primary = tag.split('-').next().unwrap_or("").to_ascii_lowercase();
+    let primary = primary(tag);
     if speech_catalogue_language(&primary) {
         primary
     } else {
@@ -47,41 +53,36 @@ fn normalize_speech_language(tag: &str) -> String {
     }
 }
 
-/// The device's first offered model for `task`, else the catalogue's first, with its option defaults.
-fn default_stage(task: &str, capabilities: Option<&Value>, language: Option<&str>) -> SpeechStage {
-    let chosen = capabilities
-        .and_then(|capabilities| offers(catalog(), capabilities, "device").ok())
-        .and_then(|offers| offers.into_iter().find(|offer| offer.task == task))
-        .map(|offer| offer.model);
-    let model = chosen
-        .or_else(|| {
-            catalog()
-                .get("models")
-                .into_iter()
-                .flat_map(values)
-                .find(|model| task_for_model(model) == Some(task))
-                .and_then(|model| field_str(model, "id"))
-                .map(str::to_owned)
-        })
-        .unwrap_or_default();
-    let model_entry = find_model(&model).expect("default model exists in embedded catalogue");
-    let schema = model_schema(model_entry);
+/// The device's first reported model for `task`, an installed one first, with its option defaults. A device that
+/// reported none for `task` gets a stage naming no model, which a call refuses to run.
+fn default_stage(task: &str, report: Option<&DeviceModels>, language: Option<&str>) -> SpeechStage {
+    let candidates = report
+        .into_iter()
+        .flat_map(|report| &report.models)
+        .filter(|model| serves(model, task));
+    let chosen = candidates
+        .clone()
+        .find(|model| model.installed)
+        .or_else(|| candidates.clone().next());
     let mut options = Map::new();
-    for option in values(schema) {
-        let id = field_str(option, "id").unwrap_or("");
-        if field_str(option, "kind") == Some("language")
-            && language.is_some_and(|language| {
-                strings(option.get("values")).any(|candidate| candidate == language)
-            })
-        {
-            options.insert(id.to_owned(), Value::String(language.unwrap().to_owned()));
-        } else if let Some(default) = option.get("default") {
-            options.insert(id.to_owned(), normalized_default(option, default));
+    if let Some(model) = chosen {
+        let schema = device_schema(task, model);
+        for option in values(&schema) {
+            let id = field_str(option, "id").unwrap_or("");
+            if field_str(option, "kind") == Some("language")
+                && language.is_some_and(|language| {
+                    strings(option.get("values")).any(|candidate| candidate == language)
+                })
+            {
+                options.insert(id.to_owned(), Value::String(language.unwrap().to_owned()));
+            } else if let Some(default) = option.get("default") {
+                options.insert(id.to_owned(), normalized_default(option, default));
+            }
         }
     }
     SpeechStage {
         place: "device".to_owned(),
-        model,
+        model: chosen.map(|model| model.id.clone()).unwrap_or_default(),
         options,
         build: None,
     }

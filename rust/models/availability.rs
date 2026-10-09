@@ -6,13 +6,20 @@ use super::{catalog::find_provider, json::field_str};
 use crate::{messages::LocalizedMessage, types::CallSettings};
 
 /// Whether the call settings cannot run because the host is not an available model place or a provider is
-/// missing a key/voice. The caller supplies only key availability; T2 never reads storage or environment state.
+/// missing a key/voice, or a device stage names no model because the device reported none. The caller supplies
+/// only key availability; T2 never reads storage or environment state.
 pub fn unavailable(
     settings: &CallSettings,
     provider_key_available: impl Fn(&str) -> bool,
 ) -> Option<LocalizedMessage> {
     if settings.stt.place == "host" || settings.tts.place == "host" {
         return Some(LocalizedMessage::new("place_host_unavailable"));
+    }
+    if [&settings.stt, &settings.tts]
+        .iter()
+        .any(|stage| stage.place == "device" && stage.model.is_empty())
+    {
+        return Some(LocalizedMessage::new("device_model_missing"));
     }
     for (task, stage) in [("stt", &settings.stt), ("tts", &settings.tts)] {
         if matches!(stage.place.as_str(), "device" | "host") {

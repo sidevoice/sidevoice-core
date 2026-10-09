@@ -7,7 +7,7 @@ fn relay_path_never_crosses_local_or_rendezvous_boundary() {
     let local_only = |path: &str| path.starts_with("/api/device/local");
     for path in [
         "/api/presentation/ws",
-        "/api/models/catalog",
+        "/api/models/check",
         "/api/host/agents",
         "/api/device/identity",
     ] {

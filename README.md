@@ -110,12 +110,12 @@ rust/              the core: one crate, the binary sidevoice-core-rust
   control/         conversations, devices and pairing, latency, telemetry
   pipeline/        voice activity and end of turn, behind Rustvani
   providers/       the OpenAI and ElevenLabs adapters and the synthesis cache
-  models/          catalogue, settings and model-check rules
+  models/          settings, the models a device reports, and model-check rules
   messages/        the per-language message bundles
   storage/         private files and process locks
 tests/             integration tests, with their recorded voice and provider responses
 xtask/             build tooling: models, release archives, manifest, compatibility (`cargo xtask`)
-assets/catalog/    the model and voice catalogues, resolver vectors and model-check clips
+assets/catalog/    the remote-provider and speech-language catalogues, and model-check clips
 ```
 
 ## Contributing

@@ -1,0 +1,63 @@
+{
+  "providers": [
+    {
+      "id": "openai",
+      "label": "OpenAI",
+      "tasks": [
+        "stt"
+      ],
+      "key": true,
+      "stt": {
+        "models": "remote",
+        "options": [
+          {
+            "id": "language",
+            "kind": "language",
+            "values": [
+              "es",
+              "en",
+              "fr",
+              "it",
+              "pt",
+              "hi"
+            ],
+            "auto": true,
+            "default": "en"
+          },
+          {
+            "id": "context",
+            "kind": "text",
+            "max": 400
+          }
+        ]
+      }
+    },
+    {
+      "id": "elevenlabs",
+      "label": "ElevenLabs",
+      "tasks": [
+        "tts"
+      ],
+      "key": true,
+      "tts": {
+        "models": "remote",
+        "options": [
+          {
+            "id": "voice",
+            "kind": "voice",
+            "from": "remote.voices",
+            "per_language": true
+          },
+          {
+            "id": "speed",
+            "kind": "range",
+            "min": 0.7,
+            "max": 1.2,
+            "step": 0.05,
+            "default": 1
+          }
+        ]
+      }
+    }
+  ]
+}

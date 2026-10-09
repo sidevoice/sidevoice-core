@@ -76,8 +76,16 @@ pub(super) async fn admit(
     hello: &Value,
     events: mpsc::Sender<Value>,
 ) -> Option<Admitted> {
-    let defaults = crate::models::default_settings(Some(&crate::runtime::system_language()), None);
     let hello = hello.get("data");
+    let (device_models, device_models_problem) =
+        match crate::models::device_models(hello.and_then(|v| v.get("device_models"))) {
+            Ok(report) => (report, None),
+            Err(problem) => (None, Some(problem)),
+        };
+    let defaults = crate::models::default_settings(
+        Some(&crate::runtime::system_language()),
+        device_models.clone(),
+    );
     let loaded = crate::models::settings_from(hello.and_then(|v| v.get("settings")), &defaults);
     // The detector runs on the room's numbers shaped by the device's patience; the device's own
     // tuning, sent or stored, never reaches it (the 2026-09-20 regression).
@@ -115,12 +123,16 @@ pub(super) async fn admit(
         .or_else(|| {
             mic_problem.map(|message| json!({"key":"turn_patience_unknown","message":message}))
         });
-    let (runtime, runtime_problem) =
-        match crate::models::browser_runtime(hello.and_then(|v| v.get("transcription"))) {
-            Ok(runtime) => (runtime, None),
-            Err(problem) => (None, Some(runtime_refusal(&problem, language))),
-        };
-    let problems = [settings_problem, runtime_problem]
+    let (runtime, runtime_problem) = match crate::models::browser_runtime(
+        hello.and_then(|v| v.get("transcription")),
+        device_models.as_ref(),
+    ) {
+        Ok(runtime) => (runtime, None),
+        Err(problem) => (None, Some(runtime_refusal(&problem, language))),
+    };
+    let device_models_problem =
+        device_models_problem.map(|problem| runtime_refusal(&problem, language));
+    let problems = [device_models_problem, settings_problem, runtime_problem]
         .into_iter()
         .flatten()
         .map(|problem| json!({"type":"error","data":problem}))
@@ -156,7 +168,7 @@ pub(super) fn unavailable_refusal(state: &AppState, settings: &CallSettings) -> 
     Some(json!({"type":"error","data":render_refusal(&refusal, &settings.ui_language)}))
 }
 
-/// The error data for a transcription runtime this node cannot read.
+/// The error data for a transcription runtime or a device-models report this node cannot read.
 pub(super) fn runtime_refusal(problem: &LocalizedMessage, language: &str) -> Value {
     json!({"key":problem.key,"message":render(problem, language)})
 }
