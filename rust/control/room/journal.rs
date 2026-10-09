@@ -36,6 +36,8 @@ pub(super) struct Row {
     pub(super) time: u64,
     pub(super) status: String,
     pub(super) reason: Option<String>,
+    /// For a reply cut while it played: how many characters of it the person heard, as the call reported.
+    pub(super) heard_chars: Option<u64>,
     pub(super) language: Option<String>,
     pub(super) offline: Option<Value>,
     pub(super) payload: Option<Value>,
@@ -48,7 +50,8 @@ impl Row {
     fn view(&self) -> Value {
         json!({"seq": self.seq, "id": self.id, "thread": self.thread, "role": self.role,
         "text": self.text, "name": self.name, "session": self.session, "revision": self.revision,
-        "time": self.time, "status": self.status, "audio_reason": self.reason, "offline": self.offline})
+        "time": self.time, "status": self.status, "audio_reason": self.reason, "heard_chars": self.heard_chars,
+        "offline": self.offline})
     }
     fn is_input(&self) -> bool {
         self.role == "user"

@@ -86,7 +86,7 @@ async fn a_refused_pairing_keeps_the_connectors_reason() {
 }
 
 #[tokio::test]
-async fn foreign_origins_are_refused_by_host_agents_and_the_rtc_offer() {
+async fn foreign_origins_are_refused_by_host_agents() {
     let (_temp, state, token) = paired();
     let app = router(state, false);
     let request = |method: &str, uri: &str, body: Body| {
@@ -108,7 +108,6 @@ async fn foreign_origins_are_refused_by_host_agents_and_the_rtc_offer() {
     assert_eq!(agents.status(), StatusCode::FORBIDDEN);
     assert_eq!(body_json(agents).await, json!({"key":"origin-not-allowed"}));
     let action = app
-        .clone()
         .oneshot(request(
             "POST",
             "/api/host/agents/codex/connect",
@@ -118,16 +117,6 @@ async fn foreign_origins_are_refused_by_host_agents_and_the_rtc_offer() {
         .unwrap();
     assert_eq!(action.status(), StatusCode::FORBIDDEN);
     assert_eq!(body_json(action).await, json!({"key":"origin-not-allowed"}));
-    let offer = serde_json::to_vec(&json!({"type":"offer","session_id":"s","sdp":"v=0"})).unwrap();
-    let rtc = app
-        .oneshot(request(
-            "POST",
-            "/api/presentation/rtc/offer",
-            Body::from(offer),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(rtc.status(), StatusCode::FORBIDDEN);
 }
 
 type CallSocket =

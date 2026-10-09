@@ -5,7 +5,7 @@ pub struct RoomError {
     pub key: &'static str,
 }
 impl RoomError {
-    pub(super) fn new(status: u16, key: &'static str) -> Self {
+    pub(crate) fn new(status: u16, key: &'static str) -> Self {
         Self { status, key }
     }
 }

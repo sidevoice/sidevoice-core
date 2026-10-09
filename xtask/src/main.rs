@@ -1,8 +1,7 @@
 //! Build tooling for the core, run as `cargo xtask <command>` (alias in `.cargo/config.toml`).
 //!
-//! - `models [DIR]`: stage the detector models pinned in `assets/rust-models.json` (default `$RUSTVANI_CACHE_DIR`).
 //! - `dist`: build the release binary for this host (Linux: against glibc `glibc::FLOOR`, with cargo-zigbuild) and
-//!   package it, with its models, native libraries and licence notices, as the relocatable archive
+//!   package it, with its licence notices, as the relocatable archive
 //!   `native/sidevoice-core-<target>.tar.zst`; then `verify` it.
 //! - `verify ARCHIVE`: unpack it somewhere else, check its inventory and (Linux) that nothing in it needs a glibc
 //!   newer than the floor the inventory records, and start the core from there.
@@ -22,7 +21,6 @@ mod dist;
 mod glibc;
 mod libraries;
 mod manifest;
-mod models;
 mod notices;
 mod publish;
 mod util;
@@ -34,9 +32,7 @@ use std::path::Path;
 use compat::{compat, report};
 use dist::dist;
 use manifest::manifest;
-use models::models;
 use publish::publish;
-use util::cache_dir;
 use verify::{verify, verify_tree};
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
@@ -44,18 +40,17 @@ pub(crate) type Result<T> = std::result::Result<T, String>;
 pub(crate) const TARGETS: [&str; 3] = ["linux-aarch64", "linux-x86_64", "macos-aarch64"];
 pub(crate) const ROOT_NAME: &str = "sidevoice-core-rust";
 pub(crate) const ENTRYPOINT: &str = "bin/sidevoice-core-rust";
-pub(crate) const KIND: &str = "rust-native-v1";
+/// The archive's layout: `bin/` and `notices/` (v1 also carried the voice pipeline's models, `checks/` and `lib/`).
+pub(crate) const KIND: &str = "rust-native-v2";
 
 const USAGE: &str =
-    "usage: cargo xtask models [DIR] | dist | verify ARCHIVE | verify-floor ARCHIVE | manifest DIR [--tag vX.Y.Z] \
+    "usage: cargo xtask dist | verify ARCHIVE | verify-floor ARCHIVE | manifest DIR [--tag vX.Y.Z] \
      | publish DIR TAG | compat | compat-report";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
-        ["models"] => cache_dir().and_then(|dir| models(&dir)),
-        ["models", dir] => models(Path::new(dir)),
         ["dist"] => dist(),
         ["verify", archive] => verify(Path::new(archive), None),
         ["verify-floor", archive] => verify(Path::new(archive), Some(glibc::FLOOR_IMAGE)),

@@ -1,11 +1,12 @@
-//! Browser calls: each call's focus, turn and playback queue, and the room's recent sessions.
+//! Browser calls: each call's focus and turn, and the room's recent sessions.
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::journal::InputRef;
+use super::turns::VoiceTurn;
 use super::util::id;
 
 /// How many recent session IDs the room remembers, including calls that already ended.
@@ -39,17 +40,10 @@ pub(super) struct Browser {
     pub(super) revision: u64,
     pub(super) turn_revision: u64,
     pub(super) speaking: bool,
+    /// The turn the person is speaking, with the focus it started on; its words go there.
+    pub(super) turn: Option<VoiceTurn>,
     pub(super) cancelled_turn: Option<u64>,
     pub(super) sent: u64,
-    pub(super) active: Option<String>,
-    pub(super) pending: VecDeque<String>,
-    /// The utterance handed to this call, and when it stops being waited on.
-    pub(super) playback_watch: Option<(String, Instant)>,
-    /// The pause after the person stops speaking before a reply starts (`audio_grace_seconds`).
-    pub(super) audio_grace: Duration,
-    pub(super) quiet_until: Option<Instant>,
-    /// What the room may show about this call's transcription (place, model, the reported runtime).
-    pub(super) transcription: Value,
     /// Since when the call has had no socket: nothing new is handed to it until its page is back.
     pub(super) parked: Option<Instant>,
 }
@@ -63,14 +57,9 @@ impl Browser {
             revision: 0,
             turn_revision: 0,
             speaking: false,
+            turn: None,
             cancelled_turn: None,
             sent: 0,
-            active: None,
-            pending: VecDeque::new(),
-            playback_watch: None,
-            audio_grace: Duration::from_secs(1),
-            quiet_until: None,
-            transcription: Value::Null,
             parked: None,
         }
     }
@@ -82,18 +71,16 @@ impl Browser {
     pub(super) fn notify(&self, event: Value) {
         self.offer(event);
     }
-    /// Start a new revision, telling the browser to drop whatever belonged to the old one.
-    pub(super) fn next_revision(&mut self, sid: &str) -> u64 {
+    /// Start a new revision: what the call is sent from now on belongs to it.
+    pub(super) fn next_revision(&mut self) -> u64 {
         self.revision += 1;
-        self.notify(
-            json!({"type":"voice-cancel","data":{"session_id":sid,"revision":self.revision}}),
-        );
         self.revision
     }
     /// Move the call to another focus under a new revision, ending any turn in progress.
-    pub(super) fn refocus(&mut self, sid: &str, target: Target) {
-        self.next_revision(sid);
+    pub(super) fn refocus(&mut self, target: Target) {
+        self.next_revision();
         self.speaking = false;
+        self.turn = None;
         self.target = Some(target);
     }
     pub(super) fn is_on(&self, thread: &str) -> bool {
@@ -102,13 +89,6 @@ impl Browser {
     /// The focus, if the call is focused on a conversation.
     pub(super) fn bound_target(&self) -> Option<&Target> {
         self.target.as_ref().filter(|t| !t.thread.is_empty())
-    }
-    /// The utterance to play next, unless one is playing or the user is speaking.
-    pub(super) fn next_to_play(&self) -> Option<&String> {
-        if self.active.is_some() || self.speaking || self.parked.is_some() {
-            return None;
-        }
-        self.pending.front()
     }
 }
 
@@ -142,9 +122,6 @@ impl Browsers {
     }
     pub(super) fn iter(&self) -> impl Iterator<Item = (&String, &Browser)> {
         self.calls.iter()
-    }
-    pub(super) fn ids(&self) -> Vec<String> {
-        self.calls.keys().cloned().collect()
     }
     /// Whether `sid` is one of the recent sessions, ended or not.
     pub(super) fn is_recent(&self, sid: &str) -> bool {

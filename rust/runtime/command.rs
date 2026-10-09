@@ -1,13 +1,11 @@
 //! What the process was asked to do, from its command line.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
 
 use super::Config;
 
 pub enum Command {
     Help,
-    SelfTest { wav: PathBuf, assets: PathBuf },
     Serve(Config),
 }
 
@@ -15,8 +13,6 @@ pub enum Command {
 pub enum CommandError {
     /// The arguments are not valid; rendered as `runtime.arguments`.
     Arguments,
-    /// `--self-test` without exactly a WAV file and an asset directory.
-    SelfTestUsage,
 }
 
 impl Command {
@@ -30,15 +26,6 @@ impl Command {
     pub fn parse(flags: &[String]) -> Result<Self, CommandError> {
         if flags.iter().any(|flag| flag == "--help" || flag == "-h") {
             return Ok(Self::Help);
-        }
-        if flags.first().map(String::as_str) == Some("--self-test") {
-            let [_, wav, assets] = flags else {
-                return Err(CommandError::SelfTestUsage);
-            };
-            return Ok(Self::SelfTest {
-                wav: PathBuf::from(wav),
-                assets: PathBuf::from(assets),
-            });
         }
         Config::from_args(flags)
             .map(Self::Serve)

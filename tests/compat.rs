@@ -181,7 +181,7 @@ async fn the_released_connector_links_delivers_and_publishes() {
         .await;
     assert_ne!(published["status"], "rejected", "{published}");
     assert_eq!(
-        browser.frame("voice-speech").await["text"],
+        browser.frame("voice-reply").await["text"],
         "Reply through the released connector"
     );
 }

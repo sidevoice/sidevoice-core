@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use super::support::{pull_room, say};
+use super::support::{pull_room, report, say};
 use crate::control::room::unheard::{unheard, TOLD_CHARS, TOLD_REPLIES};
 use crate::control::room::Room;
 
@@ -22,7 +22,6 @@ fn room_on(thread: &str) -> (tempfile::TempDir, Room, String, String) {
 fn call(room: &Room, thread: &str) -> (String, mpsc::Receiver<Value>) {
     let (events, received) = mpsc::channel(256);
     let sid = room.join("device".into(), "en".into(), events).unwrap();
-    room.set_audio_grace(&sid, 0.0);
     room.select(&sid, thread).unwrap();
     (sid, received)
 }
@@ -108,7 +107,8 @@ fn a_reply_spoken_over_is_cut_and_the_next_message_tells_the_agent() {
         "The build is green.",
         revision(&room, &sid),
     );
-    room.receipt(&sid, "r1", revision(&room, &sid), "playing")
+    report(&room, &sid, "r1", "playing");
+    room.playback(&sid, "r1", "interrupted", None, Some(9), &Value::Null)
         .unwrap();
     say(&room, &sid, "And the tests?");
     assert_eq!(
@@ -119,7 +119,7 @@ fn a_reply_spoken_over_is_cut_and_the_next_message_tells_the_agent() {
     assert_eq!(message["text"], "And the tests?");
     assert_eq!(
         message["unheard"],
-        json!({"count":1,"replies":[{"text":"The build is green.","truncated":false,"cut":true}]})
+        json!({"count":1,"replies":[{"text":"The build is green.","truncated":false,"cut":true,"heard_chars":9}]})
     );
     // Told once: the next message carries nothing.
     say(&room, &sid, "Thanks.");
@@ -127,26 +127,20 @@ fn a_reply_spoken_over_is_cut_and_the_next_message_tells_the_agent() {
 }
 
 #[test]
-fn replies_held_for_a_turn_that_became_a_message_are_never_played() {
+fn replies_the_call_drops_for_a_newer_turn_are_never_played() {
     let (_directory, room, _, _) = room_on("t");
     let (sid, _received) = call(&room, "t");
     let asked = revision(&room, &sid);
     reply(&room, &sid, "t", "r1", "First.", asked);
     reply(&room, &sid, "t", "r2", "Second.", asked);
-    say(&room, &sid, "Wait, something else.");
-    let turn = revision(&room, &sid);
-    room.finish_turn(&sid, turn);
     for uid in ["r1", "r2"] {
+        report(&room, &sid, uid, "unplayed");
         assert_eq!(
             status(&room, &sid, uid),
             ("interrupted".into(), Some("newer_turn".into()))
         );
     }
-    {
-        let inner = room.inner.lock().unwrap();
-        let browser = inner.browsers.get(&sid).unwrap();
-        assert!(browser.active.is_none() && browser.pending.is_empty());
-    }
+    say(&room, &sid, "Wait, something else.");
     let message = only(deliveries(&room, "voice"));
     assert_eq!(message["unheard"]["count"], 2);
     let texts: Vec<_> = message["unheard"]["replies"]
@@ -159,28 +153,11 @@ fn replies_held_for_a_turn_that_became_a_message_are_never_played() {
 }
 
 #[test]
-fn a_turn_that_became_no_message_lets_the_held_reply_play() {
-    let (_directory, room, _, _) = room_on("t");
-    let (sid, _received) = call(&room, "t");
-    reply(&room, &sid, "t", "r1", "Here it is.", revision(&room, &sid));
-    let turn = room.begin_turn(&sid).unwrap();
-    room.finish_turn(&sid, turn.revision);
-    let inner = room.inner.lock().unwrap();
-    assert_eq!(
-        inner.browsers.get(&sid).unwrap().active.as_deref(),
-        Some("r1")
-    );
-    assert!(!inner.unheard.has("t"));
-}
-
-#[test]
 fn a_reply_to_a_turn_the_person_already_followed_is_not_spoken() {
     let (_directory, room, _, _) = room_on("t");
     let (sid, _received) = call(&room, "t");
     let asked = revision(&room, &sid);
     say(&room, &sid, "Something new.");
-    let turn = revision(&room, &sid);
-    room.finish_turn(&sid, turn);
     let answer = reply(
         &room,
         &sid,
@@ -305,8 +282,7 @@ fn a_reply_played_to_the_end_is_not_reported() {
     let (sid, _received) = call(&room, "t");
     let asked = revision(&room, &sid);
     reply(&room, &sid, "t", "r1", "All good.", asked);
-    room.receipt(&sid, "r1", asked, "playing").unwrap();
-    room.receipt(&sid, "r1", asked, "playback_finished")
-        .unwrap();
+    report(&room, &sid, "r1", "playing");
+    report(&room, &sid, "r1", "heard");
     assert!(!room.inner.lock().unwrap().unheard.has("t"));
 }

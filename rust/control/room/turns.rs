@@ -1,7 +1,9 @@
-//! Voice turns: opening, finishing and cancelling the user's spoken turn in a call.
+//! Voice turns: the person's spoken turn in a call, as the call's voice module reports it. A turn opens with the
+//! focus it is spoken to and ends with the words it became, or with none.
 use serde_json::{json, Value};
 
 use super::error::RoomError;
+use super::latency::{latency_now_micros, LatencyEvent};
 use super::Room;
 
 /// Focus and revision captured atomically when a browser opens a voice turn.
@@ -16,17 +18,18 @@ pub struct VoiceTurn {
 }
 
 impl Room {
+    /// The person started speaking in call `sid`: a new revision, and the focus the turn's words will go to.
     pub fn begin_turn(&self, sid: &str) -> Result<VoiceTurn, RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
         let Some(c) = inner.browsers.get_mut(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
         };
-        let revision = c.next_revision(sid);
+        let revision = c.next_revision();
         c.turn_revision = revision;
         c.speaking = true;
         c.cancelled_turn = None;
         let bound = c.bound_target();
-        let result = VoiceTurn {
+        let turn = VoiceTurn {
             session_id: sid.into(),
             revision,
             thread_id: bound.map(|t| t.thread.clone()),
@@ -34,36 +37,56 @@ impl Room {
             title: c.target.as_ref().and_then(|t| t.title.clone()),
             language: c.language.clone(),
         };
-        inner.hold_client(sid, revision);
-        Ok(result)
-    }
-    pub fn finish_turn(&self, sid: &str, revision: u64) {
-        let mut guard = self.inner.lock().expect("room lock");
-        let inner = &mut *guard;
-        if let Some(c) = inner.browsers.get_mut(sid) {
-            if c.turn_revision == revision && c.speaking {
-                c.speaking = false;
-                c.quiet_until = Some(std::time::Instant::now() + c.audio_grace);
-            }
-        }
-        for (uid, row_id) in inner.utterances.waiting_for_turn(sid, revision) {
-            let Some(row) = inner.journal.find(&row_id) else {
-                continue;
-            };
-            let Some(browser) = inner.browsers.get(sid) else {
-                continue;
-            };
-            if browser.speaking || browser.revision != revision || !browser.is_on(&row.thread) {
-                continue;
-            }
-            inner.utterances.set_client_status(&uid, sid, "queued");
-            if inner.utterances.get(&uid).is_some_and(|r| !r.is_replay()) {
-                inner.sync_row(&row_id, "queued", None);
-            }
-        }
-        inner.dispatch_client(sid);
+        c.turn = Some(turn.clone());
+        Ok(turn)
     }
 
+    /// Turn `revision` of call `sid` ended. With `text`, its words go to the conversation it was spoken to, as a
+    /// message; without (cancelled, or nothing said), it just ends. `timings` are the call's own measures of it.
+    pub fn finish_turn(
+        &self,
+        sid: &str,
+        revision: u64,
+        text: Option<&str>,
+        timings: &Value,
+    ) -> Result<Value, RoomError> {
+        let turn = {
+            let mut inner = self.inner.lock().expect("room lock");
+            let Some(browser) = inner.browsers.get_mut(sid) else {
+                return Err(RoomError::new(409, "room.browser_absent"));
+            };
+            let Some(turn) = browser.turn.take_if(|turn| turn.revision == revision) else {
+                return Err(RoomError::new(409, "room.input_ended"));
+            };
+            if browser.turn_revision == revision {
+                browser.speaking = false;
+            }
+            turn
+        };
+        let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+            return Ok(json!({"accepted":false,"revision":revision}));
+        };
+        if let Some(thread) = turn.thread_id.as_deref() {
+            self.latency_mark(
+                sid,
+                thread,
+                revision,
+                None,
+                LatencyEvent::Transcript,
+                latency_now_micros(),
+            );
+            if let Some(timings) = timings.as_object() {
+                for (name, milliseconds) in timings {
+                    if let Some(milliseconds) = milliseconds.as_f64() {
+                        self.latency_duration(sid, thread, revision, None, name, milliseconds);
+                    }
+                }
+            }
+        }
+        self.queue_voice_input(&turn, text)
+    }
+
+    /// The person cancelled the turn they are speaking, from the page: its words, when they come, are dropped.
     pub fn cancel_input(&self, sid: &str, revision: u64) -> Result<Value, RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
         let Some(browser) = inner.browsers.get_mut(sid) else {
@@ -74,17 +97,8 @@ impl Room {
         }
         browser.cancelled_turn = Some(revision);
         let thread = browser.target.as_ref().map(|target| target.thread.clone());
-        browser.notify(json!({"type":"voice-user-turn","data":{
+        browser.notify(json!({"type":"voice-user-turn","data":{"session_id":sid,
             "phase":"cancelled","revision":revision,"thread_id":thread}}));
         Ok(json!({"status":"cancelled"}))
-    }
-
-    pub fn turn_cancelled(&self, sid: &str, revision: u64) -> bool {
-        self.inner
-            .lock()
-            .expect("room lock")
-            .browsers
-            .get(sid)
-            .is_some_and(|browser| browser.cancelled_turn == Some(revision))
     }
 }

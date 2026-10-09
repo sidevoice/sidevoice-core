@@ -1,46 +1,34 @@
-//! From an authenticated socket to a call: the hello, its settings, a room seat
-//! and started media — or the refusal that ends the socket.
+//! From an authenticated socket to a call: the hello, its interface language and a room seat, or the
+//! refusal that ends the socket.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::messages::{render, render_refusal, LocalizedMessage};
-use crate::pipeline::CallFrame;
-use crate::server::media::{self, CallMedia};
+use crate::messages::{render, ui_locale, LocalizedMessage};
 use crate::server::AppState;
-use crate::types::CallSettings;
 
 use super::registration::CallRegistration;
 use super::{close, text, UNPAIRED};
 
-/// How long a call waits for the client's hello before it goes on with the default settings.
+/// How long a call waits for the client's hello before it goes on without one.
 pub(super) const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-/// Policy violation: the requested settings cannot run on this node.
-const SETTINGS_REFUSED: u16 = 1008;
 /// Try again later: the room has no seat for this call.
 const ROOM_FULL: u16 = 1013;
 
-/// What a call holds once the room and media accepted it.
+/// What a call holds once the room seated it.
 pub(super) struct Admitted {
-    /// The node's defaults, against which later settings are read.
-    pub(super) defaults: CallSettings,
-    pub(super) settings: CallSettings,
     pub(super) session: String,
-    pub(super) media: Arc<CallMedia>,
-    pub(super) detector_events: mpsc::Receiver<CallFrame>,
-    pub(super) focus_events: mpsc::Receiver<()>,
+    /// The language the call's interface and the room's messages to it are in.
+    pub(super) language: String,
     /// What the hello got wrong, as error events sent right after the session.
     pub(super) problems: Vec<Value>,
-    /// What the room shows about this call's transcription.
-    pub(super) transcription: Value,
 }
 
-/// Waits for the client's first text frame, answering pings meanwhile. No hello in time is a call with the default
-/// settings.
+/// Waits for the client's first text frame, answering pings meanwhile. No hello in time is a call with no
+/// conversation, in the machine's language.
 pub(super) async fn await_hello(
     socket: &mut WebSocket,
     registration: &mut CallRegistration,
@@ -68,7 +56,7 @@ pub(super) async fn await_hello(
     }
 }
 
-/// Seats the call in the room and starts its media, or refuses it on the socket.
+/// Seats the call in the room, or refuses it on the socket.
 pub(super) async fn admit(
     state: &AppState,
     socket: &mut WebSocket,
@@ -76,69 +64,38 @@ pub(super) async fn admit(
     hello: &Value,
     events: mpsc::Sender<Value>,
 ) -> Option<Admitted> {
-    let defaults = crate::models::default_settings(Some(&crate::runtime::system_language()), None);
-    let hello = hello.get("data");
-    let loaded = crate::models::settings_from(hello.and_then(|v| v.get("settings")), &defaults);
-    // The detector runs on the room's numbers shaped by the device's patience; the device's own
-    // tuning, sent or stored, never reaches it (the 2026-09-20 regression).
-    let (mic, mic_problem) =
-        crate::models::mic_settings(&loaded.settings, hello.and_then(|v| v.get("mic")));
-    let settings = mic.applied_to(&loaded.settings);
-    if let Some(refusal) = unavailable_refusal(state, &settings) {
-        let _ = socket.send(text(&refusal)).await;
-        let _ = socket.send(close(SETTINGS_REFUSED, "")).await;
-        return None;
-    }
-    let Ok(session) = state
-        .room
-        .join(device, settings.ui_language.clone(), events)
-    else {
-        let admission = state.room.admission(&settings.ui_language);
+    let (language, problem) =
+        hello_language(hello.get("data").and_then(|data| data.get("ui_language")));
+    let Ok(session) = state.room.join(device, language.clone(), events) else {
+        let admission = state.room.admission(&language);
         refuse_full(socket, &admission).await;
         return None;
     };
-    let Ok((media, detector_events, focus_events)) = CallMedia::start(&settings) else {
-        state.room.leave(&session);
-        let message = render(
-            &LocalizedMessage::new("voice.media_unavailable"),
-            &settings.ui_language,
-        );
-        let refusal =
-            json!({"type":"error","data":{"key":"voice.media_unavailable","message":message}});
-        let _ = socket.send(text(&refusal)).await;
-        return None;
-    };
-    let language = settings.ui_language.as_str();
-    let settings_problem = loaded
-        .issue
-        .map(|message| json!({"key":"settings.invalid","message":message}))
-        .or_else(|| {
-            mic_problem.map(|message| json!({"key":"turn_patience_unknown","message":message}))
-        });
-    let (runtime, runtime_problem) =
-        match crate::models::browser_runtime(hello.and_then(|v| v.get("transcription"))) {
-            Ok(runtime) => (runtime, None),
-            Err(problem) => (None, Some(runtime_refusal(&problem, language))),
-        };
-    let problems = [settings_problem, runtime_problem]
+    let problems = problem
+        .map(|key| {
+            let message = render(&LocalizedMessage::new(key), &language);
+            json!({"type":"error","data":{"key":key,"message":message}})
+        })
         .into_iter()
-        .flatten()
-        .map(|problem| json!({"type":"error","data":problem}))
         .collect();
-    let transcription = crate::models::call_transcription(&settings.stt, runtime.as_ref());
-    state
-        .room
-        .set_transcription(&session, transcription.clone());
     Some(Admitted {
-        defaults,
-        settings,
         session,
-        media,
-        detector_events,
-        focus_events,
+        language,
         problems,
-        transcription,
     })
+}
+
+/// The interface language a hello asks for: `en` or `es`. Without one, the machine's; one the core does not
+/// offer is refused with its key, and the call goes on in the machine's.
+pub(super) fn hello_language(asked: Option<&Value>) -> (String, Option<&'static str>) {
+    let fallback = ui_locale(&crate::runtime::system_language()).to_owned();
+    match asked {
+        None | Some(Value::Null) => (fallback, None),
+        Some(Value::String(language)) if matches!(language.as_str(), "en" | "es") => {
+            (language.clone(), None)
+        }
+        Some(_) => (fallback, Some("settings.ui_language_invalid")),
+    }
 }
 
 /// Refuses a client the room has no seat for: the reason as a frame, then 1013 (try again later).
@@ -146,17 +103,4 @@ pub(super) async fn refuse_full(socket: &mut WebSocket, admission: &Value) {
     let refusal = json!({"type":"error","data":{"message":admission["message"],"reason":admission["reason"]}});
     let _ = socket.send(text(&refusal)).await;
     let _ = socket.send(close(ROOM_FULL, "")).await;
-}
-
-/// The error event for settings whose provider this node cannot reach, if any.
-pub(super) fn unavailable_refusal(state: &AppState, settings: &CallSettings) -> Option<Value> {
-    let refusal = crate::models::unavailable(settings, |place| {
-        media::provider_key(&state.dir, place).is_some()
-    })?;
-    Some(json!({"type":"error","data":render_refusal(&refusal, &settings.ui_language)}))
-}
-
-/// The error data for a transcription runtime this node cannot read.
-pub(super) fn runtime_refusal(problem: &LocalizedMessage, language: &str) -> Value {
-    json!({"key":problem.key,"message":render(problem, language)})
 }

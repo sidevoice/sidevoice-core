@@ -28,13 +28,12 @@ const CA_BUNDLES: [&str; 2] = [
     "/etc/pki/tls/certs/ca-bundle.crt",
 ];
 
-/// Unpacks the archive somewhere else (a path with a space), checks on Linux that the binary and every bundled
-/// library need nothing but the system's libraries and `lib/` and no glibc newer than the floor the inventory
-/// records, then runs the detector self-test from there, starts the core, checks its ready file and health over the
-/// local socket, and checks it leaves nothing behind on SIGTERM.
+/// Unpacks the archive somewhere else (a path with a space), checks on Linux that the binary needs nothing but the
+/// system's libraries and no glibc newer than the floor the inventory records, then starts the core from there,
+/// checks its ready file and health over the local socket, and checks it leaves nothing behind on SIGTERM.
 ///
 /// With `image` (a container image of this machine's architecture, whose glibc must be the inventory's floor), the
-/// self-test and the start run in that container instead: the unpacked tree mounted read-only, no network, driven
+/// start runs in that container instead: the unpacked tree mounted read-only, no network, driven
 /// by this xtask built against the floor.
 pub(crate) fn verify(archive: &Path, image: Option<&str>) -> Result<()> {
     // Under /tmp, not $TMPDIR: on macOS that path is so long a Unix socket in it exceeds the 104-byte limit.
@@ -61,37 +60,22 @@ pub(crate) fn verify(archive: &Path, image: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// The binary and every library in `lib/`: each may name only the system's libraries and those in `lib/`, and none
-/// may need a glibc newer than `floor`. Returns the newest glibc any of them needs.
+/// The binary may name only the system's libraries, and may not need a glibc newer than `floor`. Returns the newest
+/// glibc it needs.
 fn check_floor(root: &Path, floor: &str) -> Result<String> {
-    let lib = root.join("lib");
-    let mut files = vec![root.join(ENTRYPOINT)];
-    if lib.is_dir() {
-        files.extend(walk(&lib)?.into_iter().map(|(name, _)| lib.join(name)));
-    }
-    let mut newest = String::from("2.0");
-    for file in files {
-        let path = file.to_str().ok_or("path")?;
-        let what = file
-            .strip_prefix(root)
-            .unwrap_or(&file)
-            .display()
-            .to_string();
-        for name in glibc::needed_libraries(path)? {
-            if !LINUX_SYSTEM.contains(&name.as_str()) && !lib.join(&name).is_file() {
-                return Err(format!(
-                    "{what} needs {name}, which is neither in lib/ nor on every system"
-                ));
-            }
+    let path = root.join(ENTRYPOINT);
+    let path = path.to_str().ok_or("path")?;
+    for name in glibc::needed_libraries(path)? {
+        if !LINUX_SYSTEM.contains(&name.as_str()) {
+            return Err(format!("{ENTRYPOINT} needs {name}, which is not on every system"));
         }
-        let needed = glibc::needed(path)?;
-        glibc::check(&what, &needed, floor)?;
-        newest = glibc::newest(newest, needed);
     }
-    Ok(newest)
+    let needed = glibc::needed(path)?;
+    glibc::check(ENTRYPOINT, &needed, floor)?;
+    Ok(glibc::newest(String::from("2.0"), needed))
 }
 
-/// `verify-tree ROOT`: the self-test and the start of an already unpacked and checked tree, as `verify-floor` runs
+/// `verify-tree ROOT`: the start of an already unpacked and checked tree, as `verify-floor` runs
 /// them in its container.
 pub(crate) fn verify_tree(root: &Path) -> Result<()> {
     println!("{}", start(root)?);
@@ -167,19 +151,14 @@ fn floor_xtask() -> Result<PathBuf> {
     Ok(repo().join("xtask/target").join(triple).join("debug/xtask"))
 }
 
-/// Runs the detector self-test from the unpacked tree, starts the core, checks its ready file and health over the
-/// local socket, and checks it leaves nothing behind on SIGTERM.
+/// Starts the core from the unpacked tree, checks its ready file and health over the local socket, and checks it
+/// leaves nothing behind on SIGTERM.
 fn start(root: &Path) -> Result<Value> {
     let work = TempDir::new_in(Path::new("/tmp"), "sidevoice relocated state")?;
     let binary = root.join(ENTRYPOINT);
-    let models = root.join("models");
     let command = |args: &[&str]| {
         let mut command = Command::new(&binary);
-        command
-            .args(args)
-            .env("RUSTVANI_CACHE_DIR", &models)
-            .env("SIDEVOICE_STUN_URLS", "")
-            .env_remove("ORT_DYLIB_PATH");
+        command.args(args);
         command
     };
     if cfg!(target_os = "linux")
@@ -190,32 +169,6 @@ fn start(root: &Path) -> Result<Value> {
         })
     {
         return Err("this Linux host has no CA certificate bundle".into());
-    }
-
-    let wav = root.join("checks/detector-16k.wav");
-    let result = command(&[
-        "--self-test",
-        wav.to_str().ok_or("path")?,
-        models.to_str().ok_or("path")?,
-    ])
-    .output()
-    .map_err(|error| format!("self-test: {error}"))?;
-    if !result.status.success() {
-        return Err(format!(
-            "self-test failed: {}",
-            String::from_utf8_lossy(&result.stderr)
-        ));
-    }
-    let report = parse_json(&result.stdout, "self-test")?;
-    let detectors = &report["detectors"];
-    if detectors["sample_rate"] != 16000
-        || detectors["max_voice_confidence"].as_f64().unwrap_or(0.0) <= 0.5
-        || detectors["smart_turn_complete"] != true
-    {
-        return Err(format!("detector self-test failed: {detectors}"));
-    }
-    if report["opus_decoded_samples"] != 320 {
-        return Err("Opus decode self-test failed".into());
     }
 
     let data = work.0.join("private state");
@@ -311,8 +264,5 @@ fn start(root: &Path) -> Result<Value> {
     if data.join("core.json").exists() || data.join("local.sock").exists() {
         return Err("the core left its ready file or socket after shutdown".into());
     }
-    Ok(
-        json!({"detectors": detectors, "opus_decoded_samples": report["opus_decoded_samples"],
-              "fingerprint": health["fingerprint"]}),
-    )
+    Ok(json!({"fingerprint": health["fingerprint"]}))
 }

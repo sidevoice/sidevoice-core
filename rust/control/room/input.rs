@@ -1,4 +1,4 @@
-//! User input entering the journal: typed text, completed voice turns and offline audio.
+//! User input entering the journal: typed text, completed voice turns, and turns spoken offline.
 use serde_json::{json, Value};
 
 use super::error::RoomError;
@@ -94,7 +94,6 @@ impl Room {
         else {
             return Ok(inner.not_sent(&turn.session_id, row_id, turn.revision));
         };
-        inner.supersede_held(&turn.session_id, turn.revision);
         let message_id = id();
         Ok(inner.queue_input(InputDraft {
             row_id,
@@ -110,53 +109,41 @@ impl Room {
             time: None,
         }))
     }
-    /// Offline audio is a separate input row, never a live voice revision.
-    pub fn offline_target(&self, sid: &str) -> Option<VoiceTurn> {
-        let inner = self.inner.lock().expect("room lock");
-        let browser = inner.browsers.get(sid)?;
-        let target = browser.bound_target();
-        Some(VoiceTurn {
-            session_id: sid.into(),
-            revision: 0,
-            thread_id: target.map(|target| target.thread.clone()),
-            binding_id: target.map(|target| target.binding_id.clone()),
-            title: target.and_then(|target| target.title.clone()),
-            language: browser.language.clone(),
-        })
-    }
-    pub fn queue_offline_input(
+    /// A turn the call spoke and transcribed while it had no room (`client_id` is the client message that brought it)
+    /// is its own input row, never a live voice revision, sent to the conversation the call is on now.
+    pub fn offline_input(
         &self,
-        target: &VoiceTurn,
-        row_id: &str,
+        sid: &str,
+        client_id: &str,
         text: &str,
-        offline: &str,
         time: Option<u64>,
     ) -> Result<Value, RoomError> {
         if text.trim().is_empty() {
             return Err(RoomError::new(422, "room.text_empty"));
         }
+        let row_id = format!("{sid}:user-offline:{client_id}");
         let mut inner = self.inner.lock().expect("room lock");
-        let sid = target.session_id.as_str();
-        if !inner.browsers.contains(sid) {
+        let Some(browser) = inner.browsers.get(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
-        }
-        let (Some(thread), Some(binding)) =
-            (target.thread_id.as_deref(), target.binding_id.as_deref())
-        else {
-            return Ok(inner.not_sent(sid, row_id.into(), 0));
         };
+        let language = browser.language.clone();
+        let target = browser.bound_target().cloned();
+        let Some(target) = target else {
+            return Ok(inner.not_sent(sid, row_id, 0));
+        };
+        let (thread, binding) = (target.thread.as_str(), target.binding_id.as_str());
         let message_id = id();
         Ok(inner.queue_input(InputDraft {
-            row_id: row_id.into(),
+            row_id,
             text,
             session_id: sid,
             revision: 0,
             thread_id: thread,
             binding_id: binding,
             title: target.title.clone(),
-            language: &target.language,
+            language: &language,
             message_id: &message_id,
-            offline: Some(offline),
+            offline: Some("offline"),
             time,
         }))
     }

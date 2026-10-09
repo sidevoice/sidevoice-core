@@ -19,8 +19,8 @@ impl Room {
         let call_utterances: Vec<Value> =
             utterances.into_iter().filter_map(|entry| entry.2).collect();
         json!({"binding":c.and_then(Browser::bound_target).map(Target::view),
-        "room":{"revision":c.map_or(0,|b|b.revision),"speaking":c.is_some_and(|b|b.speaking),"switching":false,"clients":inner.browsers.len(),"utterances":room_utterances,"audio_reports":[],"client_errors":inner.client_errors.view()},
-        "clients":inner.browsers.iter().map(|(id,b)|json!({"id":id,"device_id":b.device,"connected":true,"user_speaking":b.speaking,"turn_revision":b.turn_revision,"transport":"pcm","transcription":b.transcription})).collect::<Vec<_>>(),
-        "call":c.map(|b|json!({"id":sid,"target":b.target.as_ref().map(Target::view).unwrap_or(json!({})),"connected":true,"user_speaking":b.speaking,"error":Value::Null,"sent":b.sent,"last_delivery":Value::Null,"revision":b.revision,"utterances":call_utterances,"mic":Value::Null,"mic_settings":Value::Null,"transcription":b.transcription,"audio_health":Value::Null,"speech_filter":{}}))})
+        "room":{"revision":c.map_or(0,|b|b.revision),"speaking":c.is_some_and(|b|b.speaking),"switching":false,"clients":inner.browsers.len(),"utterances":room_utterances,"client_errors":inner.client_errors.view()},
+        "clients":inner.browsers.iter().map(|(id,b)|json!({"id":id,"device_id":b.device,"connected":true,"user_speaking":b.speaking,"turn_revision":b.turn_revision})).collect::<Vec<_>>(),
+        "call":c.map(|b|json!({"id":sid,"target":b.target.as_ref().map(Target::view).unwrap_or(json!({})),"connected":true,"user_speaking":b.speaking,"error":Value::Null,"sent":b.sent,"last_delivery":Value::Null,"revision":b.revision,"utterances":call_utterances}))})
     }
 }

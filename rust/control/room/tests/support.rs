@@ -27,9 +27,17 @@ pub(super) fn pull_room(connectors: &[&str]) -> (tempfile::TempDir, Room, Vec<St
     (directory, room, generations)
 }
 
+/// The person says `text` in call `sid`: a turn starts and ends with those words, as the call's voice module reports.
 pub(super) fn say(room: &Room, sid: &str, text: &str) {
     let turn = room.begin_turn(sid).unwrap();
-    room.queue_voice_input(&turn, text).unwrap();
+    room.finish_turn(sid, turn.revision, Some(text), &Value::Null)
+        .unwrap();
+}
+
+/// Call `sid` reports what became of reply `uid`.
+pub(super) fn report(room: &Room, sid: &str, uid: &str, status: &str) {
+    room.playback(sid, uid, status, None, None, &Value::Null)
+        .unwrap();
 }
 
 pub(super) fn pull(room: &Room, cid: &str, request: Value) -> Result<Value, RoomError> {

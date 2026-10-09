@@ -8,7 +8,6 @@ mod failure;
 mod language;
 mod local_socket;
 mod ready;
-mod self_test;
 mod serve;
 mod servers;
 mod stop;
@@ -19,7 +18,6 @@ mod tests;
 pub use command::{Command, CommandError};
 pub use config::Config;
 pub use language::system_language;
-pub use self_test::self_test;
 
 use failure::StartFailure;
 

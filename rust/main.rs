@@ -1,4 +1,3 @@
-use serde_json::json;
 use sidevoice_core::messages::{render, LocalizedMessage};
 use sidevoice_core::runtime::{self, Command, CommandError};
 
@@ -6,23 +5,9 @@ use sidevoice_core::runtime::{self, Command, CommandError};
 async fn main() {
     match Command::from_args_os(std::env::args_os().skip(1)) {
         Ok(Command::Help) => println!("{}", localized("runtime.help")),
-        Ok(Command::SelfTest { wav, assets }) => match runtime::self_test(&wav, &assets).await {
-            Ok(report) => println!("{report}"),
-            Err(detail) => {
-                eprintln!(
-                    "{}",
-                    json!({"error_key": "rust_core_t0_detector_failed", "detail": detail})
-                );
-                std::process::exit(1);
-            }
-        },
         Ok(Command::Serve(config)) => std::process::exit(runtime::run(config).await),
         Err(CommandError::Arguments) => {
             eprintln!("{}", localized("runtime.arguments"));
-            std::process::exit(2);
-        }
-        Err(CommandError::SelfTestUsage) => {
-            eprintln!("{}", json!({"error_key": "rust_core_t0_usage"}));
             std::process::exit(2);
         }
     }

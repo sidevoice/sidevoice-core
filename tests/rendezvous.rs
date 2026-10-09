@@ -2,15 +2,12 @@
 //! namespace, or the room dials in to the core's; either way the room relays HTTP requests and call sockets
 //! through it, with binary bodies as Socket.IO attachments. The link follows the connector-owned pairing file:
 //! a refusal stops it, a new pairing resumes it, an edited one replaces it, a removed one ends it.
-//!
-//! The relayed call needs the detector models staged in `RUSTVANI_CACHE_DIR` (`cargo xtask models`).
 
 mod support;
 
 use std::path::Path;
 use std::time::Duration;
 
-use base64::Engine as _;
 use futures_util::future::join_all;
 use serde_json::{json, Value};
 use support::*;
@@ -154,7 +151,7 @@ async fn the_room_relays_requests_and_calls_and_the_link_follows_the_pairing() {
     let errors = snapshot["room"]["client_errors"].as_array().unwrap();
     assert_eq!(errors.last().unwrap()["message"], report["message"]);
 
-    // A whole call through the relay: hello, recorded speech as binary frames, a transcribed turn.
+    // A whole call through the relay: hello, and a turn the call's voice module transcribed.
     let opened = link
         .call(
             "relay.open",
@@ -163,56 +160,31 @@ async fn the_room_relays_requests_and_calls_and_the_link_follows_the_pairing() {
         )
         .await;
     assert_eq!(opened.data, json!({"ok": true}));
-    let hello = json!({"type": "voice-hello", "data": {"settings": {"turn_patience": "fast"}}});
+    let hello = json!({"type": "voice-hello", "data": {"ui_language": "en"}});
     link.emit(
         "relay.data",
         json!({"channel": "call", "data": hello.to_string()}),
     );
     let session = call_event(&mut link, "call", "voice-session", STEP).await;
-    let mut audio = silence(1.0);
-    audio.extend(speech());
-    audio.extend(silence(4.0));
-    let started = std::time::Instant::now();
-    for (index, chunk) in audio.chunks(640).enumerate() {
-        link.emit_binary(
-            "relay.data",
-            json!({"channel": "call", "data": {"_placeholder": true, "num": 0}}),
-            vec![chunk.to_vec()],
-        );
-        let due = started + Duration::from_millis(20 * (index as u64 + 1));
-        tokio::time::sleep_until(due.into()).await;
-    }
-    let ask = call_event(
-        &mut link,
-        "call",
-        "voice-transcribe",
-        Duration::from_secs(30),
-    )
-    .await;
-    assert_eq!(ask["session_id"], session["session_id"]);
-    let wav = base64::engine::general_purpose::STANDARD
-        .decode(ask["audio_base64"].as_str().unwrap())
-        .unwrap();
-    assert!(wav.starts_with(b"RIFF"));
-    let transcript = json!({"type": "voice-transcript", "data": {"session_id": session["session_id"],
-        "request_id": ask["request_id"], "text": "Recorded speech through the room"}});
+    let sid = session["session_id"].clone();
+    let started = json!({"type": "voice-user-turn", "data": {"session_id": sid, "client_msg_id": "turn-started",
+        "phase": "started"}});
     link.emit(
         "relay.data",
-        json!({"channel": "call", "data": transcript.to_string()}),
+        json!({"channel": "call", "data": started.to_string()}),
     );
-    let turn = loop {
-        let turn = call_event(
-            &mut link,
-            "call",
-            "voice-user-turn",
-            Duration::from_secs(20),
-        )
-        .await;
-        if turn["phase"] == "finished" {
-            break turn;
-        }
-    };
-    assert_eq!(turn["text"], "Recorded speech through the room");
+    let turn = call_event(&mut link, "call", "voice-user-turn", STEP).await;
+    assert_eq!(turn["phase"], "started");
+    let finished = json!({"type": "voice-user-turn", "data": {"session_id": sid, "client_msg_id": "turn-finished",
+        "phase": "finished", "revision": turn["revision"], "text": "Said through the room"}});
+    link.emit(
+        "relay.data",
+        json!({"channel": "call", "data": finished.to_string()}),
+    );
+    // The call is on no conversation: the words are kept as not sent.
+    let receipt = call_event(&mut link, "call", "voice-input-receipt", STEP).await;
+    assert_eq!(receipt["status"], "not_sent");
+    assert_eq!(receipt["revision"], turn["revision"]);
     link.emit("relay.close", json!({"channel": "call", "code": 1000}));
     let denied = link
         .call(

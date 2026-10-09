@@ -24,7 +24,6 @@ pub(super) async fn select(
         .room
         .select(sid, data["thread_id"].as_str().unwrap_or(""))
         .map_err(|error| room_refusal(error, &headers))?;
-    refocus(&state, sid).await;
     Ok(Json(selected).into_response())
 }
 
@@ -40,7 +39,6 @@ pub(super) async fn leave(
         .room
         .deselect(sid, data["binding_id"].as_str().unwrap_or(""))
         .map_err(|error| room_refusal(error, &headers))?;
-    refocus(&state, sid).await;
     Ok(Json(left).into_response())
 }
 
@@ -55,18 +53,8 @@ pub(super) async fn close(
         .room
         .close_channel(data["thread_id"].as_str().unwrap_or(""))
         .map_err(|error| room_refusal(error, &headers))?;
-    state.prune_replay_audio();
     if let Some((peer, params)) = notify {
         let _ = peer.send("binding.close", params).await;
     }
     Ok(Json(result).into_response())
-}
-
-/// Lets the session's call react to a focus the room already changed.
-async fn refocus(state: &AppState, sid: &str) {
-    state.prune_replay_audio();
-    let call = state.media.lock().expect("media lock").get(sid).cloned();
-    if let Some(call) = call {
-        call.focus_changed().await;
-    }
 }

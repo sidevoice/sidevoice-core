@@ -1,49 +1,15 @@
 //! A call whose socket drops comes back as itself: the page reconnects with its session's token and the last
 //! frame it handled, gets what it missed, and nothing it sends again is taken twice. Speech the person never
 //! heard is not played late.
-//!
-//! Needs the detector models staged in `RUSTVANI_CACHE_DIR` (`cargo xtask models`).
 
 mod support;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
-use base64::Engine as _;
 use serde_json::{json, Value};
 use support::*;
 
 const THREAD: &str = "resumed-thread";
-
-fn settings() -> Value {
-    json!({"turn_patience": "fast", "audio_grace_seconds": 0})
-}
-
-/// Reads events until each of `kinds` has been seen as often as it says, keeping those `keep` takes and
-/// passing over everything else, so that no expected event is skipped while waiting for another.
-async fn gather(
-    browser: &mut Browser,
-    kinds: &[(&str, usize)],
-    keep: impl Fn(&Value) -> bool,
-) -> HashMap<String, Vec<Value>> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let mut seen: HashMap<String, Vec<Value>> = HashMap::new();
-    while kinds
-        .iter()
-        .any(|(kind, count)| seen.get(*kind).map_or(0, Vec::len) < *count)
-    {
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let event = browser
-            .next(left)
-            .await
-            .unwrap_or_else(|| panic!("still waiting for {kinds:?}; seen {seen:?}"));
-        let kind = event["type"].as_str().unwrap_or("").to_owned();
-        if kinds.iter().any(|(wanted, _)| *wanted == kind) && keep(&event) {
-            seen.entry(kind).or_default().push(event["data"].clone());
-        }
-    }
-    seen
-}
 
 fn own_rows(history: &[Value], session: &str, role: &str) -> Vec<Value> {
     history
@@ -55,14 +21,11 @@ fn own_rows(history: &[Value], session: &str, role: &str) -> Vec<Value> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
-    let _serial = serial().await;
     let root = tempfile::tempdir().unwrap();
-    let core = Launch::new(root.path().join("core"))
-        .env("SIDEVOICE_FIXTURE_STT_TIMEOUT_MS", "30000")
-        .start();
+    let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (_peer, _binding) = v2_with_binding(&core, "resumed", THREAD).await;
-    let mut browser = core.join(&token, settings()).await;
+    let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
     assert_eq!(browser.welcome["resumed"], false);
@@ -71,14 +34,20 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
         .unwrap()
         .to_owned();
 
-    // The person is speaking when the network goes: the turn is open, and its audio stops arriving.
-    let pcm = speech();
-    browser.speak(&pcm).await;
-    browser.turn("started", STEP).await;
+    // The person is speaking when the network goes: the turn is open on the page, which transcribes it meanwhile.
+    browser
+        .send(
+            "voice-user-turn",
+            json!({"session_id": session, "client_msg_id": "turn-started", "phase": "started"}),
+        )
+        .await;
+    let revision = browser
+        .wait("voice-user-turn", STEP, |turn| turn["phase"] == "started")
+        .await["revision"]
+        .clone();
     let last_seq = browser.last_seq;
     browser.drop_link().await;
-    // Parked, the call keeps its seat and its turn, which closes and asks for its transcription meanwhile.
-    tokio::time::sleep(Duration::from_secs(7)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(core.calls().await, 1, "the parked call keeps its seat");
 
     let mut back = core.resume(&token, &session, &resume, last_seq).await;
@@ -89,78 +58,36 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
         resume.as_str(),
         "a fresh token"
     );
-    let ask = back.frame_within("voice-transcribe", STEP).await;
-    let transcript = json!({"session_id": session, "request_id": ask["request_id"],
-        "text": "Said across the drop", "client_msg_id": "transcript-1"});
-    // The page sends it twice (its outbox retried): taken once, acknowledged both times.
-    back.send("voice-transcript", transcript.clone()).await;
-    back.send("voice-transcript", transcript).await;
-    let seen = gather(
-        &mut back,
-        &[("voice-ack", 2), ("voice-user-turn", 1)],
-        |event| event["type"] != "voice-user-turn" || event["data"]["phase"] == "finished",
-    )
-    .await;
-    assert!(seen["voice-ack"]
-        .iter()
-        .all(|ack| ack["client_msg_id"] == "transcript-1"));
-    assert_eq!(seen["voice-user-turn"][0]["text"], "Said across the drop");
-
-    // What the page captured while it was away, sent twice: recognised once, acknowledged both times.
-    let catchup = json!({"session_id": session, "sample_rate": 16000, "seq": 0, "final": true,
-        "audio_base64": base64::engine::general_purpose::STANDARD.encode(&pcm),
-        "client_msg_id": "catchup-1"});
-    back.send("voice-catchup", catchup.clone()).await;
-    back.send("voice-catchup", catchup).await;
-    let seen = gather(
-        &mut back,
-        &[("voice-ack", 2), ("voice-transcribe", 1)],
-        |_| true,
-    )
-    .await;
-    assert!(seen["voice-ack"]
-        .iter()
-        .all(|ack| ack["client_msg_id"] == "catchup-1"));
-    back.transcript(&seen["voice-transcribe"][0], "Said while away")
-        .await;
-    back.frame("voice-catchup-turn").await;
-    back.none_of(&["voice-transcribe"], Duration::from_millis(700))
-        .await;
+    // The page sends the turn's words twice (its outbox retried): taken once, acknowledged both times.
+    let finished = json!({"session_id": session, "client_msg_id": "turn-finished", "phase": "finished",
+        "revision": revision, "text": "Said across the drop"});
+    for _ in 0..2 {
+        back.send("voice-user-turn", finished.clone()).await;
+        assert_eq!(
+            back.frame("voice-ack").await["client_msg_id"],
+            "turn-finished"
+        );
+    }
+    // A turn the page spoke and transcribed while it had no room, sent twice: one row.
+    let offline = json!({"session_id": session, "client_msg_id": "offline-1", "phase": "finished",
+        "offline": true, "text": "Said while away"});
+    for _ in 0..2 {
+        back.send("voice-user-turn", offline.clone()).await;
+        assert_eq!(back.frame("voice-ack").await["client_msg_id"], "offline-1");
+    }
     let rows = own_rows(&core.history(&token, THREAD).await, &session, "user");
     let texts: Vec<_> = rows.iter().map(|row| row["text"].clone()).collect();
     assert_eq!(
         texts,
         [json!("Said across the drop"), json!("Said while away")]
     );
+    assert_eq!(rows[1]["offline"], "offline");
 
     // The token was spent by the resume: the same one again is a new call.
-    let mut stale = core.resume(&token, &session, &resume, 0).await;
+    let stale = core.resume(&token, &session, &resume, 0).await;
     assert_ne!(stale.session, session);
     assert_eq!(stale.welcome["resumed"], false);
     assert_eq!(stale.welcome["resume_refused"], "unknown");
-    stale
-        .none_of(&["voice-transcribe"], Duration::from_millis(300))
-        .await;
-    // A transcript the old session asked for, finished on the page after it was gone, still reaches the
-    // conversation through the new one: once, however often the page sends it.
-    core.select(&token, &stale.session, THREAD).await;
-    let orphan = json!({"session_id": stale.session, "request_id": "asked-by-a-session-that-is-gone",
-        "text": "Finished while the call was gone", "client_msg_id": "transcript-orphan"});
-    stale.send("voice-transcript", orphan.clone()).await;
-    let turn = stale.frame("voice-catchup-turn").await;
-    assert_eq!(turn["text"], "Finished while the call was gone");
-    assert_eq!(turn["thread_id"], THREAD);
-    stale.send("voice-transcript", orphan).await;
-    // Both sends are acknowledged; reading the second ack passes over the first.
-    assert_eq!(
-        stale.frame("voice-ack").await["client_msg_id"],
-        "transcript-orphan"
-    );
-    stale
-        .none_of(&["voice-catchup-turn"], Duration::from_millis(700))
-        .await;
-    let rows = own_rows(&core.history(&token, THREAD).await, &stale.session, "user");
-    assert_eq!(rows.len(), 1, "{rows:?}");
     stale.close().await;
     back.close().await;
     core.calls_become(0).await;
@@ -168,12 +95,11 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_published_while_the_page_was_away_is_marked_unheard_not_played() {
-    let _serial = serial().await;
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (peer, binding) = v2_with_binding(&core, "resumed", THREAD).await;
-    let browser = core.join(&token, settings()).await;
+    let browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
     let revision = core.revision(&token, &session).await;
@@ -197,11 +123,8 @@ async fn a_reply_published_while_the_page_was_away_is_marked_unheard_not_played(
 
     let mut back = core.resume(&token, &session, &resume, last_seq).await;
     assert_eq!(back.welcome["resumed"], true);
-    back.none_of(
-        &["voice-speech", "voice-speech-audio", "voice-replay"],
-        Duration::from_millis(1500),
-    )
-    .await;
+    back.none_of(&["voice-reply"], Duration::from_millis(1500))
+        .await;
     let rows = own_rows(&core.history(&token, THREAD).await, &session, "assistant");
     let row = rows.last().expect("the reply stays written");
     assert_eq!(
@@ -214,7 +137,6 @@ async fn a_reply_published_while_the_page_was_away_is_marked_unheard_not_played(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_page_that_never_comes_back_gives_its_seat_back_when_the_park_ends() {
-    let _serial = serial().await;
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core"))
         .env("VOICE_RESUME_SECONDS", "1")
@@ -223,19 +145,19 @@ async fn a_page_that_never_comes_back_gives_its_seat_back_when_the_park_ends() {
         .start();
     let token = core.pair_local("Browser").await;
     // Dropped without a word: parked, then released.
-    let browser = core.join(&token, settings()).await;
+    let browser = core.join(&token, Value::Null).await;
     core.calls_become(1).await;
     browser.drop_link().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(core.calls().await, 1, "parked");
     core.calls_become(0).await;
     // Silent behind a proxy that never closes the socket: the heartbeat parks it, and the park ends it.
-    let quiet = core.join(&token, settings()).await;
+    let quiet = core.join(&token, Value::Null).await;
     core.calls_become(1).await;
     core.calls_become(0).await;
     drop(quiet);
     // A hang-up ends the call at once.
-    let leaving = core.join(&token, settings()).await;
+    let leaving = core.join(&token, Value::Null).await;
     core.calls_become(1).await;
     leaving.close().await;
     core.calls_become(0).await;

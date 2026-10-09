@@ -1,9 +1,9 @@
 //! What the person did not hear, per conversation, until the agent is told.
 //!
 //! A reply counts as unheard when it ends without being played to the person:
-//! - cut while it played, because the person spoke over it (`user_interrupted`). Nothing tells the
-//!   room how far playback got, so the whole reply counts, flagged `cut`: its start was heard;
-//! - dropped before it played: superseded by a newer message (`newer_turn`), held for a call that
+//! - cut while it played, because the person spoke over it (`user_interrupted`). The whole reply counts,
+//!   flagged `cut`: its start was heard, and the call says how many of its characters were (`heard_chars`);
+//! - dropped before it played: superseded by a newer message (`newer_turn`), not received by a call that
 //!   dropped (`unheard`), stopped by a change of conversation or the end of the call
 //!   (`focus_changed`, `call_ended`, `session_changed`), refused for a full queue or failed on the
 //!   page (`queue_full`, `playback_failed`);
@@ -126,7 +126,11 @@ impl Unheard {
             .map(|(row, cut)| {
                 let truncated = row.text.chars().count() > TOLD_CHARS;
                 let text: String = row.text.chars().take(TOLD_CHARS).collect();
-                json!({"text":text,"truncated":truncated,"cut":cut})
+                let mut reply = json!({"text":text,"truncated":truncated,"cut":cut});
+                if let Some(heard) = row.heard_chars.filter(|_| *cut) {
+                    reply["heard_chars"] = json!(heard);
+                }
+                reply
             })
             .collect();
         Some(json!({"count":count,"replies":replies}))

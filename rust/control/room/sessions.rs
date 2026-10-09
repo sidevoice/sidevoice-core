@@ -1,4 +1,4 @@
-//! Browser sessions: joining and leaving the room, admission and per-call settings.
+//! Browser sessions: joining and leaving the room, admission, parking and the call's language.
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -46,23 +46,15 @@ impl Room {
         inner.utterances.forget_replays_of(sid);
         inner.latency.close(sid);
     }
-    /// A call whose socket went keeps its seat; the reply it was given waits for it rather than
-    /// running out its playback bound while nobody can confirm it, and nothing new is handed to it.
+    /// A call whose socket went keeps its seat, and nothing new is sent to it until its page is back.
     pub fn park(&self, sid: &str, parked: bool) {
-        let mut guard = self.inner.lock().expect("room lock");
-        let inner = &mut *guard;
+        let mut inner = self.inner.lock().expect("room lock");
         let Some(browser) = inner.browsers.get_mut(sid) else {
             return;
         };
         match (browser.parked, parked) {
             (None, true) => browser.parked = Some(std::time::Instant::now()),
-            (Some(since), false) => {
-                browser.parked = None;
-                if let Some((_, deadline)) = browser.playback_watch.as_mut() {
-                    *deadline += since.elapsed();
-                }
-                inner.dispatch_client(sid);
-            }
+            (Some(_), false) => browser.parked = None,
             _ => {}
         }
     }
@@ -86,20 +78,6 @@ impl Room {
     pub fn set_language(&self, sid: &str, language: &str) {
         if let Some(browser) = self.inner.lock().expect("room lock").browsers.get_mut(sid) {
             browser.language = language.to_owned();
-        }
-    }
-    pub fn set_audio_grace(&self, sid: &str, seconds: f32) {
-        if let Some(browser) = self.inner.lock().expect("room lock").browsers.get_mut(sid) {
-            browser.audio_grace = std::time::Duration::from_secs_f32(if seconds.is_finite() {
-                seconds.clamp(0.0, 10.0)
-            } else {
-                1.0
-            });
-        }
-    }
-    pub fn set_transcription(&self, sid: &str, transcription: Value) {
-        if let Some(browser) = self.inner.lock().expect("room lock").browsers.get_mut(sid) {
-            browser.transcription = transcription;
         }
     }
     pub fn admission(&self, language: &str) -> Value {
