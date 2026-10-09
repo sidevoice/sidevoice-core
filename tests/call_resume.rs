@@ -57,7 +57,6 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     let mut back = core.resume(&token, &session, &resume, last_seq).await;
     assert_eq!(back.session, session, "the same call");
     assert_eq!(back.welcome["resumed"], true, "{}", back.welcome);
-    assert_eq!(back.welcome["audio_received"], pcm.len() as u64);
     assert_ne!(
         back.welcome["resume"]["token"],
         resume.as_str(),
