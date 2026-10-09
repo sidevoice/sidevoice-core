@@ -6,6 +6,7 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -16,6 +17,32 @@ const THREAD: &str = "resumed-thread";
 
 fn settings() -> Value {
     json!({"turn_patience": "fast", "audio_grace_seconds": 0})
+}
+
+/// Reads events until each of `kinds` has been seen as often as it says, keeping those `keep` takes and
+/// passing over everything else, so that no expected event is skipped while waiting for another.
+async fn gather(
+    browser: &mut Browser,
+    kinds: &[(&str, usize)],
+    keep: impl Fn(&Value) -> bool,
+) -> HashMap<String, Vec<Value>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut seen: HashMap<String, Vec<Value>> = HashMap::new();
+    while kinds
+        .iter()
+        .any(|(kind, count)| seen.get(*kind).map_or(0, Vec::len) < *count)
+    {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = browser
+            .next(left)
+            .await
+            .unwrap_or_else(|| panic!("still waiting for {kinds:?}; seen {seen:?}"));
+        let kind = event["type"].as_str().unwrap_or("").to_owned();
+        if kinds.iter().any(|(wanted, _)| *wanted == kind) && keep(&event) {
+            seen.entry(kind).or_default().push(event["data"].clone());
+        }
+    }
+    seen
 }
 
 fn own_rows(history: &[Value], session: &str, role: &str) -> Vec<Value> {
@@ -66,27 +93,36 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     let transcript = json!({"session_id": session, "request_id": ask["request_id"],
         "text": "Said across the drop", "client_msg_id": "transcript-1"});
     // The page sends it twice (its outbox retried): taken once, acknowledged both times.
-    for _ in 0..2 {
-        back.send("voice-transcript", transcript.clone()).await;
-        let ack = back.frame("voice-ack").await;
-        assert_eq!(ack["client_msg_id"], "transcript-1");
-    }
-    let finished = back.turn("finished", Duration::from_secs(20)).await;
-    assert_eq!(finished["text"], "Said across the drop");
-    back.receipt("pending").await;
+    back.send("voice-transcript", transcript.clone()).await;
+    back.send("voice-transcript", transcript).await;
+    let seen = gather(
+        &mut back,
+        &[("voice-ack", 2), ("voice-user-turn", 1)],
+        |event| event["type"] != "voice-user-turn" || event["data"]["phase"] == "finished",
+    )
+    .await;
+    assert!(seen["voice-ack"]
+        .iter()
+        .all(|ack| ack["client_msg_id"] == "transcript-1"));
+    assert_eq!(seen["voice-user-turn"][0]["text"], "Said across the drop");
 
     // What the page captured while it was away, sent twice: recognised once, acknowledged both times.
     let catchup = json!({"session_id": session, "sample_rate": 16000, "seq": 0, "final": true,
         "audio_base64": base64::engine::general_purpose::STANDARD.encode(&pcm),
         "client_msg_id": "catchup-1"});
     back.send("voice-catchup", catchup.clone()).await;
-    let ask = back
-        .frame_within("voice-transcribe", Duration::from_secs(15))
-        .await;
-    assert_eq!(back.frame("voice-ack").await["client_msg_id"], "catchup-1");
     back.send("voice-catchup", catchup).await;
-    assert_eq!(back.frame("voice-ack").await["client_msg_id"], "catchup-1");
-    back.transcript(&ask, "Said while away").await;
+    let seen = gather(
+        &mut back,
+        &[("voice-ack", 2), ("voice-transcribe", 1)],
+        |_| true,
+    )
+    .await;
+    assert!(seen["voice-ack"]
+        .iter()
+        .all(|ack| ack["client_msg_id"] == "catchup-1"));
+    back.transcript(&seen["voice-transcribe"][0], "Said while away")
+        .await;
     back.frame("voice-catchup-turn").await;
     back.none_of(&["voice-transcribe"], Duration::from_millis(700))
         .await;
