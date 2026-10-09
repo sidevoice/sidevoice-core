@@ -5,23 +5,30 @@ use std::collections::{HashMap, HashSet};
 /// Most original utterances the room keeps; replays are bounded separately.
 pub(super) const MAX_UTTERANCES: usize = 2048;
 
-/// What one call is doing with an utterance: the revision it was queued under and its status.
+/// What one call did with an utterance: the revision it was sent under and how far it got there.
 pub(super) type ClientEntry = (u64, String);
+
+/// How an utterance ended on one call: why it stopped short, and how many of its characters were heard, when said.
+#[derive(Clone, Debug, Default)]
+pub(super) struct End {
+    pub(super) reason: Option<String>,
+    pub(super) heard_chars: Option<u64>,
+}
 
 #[derive(Default)]
 pub(super) struct UtteranceRecord {
     pub(super) row_id: String,
     pub(super) clients: HashMap<String, ClientEntry>,
+    /// How it ended on each call that ended it, by session; the journal row is derived from these and `clients`.
+    pub(super) ends: HashMap<String, End>,
     pub(super) parked: bool,
     pub(super) replay_of: Option<String>,
     /// Calls that heard this reply through: it played to the end, or that listener stopped it.
     pub(super) heard: HashSet<String>,
-    /// Handed to a call at least once, so a paid engine may already have rendered it.
-    pub(super) dispatched: bool,
+    /// Calls it was sent to. A call that was away when it was published never got it.
+    pub(super) sent: HashSet<String>,
     /// A repetition the person asked for from the bubble, not a catch-up.
     pub(super) requested: bool,
-    /// How many of its characters were heard before it was cut, when the call reports it.
-    pub(super) heard_chars: Option<usize>,
 }
 impl UtteranceRecord {
     pub(super) fn is_replay(&self) -> bool {
@@ -33,6 +40,24 @@ impl UtteranceRecord {
             .values()
             .map(|(_, status)| status.as_str())
             .max_by_key(|status| status_rank(status))
+    }
+    /// What the reply's journal row shows: the furthest status any call reached, with the reason and the heard extent
+    /// of the calls that ended there. A cut while it played (`user_interrupted`) is the reason told first, since its
+    /// start was heard; the furthest any of those calls heard is how far it was heard.
+    pub(super) fn outcome(&self) -> Option<(&str, Option<&str>, Option<u64>)> {
+        let best = self.best_status()?;
+        let ends: Vec<&End> = self
+            .clients
+            .iter()
+            .filter(|(_, (_, status))| status == best)
+            .filter_map(|(sid, _)| self.ends.get(sid))
+            .collect();
+        let reason = ends
+            .iter()
+            .filter_map(|end| end.reason.as_deref())
+            .min_by_key(|reason| (*reason != "user_interrupted", *reason));
+        let heard_chars = ends.iter().filter_map(|end| end.heard_chars).max();
+        Some((best, reason, heard_chars))
     }
     /// Whether no call will still play this utterance.
     fn finished(&self) -> bool {
@@ -50,7 +75,6 @@ fn status_rank(status: &str) -> u8 {
         "failed" => 2,
         "interrupted" => 3,
         "queued" => 4,
-        "waiting_for_turn" | "waiting_for_pause" => 5,
         "playing" => 7,
         "playback_finished" => 8,
         _ => 0,
@@ -58,10 +82,7 @@ fn status_rank(status: &str) -> u8 {
 }
 
 fn in_flight(status: &str) -> bool {
-    matches!(
-        status,
-        "queued" | "waiting_for_turn" | "waiting_for_pause" | "playing"
-    )
+    matches!(status, "queued" | "playing")
 }
 
 #[derive(Default)]
@@ -97,38 +118,14 @@ impl Utterances {
             .iter()
             .find(|(_, record)| record.row_id == row_id && !record.is_replay())
     }
-    /// The furthest status of the original utterance spoken from a journal row. Replays share
-    /// the row but never decide its status.
-    pub(super) fn row_status(&self, row_id: &str) -> Option<&str> {
-        self.original_of_row(row_id)
-            .and_then(|(_, record)| record.best_status())
-    }
-    /// A call's entry for an utterance: the revision it was queued under and its status.
-    pub(super) fn client_entry(&self, uid: &str, sid: &str) -> Option<&ClientEntry> {
-        self.by_id
-            .get(uid)
-            .and_then(|record| record.clients.get(sid))
-    }
-    pub(super) fn set_client_status(&mut self, uid: &str, sid: &str, status: &str) {
-        if let Some(entry) = self
-            .by_id
-            .get_mut(uid)
-            .and_then(|record| record.clients.get_mut(sid))
-        {
-            entry.1 = status.into();
+    /// One call's entry for an utterance moves to `status`, ending there as `end` says.
+    pub(super) fn set_client_status(&mut self, uid: &str, sid: &str, status: &str, end: End) {
+        if let Some(record) = self.by_id.get_mut(uid) {
+            if let Some(entry) = record.clients.get_mut(sid) {
+                entry.1 = status.into();
+                record.ends.insert(sid.to_owned(), end);
+            }
         }
-    }
-    /// The utterances a call holds waiting for the end of its turn `revision`, with their rows.
-    pub(super) fn waiting_for_turn(&self, sid: &str, revision: u64) -> Vec<(String, String)> {
-        self.by_id
-            .iter()
-            .filter(|(_, u)| {
-                u.clients
-                    .get(sid)
-                    .is_some_and(|(rev, status)| *rev == revision && status == "waiting_for_turn")
-            })
-            .map(|(uid, u)| (uid.clone(), u.row_id.clone()))
-            .collect()
     }
     /// Whether a call has an utterance in one of `statuses`.
     pub(super) fn has_client_status(&self, sid: &str, statuses: &[&str]) -> bool {
@@ -139,57 +136,28 @@ impl Utterances {
                 .is_some_and(|(_, status)| statuses.contains(&status.as_str()))
         })
     }
-    /// Stop everything a call still had to play. Returns the rows of original utterances that
-    /// no call is playing any more.
-    pub(super) fn interrupt_client(&mut self, sid: &str) -> Vec<String> {
+    /// Stop everything a call still had to play, for `reason`. Returns the rows of the original utterances it
+    /// stopped.
+    pub(super) fn interrupt_client(&mut self, sid: &str, reason: &str) -> Vec<String> {
         let mut rows = Vec::new();
         for record in self.by_id.values_mut() {
             if let Some(entry) = record.clients.get_mut(sid) {
                 if in_flight(&entry.1) {
                     entry.1 = "interrupted".into();
-                    if !record.is_replay()
-                        && record
-                            .clients
-                            .values()
-                            .all(|(_, status)| !in_flight(status))
-                    {
+                    record.ends.insert(
+                        sid.to_owned(),
+                        End {
+                            reason: Some(reason.to_owned()),
+                            heard_chars: None,
+                        },
+                    );
+                    if !record.is_replay() {
                         rows.push(record.row_id.clone());
                     }
                 }
             }
         }
         rows
-    }
-    /// The user started turn `revision` in a call: what it had queued waits for the turn to end
-    /// and what it was playing is interrupted.
-    pub(super) fn hold_client(&mut self, sid: &str, revision: u64) -> Held {
-        let mut held = Held::default();
-        for (uid, record) in &mut self.by_id {
-            let Some(entry) = record.clients.get_mut(sid) else {
-                continue;
-            };
-            match entry.1.as_str() {
-                "queued" | "waiting_for_turn" | "waiting_for_pause" => {
-                    entry.0 = revision;
-                    entry.1 = "waiting_for_turn".into();
-                    held.waiting.push((
-                        uid.clone(),
-                        (!record.is_replay()).then(|| record.row_id.clone()),
-                    ));
-                }
-                "playing" => {
-                    // The person spoke over it: that listener stopped it, so it counts as heard.
-                    entry.1 = "interrupted".into();
-                    record.heard.insert(sid.to_owned());
-                    match &record.replay_of {
-                        None => held.interrupted.push(record.row_id.clone()),
-                        Some(original) => held.heard_replays.push(original.clone()),
-                    }
-                }
-                _ => {}
-            }
-        }
-        held
     }
     /// A catch-up that actually sounded for `sid` says so on the reply it repeated, so the next
     /// return does not offer it again. One that never started playing says nothing.
@@ -206,6 +174,9 @@ impl Utterances {
             self.by_id.retain(|_, u| !row_ids.contains(&u.row_id));
         }
     }
+    pub(super) fn forget(&mut self, uid: &str) {
+        self.by_id.remove(uid);
+    }
     /// Forget the replays a call that left was given.
     pub(super) fn forget_replays_of(&mut self, sid: &str) {
         self.by_id
@@ -216,15 +187,4 @@ impl Utterances {
         self.by_id
             .retain(|_, record| !record.is_replay() || !record.finished());
     }
-}
-
-/// What holding a call for a new turn changed.
-#[derive(Default)]
-pub(super) struct Held {
-    /// Utterances now waiting for the turn to end, with the row of each original.
-    pub(super) waiting: Vec<(String, Option<String>)>,
-    /// Rows of original utterances whose playback was cut.
-    pub(super) interrupted: Vec<String>,
-    /// Originals of catch-ups that were playing when the turn cut them.
-    pub(super) heard_replays: Vec<String>,
 }

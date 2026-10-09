@@ -1,4 +1,4 @@
-//! Helpers shared by every command: files, JSON, processes, downloads, temporary directories.
+//! Helpers shared by every command: files, JSON, processes, temporary directories.
 
 use std::env;
 use std::fs;
@@ -16,12 +16,6 @@ pub(crate) fn repo() -> PathBuf {
         .parent()
         .expect("xtask lives in the repository")
         .to_path_buf()
-}
-
-pub(crate) fn cache_dir() -> Result<PathBuf> {
-    env::var_os("RUSTVANI_CACHE_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| "RUSTVANI_CACHE_DIR is not set".into())
 }
 
 pub(crate) fn sha256(bytes: &[u8]) -> String {
@@ -78,28 +72,6 @@ pub(crate) fn output(program: &str, args: &[&str], dir: Option<&Path>) -> Result
 
 pub(crate) fn run(program: &str, args: &[&str]) -> Result<()> {
     output(program, args, None).map(|_| ())
-}
-
-pub(crate) fn download(url: &str) -> Result<Vec<u8>> {
-    let result = Command::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--retry",
-            "3",
-            url,
-        ])
-        .output()
-        .map_err(|error| format!("curl: {error}"))?;
-    if !result.status.success() {
-        return Err(format!(
-            "download {url}: {}",
-            String::from_utf8_lossy(&result.stderr)
-        ));
-    }
-    Ok(result.stdout)
 }
 
 pub(crate) fn host_target() -> Result<&'static str> {

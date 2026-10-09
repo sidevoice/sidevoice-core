@@ -4,7 +4,6 @@ use serde_json::{json, Value};
 
 use super::browsers::Browser;
 use super::journal::Row;
-use super::playback::MAX_PENDING;
 use super::util::{default_title, field, id, millis, seconds, valid_thread};
 use super::utterances::{UtteranceRecord, MAX_UTTERANCES};
 use super::{Inner, Room};
@@ -56,25 +55,9 @@ impl Room {
         let deferred = reason.is_some_and(deferrable)
             && !(reason == Some("newer_turn")
                 && inner.journal.has_newer_input(&sid, thread, revision));
-        let capacity = inner.utterances.original_count() >= MAX_UTTERANCES
-            || audience.iter().any(|id| {
-                inner
-                    .browsers
-                    .get(id)
-                    .is_some_and(|b| b.pending.len() >= MAX_PENDING)
-            });
+        let capacity = inner.utterances.original_count() >= MAX_UTTERANCES;
         let can_speak = (reason.is_none() || deferred) && !audience.is_empty() && !capacity;
-        let waiting = can_speak
-            && audience
-                .iter()
-                .any(|id| inner.browsers.get(id).is_some_and(|b| b.speaking));
-        let status = if !can_speak {
-            "text_only"
-        } else if waiting {
-            "waiting_for_turn"
-        } else {
-            "queued"
-        };
+        let status = if can_speak { "queued" } else { "text_only" };
         let spoken_revision = if deferred {
             asker.map_or(revision, |b| b.revision)
         } else {
@@ -110,7 +93,7 @@ impl Room {
             inner.track_unheard(&row_id);
         }
         if can_speak {
-            inner.speak(uid, row_id, &audience, thread, revision, status);
+            inner.speak(uid, row_id, &audience, thread, revision);
         } else if matches!(
             reason,
             Some("session_changed" | "call_ended" | "focus_changed")
@@ -166,7 +149,7 @@ impl Inner {
         }
         (asked.to_owned(), revision)
     }
-    /// Queue a reply for every call in its audience and start playing where nothing else is.
+    /// Send a reply to every call in its audience; each call's voice module decides whether and when it plays.
     fn speak(
         &mut self,
         uid: &str,
@@ -174,18 +157,12 @@ impl Inner {
         audience: &[String],
         thread: &str,
         revision: u64,
-        status: &str,
     ) {
         let clients = audience
             .iter()
             .filter_map(|listener| {
                 let c = self.browsers.get(listener)?;
-                let client_status = if c.speaking {
-                    "waiting_for_turn"
-                } else {
-                    "queued"
-                };
-                Some((listener.clone(), (c.revision, client_status.to_owned())))
+                Some((listener.clone(), (c.revision, "queued".to_owned())))
             })
             .collect();
         self.utterances.insert(
@@ -197,13 +174,8 @@ impl Inner {
             },
         );
         for listener in audience {
-            self.register_latency_reply(listener, thread, revision, uid, status);
-        }
-        for listener in audience {
-            if let Some(c) = self.browsers.get_mut(listener) {
-                c.pending.push_back(uid.into());
-            }
-            self.dispatch_client(listener);
+            self.register_latency_reply(listener, thread, revision, uid, "queued");
+            self.send_reply(listener, uid);
         }
     }
 }

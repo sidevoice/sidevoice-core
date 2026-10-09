@@ -1,13 +1,12 @@
 name: Set up the Rust core build
 description: >-
-  Installs the pinned Rust toolchain and the native libraries the core links against, on Linux the pinned zig and
-  cargo-zigbuild that link the release binary against an old glibc (xtask/src/glibc.rs), and stages the pinned
-  detector models into RUSTVANI_CACHE_DIR.
+  Installs the pinned Rust toolchain, the archive tools, and on Linux the pinned zig and cargo-zigbuild that link the
+  release binary against an old glibc (xtask/src/glibc.rs).
 
 runs:
   using: composite
   steps:
-    - name: Toolchain and native libraries
+    - name: Toolchain and archive tools
       shell: bash
       env:
         RUST_VERSION: "1.98.1"
@@ -15,12 +14,11 @@ runs:
         set -euo pipefail
         rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy --component rustfmt
         echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
-        echo "RUSTVANI_CACHE_DIR=$RUNNER_TEMP/sidevoice-models" >> "$GITHUB_ENV"
         if [ "$RUNNER_OS" = macOS ]; then
-          brew install opus zstd
+          brew install zstd
         else
           sudo apt-get update
-          sudo apt-get install -y libopus-dev patchelf pkg-config zstd
+          sudo apt-get install -y zstd
         fi
     # Each download checked against the digest pinned here (zig's from ziglang.org/download/index.json,
     # cargo-zigbuild's from its release's .sha256 files).
@@ -66,6 +64,3 @@ runs:
         workspaces: |
           . -> target
           xtask -> target
-    - name: Detector models (pinned by digest in assets/rust-models.json)
-      shell: bash
-      run: cargo xtask models

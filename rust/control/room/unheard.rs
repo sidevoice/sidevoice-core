@@ -4,8 +4,8 @@
 //! - cut while it played, because the person spoke over it (`user_interrupted`): the whole reply
 //!   counts, flagged `cut` (its start was heard), with `heard_chars` when the call said how far
 //!   playback got;
-//! - dropped before it played: superseded by a newer message (`newer_turn`), held for a call that
-//!   dropped (`unheard`), stopped by a change of conversation or the end of the call
+//! - dropped before it played: superseded by a newer message (`newer_turn`), not received by a call
+//!   that dropped or whose channel was full (`unheard`), stopped by a change of conversation or the end of the call
 //!   (`focus_changed`, `call_ended`, `session_changed`), refused for a full queue or failed on the
 //!   page (`queue_full`, `playback_failed`);
 //! - published with nobody listening on its conversation (`text_only`).
@@ -215,10 +215,9 @@ impl Inner {
         let verdict = unheard(&row.status, row.reason.as_deref());
         if verdict.is_some() || row.status == "playback_finished" {
             let thread = row.thread.clone();
-            let heard_chars = self
-                .utterances
-                .original_of_row(row_id)
-                .and_then(|(_, record)| record.heard_chars);
+            let heard_chars = row
+                .heard_chars
+                .and_then(|heard| usize::try_from(heard).ok());
             self.unheard.update(&thread, row_id, verdict, heard_chars);
         }
     }

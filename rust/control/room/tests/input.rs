@@ -32,14 +32,14 @@ fn completed_voice_turn_uses_captured_focus_and_shared_outbox() {
     let (events, _received) = mpsc::channel(8);
     let sid = room.join("device".into(), "en".into(), events).unwrap();
     room.select(&sid, "old-thread").unwrap();
-    let turn = room.begin_turn(&sid).unwrap();
+    let turn = room.begin_turn(&sid, "turn").unwrap();
     assert_eq!(turn.thread_id.as_deref(), Some("old-thread"));
     room.select(&sid, "new-thread").unwrap();
     let accepted = room
         .queue_voice_input(&turn, "Words for the old thread")
         .unwrap();
     assert_eq!(accepted["accepted"], true);
-    assert_eq!(accepted["id"], format!("{sid}:user-turn:{}", turn.revision));
+    assert_eq!(accepted["id"], format!("{sid}:user-turn:{}", turn.turn_id));
     let rows = room.history(Some("old-thread"));
     assert_eq!(rows["messages"][0]["text"], "Words for the old thread");
     assert_eq!(rows["messages"][0]["status"], "pending");

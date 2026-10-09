@@ -1,5 +1,4 @@
-//! A device's writes into the room: text, input cancellation, playback receipts,
-//! client errors and speech.
+//! A device's writes into the room: text, input cancellation, client errors and speech.
 
 use std::sync::Arc;
 
@@ -10,12 +9,9 @@ use axum::response::IntoResponse;
 use axum::Json;
 use uuid::Uuid;
 
-use crate::server::call::client_msg_id;
 use crate::server::refusal::{refuse, require_origin, room_refusal, Handled};
 use crate::server::request::room_payload;
 use crate::server::{AppState, AuthenticatedDevice};
-
-const MAX_TEXT_BYTES: usize = 12000;
 
 pub(super) async fn text(
     State(state): State<Arc<AppState>>,
@@ -26,7 +22,7 @@ pub(super) async fn text(
     let data = room_payload(&body, &headers)?;
     let text = data["text"].as_str().unwrap_or("");
     let mid = data["message_id"].as_str().unwrap_or("");
-    if text.len() > MAX_TEXT_BYTES || Uuid::parse_str(mid).is_err() {
+    if Uuid::parse_str(mid).is_err() {
         return Err(refuse(
             "room.request_invalid",
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -55,7 +51,7 @@ pub(super) async fn cancel_input(
     require_origin(&headers)?;
     let data = room_payload(&body, &headers)?;
     let sid = data["session_id"].as_str().unwrap_or("");
-    let revision = data["revision"].as_u64().unwrap_or(0);
+    let turn_id = data["turn_id"].as_str().unwrap_or("");
     if !state.room.owns_session(sid, &device.0) {
         return Err(refuse(
             "room.browser_absent",
@@ -65,58 +61,9 @@ pub(super) async fn cancel_input(
     }
     let result = state
         .room
-        .cancel_input(sid, revision)
+        .cancel_input(sid, turn_id)
         .map_err(|error| room_refusal(error, &headers))?;
-    let sender = state
-        .cancel_input
-        .lock()
-        .expect("cancel input lock")
-        .get(sid)
-        .cloned();
-    if let Some(sender) = sender {
-        let _ = sender.send(revision).await;
-    }
     Ok(Json(result).into_response())
-}
-
-pub(super) async fn receipt(
-    State(state): State<Arc<AppState>>,
-    Extension(device): Extension<AuthenticatedDevice>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Handled {
-    require_origin(&headers)?;
-    let data = room_payload(&body, &headers)?;
-    // A receipt the page sends again after a drop gets the answer it got the first time.
-    let id = client_msg_id(&data).map(str::to_owned);
-    if let Some(answer) = id
-        .as_deref()
-        .and_then(|id| state.seen.answer(&device.0, id))
-    {
-        return Ok(Json(answer).into_response());
-    }
-    let sid = data["session_id"].as_str().unwrap_or("");
-    let uid = data["utterance_id"].as_str().unwrap_or("");
-    let status = data["status"].as_str().unwrap_or("");
-    let accepted = state
-        .room
-        .receipt(
-            sid,
-            uid,
-            data["revision"].as_u64().unwrap_or(u64::MAX),
-            status,
-        )
-        .map_err(|error| room_refusal(error, &headers))?;
-    if let Some(id) = &id {
-        state.seen.remember(&device.0, id, accepted.clone());
-    }
-    state.prune_replay_audio();
-    let media = state.media.lock().expect("media lock").get(sid).cloned();
-    if let Some(media) = media {
-        media.admitted_receipt(uid, status).await;
-    }
-    state.room.latency_browser(sid, uid, &data["timings_ms"]);
-    Ok(Json(accepted).into_response())
 }
 
 pub(super) async fn client_error(

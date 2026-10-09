@@ -33,9 +33,13 @@ pub(super) struct Row {
     pub(super) name: Option<String>,
     pub(super) session: String,
     pub(super) revision: u64,
+    /// For the words of a voice turn: the client's id for the turn.
+    pub(super) turn_id: Option<String>,
     pub(super) time: u64,
     pub(super) status: String,
     pub(super) reason: Option<String>,
+    /// For a reply cut while it played: how many characters of it the person heard, as the call reported.
+    pub(super) heard_chars: Option<u64>,
     pub(super) language: Option<String>,
     pub(super) offline: Option<Value>,
     pub(super) payload: Option<Value>,
@@ -48,7 +52,8 @@ impl Row {
     fn view(&self) -> Value {
         json!({"seq": self.seq, "id": self.id, "thread": self.thread, "role": self.role,
         "text": self.text, "name": self.name, "session": self.session, "revision": self.revision,
-        "time": self.time, "status": self.status, "audio_reason": self.reason, "offline": self.offline})
+        "time": self.time, "status": self.status, "audio_reason": self.reason, "heard_chars": self.heard_chars,
+        "offline": self.offline})
     }
     fn is_input(&self) -> bool {
         self.role == "user"
@@ -72,6 +77,7 @@ impl Row {
             id: self.id.clone(),
             thread: Some(self.thread.clone()),
             revision: self.revision,
+            turn_id: self.turn_id.clone(),
         }
     }
 }
@@ -82,6 +88,7 @@ pub(super) struct InputRef {
     pub(super) id: String,
     pub(super) thread: Option<String>,
     pub(super) revision: u64,
+    pub(super) turn_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -142,6 +149,15 @@ impl Journal {
         self.rows
             .iter_mut()
             .filter(move |r| r.is_input() && r.thread == thread)
+    }
+    /// How many messages wait to reach their agents, and the bytes of their words.
+    pub(super) fn waiting_input(&self) -> (usize, usize) {
+        self.rows
+            .iter()
+            .filter(|r| r.is_input() && matches!(r.status.as_str(), "pending" | "sending"))
+            .fold((0, 0), |(count, bytes), r| {
+                (count + 1, bytes + r.text.len())
+            })
     }
     /// Pending input whose next delivery attempt is due.
     pub(super) fn due_input(&mut self, now: u64) -> impl Iterator<Item = &mut Row> {

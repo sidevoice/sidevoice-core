@@ -1,9 +1,0 @@
-{
-  "text": "  Hola mundo  ",
-  "logprobs": [
-    {"token": "Hola", "logprob": -0.2, "bytes": [72, 111, 108, 97]},
-    {"token": "mundo", "logprob": null, "bytes": [109, 117, 110, 100, 111]},
-    {"token": "!", "logprob": -0.8, "bytes": [33]}
-  ],
-  "usage": {"type": "tokens", "input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
-}

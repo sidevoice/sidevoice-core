@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{client_msg_id, resume_window, Outbound, ResumableCalls, SeenMessages, RING_FRAMES};
+use super::{
+    client_msg_id, missed_on_return, resume_window, Outbound, ResumableCalls, SeenMessages,
+    RING_FRAMES,
+};
 
 fn seq(text: &str) -> u64 {
     serde_json::from_str::<Value>(text).unwrap()["seq"]
@@ -90,24 +93,41 @@ async fn a_token_takes_its_own_call_once_and_only_for_its_device() {
 }
 
 #[test]
-fn a_repeated_message_gets_its_first_answer_within_a_bounded_memory() {
+fn a_message_is_taken_once_per_device_within_a_bounded_memory() {
     let seen = SeenMessages::default();
-    assert!(seen.answer("device", "m1").is_none());
-    seen.remember("device", "m1", json!({"status":"playing"}));
-    seen.remember("device", "m1", json!({"status":"other"}));
-    assert_eq!(
-        seen.answer("device", "m1"),
-        Some(json!({"status":"playing"}))
-    );
-    assert!(seen.answer("another", "m1").is_none(), "ids are per device");
+    assert!(seen.claim("device", "m1"));
+    assert!(!seen.claim("device", "m1"), "a repeat");
+    assert!(seen.claim("another", "m1"), "ids are per device");
     for n in 0..super::SEEN_PER_DEVICE {
-        seen.remember("device", &format!("x{n}"), Value::Null);
+        assert!(seen.claim("device", &format!("x{n}")));
     }
-    assert!(
-        seen.answer("device", "m1").is_none(),
-        "the oldest is forgotten"
-    );
-    assert!(seen.answer("device", "x1").is_some());
+    assert!(seen.claim("device", "m1"), "the oldest is forgotten");
+    assert!(!seen.claim("device", "x1"));
+}
+
+/// Two calls of one device sending the same message at the same moment: it is taken once between them.
+#[test]
+fn the_same_message_from_two_calls_at_once_is_taken_once() {
+    use std::sync::{Arc, Barrier};
+    for _ in 0..200 {
+        let seen = Arc::new(SeenMessages::default());
+        let start = Arc::new(Barrier::new(2));
+        let calls: Vec<_> = (0..2)
+            .map(|_| {
+                let (seen, start) = (seen.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    seen.claim("device", "m1")
+                })
+            })
+            .collect();
+        let taken = calls
+            .into_iter()
+            .map(|call| call.join().unwrap())
+            .filter(|taken| *taken)
+            .count();
+        assert_eq!(taken, 1);
+    }
 }
 
 #[test]
@@ -124,4 +144,22 @@ fn ids_and_windows_are_read_defensively() {
     assert_eq!(resume_window(Some("0")), Duration::ZERO);
     assert_eq!(resume_window(Some("-1")), Duration::from_secs(60));
     assert_eq!(resume_window(Some("soon")), Duration::from_secs(60));
+}
+
+/// A reply the room had queued for the call when its socket went, but the call had not sent yet, is not sent to the
+/// returning page: it counts as unreceived, while the rest that waited goes out in order.
+#[tokio::test]
+async fn a_reply_still_queued_when_the_page_returns_is_unreceived_not_sent() {
+    let mut outbound = Outbound::default();
+    outbound.stamp(json!({"type":"voice-ping","data":{}}));
+    let (room, mut queued) = tokio::sync::mpsc::channel(8);
+    room.try_send(json!({"type":"voice-reply","data":{"utterance_id":"late"}}))
+        .unwrap();
+    room.try_send(json!({"type":"voice-state","data":{"n":1}}))
+        .unwrap();
+    let missed = missed_on_return(&mut outbound, &mut queued, 1).unwrap();
+    assert_eq!(missed.unreceived, ["late"]);
+    assert_eq!(missed.frames.len(), 1);
+    assert!(missed.frames[0].contains("voice-state"));
+    assert!(queued.try_recv().is_err(), "nothing is left to send later");
 }

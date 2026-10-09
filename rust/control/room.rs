@@ -34,7 +34,6 @@ mod participants;
 mod playback;
 mod pull;
 mod push;
-mod receipts;
 mod registration;
 mod replay;
 mod reports;

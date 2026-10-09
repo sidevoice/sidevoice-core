@@ -1,13 +1,11 @@
-//! The room's behaviour across calls and conversations: catch-up of missed replies,
-//! the playback bound, the pause after speaking, focus and working state, and input limits.
-use std::time::{Duration, Instant};
+//! The room's behaviour across calls and conversations: what a returning or parked call is sent, focus and
+//! working state, and input limits.
 
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::support::pull_room;
 use crate::control::room::journal::parse_input_ttl;
-use crate::control::room::playback::playback_bound;
 use crate::control::room::Room;
 
 /// A room with one linked connector, one binding on `thread`, and the binding's ID.
@@ -25,7 +23,6 @@ fn parity_room(thread: &str) -> (tempfile::TempDir, Room, String) {
 fn browser(room: &Room, thread: &str) -> (String, mpsc::Receiver<Value>) {
     let (events, received) = mpsc::channel(256);
     let sid = room.join("device".into(), "en".into(), events).unwrap();
-    room.set_audio_grace(&sid, 0.0);
     if !thread.is_empty() {
         room.select(&sid, thread).unwrap();
     }
@@ -40,17 +37,6 @@ fn revision(room: &Room, sid: &str) -> u64 {
         .get(sid)
         .unwrap()
         .revision
-}
-
-fn active(room: &Room, sid: &str) -> Option<String> {
-    room.inner
-        .lock()
-        .unwrap()
-        .browsers
-        .get(sid)
-        .unwrap()
-        .active
-        .clone()
 }
 
 fn reply(room: &Room, sid: &str, thread: &str, uid: &str, text: &str) -> Value {
@@ -83,11 +69,9 @@ fn a_returning_browser_is_not_played_what_it_missed() {
     room.leave(&first);
     let (back, mut events) = browser(&room, "");
     assert!(room.restore_focus(&back, "t"));
-    room.inner.lock().unwrap().dispatch_client(&back);
-    assert!(drain(&mut events).iter().all(|event| !matches!(
-        event["type"].as_str(),
-        Some("voice-speech" | "voice-replay")
-    )));
+    assert!(drain(&mut events)
+        .iter()
+        .all(|event| event["type"] != "voice-reply"));
 }
 
 #[test]
@@ -128,123 +112,41 @@ fn selecting_needs_no_binding_and_shows_working_which_detach_clears() {
 }
 
 #[test]
-fn an_unconfirmed_playback_times_out_and_the_queue_moves_on() {
+fn a_reply_goes_out_as_text_at_once_and_a_parked_call_is_sent_nothing_until_it_is_back() {
     let (_directory, room, _) = parity_room("t");
-    let (sid, _events) = browser(&room, "t");
-    reply(&room, &sid, "t", "lost", "Never confirmed");
-    reply(&room, &sid, "t", "next", "Next reply");
-    assert_eq!(playback_bound("abcdef"), Duration::from_secs(61));
-    assert_eq!(active(&room, &sid).as_deref(), Some("lost"));
-    let deadline = room
-        .inner
-        .lock()
-        .unwrap()
-        .browsers
-        .get(&sid)
-        .unwrap()
-        .playback_watch
-        .as_ref()
-        .unwrap()
-        .1;
-    room.inner
-        .lock()
-        .unwrap()
-        .expire_playback(&sid, deadline - Duration::from_millis(1));
-    assert_eq!(active(&room, &sid).as_deref(), Some("lost"));
-    {
-        let mut inner = room.inner.lock().unwrap();
-        inner.expire_playback(&sid, deadline);
-        inner.dispatch_client(&sid);
-    }
-    assert_eq!(active(&room, &sid).as_deref(), Some("next"));
+    let (sid, mut events) = browser(&room, "t");
+    let turn = room.begin_turn(&sid, "turn").unwrap();
+    // The person is speaking: the reply still goes out, for the call's voice module to hold or drop.
+    reply(&room, &sid, "t", "sent", "Sent while the person spoke");
+    let sent = drain(&mut events);
+    let sent = sent
+        .iter()
+        .find(|event| event["type"] == "voice-reply")
+        .expect("the reply is sent");
     assert_eq!(
-        row(&room, &format!("{sid}:voice:lost")),
-        ("failed".into(), Some("unconfirmed".into()))
+        sent["data"],
+        json!({"session_id":sid,"utterance_id":"sent","revision":turn.revision,"reply_revision":turn.revision,
+            "thread_id":"t","text":"Sent while the person spoke","language":null,
+            "history_id":format!("{sid}:voice:sent")})
     );
-}
-
-#[test]
-fn a_parked_call_keeps_its_reply_and_is_handed_nothing_new_until_it_is_back() {
-    let (_directory, room, _) = parity_room("t");
-    let (sid, _events) = browser(&room, "t");
-    reply(&room, &sid, "t", "playing", "Handed before the drop");
+    assert_eq!(row(&room, &format!("{sid}:voice:sent")).0, "queued");
     room.park(&sid, true);
     reply(&room, &sid, "t", "later", "Published while parked");
-    let deadline = room
-        .inner
-        .lock()
-        .unwrap()
-        .browsers
-        .get(&sid)
-        .unwrap()
-        .playback_watch
-        .as_ref()
-        .unwrap()
-        .1;
-    {
-        let mut inner = room.inner.lock().unwrap();
-        // Long past its bound: nobody can confirm it while the page is away, so it is not failed.
-        inner.expire_playback(&sid, deadline + Duration::from_secs(600));
-        inner.dispatch_client(&sid);
-    }
-    assert_eq!(active(&room, &sid).as_deref(), Some("playing"));
-    assert_ne!(row(&room, &format!("{sid}:voice:playing")).0, "failed");
-    std::thread::sleep(Duration::from_millis(20));
-    room.park(&sid, false);
-    let moved = room
-        .inner
-        .lock()
-        .unwrap()
-        .browsers
-        .get(&sid)
-        .unwrap()
-        .playback_watch
-        .as_ref()
-        .unwrap()
-        .1;
-    assert!(
-        moved >= deadline + Duration::from_millis(20),
-        "the bound restarts where it stopped"
-    );
-    let current = revision(&room, &sid);
-    room.receipt(&sid, "playing", current, "playing").unwrap();
-    room.receipt(&sid, "playing", current, "playback_finished")
-        .unwrap();
-    room.inner.lock().unwrap().dispatch_client(&sid);
-    assert_eq!(active(&room, &sid).as_deref(), Some("later"));
-}
-
-#[test]
-fn a_reply_waits_out_the_pause_after_the_person_stops_speaking() {
-    let (_directory, room, _) = parity_room("t");
-    let (sid, _events) = browser(&room, "t");
-    room.set_audio_grace(&sid, 5.0);
-    let rev = revision(&room, &sid);
+    assert!(drain(&mut events).is_empty());
+    // Back: what was published while it was away, and a reply whose frame never reached it, are unheard.
+    room.resume(&sid, &[]);
+    assert!(drain(&mut events).is_empty());
     assert_eq!(
-        reply(&room, &sid, "t", "barged", "Playing when the person speaks")["status"],
-        "queued"
+        row(&room, &format!("{sid}:voice:later")),
+        ("interrupted".into(), Some("unheard".into()))
     );
-    room.receipt(&sid, "barged", rev, "playing").unwrap();
-    let turn = room.begin_turn(&sid).unwrap();
+    assert_eq!(row(&room, &format!("{sid}:voice:sent")).0, "queued");
+    room.park(&sid, true);
+    room.resume(&sid, &["sent".to_owned()]);
     assert_eq!(
-        row(&room, &format!("{sid}:voice:barged")),
-        ("interrupted".into(), Some("user_interrupted".into()))
+        row(&room, &format!("{sid}:voice:sent")),
+        ("interrupted".into(), Some("unheard".into()))
     );
-    reply(&room, &sid, "t", "after", "Reply after the turn");
-    room.finish_turn(&sid, turn.revision);
-    let row_id = format!("{sid}:voice:after");
-    assert_eq!(
-        row(&room, &row_id),
-        ("waiting_for_pause".into(), Some("quiet_grace".into()))
-    );
-    assert_eq!(active(&room, &sid), None);
-    {
-        let mut inner = room.inner.lock().unwrap();
-        inner.browsers.get_mut(&sid).unwrap().quiet_until = Some(Instant::now());
-        inner.dispatch_client(&sid);
-    }
-    assert_eq!(active(&room, &sid).as_deref(), Some("after"));
-    assert_eq!(row(&room, &row_id).0, "queued");
 }
 
 #[test]

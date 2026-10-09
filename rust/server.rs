@@ -1,42 +1,31 @@
 //! Minimum device trust surface on TCP and the same user's Unix socket.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::middleware;
-use axum::routing::{get, post};
+
 use axum::Router;
 use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
-use crate::providers::cache::SynthesisCache;
 use crate::storage::PrivateDir;
 
 mod call;
 mod connector_routes;
 mod connectors;
 mod guard;
-mod media;
-mod model_check;
 mod node;
 mod pairing;
 mod presentation;
 mod refusal;
 pub mod rendezvous;
 mod request;
-mod rtc;
-mod settings;
 #[cfg(test)]
 mod tests;
-mod transcription_trial;
 mod trust;
 
-// The handler toolkit the sibling route modules reach through `super::`.
-use refusal::failure;
-use request::payload;
-use trust::origin_allowed;
 pub(crate) use trust::{credential_safe, local_only, safe_url};
 
 /// The room a pairing code may name, only when the device's pairing secret and token may travel to it.
@@ -54,45 +43,15 @@ pub struct AppState {
     /// Every live call a page may come back to, and the client messages already taken.
     resumable: call::ResumableCalls,
     seen: call::SeenMessages,
-    media: Mutex<HashMap<String, Arc<media::CallMedia>>>,
-    cancel_input: Mutex<HashMap<String, tokio::sync::mpsc::Sender<u64>>>,
-    call_settings: Mutex<HashMap<String, crate::types::CallSettings>>,
-    replay_audio: Mutex<HashMap<String, Arc<PinnedReplay>>>,
-    check_budget: model_check::CheckBudget,
-    trial_budget: transcription_trial::TrialBudget,
-    integration_revisions: Mutex<HashMap<String, u64>>,
-    synthesis: Arc<SynthesisCache>,
     launch_id: String,
     host: String,
     port: u16,
-}
-
-struct PinnedReplay {
-    speech: Arc<crate::providers::CloudSpeech>,
-    voice: crate::models::ResolvedVoice,
 }
 
 #[derive(Clone)]
 struct AuthenticatedDevice(String);
 
 impl AppState {
-    fn prune_replay_audio(&self) {
-        self.replay_audio
-            .lock()
-            .expect("replay audio lock")
-            .retain(|uid, _| self.room.has_replay(uid));
-    }
-
-    fn retire_session_replays(&self, session: &str) {
-        // Replay admission also takes the audio lock before entering the room.
-        // Keep leave and the final purge atomic with that admission path.
-        let mut audio = self.replay_audio.lock().expect("replay audio lock");
-        self.room.leave(session);
-        audio.retain(|uid, _| {
-            !uid.starts_with(&format!("{session}:replay:")) && self.room.has_replay(uid)
-        });
-    }
-
     #[expect(
         clippy::too_many_arguments,
         reason = "shared application owners are explicit at construction"
@@ -116,14 +75,6 @@ impl AppState {
             calls: call::CallRegistry::default(),
             resumable: call::ResumableCalls::default(),
             seen: call::SeenMessages::default(),
-            media: Mutex::new(HashMap::new()),
-            cancel_input: Mutex::new(HashMap::new()),
-            call_settings: Mutex::new(HashMap::new()),
-            replay_audio: Mutex::new(HashMap::new()),
-            check_budget: model_check::CheckBudget::default(),
-            trial_budget: transcription_trial::TrialBudget::default(),
-            integration_revisions: Mutex::new(HashMap::new()),
-            synthesis: Arc::new(SynthesisCache::new()),
             launch_id,
             host,
             port,
@@ -182,14 +133,6 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .merge(node::routes())
         .merge(pairing::routes())
         .merge(call::routes())
-        .merge(settings::routes())
-        .route("/api/models/check", post(model_check::model_check))
-        .route(
-            "/api/models/transcription/preview",
-            post(transcription_trial::preview),
-        )
-        .route("/api/presentation/rtc/config", get(rtc::config))
-        .route("/api/presentation/rtc/offer", post(rtc::offer))
         .merge(presentation::routes())
         .merge(connector_routes::routes());
     if local {

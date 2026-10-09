@@ -1,5 +1,5 @@
 use super::template::interpolate;
-use super::{bundle, render, render_refusal, ui_locale, LocalizedMessage};
+use super::{bundle, render, ui_locale, LocalizedMessage};
 use serde_json::{json, Map, Value};
 
 #[test]
@@ -12,12 +12,8 @@ fn locale_uses_the_supported_primary_subtag_and_english_fallback() {
 
 #[test]
 fn render_substitutes_named_parameters_and_falls_back_to_english() {
-    let message =
-        LocalizedMessage::new("provider_key_missing").with_param("provider_label", json!("OpenAI"));
-    assert_eq!(
-        render(&message, "es-MX"),
-        "OpenAI necesita una clave de API antes de conectarse."
-    );
+    let message = LocalizedMessage::new("room.conversation_title").with_param("id", json!("7"));
+    assert_eq!(render(&message, "es-MX"), "Conversación 7");
 
     let fallback = LocalizedMessage::new("device.unpaired");
     assert_eq!(
@@ -50,74 +46,26 @@ fn t1_runtime_keys_are_present_and_render_without_parameters() {
 }
 
 #[test]
-fn refusal_conversion_keeps_the_flat_wire_shape_and_omits_render_only_params() {
-    let missing_key = LocalizedMessage::new("provider_key_missing")
-        .with_param("provider", json!("openai"))
-        .with_param("provider_label", json!("OpenAI"));
-    assert_eq!(
-        Value::Object(render_refusal(&missing_key, "en")),
-        json!({
-            "key":"provider_key_missing",
-            "provider":"openai",
-            "message":"OpenAI needs an API key before connecting."
-        })
-    );
-
-    let mismatch = LocalizedMessage::new("check_mismatch")
-        .with_param("heard", json!("Thank you for watching."));
-    assert_eq!(
-        Value::Object(render_refusal(&mismatch, "en")),
-        json!({
-            "key":"check_mismatch",
-            "heard":"Thank you for watching.",
-            "message":"The model heard something else: \"Thank you for watching.\"."
-        })
-    );
-
-    let duration = LocalizedMessage::new("check_duration")
-        .with_param("seconds", json!(0.12))
-        .with_param("seconds_display", json!("0.1"));
-    assert_eq!(
-        Value::Object(render_refusal(&duration, "en")),
-        json!({
-            "key":"check_duration",
-            "seconds":0.12,
-            "message":"The model produced 0.1 s of audio for a phrase that takes about five."
-        })
-    );
-}
-
-#[test]
 fn english_templates_keep_their_wording() {
     let expected = [
+        ("room.conversation_title", "Conversation 7"),
         (
-            "speech_language_unsupported",
-            "Unsupported speech language.",
-        ),
-        ("check_invalid", "The invalid request details."),
-        (
-            "check_rate_limited",
-            "Too many model checks; try again in 4 s.",
+            "runtime.log_failure",
+            "The core could not start (bind.port-in-use).",
         ),
         (
-            "turn_patience_unknown",
-            "Unknown patience; the room's own is used: patient",
+            "settings.ui_language_invalid",
+            "Input should be 'es' or 'en'",
         ),
-        ("provider_key_refused", "OpenAI refused the key."),
-        ("provider_unreachable", "OpenAI could not be reached."),
-        ("provider_failed", "OpenAI failed: timeout."),
+        ("room.receipt_invalid", "Invalid playback state."),
+        ("room.text_too_long", "The message is too long."),
     ];
     let messages = [
-        LocalizedMessage::new("speech_language_unsupported"),
-        LocalizedMessage::new("check_invalid")
-            .with_param("details", json!("The invalid request details.")),
-        LocalizedMessage::new("check_rate_limited").with_param("retry_after", json!(4)),
-        LocalizedMessage::new("turn_patience_unknown").with_param("patience", json!("patient")),
-        LocalizedMessage::new("provider_key_refused").with_param("provider_label", json!("OpenAI")),
-        LocalizedMessage::new("provider_unreachable").with_param("provider_label", json!("OpenAI")),
-        LocalizedMessage::new("provider_failed")
-            .with_param("provider_label", json!("OpenAI"))
-            .with_param("detail", json!("timeout")),
+        LocalizedMessage::new("room.conversation_title").with_param("id", json!("7")),
+        LocalizedMessage::new("runtime.log_failure").with_param("key", json!("bind.port-in-use")),
+        LocalizedMessage::new("settings.ui_language_invalid"),
+        LocalizedMessage::new("room.receipt_invalid"),
+        LocalizedMessage::new("room.text_too_long"),
     ];
     for ((key, expected), message) in expected.into_iter().zip(messages) {
         assert_eq!(message.key, key);
@@ -181,7 +129,6 @@ fn keys_the_server_emits_have_english_text() {
         "connector-error",
         "connector-unavailable",
         "origin-not-allowed",
-        "integration_superseded",
         "connector.credential_refused",
         "connector.protocol_unsupported",
     ] {

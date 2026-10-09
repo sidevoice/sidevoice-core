@@ -25,7 +25,6 @@ impl Room {
                 json!({"status":"already_active","binding":client.target.as_ref().map(Target::view)}),
             );
         }
-        client.active = None;
         client.sent = 0;
         let target = Target {
             thread: thread.into(),
@@ -33,7 +32,7 @@ impl Room {
             binding_id: id(),
         };
         let view = target.view();
-        client.refocus(sid, target);
+        client.refocus(target);
         inner.interrupt_client(sid, "focus_changed");
         inner.report_working(sid);
         inner.offer_note(sid);
@@ -73,10 +72,9 @@ impl Room {
         if c.target.as_ref().is_none_or(|t| t.binding_id != bid) {
             return Err(RoomError::new(409, "room.focus_changed"));
         }
-        c.active = None;
         let target = Target::none();
         let view = target.view();
-        c.refocus(sid, target);
+        c.refocus(target);
         inner.interrupt_client(sid, "focus_changed");
         Ok(json!({"status":"activated","binding":view}))
     }

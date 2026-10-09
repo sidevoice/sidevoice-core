@@ -3,7 +3,6 @@
 //! few requires, the call socket's token as a subprotocol, revocation; and CORS and preflights for
 //! desktop origins, a foreign Host refused.
 
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
@@ -322,7 +321,7 @@ async fn every_other_route_on_the_socket_still_wants_a_token() {
         "/api/presentation/admission",
         "/api/device/devices",
         "/api/connectors",
-        "/api/models/catalog",
+        "/api/presentation/history",
     ] {
         for headers in [&[][..], &[("authorization", "Bearer guessed")]] {
             let (status, _, _) = send(&node.socket(), "GET", path, headers, None).await;
@@ -357,7 +356,7 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
     let node = Node::new();
     let (_, token) = node.paired().await;
     let basic = format!("Basic {token}");
-    let protected: [(&str, &str, Option<Value>); 12] = [
+    let protected: [(&str, &str, Option<Value>); 7] = [
         ("GET", "/api/presentation/admission", None),
         ("GET", "/api/connectors", None),
         (
@@ -365,22 +364,13 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
             "/api/rendezvous/pair",
             Some(json!({"room": "https://room.example", "code": "ABCD"})),
         ),
-        ("GET", "/api/presentation/rtc/config", None),
         ("GET", "/api/device/devices", None),
         ("DELETE", "/api/device/devices/nobody", None),
         ("GET", "/api/presentation/history", None),
-        ("GET", "/api/presentation/integrations", None),
-        (
-            "PUT",
-            "/api/presentation/integrations/openai",
-            Some(json!({"key": "sk-guessed"})),
-        ),
-        ("DELETE", "/api/presentation/integrations/openai", None),
-        ("GET", "/api/models/catalog", None),
         (
             "POST",
-            "/api/models/check",
-            Some(json!({"stage": "stt", "place": "openai", "model": "whisper-1"})),
+            "/api/presentation/replay",
+            Some(json!({"session_id": "s", "history_id": "h"})),
         ),
     ];
     for (method, path, body) in &protected {
@@ -415,8 +405,7 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
     for path in [
         "/api/presentation/admission",
         "/api/connectors",
-        "/api/presentation/rtc/config",
-        "/api/models/catalog",
+        "/api/presentation/history",
     ] {
         let (status, _, _) = send(&node.tcp(), "GET", path, &with_token, None).await;
         assert_eq!(status, StatusCode::OK, "{path}");
@@ -773,145 +762,6 @@ async fn pairing_a_room_is_a_page_s_act_not_a_script_s() {
 }
 
 // --- Integrations: routes that never reach a provider ----------------------------------------
-
-#[tokio::test]
-async fn integration_writes_come_from_a_page_and_name_a_known_provider_and_a_key() {
-    let node = Node::new();
-    let (_, token) = node.paired().await;
-    let authorization = bearer(&token);
-    let page = [
-        ("origin", "http://127.0.0.1:8768"),
-        ("authorization", authorization.as_str()),
-    ];
-    let script = [("authorization", authorization.as_str())];
-    let (status, _, _) = send(
-        &node.tcp(),
-        "PUT",
-        "/api/presentation/integrations/openai",
-        &script,
-        Some(json!({"key": "sk-script"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "no Origin, no write");
-    let (status, _, _) = send(
-        &node.tcp(),
-        "PUT",
-        "/api/presentation/integrations/nobody",
-        &page,
-        Some(json!({"key": "sk-x"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    for body in [json!({"key": "   "}), json!({}), json!({"key": 7})] {
-        let (status, _, _) = send(
-            &node.tcp(),
-            "PUT",
-            "/api/presentation/integrations/openai",
-            &page,
-            Some(body.clone()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    }
-    assert_eq!(node.dir.read_json("integrations.json").unwrap(), None);
-}
-
-#[tokio::test]
-async fn a_key_the_provider_cannot_take_is_not_stored_and_the_old_one_stays() {
-    let node = Node::new();
-    node.dir
-        .write_json("integrations.json", &json!({"openai": "sk-installed-0000"}))
-        .unwrap();
-    let (_, token) = node.paired().await;
-    let authorization = bearer(&token);
-    let page = [
-        ("origin", "http://127.0.0.1:8768"),
-        ("authorization", authorization.as_str()),
-    ];
-    // Not a value an Authorization header can carry: refused before any request is made.
-    let (status, _, _) = send(
-        &node.tcp(),
-        "PUT",
-        "/api/presentation/integrations/openai",
-        &page,
-        Some(json!({"key": "sk-bad\nkey"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        node.dir.read_json("integrations.json").unwrap().unwrap(),
-        json!({"openai": "sk-installed-0000"})
-    );
-}
-
-#[tokio::test]
-async fn the_listing_never_carries_a_key_and_delete_removes_only_the_saved_one() {
-    let node = Node::new();
-    node.dir
-        .write_json(
-            "integrations.json",
-            &json!({"openai": "sk-openai-1234", "elevenlabs": "xi-voice-5678"}),
-        )
-        .unwrap();
-    let (_, token) = node.paired().await;
-    let authorization = bearer(&token);
-    let page = [
-        ("origin", "http://127.0.0.1:8768"),
-        ("authorization", authorization.as_str()),
-    ];
-    let (status, _, listing) = send(
-        &node.tcp(),
-        "GET",
-        "/api/presentation/integrations",
-        &page,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let text = listing.to_string();
-    assert!(!text.contains("sk-openai-1234") && !text.contains("xi-voice-5678"));
-    let ids: Vec<_> = listing["providers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| {
-            (
-                row["id"].clone(),
-                row["source"].clone(),
-                row["hint"].clone(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        ids,
-        [
-            (json!("openai"), json!("stored"), json!("…1234")),
-            (json!("elevenlabs"), json!("stored"), json!("…5678"))
-        ]
-    );
-    let (status, _, _) = send(
-        &node.tcp(),
-        "DELETE",
-        "/api/presentation/integrations/openai",
-        &page,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        node.dir.read_json("integrations.json").unwrap().unwrap(),
-        json!({"elevenlabs": "xi-voice-5678"}),
-        "the other provider's key stays"
-    );
-    assert_eq!(
-        std::fs::metadata(node.dir.path().join("integrations.json"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-}
 
 // --- The call socket over a real listener ----------------------------------------------------
 

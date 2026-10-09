@@ -1,216 +1,211 @@
-//! Playback dispatch: each call's queue of utterances, held, interrupted or sent one at a time,
-//! and the journal rows that show how far each reply got.
-use std::time::{Duration, Instant};
+//! Replies on their way to the calls listening: each is sent once to every call on its conversation, whose voice
+//! module decides whether and when it plays, and the journal row shows how far it got from what the calls report.
+use serde_json::{json, Value};
 
-use serde_json::json;
-
+use super::error::RoomError;
 use super::latency::{latency_now_micros, LatencyEvent};
+use super::utterances::End;
 use super::{Inner, Room};
 
-/// Most utterances one call may have queued.
-pub(super) const MAX_PENDING: usize = 16;
-/// A reply handed to a call is not waited on for ever: 60 s plus the text at 6 characters/s.
-const PLAYBACK_BASE_SECONDS: f64 = 60.0;
-const PLAYBACK_CHARS_PER_SECOND: f64 = 6.0;
-
-pub(super) fn playback_bound(text: &str) -> Duration {
-    Duration::from_secs_f64(
-        PLAYBACK_BASE_SECONDS + text.chars().count() as f64 / PLAYBACK_CHARS_PER_SECOND,
-    )
-}
+/// What a call may report about a reply it was sent.
+const REPORTS: [&str; 5] = ["playing", "heard", "interrupted", "unplayed", "failed"];
+/// Why a reply stopped short, as a call may say.
+const REASONS: [&str; 6] = [
+    "user_interrupted",
+    "newer_turn",
+    "user_skipped",
+    "focus_changed",
+    "call_ended",
+    "unheard",
+];
 
 impl Room {
-    pub fn speech_current(&self, sid: &str, uid: &str, revision: u64) -> bool {
-        let inner = self.inner.lock().expect("room lock");
-        inner.browsers.get(sid).is_some_and(|browser| {
-            browser.revision == revision
-                && !browser.speaking
-                && browser.active.as_deref() == Some(uid)
-        }) && inner
-            .utterances
-            .client_entry(uid, sid)
-            .is_some_and(|(entry_revision, status)| {
-                *entry_revision == revision
-                    && !matches!(
-                        status.as_str(),
-                        "interrupted" | "failed" | "playback_finished"
-                    )
-            })
+    /// Call `sid` reports what became of reply `uid` there: it started playing, was heard to the end, was cut
+    /// (with how many of its characters were heard), was never played, or failed. A report on a reply that
+    /// already ended is taken without changing it.
+    pub fn playback(
+        &self,
+        sid: &str,
+        uid: &str,
+        status: &str,
+        reason: Option<&str>,
+        heard_chars: Option<u64>,
+        timings: &Value,
+    ) -> Result<(), RoomError> {
+        if !REPORTS.contains(&status) || reason.is_some_and(|reason| !REASONS.contains(&reason)) {
+            return Err(RoomError::new(400, "room.receipt_invalid"));
+        }
+        let stale = || RoomError::new(409, "room.stale_utterance");
+        let mut guard = self.inner.lock().expect("room lock");
+        let inner = &mut *guard;
+        if !inner.browsers.contains(sid) {
+            return Err(stale());
+        }
+        let Some(record) = inner.utterances.get(uid) else {
+            return Err(stale());
+        };
+        // How far a reply was heard is counted in its characters (Unicode scalar values), and cannot pass its end.
+        let length = inner
+            .journal
+            .find(&record.row_id)
+            .map(|row| row.text.chars().count() as u64);
+        if heard_chars.is_some_and(|heard| length.is_some_and(|length| heard > length)) {
+            return Err(RoomError::new(400, "room.receipt_invalid"));
+        }
+        let Some(record) = inner.utterances.get_mut(uid) else {
+            return Err(stale());
+        };
+        let Some(entry) = record.clients.get_mut(sid) else {
+            return Err(stale());
+        };
+        if !matches!(entry.1.as_str(), "queued" | "playing") {
+            return Ok(());
+        }
+        let (next, reason) = match status {
+            "heard" => ("playback_finished", None),
+            "interrupted" => ("interrupted", Some(reason.unwrap_or("user_interrupted"))),
+            "unplayed" => ("interrupted", Some(reason.unwrap_or("newer_turn"))),
+            "failed" => ("failed", Some("playback_failed")),
+            _ => ("playing", None),
+        };
+        let previous = std::mem::replace(&mut entry.1, next.to_owned());
+        record.ends.insert(
+            sid.to_owned(),
+            End {
+                reason: reason.map(str::to_owned),
+                heard_chars: heard_chars.filter(|_| status == "interrupted"),
+            },
+        );
+        // A reply played to the end, or cut while it played, was heard by this call: a catch-up of it is not
+        // offered again.
+        if next == "playback_finished" || (status == "interrupted" && previous == "playing") {
+            record.heard.insert(sid.to_owned());
+        }
+        let catch_up_of = record.replay_of.clone();
+        let original_row = (!record.is_replay()).then(|| record.row_id.clone());
+        if let Some(row_id) = &original_row {
+            inner.sync_row(row_id);
+        }
+        if let Some(original) = catch_up_of {
+            inner
+                .utterances
+                .replay_heard(&original, sid, &previous, next);
+        }
+        inner.latency.set_reply_status(sid, uid, next);
+        if status == "playing" {
+            if let Some((thread, reply_revision)) = inner.latency.reply_turn(sid, uid) {
+                inner.mark_latency(
+                    sid,
+                    &thread,
+                    reply_revision,
+                    Some(uid),
+                    LatencyEvent::PlayingReceipt,
+                    latency_now_micros(),
+                );
+            }
+        }
+        inner.utterances.retire_finished_replays();
+        drop(guard);
+        self.latency_browser(sid, uid, timings);
+        Ok(())
     }
 }
 
 impl Inner {
-    /// Show on a reply's journal row the furthest status any call reached with it; the reason
-    /// is kept only when that status is the one that just `changed`.
-    pub(super) fn sync_row(&mut self, row_id: &str, changed: &str, reason: Option<&str>) {
-        let best = self
+    /// Show on a reply's journal row what the calls it was sent to did with it (`UtteranceRecord::outcome`).
+    pub(super) fn sync_row(&mut self, row_id: &str) {
+        let Some((status, reason, heard_chars)) = self
             .utterances
-            .row_status(row_id)
-            .unwrap_or(changed)
-            .to_owned();
+            .original_of_row(row_id)
+            .and_then(|(_, record)| record.outcome())
+            .map(|(status, reason, heard)| (status.to_owned(), reason.map(str::to_owned), heard))
+        else {
+            return;
+        };
         if let Some(row) = self.journal.find_mut(row_id) {
-            row.reason = if best == changed {
-                reason.map(str::to_owned)
-            } else {
-                None
-            };
-            row.status = best;
+            row.status = status;
+            row.reason = reason;
+            row.heard_chars = heard_chars;
         }
         self.track_unheard(row_id);
     }
 
-    /// Send a call the next utterance it should play, skipping those it can no longer play.
-    pub(super) fn dispatch_client(&mut self, sid: &str) {
-        loop {
-            let Some(uid) = self
-                .browsers
-                .get(sid)
-                .and_then(|browser| browser.next_to_play().cloned())
-            else {
-                return;
-            };
-            let entry = self.utterances.get(&uid).and_then(|record| {
-                record
-                    .clients
-                    .get(sid)
-                    .map(|(revision, status)| (record.row_id.clone(), *revision, status.clone()))
-            });
-            let Some((row_id, revision, status)) = entry else {
-                self.skip_next(sid);
-                continue;
-            };
-            if status == "waiting_for_turn" {
-                return;
-            }
-            if !matches!(status.as_str(), "queued" | "waiting_for_pause") {
-                self.skip_next(sid);
-                continue;
-            }
-            let Some(row) = self.journal.find(&row_id) else {
-                self.skip_next(sid);
-                continue;
-            };
-            let (thread, text, language, reply_revision) = (
-                row.thread.clone(),
-                row.text.clone(),
-                row.language.clone(),
-                row.revision,
-            );
-            let browser = self.browsers.get_mut(sid).expect("browser present");
-            if browser.revision != revision || !browser.is_on(&thread) {
-                browser.pending.pop_front();
-                self.utterances.set_client_status(&uid, sid, "interrupted");
-                if self.utterances.get(&uid).is_some_and(|r| !r.is_replay()) {
-                    self.sync_row(&row_id, "interrupted", Some("focus_changed"));
-                }
-                self.utterances.retire_finished_replays();
-                continue;
-            }
-            // The person just stopped speaking: the reply waits out the pause before it starts.
-            let now = Instant::now();
-            if browser.quiet_until.is_some_and(|until| until > now) {
-                if status == "queued" {
-                    self.set_status_synced(&uid, sid, "waiting_for_pause", Some("quiet_grace"));
-                }
-                return;
-            }
-            if status == "waiting_for_pause" {
-                self.set_status_synced(&uid, sid, "queued", None);
-            }
-            let (replay, requested) = self
-                .utterances
-                .get(&uid)
-                .map_or((false, false), |r| (r.is_replay(), r.requested));
-            let mut data = json!({"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":reply_revision,"thread_id":thread,"text":text,"language":language,"history_id":row_id});
-            if replay {
-                data["replay"] = json!(true);
-            }
-            if requested {
-                data["requested"] = json!(true);
-            }
-            let browser = self.browsers.get_mut(sid).expect("browser present");
-            if !browser.offer(json!({"type":"voice-speech","data":data})) {
-                return;
-            }
-            browser.pending.pop_front();
-            browser.active = Some(uid.clone());
-            browser.playback_watch = Some((uid.clone(), now + playback_bound(&text)));
-            if let Some(record) = self.utterances.get_mut(&uid) {
-                record.dispatched = true;
-            }
-            self.mark_latency(
-                sid,
-                &thread,
-                reply_revision,
-                Some(&uid),
-                LatencyEvent::SynthesisStarted,
-                latency_now_micros(),
-            );
+    /// Send reply `uid` to call `sid` as text. A call that is away gets nothing: when it comes back, what was
+    /// published meanwhile is marked unheard.
+    pub(super) fn send_reply(&mut self, sid: &str, uid: &str) {
+        let Some(browser) = self.browsers.get(sid).filter(|b| b.parked.is_none()) else {
+            return;
+        };
+        let Some(record) = self.utterances.get(uid) else {
+            return;
+        };
+        let Some((revision, _)) = record.clients.get(sid) else {
+            return;
+        };
+        let Some(row) = self.journal.find(&record.row_id) else {
+            return;
+        };
+        let mut data = json!({"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":row.revision,
+            "thread_id":row.thread,"text":row.text,"language":row.language,"history_id":row.id});
+        if record.is_replay() {
+            data["replay"] = json!(true);
+        }
+        if record.requested {
+            data["requested"] = json!(true);
+        }
+        let (thread, reply_revision) = (row.thread.clone(), row.revision);
+        if !browser.offer(json!({"type":"voice-reply","data":data})) {
+            // The call's channel is full: the reply never reaches it, so it ends there unheard.
+            self.set_status_synced(uid, sid, "interrupted", Some("unheard"));
+            self.latency.set_reply_status(sid, uid, "failed");
             return;
         }
+        if let Some(record) = self.utterances.get_mut(uid) {
+            record.sent.insert(sid.to_owned());
+        }
+        self.mark_latency(
+            sid,
+            &thread,
+            reply_revision,
+            Some(uid),
+            LatencyEvent::SynthesisStarted,
+            latency_now_micros(),
+        );
     }
+
     /// One call's entry for an utterance moves; the journal row follows unless it is a replay.
     fn set_status_synced(&mut self, uid: &str, sid: &str, status: &str, reason: Option<&str>) {
-        self.utterances.set_client_status(uid, sid, status);
+        let end = End {
+            reason: reason.map(str::to_owned),
+            heard_chars: None,
+        };
+        self.utterances.set_client_status(uid, sid, status, end);
         if let Some(row_id) = self
             .utterances
             .get(uid)
             .filter(|r| !r.is_replay())
             .map(|r| r.row_id.clone())
         {
-            self.sync_row(&row_id, status, reason);
+            self.sync_row(&row_id);
         }
     }
 
-    /// A killed tab, a network gone mid-playback or a lost receipt would otherwise hold the head
-    /// of the queue for ever: past its bound the reply is marked unconfirmed and the queue moves on.
-    pub(super) fn expire_playback(&mut self, sid: &str, now: Instant) {
-        let Some(browser) = self.browsers.get_mut(sid) else {
-            return;
-        };
-        let Some((uid, deadline)) = browser.playback_watch.clone() else {
-            return;
-        };
-        if browser.parked.is_some() {
-            return;
-        }
-        if browser.active.as_deref() != Some(uid.as_str()) {
-            browser.playback_watch = None;
-            return;
-        }
-        if now < deadline {
-            return;
-        }
-        browser.playback_watch = None;
-        browser.active = None;
-        let open = self
-            .utterances
-            .client_entry(&uid, sid)
-            .is_some_and(|(_, status)| {
-                !matches!(
-                    status.as_str(),
-                    "failed" | "playback_finished" | "interrupted"
-                )
-            });
-        if open {
-            self.set_status_synced(&uid, sid, "failed", Some("unconfirmed"));
-            self.latency.set_reply_status(sid, &uid, "failed");
-        }
-        self.utterances.retire_finished_replays();
-    }
-
-    /// What a returning call never received stays written and is marked unheard: it is not played
-    /// late. `unreceived` are the utterances whose speech never reached the page; one it did receive
-    /// may still be playing there.
+    /// What a returning call never received stays written and is marked unheard: it is not played late. A reply
+    /// published while it was away was never sent to it; `unreceived` are those sent whose frame never reached the
+    /// page. One the page did receive may still be playing there, and its report counts.
     pub(super) fn drop_unheard(&mut self, sid: &str, unreceived: &[String]) {
-        let Some(browser) = self.browsers.get_mut(sid) else {
-            return;
-        };
-        let mut dropped: Vec<String> = browser.pending.drain(..).collect();
-        if let Some(active) = browser.active.take_if(|active| unreceived.contains(active)) {
-            browser.playback_watch = None;
-            dropped.push(active);
-        }
+        let dropped: Vec<String> = self
+            .utterances
+            .iter()
+            .filter(|(uid, record)| {
+                record
+                    .clients
+                    .get(sid)
+                    .is_some_and(|(_, status)| status == "queued")
+                    && (!record.sent.contains(sid) || unreceived.contains(uid))
+            })
+            .map(|(uid, _)| uid.clone())
+            .collect();
         for uid in dropped {
             self.set_status_synced(&uid, sid, "interrupted", Some("unheard"));
             self.latency.set_reply_status(sid, &uid, "failed");
@@ -218,85 +213,17 @@ impl Inner {
         self.utterances.retire_finished_replays();
     }
 
-    fn skip_next(&mut self, sid: &str) {
-        self.browsers
-            .get_mut(sid)
-            .expect("browser present")
-            .pending
-            .pop_front();
-    }
-
-    /// Stop everything a call had to play, marking `reason` on the rows nobody plays any more.
+    /// Stop everything a call had to play, for `reason`.
     pub(super) fn interrupt_client(&mut self, sid: &str, reason: &str) {
         // A halt that interrupted nothing is not a cancellation: counting it would make every turn look like one.
         if self
             .utterances
-            .has_client_status(sid, &["queued", "waiting_for_turn", "playing"])
+            .has_client_status(sid, &["queued", "playing"])
         {
             self.count_cancel(sid, reason);
         }
-        for row_id in self.utterances.interrupt_client(sid) {
-            if let Some(row) = self.journal.find_mut(&row_id) {
-                if row.status != "playback_finished" {
-                    row.status = "interrupted".into();
-                    row.reason = Some(reason.into());
-                }
-            }
-            self.track_unheard(&row_id);
-        }
-        if let Some(browser) = self.browsers.get_mut(sid) {
-            browser.pending.clear();
-            browser.active = None;
-            browser.playback_watch = None;
-        }
-        self.utterances.retire_finished_replays();
-    }
-
-    /// The user started turn `revision`: hold the call's queue until the turn ends, putting the
-    /// utterance it was about to play back at the front.
-    pub(super) fn hold_client(&mut self, sid: &str, revision: u64) {
-        if self.utterances.has_client_status(sid, &["playing"]) {
-            self.count_cancel(sid, "newer_turn");
-        }
-        let active = self.browsers.get_mut(sid).and_then(|b| b.active.take());
-        let held = self.utterances.hold_client(sid, revision);
-        if let Some(uid) = active {
-            if held.waiting.iter().any(|(id, _)| id == &uid) {
-                if let Some(browser) = self.browsers.get_mut(sid) {
-                    browser.pending.push_front(uid);
-                }
-            }
-        }
-        for row_id in held.waiting.into_iter().filter_map(|(_, row_id)| row_id) {
-            self.sync_row(&row_id, "waiting_for_turn", Some("user_speaking"));
-        }
-        for row_id in held.interrupted {
-            self.sync_row(&row_id, "interrupted", Some("user_interrupted"));
-        }
-        for original in held.heard_replays {
-            self.utterances
-                .replay_heard(&original, sid, "playing", "interrupted");
-        }
-        self.utterances.retire_finished_replays();
-    }
-
-    /// Call `sid`'s turn `revision` became a message: a reply held for that turn answers something
-    /// the person has moved past, so it is never played. A replay the person asked for still plays
-    /// after the turn.
-    pub(super) fn supersede_held(&mut self, sid: &str, revision: u64) {
-        for (uid, _) in self.utterances.waiting_for_turn(sid, revision) {
-            if self
-                .utterances
-                .get(&uid)
-                .is_some_and(|record| record.is_replay())
-            {
-                continue;
-            }
-            if let Some(browser) = self.browsers.get_mut(sid) {
-                browser.pending.retain(|pending| pending != &uid);
-            }
-            self.set_status_synced(&uid, sid, "interrupted", Some("newer_turn"));
-            self.latency.set_reply_status(sid, &uid, "failed");
+        for row_id in self.utterances.interrupt_client(sid, reason) {
+            self.sync_row(&row_id);
         }
         self.utterances.retire_finished_replays();
     }

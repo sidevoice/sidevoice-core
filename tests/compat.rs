@@ -236,7 +236,7 @@ async fn the_released_connector_links_delivers_and_publishes() {
     );
     assert_eq!(said["text_saved"], true, "{said}");
     assert_eq!(
-        browser.frame("voice-speech").await["text"],
+        browser.frame("voice-reply").await["text"],
         "Reply through the released connector"
     );
 }

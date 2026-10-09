@@ -4,12 +4,10 @@
 //! repository, no Docker.
 #![allow(dead_code)]
 
-pub mod webrtc_peer;
-
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,30 +28,6 @@ pub const CORE: &str = env!("CARGO_BIN_EXE_sidevoice-core-rust");
 
 /// How long a step may take before the test says which one did not happen.
 pub const STEP: Duration = Duration::from_secs(10);
-
-/// A recorded voice: "Hola, esto es una prueba de voz de la sala.", 16 kHz mono (tests/fixtures/README.md).
-pub fn speech() -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hola-sala-16k.wav");
-    let mut reader = hound::WavReader::open(&path).expect("the speech fixture opens");
-    let spec = reader.spec();
-    assert_eq!((spec.sample_rate, spec.channels), (16_000, 1));
-    reader
-        .samples::<i16>()
-        .flat_map(|sample| sample.expect("a 16-bit sample").to_le_bytes())
-        .collect()
-}
-
-/// `seconds` of 16 kHz mono silence.
-pub fn silence(seconds: f32) -> Vec<u8> {
-    vec![0; (16_000.0 * seconds) as usize * 2]
-}
-
-/// One test at a time for the tests that run the voice detectors in real time: two of them side by side on a
-/// small runner measure the scheduler, not the core.
-pub async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
-    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    LOCK.lock().await
-}
 
 pub fn until<T>(within: Duration, what: &str, mut check: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + within;
@@ -352,36 +326,6 @@ impl Core {
         reply.json()
     }
 
-    pub async fn receipt(
-        &self,
-        token: &str,
-        session: &str,
-        utterance: &str,
-        revision: u64,
-        status: &str,
-    ) -> u16 {
-        self.post(
-            "/api/presentation/browser-receipt",
-            json!({"session_id": session, "utterance_id": utterance, "revision": revision, "status": status}),
-        )
-        .token(token)
-        .send()
-        .await
-        .status
-    }
-
-    /// Plays a reply to its end, as a browser reports it.
-    pub async fn played(&self, token: &str, session: &str, utterance: &str, revision: u64) {
-        for status in ["playing", "playback_finished"] {
-            assert_eq!(
-                self.receipt(token, session, utterance, revision, status)
-                    .await,
-                200,
-                "{status} receipt for {utterance}"
-            );
-        }
-    }
-
     pub async fn history(&self, token: &str, thread: &str) -> Vec<Value> {
         self.get(&format!("/api/presentation/history?thread_id={thread}"))
             .token(token)
@@ -424,14 +368,10 @@ impl Core {
             .0
     }
 
-    /// A browser in a call: hello sent with these settings, session assigned.
-    pub async fn join(&self, token: &str, settings: Value) -> Browser {
+    /// A browser in a call: hello sent with this data (none when null), session assigned.
+    pub async fn join(&self, token: &str, hello: Value) -> Browser {
         let mut browser = Browser::new(self.open_call(token).await);
-        let hello = if settings.is_null() {
-            json!({})
-        } else {
-            json!({"settings": settings})
-        };
+        let hello = if hello.is_null() { json!({}) } else { hello };
         browser.send("voice-hello", hello).await;
         let session = browser.frame("voice-session").await;
         browser.session = session["session_id"].as_str().unwrap().to_owned();
@@ -678,29 +618,8 @@ fn close_code(message: &Message) -> Option<u16> {
     }
 }
 
-/// Sends PCM the way a microphone does: 20 ms (640 bytes) at a time, in real time.
-#[derive(Clone)]
-pub struct Microphone(Writer);
-
-impl Microphone {
-    pub async fn speak(&self, pcm: &[u8]) {
-        let started = Instant::now();
-        for (index, chunk) in pcm.chunks(640).enumerate() {
-            if self.0.send(Message::binary(chunk.to_vec())).is_err() {
-                return;
-            }
-            let due = started + Duration::from_millis(20 * (index as u64 + 1));
-            tokio::time::sleep_until(due.into()).await;
-        }
-    }
-}
-
-/// An event as a failure message shows it: no audio, nothing long.
+/// An event as a failure message shows it: nothing long.
 fn summary(event: &Value) -> String {
-    let mut event = event.clone();
-    if let Some(data) = event["data"].as_object_mut() {
-        data.retain(|key, _| !key.contains("audio"));
-    }
     let text = event.to_string();
     if text.len() > 300 {
         format!("{}…", &text[..text.floor_char_boundary(300)])
@@ -733,10 +652,6 @@ impl Browser {
         }
     }
 
-    pub fn microphone(&self) -> Microphone {
-        Microphone(self.tx.clone())
-    }
-
     pub async fn send(&self, kind: &str, data: Value) {
         let _ = self.tx.send(Message::text(
             json!({"type": kind, "data": data}).to_string(),
@@ -747,16 +662,58 @@ impl Browser {
         let _ = self.tx.send(message);
     }
 
-    pub async fn speak(&self, pcm: &[u8]) {
-        self.microphone().speak(pcm).await;
+    /// Sends a client message with a fresh `client_msg_id` and waits for the room to take it; the id.
+    pub async fn report(&mut self, kind: &str, mut data: Value) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        data["session_id"] = json!(self.session);
+        data["client_msg_id"] = json!(id);
+        self.send(kind, data).await;
+        self.wait("voice-ack", STEP, |ack| ack["client_msg_id"] == id.as_str())
+            .await;
+        id
     }
 
-    pub async fn transcript(&self, ask: &Value, text: &str) {
-        self.send(
-            "voice-transcript",
-            json!({"session_id": self.session, "request_id": ask["request_id"], "text": text}),
+    /// The person says `text`, as the call's voice module reports a turn: it names the turn and starts it, the room
+    /// gives it a revision, and it ends with those words. The turn's revision.
+    pub async fn say(&mut self, text: &str) -> u64 {
+        let turn = uuid::Uuid::new_v4().to_string();
+        let revision = self.start_turn(&turn).await;
+        self.report(
+            "voice-user-turn",
+            json!({"phase": "finished", "turn_id": turn, "text": text}),
         )
         .await;
+        revision
+    }
+
+    /// Starts turn `turn`: the revision the room gave it, from the started frame that names it.
+    pub async fn start_turn(&mut self, turn: &str) -> u64 {
+        self.report(
+            "voice-user-turn",
+            json!({"phase": "started", "turn_id": turn}),
+        )
+        .await;
+        let started = self
+            .wait("voice-user-turn", STEP, |data| {
+                data["phase"] == "started" && data["turn_id"] == turn
+            })
+            .await;
+        started["revision"].as_u64().expect("a revision")
+    }
+
+    /// Reports what became of reply `utterance` here.
+    pub async fn playback(&mut self, utterance: &str, status: &str) {
+        self.report(
+            "voice-playback",
+            json!({"utterance_id": utterance, "status": status}),
+        )
+        .await;
+    }
+
+    /// Plays a reply to its end, as the call's voice module reports it.
+    pub async fn played(&mut self, utterance: &str) {
+        self.playback(utterance, "playing").await;
+        self.playback(utterance, "heard").await;
     }
 
     /// The next event the core sends, or `None` once `within` passes or the socket closes.

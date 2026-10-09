@@ -18,15 +18,16 @@ already have with your agent into a voice call. The agent keeps its context and 
 speaks its replies, and you answer by voice and can interrupt it — from the sofa or on a walk, not only at your desk.
 
 **sidevoice-core** is the part that runs on the machine where your agents run. It keeps that machine's
-conversations, runs one voice pipeline per call (voice activity, end of turn, transcription, speech), and decides
-which of your devices may use it.
+conversations, carries them between your devices and your agents as text and events, and decides which of your
+devices may use it. The voice itself (listening, turns, transcription, speech) runs on your device, in
+[sidevoice-voice](https://github.com/sidevoice/sidevoice-voice).
 
 ## How it fits
 
 | Piece | Role |
 |---|---|
 | [sidevoice-connector](https://github.com/sidevoice/sidevoice-connector) | What you install on that machine. It gives your agents their voice tools and installs, starts and supervises this core. |
-| **sidevoice-core** (this repository) | The conversations and the voice pipeline, next to the agents. |
+| **sidevoice-core** (this repository) | The conversations, next to the agents. |
 | [sidevoice-desktop](https://github.com/sidevoice/sidevoice-desktop) | The app you call from. |
 | [sidevoice-web](https://github.com/sidevoice/sidevoice-web) | The call interface the app bundles; it can also be served as a static site. |
 
@@ -38,25 +39,20 @@ connector installs the version it was released with.
 
 Beta. What works today:
 
-- Voice calls with your agent's conversation from paired devices: you speak, your words reach the conversation as
-  a message, and the agent's spoken replies come back.
-- Turn detection with Silero VAD and smart-turn v3 (or a fixed silence), on onnxruntime: no PyTorch.
-- Transcription and speech on the device (Whisper, Kokoro), or through OpenAI and ElevenLabs with your own key,
-  which stays on this machine.
-- Several devices in the same conversation, each with its own microphone and playback.
+- Voice calls with your agent's conversation from paired devices: your device turns what you say into text, which
+  reaches the conversation as a message, and speaks the agent's replies, which the core sends as text.
+- What you did not hear is never played late: your device reports how far each reply was heard, and the agent is
+  told what you missed.
+- Several devices in the same conversation.
 - One-time pairing codes, per-device tokens and immediate revocation.
 
 Reaching your machine from outside your network needs a relay; that part is still being built.
 
 ## Build it from source
 
-Rust 1.98, and libopus with `pkg-config` (`apt install libopus-dev pkg-config`, `brew install opus`). The voice
-detectors' models are pinned by digest in `assets/rust-models.json`; `cargo xtask models` fetches, verifies and stages
-them in `RUSTVANI_CACHE_DIR`, where the core and its tests read them:
+Rust 1.98 and a C compiler:
 
 ```sh
-export RUSTVANI_CACHE_DIR=~/.cache/sidevoice-models
-cargo xtask models
 cargo test --locked --all-features
 cargo run --locked --release        # listens on 127.0.0.1:8768
 ```
@@ -69,12 +65,11 @@ Compatibility with the latest published connector and web client is `cargo xtask
 
 ## Configuration
 
-Its data — provider keys, paired devices, the machine's identity key, the conversation journal — lives in
+Its data — paired devices, the machine's identity key, the conversation journal — lives in
 `SIDEVOICE_CORE_DATA_DIR`, else `~/.sidevoice/core`. Every secret file there is created with mode 0600.
 
 | Variable | What it does |
 |---|---|
-| `VOICE_STT_API_KEY`, `VOICE_ELEVENLABS_API_KEY` | Provider keys for OpenAI transcription and ElevenLabs speech on a headless machine. A key saved from a paired device takes precedence. |
 | `SIDEVOICE_PUBLIC_URLS` | Comma-separated addresses where devices can reach this machine directly; they go into pairing codes. Each must be `https://` (see Security). |
 | `SIDEVOICE_TRUSTED_CLUSTER_HOSTS` | Hosts that may receive credentials over plain HTTP. Empty by default (see Security). |
 | `SIDEVOICE_ALLOWED_HOSTS`, `SIDEVOICE_ALLOWED_ORIGINS` | Host names and page origins to answer besides loopback, for a machine you made reachable. |
@@ -93,8 +88,8 @@ Its data — provider keys, paired devices, the machine's identity key, the conv
   (`.svc.cluster.local`); any other entry is one exact host. Listing a host there states that the network to it is
   yours (a Kubernetes cluster's pod network, say): whoever can read that network can read those credentials.
 - **Relays are trusted.** A relay between a device and this machine terminates TLS on both sides: it sees the pairing
-  secret redeemed through it, device tokens and all the traffic, including voice and any provider key saved from a
-  device. The machine's signed identity proves which machine answered; it encrypts nothing. Use only a relay you
+  secret redeemed through it, device tokens and all the traffic, including what you say as text and the agent's
+  replies. The machine's signed identity proves which machine answered; it encrypts nothing. Use only a relay you
   trust, or reach the machine directly. End-to-end encryption to the machine's pinned identity is planned, not
   there yet.
 
@@ -106,16 +101,12 @@ Please report vulnerabilities privately through
 ```
 rust/              the core: one crate, the binary sidevoice-core-rust
   runtime/         process configuration, launch handshake, listeners, shutdown
-  server/          the device and connector surfaces (HTTP, WebSocket, Socket.IO, WebRTC) and the calls they carry
+  server/          the device and connector surfaces (HTTP, WebSocket, Socket.IO) and the calls they carry
   control/         conversations, devices and pairing, latency, telemetry
-  pipeline/        voice activity and end of turn, behind Rustvani
-  providers/       the OpenAI and ElevenLabs adapters and the synthesis cache
-  models/          catalogue, settings and model-check rules
   messages/        the per-language message bundles
   storage/         private files and process locks
-tests/             integration tests, with their recorded voice and provider responses
-xtask/             build tooling: models, release archives, manifest, compatibility (`cargo xtask`)
-assets/catalog/    the model and voice catalogues, resolver vectors and model-check clips
+tests/             integration tests
+xtask/             build tooling: release archives, manifest, compatibility (`cargo xtask`)
 ```
 
 ## Contributing

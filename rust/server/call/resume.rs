@@ -166,6 +166,36 @@ impl Outbound {
     }
 }
 
+/// What a returning page is given after the session: the frames it missed, and the replies it never received.
+pub(super) struct Missed {
+    /// The utterances of replies sent toward the page that never reached it: the room marks them unheard.
+    pub(super) unreceived: Vec<String>,
+    /// Every other frame after the page's `last_seq`, in order.
+    pub(super) frames: Vec<String>,
+}
+
+/// What a page that handled every frame up to `last_seq` missed; none when some of it is no longer kept. What the
+/// room had already queued for the call (`queued`) and the call had not sent yet is taken first, numbered with the
+/// rest: a reply still on its way when the socket went counts as unreceived like one sent into the dead socket.
+/// Nothing the person did not hear is played late, so no reply is sent again.
+pub(super) fn missed_on_return(
+    outbound: &mut Outbound,
+    queued: &mut mpsc::Receiver<Value>,
+    last_seq: u64,
+) -> Option<Missed> {
+    while let Ok(event) = queued.try_recv() {
+        outbound.stamp(event);
+    }
+    let (replies, frames): (Vec<_>, Vec<_>) = outbound
+        .since(last_seq)?
+        .into_iter()
+        .partition(|(kind, _, _)| kind == "voice-reply");
+    Some(Missed {
+        unreceived: replies.into_iter().filter_map(|(_, uid, _)| uid).collect(),
+        frames: frames.into_iter().map(|(_, _, text)| text).collect(),
+    })
+}
+
 struct Sent {
     seq: u64,
     kind: String,
@@ -173,36 +203,26 @@ struct Sent {
     text: String,
 }
 
-/// The client messages each device already had taken, with the answer each one got.
+/// The client messages each device already had taken, the newest [`SEEN_PER_DEVICE`] of them.
 #[derive(Default)]
 pub(in crate::server) struct SeenMessages {
-    devices: Mutex<HashMap<String, VecDeque<(String, Value)>>>,
+    devices: Mutex<HashMap<String, VecDeque<String>>>,
 }
 
 impl SeenMessages {
-    /// The answer `id` got the first time, if this device sent it before.
-    pub(in crate::server) fn answer(&self, device: &str, id: &str) -> Option<Value> {
-        self.lock()
-            .get(device)?
-            .iter()
-            .find(|(seen, _)| seen == id)
-            .map(|(_, answer)| answer.clone())
-    }
-
-    pub(in crate::server) fn remember(&self, device: &str, id: &str, answer: Value) {
-        let mut devices = self.lock();
+    /// Claims message `id` of `device` for whoever takes it: true the first time, false for a repeat, under one lock,
+    /// so two calls of one device sending the same message at once take it once between them.
+    pub(in crate::server) fn claim(&self, device: &str, id: &str) -> bool {
+        let mut devices = self.devices.lock().expect("seen messages lock");
         let seen = devices.entry(device.to_owned()).or_default();
-        if seen.iter().any(|(known, _)| known == id) {
-            return;
+        if seen.iter().any(|known| known == id) {
+            return false;
         }
-        seen.push_back((id.to_owned(), answer));
+        seen.push_back(id.to_owned());
         while seen.len() > SEEN_PER_DEVICE {
             seen.pop_front();
         }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, VecDeque<(String, Value)>>> {
-        self.devices.lock().expect("seen messages lock")
+        true
     }
 }
 

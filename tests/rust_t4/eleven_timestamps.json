@@ -1,9 +1,0 @@
-{
-  "audio_base64": "AQIDBA==",
-  "alignment": {
-    "characters": ["H", "i"],
-    "character_start_times_seconds": [0.0, 0.1],
-    "character_end_times_seconds": [0.1, 0.2]
-  },
-  "normalized_alignment": null
-}

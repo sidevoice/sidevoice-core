@@ -1,7 +1,7 @@
 //! The connector's two links to the core, driven from the connector's side of the wire: Socket.IO v2 and
 //! JSON-RPC v3, both on the local socket only. A conversation registers a binding, a browser focuses it and types,
-//! the input is delivered and acknowledged, the receipts reach the browser, and the conversation's replies are
-//! played in order — across a reconnect, a replaced connection and a saturated one.
+//! the input is delivered and acknowledged, the receipts reach the browser, and the conversation's replies reach
+//! the browser as text with how far each was heard — across a reconnect, a replaced connection and a saturated one.
 
 mod support;
 
@@ -25,20 +25,6 @@ async fn refused_and_turned_away_calls_give_their_seat_back() {
         let mut refused = Browser::new(core.open_call(&token).await);
         refused.send_raw(Message::binary(b"invalid hello".to_vec()));
         refused.closed(STEP).await;
-        core.calls_become(1).await;
-        // A hello asking for a stage this machine cannot run.
-        let mut refused = Browser::new(core.open_call(&token).await);
-        refused
-            .send(
-                "voice-hello",
-                json!({"settings": {"tts": {"place": "host", "model": "kokoro-82m-v1.0"}}}),
-            )
-            .await;
-        assert_eq!(
-            refused.frame("error").await["key"],
-            "place_host_unavailable"
-        );
-        assert_eq!(refused.closed(STEP).await, 1008);
         core.calls_become(1).await;
     }
     let mut admitted = Vec::new();
@@ -112,16 +98,12 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
         (answer["status"].as_str(), answer["text_saved"].as_bool()),
         (Some("queued"), Some(true))
     );
-    let speech = browser.frame("voice-speech").await;
-    assert_eq!(speech["text"], "Reply from the connector");
-    assert_eq!(speech["session_id"], session.as_str());
-    let spoken = speech["revision"].as_u64().unwrap();
-    core.played(&token, &session, "reply", spoken).await;
-    assert_eq!(
-        core.receipt(&token, &session, "reply", spoken, "playing")
-            .await,
-        409
-    );
+    let reply = browser.frame("voice-reply").await;
+    assert_eq!(reply["text"], "Reply from the connector");
+    assert_eq!(reply["session_id"], session.as_str());
+    browser.played("reply").await;
+    // A report on a reply that already ended is taken and changes nothing.
+    browser.playback("reply", "playing").await;
     let history = core.history(&token, THREAD).await;
     let rows: Vec<_> = history
         .iter()
@@ -136,7 +118,7 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
         "{history:?}"
     );
 
-    // One browser hears replies in order: a queued reply waits for the receipt of the one before it.
+    // Replies go out at once, in order; the browser's voice module plays them, and the history shows what it says.
     for index in [2, 3] {
         let utterance = format!("queued-{index}");
         let answer = peer
@@ -152,33 +134,18 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
             .await
             .data;
         assert_eq!(answer["status"], "queued");
-        if index == 2 {
-            assert_eq!(
-                browser.frame("voice-speech").await["utterance_id"],
-                "queued-2"
-            );
-        }
+        assert_eq!(
+            browser.frame("voice-reply").await["utterance_id"],
+            utterance.as_str()
+        );
     }
+    browser.played("queued-2").await;
     browser
-        .none_of(
-            &["voice-speech", "voice-speech-audio"],
-            Duration::from_millis(350),
+        .report(
+            "voice-playback",
+            json!({"utterance_id": "queued-3", "status": "interrupted", "reason": "user_skipped"}),
         )
         .await;
-    assert_eq!(
-        core.receipt(&token, &session, "queued-2", revision, "playback_finished")
-            .await,
-        200
-    );
-    assert_eq!(
-        browser.frame("voice-speech").await["utterance_id"],
-        "queued-3"
-    );
-    assert_eq!(
-        core.receipt(&token, &session, "queued-3", revision, "skipped")
-            .await,
-        200
-    );
     let history = core.history(&token, THREAD).await;
     let statuses: Vec<_> = history[history.len() - 2..]
         .iter()
@@ -194,17 +161,13 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
     let mut returning = core.join(&token, Value::Null).await;
     core.select(&token, &returning.session, THREAD).await;
     returning
-        .none_of(
-            &["voice-replay", "voice-speech", "voice-speech-audio"],
-            Duration::from_millis(1500),
-        )
+        .none_of(&["voice-reply"], Duration::from_millis(1500))
         .await;
     returning.close().await;
 
     // Two browsers on the same conversation hear the same reply; one finishing it is enough.
     let mut second = core.join(&token, Value::Null).await;
     core.select(&token, &second.session, THREAD).await;
-    let second_revision = core.revision(&token, &second.session).await;
     let answer = peer
         .call(
             "speech.publish",
@@ -213,18 +176,15 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
         .await
         .data;
     assert_eq!(answer["status"], "queued");
-    assert_eq!(browser.frame("voice-speech").await["utterance_id"], "both");
-    assert_eq!(second.frame("voice-speech").await["utterance_id"], "both");
-    assert_eq!(
-        core.receipt(&token, &session, "both", revision, "playback_finished")
-            .await,
-        200
-    );
-    assert_eq!(
-        core.receipt(&token, &second.session, "both", second_revision, "skipped")
-            .await,
-        200
-    );
+    assert_eq!(browser.frame("voice-reply").await["utterance_id"], "both");
+    assert_eq!(second.frame("voice-reply").await["utterance_id"], "both");
+    browser.playback("both", "heard").await;
+    second
+        .report(
+            "voice-playback",
+            json!({"utterance_id": "both", "status": "interrupted", "reason": "user_skipped"}),
+        )
+        .await;
     let history = core.history(&token, THREAD).await;
     assert_eq!(
         history.last().unwrap()["status"],
@@ -414,7 +374,7 @@ async fn a_v3_connector_speaks_json_rpc_on_the_local_socket_only() {
     assert_eq!(reply["result"]["status"], "queued", "{reply}");
     assert_eq!(reply["result"]["text_saved"], true, "{reply}");
     assert_eq!(
-        browser.frame("voice-speech").await["text"],
+        browser.frame("voice-reply").await["text"],
         "Reply over JSON-RPC"
     );
 }

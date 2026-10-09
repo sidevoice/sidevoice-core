@@ -44,7 +44,7 @@ impl Room {
         }
         for sid in inner.browsers.ids_on_thread(thread) {
             if let Some(browser) = inner.browsers.get_mut(&sid) {
-                browser.refocus(&sid, Target::none());
+                browser.refocus(Target::none());
             }
             inner.interrupt_client(&sid, "focus_changed");
         }
