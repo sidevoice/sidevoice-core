@@ -94,6 +94,38 @@ async fn transcribed_turn(browser: &mut Browser, text: &str) -> (Value, Value) {
     (finished, receipt)
 }
 
+/// Closes any turn the recording left open, hearing it as nothing, and waits for the call to be
+/// quiet with nobody speaking.
+async fn settle_call(core: &Core, token: &str, browser: &mut Browser) {
+    browser.speak(&silence(4.0)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let events = browser
+            .settle(Duration::from_millis(2500), Duration::from_secs(20))
+            .await;
+        for ask in events
+            .iter()
+            .filter(|event| event["type"] == "voice-transcribe")
+        {
+            browser.transcript(&ask["data"], "").await;
+        }
+        let speaking = core
+            .get(&format!("/api/presentation?session_id={}", browser.session))
+            .token(token)
+            .send()
+            .await
+            .json()["room"]["speaking"]
+            == true;
+        if events.is_empty() && !speaking {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the call never settled"
+        );
+    }
+}
+
 async fn synthesized(server: &MockServer) -> Vec<Value> {
     server
         .received_requests()
@@ -319,11 +351,10 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
     core.select(&token, &session, THREAD).await;
     spoken_turn(&mut browser, &pcm, "Hola from the recorded call").await;
     accept_delivery(&mut call.peer).await;
-    // A reply answers the latest thing said, and the recording may end in a turn of its own: one to
-    // a turn the person already followed with a message is never played.
-    browser
-        .settle(Duration::from_millis(1500), Duration::from_secs(20))
-        .await;
+    // A reply answers the latest thing said: one held while the person speaks, or to a turn they
+    // already followed with a message, is never played. The recording may leave a turn open, so it
+    // is closed (and heard as nothing) before the reply.
+    settle_call(core, &token, &mut browser).await;
 
     let revision = core.revision(&token, &session).await;
     let uid = format!("cloud-{}", message_id());
