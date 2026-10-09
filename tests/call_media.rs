@@ -174,7 +174,6 @@ async fn a_spoken_turn_reaches_the_conversation_and_its_reply_plays_on_the_devic
 
         let revision = core.revision(&token, &session).await;
         let uid = format!("{mode}-{}", message_id());
-        let published = std::time::Instant::now();
         let answer = publish(
             &call.peer,
             &call.binding,
@@ -359,6 +358,7 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
 
     let revision = core.revision(&token, &session).await;
     let uid = format!("cloud-{}", message_id());
+    let published = std::time::Instant::now();
     let answer = publish(
         &call.peer,
         &call.binding,
