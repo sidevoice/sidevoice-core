@@ -29,8 +29,10 @@ pub(super) fn pull_room(connectors: &[&str]) -> (tempfile::TempDir, Room, Vec<St
 
 /// The person says `text` in call `sid`: a turn starts and ends with those words, as the call's voice module reports.
 pub(super) fn say(room: &Room, sid: &str, text: &str) {
-    let turn = room.begin_turn(sid).unwrap();
-    room.finish_turn(sid, turn.revision, Some(text), &Value::Null)
+    let turn = room
+        .begin_turn(sid, &crate::control::room::util::id())
+        .unwrap();
+    room.finish_turn(sid, &turn.turn_id, Some(text), &Value::Null)
         .unwrap();
 }
 

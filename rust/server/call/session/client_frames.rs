@@ -55,31 +55,43 @@ impl Call {
         }
     }
 
-    /// The person's turn, as the call's voice module saw it. A turn starts here, which gives it its revision; it
+    /// The person's turn, as the call's voice module saw it, named by it (`turn_id`) in every phase; the call sends
+    /// no revision. A turn starts here, which gives it its revision, the turn's boundary; it
     /// ends with the words it became, or with none (cancelled, or nothing said). A turn spoken while the call had
     /// no room becomes its own row when it arrives (`offline`).
     fn user_turn(&mut self, data: &Value) -> Vec<Value> {
         let room = self.state.room.clone();
         let id = client_msg_id(data);
+        let turn_id = data["turn_id"].as_str().unwrap_or("");
+        // The turn's boundary, as the call learns it: the revision the room gave the turn, and where its words go.
+        let started = |revision: &Value, thread: &Value| {
+            json!({"type":"voice-user-turn","data":{"session_id":self.session,"phase":"started",
+                "turn_id":turn_id,"revision":revision,"thread_id":thread}})
+        };
         let result = match data["phase"].as_str() {
-            Some("started") => room.begin_turn(&self.session).map(|turn| {
-                json!({"type":"voice-user-turn","data":{"session_id":self.session,"phase":"started",
-                    "revision":turn.revision,"thread_id":turn.thread_id}})
-            }),
+            Some("started") => room
+                .begin_turn(&self.session, turn_id)
+                .map(|turn| started(&json!(turn.revision), &json!(turn.thread_id))),
+            // A turn spoken offline arrives finished: once taken, its boundary is said as a started turn's is.
             Some("finished") if data["offline"].as_bool() == Some(true) => room
                 .offline_input(
                     &self.session,
-                    id.unwrap_or(""),
+                    turn_id,
                     data["text"].as_str().unwrap_or(""),
                     data["started_at"].as_u64(),
                 )
-                .map(|_| Value::Null),
+                .map(|taken| {
+                    if taken["accepted"] == true {
+                        started(&taken["revision"], &taken["thread_id"])
+                    } else {
+                        Value::Null
+                    }
+                }),
             Some(phase @ ("finished" | "cancelled")) => {
-                let revision = data["revision"].as_u64().unwrap_or(0);
                 let text = (phase == "finished")
                     .then(|| data["text"].as_str())
                     .flatten();
-                room.finish_turn(&self.session, revision, text, &data["timings_ms"])
+                room.finish_turn(&self.session, turn_id, text, &data["timings_ms"])
                     .map(|_| Value::Null)
             }
             _ => Err(RoomError::new(400, "room.request_invalid")),

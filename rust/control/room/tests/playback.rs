@@ -151,7 +151,7 @@ fn replays_never_decide_their_original_row_status() {
         assert_eq!(row(&room, &history_id).0, "playback_finished");
 
         // The other call still holds the original; its new turn leaves the original's row as it is.
-        room.begin_turn(&other).unwrap();
+        room.begin_turn(&other, "turn").unwrap();
         assert_eq!(row(&room, &history_id).0, "playback_finished");
     }
 }

@@ -38,13 +38,16 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     browser
         .send(
             "voice-user-turn",
-            json!({"session_id": session, "client_msg_id": "turn-started", "phase": "started"}),
+            json!({"session_id": session, "client_msg_id": "turn-started", "turn_id": "across", "phase": "started"}),
         )
         .await;
-    let revision = browser
+    let started = browser
         .wait("voice-user-turn", STEP, |turn| turn["phase"] == "started")
-        .await["revision"]
-        .clone();
+        .await;
+    assert_eq!(
+        started["turn_id"], "across",
+        "the room names the turn it started"
+    );
     let last_seq = browser.last_seq;
     browser.drop_link().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -60,7 +63,7 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     );
     // The page sends the turn's words twice (its outbox retried): taken once, acknowledged both times.
     let finished = json!({"session_id": session, "client_msg_id": "turn-finished", "phase": "finished",
-        "revision": revision, "text": "Said across the drop"});
+        "turn_id": "across", "text": "Said across the drop"});
     for _ in 0..2 {
         back.send("voice-user-turn", finished.clone()).await;
         assert_eq!(
@@ -70,11 +73,17 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     }
     // A turn the page spoke and transcribed while it had no room, sent twice: one row.
     let offline = json!({"session_id": session, "client_msg_id": "offline-1", "phase": "finished",
-        "offline": true, "text": "Said while away"});
-    for _ in 0..2 {
-        back.send("voice-user-turn", offline.clone()).await;
-        assert_eq!(back.frame("voice-ack").await["client_msg_id"], "offline-1");
-    }
+        "turn_id": "away", "offline": true, "text": "Said while away"});
+    back.send("voice-user-turn", offline.clone()).await;
+    assert_eq!(back.frame("voice-ack").await["client_msg_id"], "offline-1");
+    // Once taken, the offline turn's boundary is said as a started turn's is: after the one across the drop.
+    let away = back
+        .wait("voice-user-turn", STEP, |turn| turn["turn_id"] == "away")
+        .await;
+    assert_eq!(away["phase"], "started");
+    assert!(away["revision"].as_u64() > started["revision"].as_u64());
+    back.send("voice-user-turn", offline.clone()).await;
+    assert_eq!(back.frame("voice-ack").await["client_msg_id"], "offline-1");
     let rows = own_rows(&core.history(&token, THREAD).await, &session, "user");
     let texts: Vec<_> = rows.iter().map(|row| row["text"].clone()).collect();
     assert_eq!(

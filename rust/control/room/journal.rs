@@ -33,6 +33,8 @@ pub(super) struct Row {
     pub(super) name: Option<String>,
     pub(super) session: String,
     pub(super) revision: u64,
+    /// For the words of a voice turn: the client's id for the turn.
+    pub(super) turn_id: Option<String>,
     pub(super) time: u64,
     pub(super) status: String,
     pub(super) reason: Option<String>,
@@ -75,6 +77,7 @@ impl Row {
             id: self.id.clone(),
             thread: Some(self.thread.clone()),
             revision: self.revision,
+            turn_id: self.turn_id.clone(),
         }
     }
 }
@@ -85,6 +88,7 @@ pub(super) struct InputRef {
     pub(super) id: String,
     pub(super) thread: Option<String>,
     pub(super) revision: u64,
+    pub(super) turn_id: Option<String>,
 }
 
 #[derive(Default)]

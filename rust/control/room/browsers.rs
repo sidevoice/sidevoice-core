@@ -155,9 +155,12 @@ impl Browsers {
             if let Some(telemetry) = crate::control::telemetry::shared() {
                 telemetry.receipt(&input.session, status, input.thread.as_deref());
             }
-            browser.notify(json!({"type":"voice-input-receipt","data":{
-                "revision":input.revision,"history_id":input.id,"thread_id":input.thread,
-                "session_id":input.session,"status":status}}));
+            let mut data = json!({"revision":input.revision,"history_id":input.id,"thread_id":input.thread,
+                "session_id":input.session,"status":status});
+            if let Some(turn_id) = &input.turn_id {
+                data["turn_id"] = json!(turn_id);
+            }
+            browser.notify(json!({"type":"voice-input-receipt","data":data}));
         }
     }
 }

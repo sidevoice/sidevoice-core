@@ -115,7 +115,7 @@ fn selecting_needs_no_binding_and_shows_working_which_detach_clears() {
 fn a_reply_goes_out_as_text_at_once_and_a_parked_call_is_sent_nothing_until_it_is_back() {
     let (_directory, room, _) = parity_room("t");
     let (sid, mut events) = browser(&room, "t");
-    let turn = room.begin_turn(&sid).unwrap();
+    let turn = room.begin_turn(&sid, "turn").unwrap();
     // The person is speaking: the reply still goes out, for the call's voice module to hold or drop.
     reply(&room, &sid, "t", "sent", "Sent while the person spoke");
     let sent = drain(&mut events);

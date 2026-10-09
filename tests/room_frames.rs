@@ -38,24 +38,18 @@ async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
     assert_eq!(delivery.data["revision"], revision);
 
     // A turn that ended with nothing said, or that the person cancelled, sends nothing.
-    browser
-        .report("voice-user-turn", json!({"phase": "started"}))
-        .await;
-    let cancelled = browser
-        .wait("voice-user-turn", STEP, |turn| turn["phase"] == "started")
-        .await["revision"]
-        .clone();
+    browser.start_turn("cancelled").await;
     browser
         .report(
             "voice-user-turn",
-            json!({"phase": "cancelled", "revision": cancelled}),
+            json!({"phase": "cancelled", "turn_id": "cancelled"}),
         )
         .await;
     // Its words, arriving late, are refused: the turn ended.
     let late = browser
         .report(
             "voice-user-turn",
-            json!({"phase": "finished", "revision": cancelled, "text": "Never mind."}),
+            json!({"phase": "finished", "turn_id": "cancelled", "text": "Never mind."}),
         )
         .await;
     let refusal = browser.frame("error").await;
@@ -70,6 +64,81 @@ async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
         .map(|row| row["text"].clone())
         .collect();
     assert_eq!(said, [json!("Run the tests, please.")]);
+    browser.close().await;
+}
+
+/// The call names its turns (`turn_id`) and sends no revision: turns may overlap, each ends by its name, and a reply
+/// written before a turn started answers an older turn, finished or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn turns_are_named_by_the_call_and_may_overlap() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let (mut peer, binding) = v2_with_binding(&core, "overlap", THREAD).await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    core.select(&token, &session, THREAD).await;
+
+    let first = browser.start_turn("first").await;
+    let second = browser.start_turn("second").await;
+    assert!(second > first, "each turn its own boundary");
+    // A name the call already holds is not started again.
+    let again = browser
+        .report(
+            "voice-user-turn",
+            json!({"phase": "started", "turn_id": "first"}),
+        )
+        .await;
+    let refusal = browser.frame("error").await;
+    assert_eq!(
+        (refusal["key"].as_str(), refusal["client_msg_id"].as_str()),
+        (Some("room.request_invalid"), Some(again.as_str()))
+    );
+
+    // The first turn's words come after the second turn started: both reach the conversation, each with its turn.
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase": "finished", "turn_id": "first", "text": "First words"}),
+        )
+        .await;
+    assert_eq!(browser.receipt("pending").await["turn_id"], "first");
+    let delivered = accept_delivery(&mut peer).await;
+    assert_eq!(
+        (&delivered.data["text"], &delivered.data["revision"]),
+        (&json!("First words"), &json!(first))
+    );
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase": "finished", "turn_id": "second", "text": "Second words"}),
+        )
+        .await;
+    let delivered = accept_delivery(&mut peer).await;
+    assert_eq!(delivered.data["revision"], second);
+    // The agent answers the first turn after the second one's words: it is not spoken.
+    let late = publish(&peer, &binding, &session, first, "late", "An old answer.").await;
+    assert_eq!(
+        (late["status"].as_str(), late["reason"].as_str()),
+        (Some("text_only"), Some("newer_turn")),
+        "{late}"
+    );
+    let history = core.history(&token, THREAD).await;
+    let first_row = row(&history, &format!("{session}:user-turn:first"));
+    assert_eq!(first_row["text"], "First words");
+
+    // A turn the room does not hold cannot end.
+    let unknown = browser
+        .report(
+            "voice-user-turn",
+            json!({"phase": "finished", "turn_id": "never-started", "text": "Hm."}),
+        )
+        .await;
+    let refusal = browser.frame("error").await;
+    assert_eq!(
+        (refusal["key"].as_str(), refusal["client_msg_id"].as_str()),
+        (Some("room.input_ended"), Some(unknown.as_str()))
+    );
     browser.close().await;
 }
 

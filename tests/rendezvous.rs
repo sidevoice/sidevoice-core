@@ -168,15 +168,16 @@ async fn the_room_relays_requests_and_calls_and_the_link_follows_the_pairing() {
     let session = call_event(&mut link, "call", "voice-session", STEP).await;
     let sid = session["session_id"].clone();
     let started = json!({"type": "voice-user-turn", "data": {"session_id": sid, "client_msg_id": "turn-started",
-        "phase": "started"}});
+        "turn_id": "relayed", "phase": "started"}});
     link.emit(
         "relay.data",
         json!({"channel": "call", "data": started.to_string()}),
     );
     let turn = call_event(&mut link, "call", "voice-user-turn", STEP).await;
     assert_eq!(turn["phase"], "started");
+    assert_eq!(turn["turn_id"], "relayed");
     let finished = json!({"type": "voice-user-turn", "data": {"session_id": sid, "client_msg_id": "turn-finished",
-        "phase": "finished", "revision": turn["revision"], "text": "Said through the room"}});
+        "phase": "finished", "turn_id": "relayed", "text": "Said through the room"}});
     link.emit(
         "relay.data",
         json!({"channel": "call", "data": finished.to_string()}),
@@ -185,6 +186,7 @@ async fn the_room_relays_requests_and_calls_and_the_link_follows_the_pairing() {
     let receipt = call_event(&mut link, "call", "voice-input-receipt", STEP).await;
     assert_eq!(receipt["status"], "not_sent");
     assert_eq!(receipt["revision"], turn["revision"]);
+    assert_eq!(receipt["turn_id"], "relayed");
     link.emit("relay.close", json!({"channel": "call", "code": 1000}));
     let denied = link
         .call(

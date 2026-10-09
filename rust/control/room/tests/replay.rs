@@ -99,7 +99,7 @@ fn replay_skips_close_and_leave_keep_original_history() {
     .unwrap();
     assert!(!kept(&room, "skipped-replay"));
     room.replay_one(&sid, &history_id, "turn-replay").unwrap();
-    room.begin_turn(&sid).unwrap();
+    room.begin_turn(&sid, "turn").unwrap();
     assert_eq!(status(&room, &history_id), "playback_finished");
     let (other_events, _other_received) = mpsc::channel(8);
     let other = room

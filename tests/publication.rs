@@ -116,10 +116,10 @@ fn a_wrong_focus_cannot_speak() {
 fn newer_input_speaks_at_the_current_audio_revision() {
     let mut fixture = Fixture::new();
     let (sid, revision) = fixture.listener("thread-a");
-    let turn = fixture.room.begin_turn(&sid).unwrap();
+    let turn = fixture.room.begin_turn(&sid, "turn").unwrap();
     fixture
         .room
-        .finish_turn(&sid, turn.revision, None, &Value::Null)
+        .finish_turn(&sid, &turn.turn_id, None, &Value::Null)
         .unwrap();
     assert!(turn.revision > revision);
     let answer = fixture.publish(&sid, "thread-a", revision);
@@ -144,7 +144,7 @@ fn a_changed_audio_epoch_without_new_input_is_a_focus_change() {
 fn a_user_speaking_still_gets_the_reply_for_the_call_to_hold_or_drop() {
     let mut fixture = Fixture::new();
     let (sid, _) = fixture.listener("thread-a");
-    let turn = fixture.room.begin_turn(&sid).unwrap();
+    let turn = fixture.room.begin_turn(&sid, "turn").unwrap();
     let answer = fixture.publish(&sid, "thread-a", turn.revision);
     assert_eq!(answer["status"], "queued", "{answer}");
     assert_eq!(answer["revision"], turn.revision);

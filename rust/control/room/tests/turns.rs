@@ -48,16 +48,16 @@ fn publish(room: &Room, sid: &str, uid: &str, revision: u64) -> Value {
 #[test]
 fn a_newer_turn_does_not_lose_the_words_of_one_still_transcribed() {
     let (_directory, room, sid, _events) = room_with_call();
-    let a = room.begin_turn(&sid).unwrap();
-    let b = room.begin_turn(&sid).unwrap();
-    room.finish_turn(&sid, a.revision, Some("First words"), &Value::Null)
+    let a = room.begin_turn(&sid, "a").unwrap();
+    let b = room.begin_turn(&sid, "b").unwrap();
+    room.finish_turn(&sid, &a.turn_id, Some("First words"), &Value::Null)
         .unwrap();
-    room.finish_turn(&sid, b.revision, Some("Second words"), &Value::Null)
+    room.finish_turn(&sid, &b.turn_id, Some("Second words"), &Value::Null)
         .unwrap();
     assert_eq!(said(&room, "x"), ["First words", "Second words"]);
     // Each turn ends once.
     assert_eq!(
-        room.finish_turn(&sid, a.revision, Some("First words"), &Value::Null)
+        room.finish_turn(&sid, &a.turn_id, Some("First words"), &Value::Null)
             .unwrap_err()
             .key,
         "room.input_ended"
@@ -67,9 +67,9 @@ fn a_newer_turn_does_not_lose_the_words_of_one_still_transcribed() {
 #[test]
 fn a_turn_finished_after_the_focus_moved_goes_once_to_the_conversation_it_was_spoken_to() {
     let (_directory, room, sid, _events) = room_with_call();
-    let a = room.begin_turn(&sid).unwrap();
+    let a = room.begin_turn(&sid, "a").unwrap();
     room.select(&sid, "y").unwrap();
-    room.finish_turn(&sid, a.revision, Some("Words for x"), &Value::Null)
+    room.finish_turn(&sid, &a.turn_id, Some("Words for x"), &Value::Null)
         .unwrap();
     assert_eq!(said(&room, "x"), ["Words for x"]);
     assert!(said(&room, "y").is_empty());
@@ -79,16 +79,16 @@ fn a_turn_finished_after_the_focus_moved_goes_once_to_the_conversation_it_was_sp
 #[test]
 fn a_cancelled_turn_drops_its_words_and_leaves_the_others() {
     let (_directory, room, sid, _events) = room_with_call();
-    let a = room.begin_turn(&sid).unwrap();
-    let b = room.begin_turn(&sid).unwrap();
-    room.cancel_input(&sid, a.revision).unwrap();
+    let a = room.begin_turn(&sid, "a").unwrap();
+    let b = room.begin_turn(&sid, "b").unwrap();
+    room.cancel_input(&sid, &a.turn_id).unwrap();
     assert_eq!(
-        room.finish_turn(&sid, a.revision, Some("Dropped"), &Value::Null)
+        room.finish_turn(&sid, &a.turn_id, Some("Dropped"), &Value::Null)
             .unwrap_err()
             .key,
         "room.input_ended"
     );
-    room.finish_turn(&sid, b.revision, Some("Kept"), &Value::Null)
+    room.finish_turn(&sid, &b.turn_id, Some("Kept"), &Value::Null)
         .unwrap();
     assert_eq!(said(&room, "x"), ["Kept"]);
 }
@@ -96,8 +96,8 @@ fn a_cancelled_turn_drops_its_words_and_leaves_the_others() {
 #[test]
 fn an_offline_message_is_newer_than_the_turn_before_it() {
     let (_directory, room, sid, _events) = room_with_call();
-    let live = room.begin_turn(&sid).unwrap();
-    room.finish_turn(&sid, live.revision, Some("Live words"), &Value::Null)
+    let live = room.begin_turn(&sid, "live").unwrap();
+    room.finish_turn(&sid, &live.turn_id, Some("Live words"), &Value::Null)
         .unwrap();
     let offline = room
         .offline_input(&sid, "m1", "Offline words", None)
@@ -138,13 +138,13 @@ fn words_longer_than_a_message_are_refused_whichever_way_they_come() {
     let (_directory, room, sid, _events) = room_with_call();
     let longest = "a".repeat(12_000);
     let too_long = "a".repeat(12_001);
-    let turn = room.begin_turn(&sid).unwrap();
+    let turn = room.begin_turn(&sid, "turn").unwrap();
     let refused = room
-        .finish_turn(&sid, turn.revision, Some(&too_long), &Value::Null)
+        .finish_turn(&sid, &turn.turn_id, Some(&too_long), &Value::Null)
         .unwrap_err();
     assert_eq!(refused.key, "room.text_too_long");
     // The turn did not end: its words, within bounds, still go through.
-    room.finish_turn(&sid, turn.revision, Some(&longest), &Value::Null)
+    room.finish_turn(&sid, &turn.turn_id, Some(&longest), &Value::Null)
         .unwrap();
     assert_eq!(
         room.offline_input(&sid, "m1", &too_long, None)
@@ -192,8 +192,8 @@ fn messages_waiting_for_their_agent_are_bounded_in_number_and_in_bytes() {
         room.offline_input(&sid, &format!("m{n}"), &long, None)
             .unwrap();
     }
-    let turn = room.begin_turn(&sid).unwrap();
-    let refused = room.finish_turn(&sid, turn.revision, Some(&long), &Value::Null);
+    let turn = room.begin_turn(&sid, "turn").unwrap();
+    let refused = room.finish_turn(&sid, &turn.turn_id, Some(&long), &Value::Null);
     assert_eq!(refused.unwrap_err().key, "room.input_backlog_full");
     assert_eq!(said(&room, "x").len(), fit);
 }

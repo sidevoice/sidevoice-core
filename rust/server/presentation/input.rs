@@ -51,7 +51,7 @@ pub(super) async fn cancel_input(
     require_origin(&headers)?;
     let data = room_payload(&body, &headers)?;
     let sid = data["session_id"].as_str().unwrap_or("");
-    let revision = data["revision"].as_u64().unwrap_or(0);
+    let turn_id = data["turn_id"].as_str().unwrap_or("");
     if !state.room.owns_session(sid, &device.0) {
         return Err(refuse(
             "room.browser_absent",
@@ -61,7 +61,7 @@ pub(super) async fn cancel_input(
     }
     let result = state
         .room
-        .cancel_input(sid, revision)
+        .cancel_input(sid, turn_id)
         .map_err(|error| room_refusal(error, &headers))?;
     Ok(Json(result).into_response())
 }

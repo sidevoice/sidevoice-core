@@ -673,21 +673,32 @@ impl Browser {
         id
     }
 
-    /// The person says `text`, as the call's voice module reports a turn: it starts, the room gives it a revision,
-    /// and it ends with those words. The turn's revision.
+    /// The person says `text`, as the call's voice module reports a turn: it names the turn and starts it, the room
+    /// gives it a revision, and it ends with those words. The turn's revision.
     pub async fn say(&mut self, text: &str) -> u64 {
-        self.report("voice-user-turn", json!({"phase": "started"}))
-            .await;
-        let started = self
-            .wait("voice-user-turn", STEP, |turn| turn["phase"] == "started")
-            .await;
-        let revision = started["revision"].as_u64().expect("a revision");
+        let turn = uuid::Uuid::new_v4().to_string();
+        let revision = self.start_turn(&turn).await;
         self.report(
             "voice-user-turn",
-            json!({"phase": "finished", "revision": revision, "text": text}),
+            json!({"phase": "finished", "turn_id": turn, "text": text}),
         )
         .await;
         revision
+    }
+
+    /// Starts turn `turn`: the revision the room gave it, from the started frame that names it.
+    pub async fn start_turn(&mut self, turn: &str) -> u64 {
+        self.report(
+            "voice-user-turn",
+            json!({"phase": "started", "turn_id": turn}),
+        )
+        .await;
+        let started = self
+            .wait("voice-user-turn", STEP, |data| {
+                data["phase"] == "started" && data["turn_id"] == turn
+            })
+            .await;
+        started["revision"].as_u64().expect("a revision")
     }
 
     /// Reports what became of reply `utterance` here.
