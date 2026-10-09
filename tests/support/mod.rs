@@ -856,19 +856,6 @@ impl Browser {
         }
     }
 
-    /// Waits until the core has sent nothing for `quiet`, at most `within`; what it sent meanwhile.
-    pub async fn settle(&mut self, quiet: Duration, within: Duration) -> Vec<Value> {
-        let deadline = tokio::time::Instant::now() + within;
-        let mut seen = Vec::new();
-        while tokio::time::Instant::now() < deadline {
-            match self.next(quiet).await {
-                Some(event) => seen.push(event),
-                None => break,
-            }
-        }
-        seen
-    }
-
     /// The close code the core ends this socket with.
     pub async fn closed(&mut self, within: Duration) -> u16 {
         let deadline = tokio::time::Instant::now() + within;

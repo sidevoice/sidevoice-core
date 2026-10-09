@@ -94,36 +94,48 @@ async fn transcribed_turn(browser: &mut Browser, text: &str) -> (Value, Value) {
     (finished, receipt)
 }
 
-/// Closes any turn the recording left open, hearing it as nothing, and waits for the call to be
-/// quiet with nobody speaking.
-async fn settle_call(core: &Core, token: &str, browser: &mut Browser) {
-    browser.speak(&silence(4.0)).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        let events = browser
-            .settle(Duration::from_millis(2500), Duration::from_secs(20))
-            .await;
-        for ask in events
-            .iter()
-            .filter(|event| event["type"] == "voice-transcribe")
-        {
-            browser.transcript(&ask["data"], "").await;
+/// A conversation's reply to the latest thing said, and its rendered audio. The recording may end in
+/// a turn the detector hears as words: that newer message supersedes a reply published before it,
+/// which is then never played, so the reply is published again for the new turn, as the agent would.
+async fn cloud_reply(
+    call: &Call,
+    core: &Core,
+    token: &str,
+    browser: &mut Browser,
+) -> (String, Value) {
+    for _ in 0..3 {
+        let revision = core.revision(token, &browser.session).await;
+        let uid = format!("cloud-{}", message_id());
+        publish(
+            &call.peer,
+            &call.binding,
+            &browser.session,
+            revision,
+            &uid,
+            "Cloud fixture reply",
+        )
+        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let event = browser
+                .next(left)
+                .await
+                .expect("the reply's audio, or a newer message");
+            let data = &event["data"];
+            if event["type"] == "voice-speech-audio" && data["utterance_id"] == uid.as_str() {
+                return (uid, data.clone());
+            }
+            if event["type"] == "voice-input-receipt"
+                && data["revision"]
+                    .as_u64()
+                    .is_some_and(|newer| newer > revision)
+            {
+                break;
+            }
         }
-        let speaking = core
-            .get(&format!("/api/presentation?session_id={}", browser.session))
-            .token(token)
-            .send()
-            .await
-            .json()["room"]["speaking"]
-            == true;
-        if events.is_empty() && !speaking {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the call never settled"
-        );
     }
+    panic!("the reply never played");
 }
 
 async fn synthesized(server: &MockServer) -> Vec<Value> {
@@ -351,47 +363,7 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
     core.select(&token, &session, THREAD).await;
     spoken_turn(&mut browser, &pcm, "Hola from the recorded call").await;
     accept_delivery(&mut call.peer).await;
-    // A reply answers the latest thing said: one held while the person speaks, or to a turn they
-    // already followed with a message, is never played. The recording may leave a turn open, so it
-    // is closed (and heard as nothing) before the reply.
-    settle_call(core, &token, &mut browser).await;
-
-    let revision = core.revision(&token, &session).await;
-    let uid = format!("cloud-{}", message_id());
-    let published = std::time::Instant::now();
-    let answer = publish(
-        &call.peer,
-        &call.binding,
-        &session,
-        revision,
-        &uid,
-        "Cloud fixture reply",
-    )
-    .await;
-    // DIAGNOSTIC (temporary)
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let snapshot = core
-        .get(&format!("/api/presentation?session_id={session}"))
-        .token(&token)
-        .send()
-        .await
-        .json();
-    eprintln!("DIAG revision={revision} answer={answer}");
-    eprintln!("DIAG room={} call={}", snapshot["room"], snapshot["call"]);
-    eprintln!("DIAG history={:?}", core.history(&token, THREAD).await);
-    while let Some(event) = browser.next(Duration::from_secs(40)).await {
-        eprintln!("DIAG +{:?} event={event}", published.elapsed());
-        if event["type"] == "voice-speech-audio" {
-            break;
-        }
-    }
-    eprintln!(
-        "DIAG history after={:?}",
-        core.history(&token, THREAD).await
-    );
-    let audio = browser
-        .frame_within("voice-speech-audio", Duration::from_secs(20))
-        .await;
+    let (uid, audio) = cloud_reply(&call, core, &token, &mut browser).await;
     assert_eq!(
         (audio["utterance_id"].as_str(), audio["place"].as_str()),
         (Some(uid.as_str()), Some("elevenlabs"))
