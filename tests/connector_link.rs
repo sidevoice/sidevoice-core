@@ -48,7 +48,8 @@ async fn refused_and_turned_away_calls_give_their_seat_back() {
     core.calls_become(8).await;
     for _ in 0..4 {
         let mut refused = Browser::new(core.open_call(&token).await);
-        // A full room refuses before the hello, so none is sent.
+        // A full room refuses right after the hello.
+        refused.send("voice-hello", json!({})).await;
         assert_eq!(refused.frame("error").await["reason"], "room_is_full");
         assert_eq!(refused.closed(STEP).await, 1013);
         core.calls_become(8).await;
@@ -189,31 +190,19 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
         "{history:?}"
     );
 
-    // A browser that comes to the conversation is first handed what it never heard on it, oldest first.
+    // A browser that comes to the conversation is not played what it never heard on it.
     let mut returning = core.join(&token, Value::Null).await;
     core.select(&token, &returning.session, THREAD).await;
-    let replay = returning.frame("voice-replay").await;
-    let replayed: Vec<_> = replay["replies"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|reply| reply["history_id"].clone())
-        .collect();
-    let expected: Vec<_> = ["reply", "queued-2", "queued-3"]
-        .iter()
-        .map(|uid| json!(format!("{session}:voice:{uid}")))
-        .collect();
-    assert_eq!(replayed, expected, "{replay}");
-    let caught = returning.frame("voice-speech").await;
-    assert_eq!(caught["replay"], true, "{caught}");
-    assert_eq!(caught["history_id"], format!("{session}:voice:reply"));
+    returning
+        .none_of(
+            &["voice-replay", "voice-speech", "voice-speech-audio"],
+            Duration::from_millis(1500),
+        )
+        .await;
     returning.close().await;
 
-    // Two browsers on the same conversation hear the same reply; one finishing it is enough. This listener asks
-    // for no catch-up, so the next live reply is the first it hears.
-    let mut second = core
-        .join(&token, json!({"replay_on_return_seconds": 0}))
-        .await;
+    // Two browsers on the same conversation hear the same reply; one finishing it is enough.
+    let mut second = core.join(&token, Value::Null).await;
     core.select(&token, &second.session, THREAD).await;
     let second_revision = core.revision(&token, &second.session).await;
     let answer = peer

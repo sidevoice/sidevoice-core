@@ -29,18 +29,21 @@ impl DeviceTranscripts {
         self.lock().remove(request);
     }
 
-    /// Answers the matching request of this session; replies for others are ignored.
-    pub(super) fn resolve(&self, data: &Value, error: bool, session: &str) {
+    /// Answers the matching request of this session; replies for others are ignored. True when a
+    /// request was waiting for this reply.
+    pub(super) fn resolve(&self, data: &Value, error: bool, session: &str) -> bool {
         if data.get("session_id").and_then(Value::as_str) != Some(session) {
-            return;
+            return false;
         }
         let Some(request) = data.get("request_id").and_then(Value::as_str) else {
-            return;
+            return false;
         };
         let pending = self.lock().remove(request);
-        if let Some(pending) = pending {
-            let _ = pending.send(if error { Err(()) } else { Ok(reply_text(data)) });
-        }
+        let Some(pending) = pending else {
+            return false;
+        };
+        let _ = pending.send(if error { Err(()) } else { Ok(reply_text(data)) });
+        true
     }
 
     pub(super) fn clear(&self) {
@@ -52,7 +55,7 @@ impl DeviceTranscripts {
     }
 }
 
-fn reply_text(data: &Value) -> Option<String> {
+pub(super) fn reply_text(data: &Value) -> Option<String> {
     data.get("text")
         .and_then(Value::as_str)
         .map(str::trim)

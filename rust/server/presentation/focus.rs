@@ -25,16 +25,6 @@ pub(super) async fn select(
         .select(sid, data["thread_id"].as_str().unwrap_or(""))
         .map_err(|error| room_refusal(error, &headers))?;
     refocus(&state, sid).await;
-    // Coming back to a conversation is a return like any other: what was missed plays now.
-    let settings = state
-        .call_settings
-        .lock()
-        .expect("call settings lock")
-        .get(sid)
-        .cloned();
-    if let (Some(settings), Some("activated")) = (settings, selected["status"].as_str()) {
-        state.replay_missed(sid, &settings, &[]);
-    }
     Ok(Json(selected).into_response())
 }
 

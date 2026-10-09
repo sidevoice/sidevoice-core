@@ -46,6 +46,34 @@ impl Room {
         inner.utterances.forget_replays_of(sid);
         inner.latency.close(sid);
     }
+    /// A call whose socket went keeps its seat; the reply it was given waits for it rather than
+    /// running out its playback bound while nobody can confirm it, and nothing new is handed to it.
+    pub fn park(&self, sid: &str, parked: bool) {
+        let mut guard = self.inner.lock().expect("room lock");
+        let inner = &mut *guard;
+        let Some(browser) = inner.browsers.get_mut(sid) else {
+            return;
+        };
+        match (browser.parked, parked) {
+            (None, true) => browser.parked = Some(std::time::Instant::now()),
+            (Some(since), false) => {
+                browser.parked = None;
+                if let Some((_, deadline)) = browser.playback_watch.as_mut() {
+                    *deadline += since.elapsed();
+                }
+                inner.dispatch_client(sid);
+            }
+            _ => {}
+        }
+    }
+    /// The page is back: what was published while it was away, and a reply handed to it that never
+    /// arrived, are marked unheard instead of played.
+    pub fn resume(&self, sid: &str, unreceived: &[String]) {
+        let mut guard = self.inner.lock().expect("room lock");
+        guard.drop_unheard(sid, unreceived);
+        drop(guard);
+        self.park(sid, false);
+    }
     pub fn owns_session(&self, sid: &str, device: &str) -> bool {
         self.inner
             .lock()

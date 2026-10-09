@@ -34,7 +34,6 @@ pub fn default_settings(
         vad_start_secs: 0.4,
         merge_window_secs: 0.5,
         audio_grace_seconds: 1.0,
-        replay_on_return_seconds: 120.0,
     }
 }
 

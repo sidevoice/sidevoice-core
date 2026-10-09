@@ -35,12 +35,11 @@ impl SettingDiagnostic {
 }
 
 /// The order invalid fields are reported in: the order the settings declare them.
-const FIELD_ORDER: [&str; 14] = [
+const FIELD_ORDER: [&str; 13] = [
     "ui_language",
     "stt",
     "tts",
     "audio_grace_seconds",
-    "replay_on_return_seconds",
     "turn_patience",
     "turn_end_mode",
     "user_speech_timeout",
@@ -55,12 +54,9 @@ const FIELD_ORDER: [&str; 14] = [
 type FloatSetting = fn(&mut CallSettings) -> &mut f32;
 
 /// Every numeric field with its inclusive bounds.
-const FLOAT_FIELDS: [(&str, f64, f64, FloatSetting); 9] = [
+const FLOAT_FIELDS: [(&str, f64, f64, FloatSetting); 8] = [
     ("audio_grace_seconds", 0.0, 10.0, |s| {
         &mut s.audio_grace_seconds
-    }),
-    ("replay_on_return_seconds", 0.0, 3600.0, |s| {
-        &mut s.replay_on_return_seconds
     }),
     ("user_speech_timeout", 0.5, 15.0, |s| {
         &mut s.user_speech_timeout

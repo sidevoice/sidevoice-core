@@ -6,13 +6,14 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::response::Response;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as Frame};
 use tower::ServiceExt;
 
 use super::support::{app_state, private_dir};
 use crate::control::room::Room;
+use crate::server::call::Reattach;
 use crate::server::guard::open_route;
 use crate::server::node::pair_refused;
 use crate::server::{advertisable_room, router, AppState};
@@ -129,10 +130,10 @@ async fn foreign_origins_are_refused_by_host_agents_and_the_rtc_offer() {
     assert_eq!(rtc.status(), StatusCode::FORBIDDEN);
 }
 
-async fn call_socket_client(
-    state: Arc<AppState>,
-    token: &str,
-) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+type CallSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn call_socket_client(state: Arc<AppState>, token: &str) -> CallSocket {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -148,9 +149,8 @@ async fn call_socket_client(
     tokio_tungstenite::connect_async(request).await.unwrap().0
 }
 
-#[tokio::test]
-async fn a_full_room_is_said_before_the_hello() {
-    let (_temp, state, token) = paired();
+/// Takes every seat in the room for someone else; the seats are held while the receivers live.
+fn fill_room(state: &AppState) -> Vec<tokio::sync::mpsc::Receiver<Value>> {
     let mut held = Vec::new();
     loop {
         let (events, receiver) = tokio::sync::mpsc::channel(8);
@@ -159,14 +159,35 @@ async fn a_full_room_is_said_before_the_hello() {
             .join("other".into(), "en".into(), events)
             .is_err()
         {
-            break;
+            return held;
         }
         held.push(receiver);
     }
+}
+
+async fn hello(socket: &mut CallSocket, data: Value) {
+    socket
+        .send(Frame::text(
+            json!({"type":"client-ready","data":data}).to_string(),
+        ))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_full_room_is_said_right_after_the_hello() {
+    let (_temp, state, token) = paired();
+    let _held = fill_room(&state);
     let mut socket = call_socket_client(state, &token).await;
+    // A resume naming no call this device has is a new call, and a new call finds the room full.
+    hello(
+        &mut socket,
+        json!({"resume":{"session_id":"gone","token":"t","last_seq":3}}),
+    )
+    .await;
     let first = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
         .await
-        .expect("the refusal arrives without a hello")
+        .expect("the refusal follows the hello")
         .unwrap()
         .unwrap();
     let Frame::Text(text) = first else {
@@ -179,6 +200,68 @@ async fn a_full_room_is_said_before_the_hello() {
         panic!("expected a close frame");
     };
     assert_eq!(u16::from(close.code), 1013);
+}
+
+#[tokio::test]
+async fn a_returning_page_takes_its_call_back_once_even_in_a_full_room() {
+    let (_temp, state, token) = paired();
+    let device = state.authenticate_token(&token).unwrap();
+    let _held = fill_room(&state);
+    let (attach, mut parked) = tokio::sync::mpsc::channel::<Reattach>(1);
+    state
+        .resumable
+        .open("parked-session", &device, "secret", attach);
+    let mut socket = call_socket_client(state.clone(), &token).await;
+    hello(
+        &mut socket,
+        json!({"resume":{"session_id":"parked-session","token":"secret","last_seq":7}}),
+    )
+    .await;
+    let reattach = tokio::time::timeout(std::time::Duration::from_secs(5), parked.recv())
+        .await
+        .expect("the call is handed the new socket")
+        .unwrap();
+    assert_eq!(reattach.last_seq, 7);
+    let _ = reattach.answer.send(Ok(()));
+    // The token was spent: the same one, again, is a new call that finds the room full.
+    let mut again = call_socket_client(state, &token).await;
+    hello(
+        &mut again,
+        json!({"resume":{"session_id":"parked-session","token":"secret","last_seq":7}}),
+    )
+    .await;
+    let Some(Ok(Frame::Text(text))) = again.next().await else {
+        panic!("expected the refusal frame");
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap()["data"]["reason"],
+        "room_is_full"
+    );
+    assert!(parked.try_recv().is_err(), "a spent token reaches no call");
+}
+
+#[tokio::test]
+async fn another_device_cannot_take_a_call_over() {
+    let (_temp, state, token) = paired();
+    let _held = fill_room(&state);
+    let (attach, mut parked) = tokio::sync::mpsc::channel::<Reattach>(1);
+    state
+        .resumable
+        .open("parked-session", "someone-else", "secret", attach);
+    let mut socket = call_socket_client(state, &token).await;
+    hello(
+        &mut socket,
+        json!({"resume":{"session_id":"parked-session","token":"secret","last_seq":0}}),
+    )
+    .await;
+    let Some(Ok(Frame::Text(text))) = socket.next().await else {
+        panic!("expected the refusal frame");
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap()["data"]["reason"],
+        "room_is_full"
+    );
+    assert!(parked.try_recv().is_err());
 }
 
 #[tokio::test]

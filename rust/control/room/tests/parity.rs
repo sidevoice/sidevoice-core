@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 use super::support::pull_room;
 use crate::control::room::journal::parse_input_ttl;
 use crate::control::room::playback::playback_bound;
-use crate::control::room::replay::MAX_MISSED;
 use crate::control::room::Room;
 
 /// A room with one linked connector, one binding on `thread`, and the binding's ID.
@@ -77,78 +76,18 @@ fn drain(received: &mut mpsc::Receiver<Value>) -> Vec<Value> {
 }
 
 #[test]
-fn a_returning_browser_hears_what_it_missed_and_only_that() {
+fn a_returning_browser_is_not_played_what_it_missed() {
     let (_directory, room, _) = parity_room("t");
     let (first, _first_events) = browser(&room, "t");
-    let rev = revision(&room, &first);
-    reply(&room, &first, "t", "heard", "Heard reply");
-    room.receipt(&first, "heard", rev, "playing").unwrap();
-    room.receipt(&first, "heard", rev, "playback_finished")
-        .unwrap();
     reply(&room, &first, "t", "missed", "Missed reply");
     room.leave(&first);
-    // Nobody on the conversation: parked, never rendered, still owed.
-    let (away, _away_events) = browser(&room, "");
-    assert_eq!(
-        reply(&room, &away, "t", "parked", "Parked reply")["status"],
-        "text_only"
-    );
-    room.leave(&away);
-
     let (back, mut events) = browser(&room, "");
     assert!(room.restore_focus(&back, "t"));
-    assert!(room.missed_replies(&back, 0.0, &[]).is_empty());
-    let missed = room.missed_replies(&back, 120.0, &[first.clone(), away.clone()]);
-    let ids: Vec<&str> = missed.iter().map(|m| m.utterance_id.as_str()).collect();
-    assert_eq!(ids, ["missed", "parked"]);
-    assert!(missed[0].rendered && !missed[1].rendered);
-    // Without earlier sessions, what another browser heard is still owed to this one.
-    assert_eq!(room.missed_replies(&back, 120.0, &[]).len(), 3);
-
-    let queued: Vec<(String, String)> = missed
-        .iter()
-        .map(|m| {
-            (
-                format!("{}:replay:{back}", m.utterance_id),
-                m.utterance_id.clone(),
-            )
-        })
-        .collect();
-    let result = room.replay_missed(&back, &queued, &["gone".into()]);
-    assert_eq!(result["replayed"].as_array().unwrap().len(), 2);
-    assert_eq!(result["skipped"][0]["reason"], "audio_gone");
-    let events = drain(&mut events);
-    assert_eq!(events[0]["type"], "voice-replay");
-    let speech = events.iter().find(|e| e["type"] == "voice-speech").unwrap();
-    assert_eq!(speech["data"]["utterance_id"], queued[0].0);
-    assert_eq!(speech["data"]["replay"], true);
-    assert!(speech["data"].get("requested").is_none());
-
-    let rev = revision(&room, &back);
-    room.receipt(&back, &queued[0].0, rev, "playing").unwrap();
-    room.receipt(&back, &queued[0].0, rev, "playback_finished")
-        .unwrap();
-    // The catch-up that sounded counts as heard on its original; the queued one is still owed.
-    let left: Vec<String> = room
-        .missed_replies(&back, 120.0, &[first, away])
-        .into_iter()
-        .map(|m| m.utterance_id)
-        .collect();
-    assert_eq!(left, ["parked"]);
-}
-
-#[test]
-fn at_most_eight_missed_replies_newest_last() {
-    let (_directory, room, _) = parity_room("t");
-    let (gone, _events) = browser(&room, "");
-    for index in 0..12 {
-        reply(&room, &gone, "t", &format!("r{index}"), "Reply");
-    }
-    let (back, _back_events) = browser(&room, "t");
-    let missed = room.missed_replies(&back, 120.0, &[]);
-    assert_eq!(missed.len(), MAX_MISSED);
-    assert_eq!(missed[0].utterance_id, "r4");
-    assert_eq!(missed.last().unwrap().utterance_id, "r11");
+    room.inner.lock().unwrap().dispatch_client(&back);
+    assert!(drain(&mut events).iter().all(|event| !matches!(
+        event["type"].as_str(),
+        Some("voice-speech" | "voice-replay")
+    )));
 }
 
 #[test]
@@ -222,6 +161,57 @@ fn an_unconfirmed_playback_times_out_and_the_queue_moves_on() {
         row(&room, &format!("{sid}:voice:lost")),
         ("failed".into(), Some("unconfirmed".into()))
     );
+}
+
+#[test]
+fn a_parked_call_keeps_its_reply_and_is_handed_nothing_new_until_it_is_back() {
+    let (_directory, room, _) = parity_room("t");
+    let (sid, _events) = browser(&room, "t");
+    reply(&room, &sid, "t", "playing", "Handed before the drop");
+    room.park(&sid, true);
+    reply(&room, &sid, "t", "later", "Published while parked");
+    let deadline = room
+        .inner
+        .lock()
+        .unwrap()
+        .browsers
+        .get(&sid)
+        .unwrap()
+        .playback_watch
+        .as_ref()
+        .unwrap()
+        .1;
+    {
+        let mut inner = room.inner.lock().unwrap();
+        // Long past its bound: nobody can confirm it while the page is away, so it is not failed.
+        inner.expire_playback(&sid, deadline + Duration::from_secs(600));
+        inner.dispatch_client(&sid);
+    }
+    assert_eq!(active(&room, &sid).as_deref(), Some("playing"));
+    assert_ne!(row(&room, &format!("{sid}:voice:playing")).0, "failed");
+    std::thread::sleep(Duration::from_millis(20));
+    room.park(&sid, false);
+    let moved = room
+        .inner
+        .lock()
+        .unwrap()
+        .browsers
+        .get(&sid)
+        .unwrap()
+        .playback_watch
+        .as_ref()
+        .unwrap()
+        .1;
+    assert!(
+        moved >= deadline + Duration::from_millis(20),
+        "the bound restarts where it stopped"
+    );
+    let current = revision(&room, &sid);
+    room.receipt(&sid, "playing", current, "playing").unwrap();
+    room.receipt(&sid, "playing", current, "playback_finished")
+        .unwrap();
+    room.inner.lock().unwrap().dispatch_client(&sid);
+    assert_eq!(active(&room, &sid).as_deref(), Some("later"));
 }
 
 #[test]

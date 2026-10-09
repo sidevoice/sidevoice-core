@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use crate::server::call::admission::{runtime_refusal, unavailable_refusal};
-use crate::server::call::text;
+use crate::server::call::client_msg_id;
 use crate::server::media::Source;
 
 use super::Call;
@@ -29,12 +29,48 @@ impl Call {
             Some("voice-turn-trace") => trace_turn(&self.session, &data),
             Some("voice-audio-health") => audio_health(&self.session, &data),
             Some("voice-media") => self.select_media(&data).await,
-            Some("voice-transcript") => self.media.transcript(&data, false, &self.session),
-            Some("voice-transcript-error") => self.media.transcript(&data, true, &self.session),
-            Some("voice-catchup") => self.turns.catchup_slice(&data).await,
+            Some("voice-transcript") => self.transcript(&data, false).await,
+            Some("voice-transcript-error") => self.transcript(&data, true).await,
+            Some("voice-catchup") => self.catchup(&data).await,
             Some("voice-settings") => self.update_settings(&data).await,
             Some("voice-stt-ready") => self.runtime_ready(&data).await,
             _ => {}
+        }
+    }
+
+    /// A transcript the page may send again after a drop: taken once, acknowledged every time. One
+    /// that no recognition of this call is waiting for (asked by a session that is gone, or answered
+    /// after its wait ran out) is still the person's words, and reaches the conversation as text.
+    async fn transcript(&mut self, data: &Value, error: bool) {
+        let Some(id) = client_msg_id(data).map(str::to_owned) else {
+            self.media.transcript(data, error, &self.session);
+            return;
+        };
+        if self.state.seen.answer(&self.device, &id).is_none() {
+            if !self.media.transcript(data, error, &self.session) && !error {
+                self.turns.loose_transcript(data).await;
+            }
+            self.state.seen.remember(&self.device, &id, Value::Null);
+        }
+        self.ack(&id).await;
+    }
+
+    /// A catch-up slice; a whole catch-up already taken is acknowledged again, not recognised again.
+    async fn catchup(&mut self, data: &Value) {
+        let id = client_msg_id(data).map(str::to_owned);
+        if let Some(id) = &id {
+            if self.state.seen.answer(&self.device, id).is_some() {
+                if data["final"].as_bool() == Some(true) {
+                    self.ack(id).await;
+                }
+                return;
+            }
+        }
+        if self.turns.catchup_slice(data).await {
+            if let Some(id) = id {
+                self.state.seen.remember(&self.device, &id, Value::Null);
+                self.ack(&id).await;
+            }
         }
     }
 
@@ -56,11 +92,11 @@ impl Call {
         let loaded = crate::models::settings_from(data.get("settings"), &self.defaults);
         if let Some(issue) = loaded.issue {
             let refusal = json!({"type":"error","data":{"message":issue}});
-            let _ = self.socket.send(text(&refusal)).await;
+            self.send(refusal).await;
             return;
         }
         if let Some(refusal) = unavailable_refusal(&self.state, &loaded.settings) {
-            let _ = self.socket.send(text(&refusal)).await;
+            self.send(refusal).await;
             return;
         }
         let settings = loaded.settings;
@@ -73,7 +109,6 @@ impl Call {
         self.state
             .room
             .set_audio_grace(&self.session, settings.audio_grace_seconds);
-        self.settings.replay_on_return_seconds = settings.replay_on_return_seconds;
         self.state
             .call_settings
             .lock()
@@ -95,7 +130,7 @@ impl Call {
             Ok(None) => {}
             Err(problem) => {
                 let refusal = json!({"type":"error","data":runtime_refusal(&problem, &self.settings.ui_language)});
-                let _ = self.socket.send(text(&refusal)).await;
+                self.send(refusal).await;
             }
         }
     }
