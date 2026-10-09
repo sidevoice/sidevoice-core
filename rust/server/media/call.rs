@@ -102,8 +102,9 @@ impl CallMedia {
         }
     }
 
-    pub(in crate::server) fn transcript(&self, data: &Value, error: bool, session: &str) {
-        self.transcripts.resolve(data, error, session);
+    /// Hands a transcript to the recognition waiting for it; false when none was.
+    pub(in crate::server) fn transcript(&self, data: &Value, error: bool, session: &str) -> bool {
+        self.transcripts.resolve(data, error, session)
     }
 
     pub(super) fn transcripts(&self) -> &DeviceTranscripts {

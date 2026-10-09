@@ -141,6 +141,22 @@ impl TurnOwner {
         .await;
     }
 
+    /// Words the page transcribed for a recognition this call never asked for: they join the
+    /// conversation as text said while away, exactly as a recognised catch-up does.
+    pub(in crate::server) async fn loose_transcript(&mut self, data: &Value) {
+        let Some(text) = super::super::transcripts::reply_text(data) else {
+            return;
+        };
+        let Some(target) = self.room.offline_target(&self.session) else {
+            return;
+        };
+        self.catchups += 1;
+        let row_id = format!("{}:user-catchup:{}", self.session, self.catchups);
+        let time = started_at(data, now_millis());
+        self.offline_result(&target, &row_id, false, time, Ok(Some(text)))
+            .await;
+    }
+
     pub(super) async fn offline_result(
         &mut self,
         target: &VoiceTurn,

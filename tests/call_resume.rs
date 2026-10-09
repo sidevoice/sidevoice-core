@@ -105,6 +105,26 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     stale
         .none_of(&["voice-transcribe"], Duration::from_millis(300))
         .await;
+    // A transcript the old session asked for, finished on the page after it was gone, still reaches the
+    // conversation through the new one: once, however often the page sends it.
+    core.select(&token, &stale.session, THREAD).await;
+    let orphan = json!({"session_id": stale.session, "request_id": "asked-by-a-session-that-is-gone",
+        "text": "Finished while the call was gone", "client_msg_id": "transcript-orphan"});
+    stale.send("voice-transcript", orphan.clone()).await;
+    let turn = stale.frame("voice-catchup-turn").await;
+    assert_eq!(turn["text"], "Finished while the call was gone");
+    assert_eq!(turn["thread_id"], THREAD);
+    stale.send("voice-transcript", orphan).await;
+    // Both sends are acknowledged; reading the second ack passes over the first.
+    assert_eq!(
+        stale.frame("voice-ack").await["client_msg_id"],
+        "transcript-orphan"
+    );
+    stale
+        .none_of(&["voice-catchup-turn"], Duration::from_millis(700))
+        .await;
+    let rows = own_rows(&core.history(&token, THREAD).await, &stale.session, "user");
+    assert_eq!(rows.len(), 1, "{rows:?}");
     stale.close().await;
     back.close().await;
     core.calls_become(0).await;

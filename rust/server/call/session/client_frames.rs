@@ -38,14 +38,18 @@ impl Call {
         }
     }
 
-    /// A transcript the page may send again after a drop: taken once, acknowledged every time.
+    /// A transcript the page may send again after a drop: taken once, acknowledged every time. One
+    /// that no recognition of this call is waiting for (asked by a session that is gone, or answered
+    /// after its wait ran out) is still the person's words, and reaches the conversation as text.
     async fn transcript(&mut self, data: &Value, error: bool) {
         let Some(id) = client_msg_id(data).map(str::to_owned) else {
             self.media.transcript(data, error, &self.session);
             return;
         };
         if self.state.seen.answer(&self.device, &id).is_none() {
-            self.media.transcript(data, error, &self.session);
+            if !self.media.transcript(data, error, &self.session) && !error {
+                self.turns.loose_transcript(data).await;
+            }
             self.state.seen.remember(&self.device, &id, Value::Null);
         }
         self.ack(&id).await;
