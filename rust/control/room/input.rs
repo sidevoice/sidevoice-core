@@ -94,6 +94,7 @@ impl Room {
         else {
             return Ok(inner.not_sent(&turn.session_id, row_id, turn.revision));
         };
+        inner.supersede_held(&turn.session_id, turn.revision);
         let message_id = id();
         Ok(inner.queue_input(InputDraft {
             row_id,
@@ -186,8 +187,12 @@ impl Inner {
             offline,
             time,
         } = draft;
-        let payload = json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
+        let mut payload = json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
             "history_id":row_id,"revision":revision,"binding_id":binding_id,"title":title});
+        // The message takes with it what the person did not hear, so the agent is told once.
+        if let Some(unheard) = self.unheard.take(thread_id, &self.journal) {
+            payload["unheard"] = unheard;
+        }
         let row = Row {
             id: row_id,
             thread: thread_id.into(),

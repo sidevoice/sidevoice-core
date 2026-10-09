@@ -12,8 +12,7 @@ impl Room {
             return Err(RoomError::new(400, "room.thread_invalid"));
         }
         let mut inner = self.inner.lock().expect("room lock");
-        // Selecting needs no active binding: the conversation may come
-        // back, and what was missed on it is replayed by the caller.
+        // Selecting needs no active binding: the conversation may come back.
         let title = inner
             .bindings
             .newest_active(thread)
@@ -37,6 +36,7 @@ impl Room {
         client.refocus(sid, target);
         inner.interrupt_client(sid, "focus_changed");
         inner.report_working(sid);
+        inner.offer_note(sid);
         Ok(json!({"status":"activated","binding":view}))
     }
     /// Focus a call that just joined on the conversation its hello names, honoured only while
@@ -62,6 +62,7 @@ impl Room {
             binding_id: id(),
         });
         inner.report_working(sid);
+        inner.offer_note(sid);
         true
     }
     pub fn deselect(&self, sid: &str, bid: &str) -> Result<Value, RoomError> {

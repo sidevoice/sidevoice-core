@@ -18,6 +18,7 @@ mod inflight;
 mod journal;
 mod latency_log;
 mod peers;
+mod unheard;
 mod utterances;
 
 // The room's operations, by concern.
@@ -56,6 +57,7 @@ use inflight::Inflight;
 use journal::Journal;
 use latency_log::LatencyLog;
 use peers::Peers;
+use unheard::Unheard;
 use utterances::Utterances;
 
 struct Inner {
@@ -65,6 +67,7 @@ struct Inner {
     browsers: Browsers,
     journal: Journal,
     utterances: Utterances,
+    unheard: Unheard,
     inflight: Inflight,
     latency: LatencyLog,
     client_errors: ClientErrors,
@@ -90,6 +93,7 @@ impl Room {
                 browsers: Browsers::default(),
                 journal: Journal::default(),
                 utterances: Utterances::default(),
+                unheard: Unheard::default(),
                 inflight: Inflight::default(),
                 latency: LatencyLog::new(telemetry::shared()),
                 client_errors: ClientErrors::default(),

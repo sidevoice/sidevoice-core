@@ -79,12 +79,14 @@ impl Room {
             record.heard.insert(sid.to_owned());
         }
         let catch_up_of = record.replay_of.clone();
-        if !record.is_replay() {
+        let original_row = (!record.is_replay()).then(|| record.row_id.clone());
+        if let Some(row_id) = &original_row {
             let best = record.best_status().unwrap_or(next).to_owned();
-            if let Some(row) = inner.journal.find_mut(&record.row_id) {
+            if let Some(row) = inner.journal.find_mut(row_id) {
                 row.status = best;
                 row.reason = reason(status).map(str::to_owned);
             }
+            inner.track_unheard(row_id);
         }
         if let Some(original) = catch_up_of {
             inner

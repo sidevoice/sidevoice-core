@@ -56,6 +56,7 @@ impl Inner {
             };
             row.status = best;
         }
+        self.track_unheard(row_id);
     }
 
     /// Send a call the next utterance it should play, skipping those it can no longer play.
@@ -241,6 +242,7 @@ impl Inner {
                     row.reason = Some(reason.into());
                 }
             }
+            self.track_unheard(&row_id);
         }
         if let Some(browser) = self.browsers.get_mut(sid) {
             browser.pending.clear();
@@ -274,6 +276,19 @@ impl Inner {
         for original in held.heard_replays {
             self.utterances
                 .replay_heard(&original, sid, "playing", "interrupted");
+        }
+        self.utterances.retire_finished_replays();
+    }
+
+    /// Call `sid`'s turn `revision` became a message: what was held for that turn answers
+    /// something the person has moved past, so it is never played.
+    pub(super) fn supersede_held(&mut self, sid: &str, revision: u64) {
+        for (uid, _) in self.utterances.waiting_for_turn(sid, revision) {
+            if let Some(browser) = self.browsers.get_mut(sid) {
+                browser.pending.retain(|pending| pending != &uid);
+            }
+            self.set_status_synced(&uid, sid, "interrupted", Some("newer_turn"));
+            self.latency.set_reply_status(sid, &uid, "failed");
         }
         self.utterances.retire_finished_replays();
     }
