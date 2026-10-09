@@ -339,3 +339,31 @@ fn how_far_a_cut_reply_was_heard_reaches_the_agent_when_known() {
         json!({"text":"The build is green and deployed.","truncated":false,"cut":true,"heard_chars":12})
     );
 }
+
+#[test]
+fn a_replay_the_person_asked_for_still_plays_after_their_turn() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    let asked = revision(&room, &sid);
+    reply(&room, &sid, "t", "r1", "Here it is.", asked);
+    room.receipt(&sid, "r1", asked, "playing").unwrap();
+    room.receipt(&sid, "r1", asked, "playback_finished")
+        .unwrap();
+    let history_id = format!("{sid}:voice:r1");
+    room.replay_one(&sid, &history_id, "again").unwrap();
+    say(&room, &sid, "Wait.");
+    let turn = revision(&room, &sid);
+    room.finish_turn(&sid, turn);
+    assert_eq!(
+        room.inner
+            .lock()
+            .unwrap()
+            .browsers
+            .get(&sid)
+            .unwrap()
+            .active
+            .as_deref(),
+        Some("again")
+    );
+    assert_eq!(told(&room, "Wait."), None);
+}

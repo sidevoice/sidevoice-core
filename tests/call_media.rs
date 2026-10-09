@@ -94,50 +94,6 @@ async fn transcribed_turn(browser: &mut Browser, text: &str) -> (Value, Value) {
     (finished, receipt)
 }
 
-/// A conversation's reply to the latest thing said, and its rendered audio. The recording may end in
-/// a turn the detector hears as words: that newer message supersedes a reply published before it,
-/// which is then never played, so the reply is published again for the new turn, as the agent would.
-async fn cloud_reply(
-    call: &Call,
-    core: &Core,
-    token: &str,
-    browser: &mut Browser,
-) -> (String, Value) {
-    for _ in 0..3 {
-        let revision = core.revision(token, &browser.session).await;
-        let uid = format!("cloud-{}", message_id());
-        publish(
-            &call.peer,
-            &call.binding,
-            &browser.session,
-            revision,
-            &uid,
-            "Cloud fixture reply",
-        )
-        .await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-        loop {
-            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let event = browser
-                .next(left)
-                .await
-                .expect("the reply's audio, or a newer message");
-            let data = &event["data"];
-            if event["type"] == "voice-speech-audio" && data["utterance_id"] == uid.as_str() {
-                return (uid, data.clone());
-            }
-            if event["type"] == "voice-input-receipt"
-                && data["revision"]
-                    .as_u64()
-                    .is_some_and(|newer| newer > revision)
-            {
-                break;
-            }
-        }
-    }
-    panic!("the reply never played");
-}
-
 async fn synthesized(server: &MockServer) -> Vec<Value> {
     server
         .received_requests()
@@ -361,18 +317,23 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
     let mut browser = core.join(&token, settings).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
-    // As the other spoken tests do: the detector hears silence first, so the recording is one turn.
-    browser.speak(&silence(1.0)).await;
-    browser
-        .none_of(
-            &["voice-transcribe", "voice-user-turn", "voice-input-receipt"],
-            Duration::from_millis(800),
-        )
-        .await;
     spoken_turn(&mut browser, &pcm, "Hola from the recorded call").await;
     accept_delivery(&mut call.peer).await;
-    let (uid, audio) = cloud_reply(&call, core, &token, &mut browser).await;
-    let revision = audio["revision"].as_u64().unwrap();
+
+    let revision = core.revision(&token, &session).await;
+    let uid = format!("cloud-{}", message_id());
+    publish(
+        &call.peer,
+        &call.binding,
+        &session,
+        revision,
+        &uid,
+        "Cloud fixture reply",
+    )
+    .await;
+    let audio = browser
+        .frame_within("voice-speech-audio", Duration::from_secs(20))
+        .await;
     assert_eq!(
         (audio["utterance_id"].as_str(), audio["place"].as_str()),
         (Some(uid.as_str()), Some("elevenlabs"))

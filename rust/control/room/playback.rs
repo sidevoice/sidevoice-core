@@ -280,10 +280,18 @@ impl Inner {
         self.utterances.retire_finished_replays();
     }
 
-    /// Call `sid`'s turn `revision` became a message: what was held for that turn answers
-    /// something the person has moved past, so it is never played.
+    /// Call `sid`'s turn `revision` became a message: a reply held for that turn answers something
+    /// the person has moved past, so it is never played. A replay the person asked for still plays
+    /// after the turn.
     pub(super) fn supersede_held(&mut self, sid: &str, revision: u64) {
         for (uid, _) in self.utterances.waiting_for_turn(sid, revision) {
+            if self
+                .utterances
+                .get(&uid)
+                .is_some_and(|record| record.is_replay())
+            {
+                continue;
+            }
             if let Some(browser) = self.browsers.get_mut(sid) {
                 browser.pending.retain(|pending| pending != &uid);
             }
