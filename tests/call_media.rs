@@ -378,6 +378,13 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
     eprintln!("DIAG revision={revision} answer={answer}");
     eprintln!("DIAG room={} call={}", snapshot["room"], snapshot["call"]);
     eprintln!("DIAG history={:?}", core.history(&token, THREAD).await);
+    for event in browser
+        .settle(Duration::from_secs(20), Duration::from_secs(20))
+        .await
+    {
+        eprintln!("DIAG event={event}");
+    }
+    eprintln!("DIAG history after={:?}", core.history(&token, THREAD).await);
     let audio = browser
         .frame_within("voice-speech-audio", Duration::from_secs(20))
         .await;
