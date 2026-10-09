@@ -361,6 +361,14 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
     let mut browser = core.join(&token, settings).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
+    // As the other spoken tests do: the detector hears silence first, so the recording is one turn.
+    browser.speak(&silence(1.0)).await;
+    browser
+        .none_of(
+            &["voice-transcribe", "voice-user-turn", "voice-input-receipt"],
+            Duration::from_millis(800),
+        )
+        .await;
     spoken_turn(&mut browser, &pcm, "Hola from the recorded call").await;
     accept_delivery(&mut call.peer).await;
     let (uid, audio) = cloud_reply(&call, core, &token, &mut browser).await;
