@@ -5,7 +5,7 @@
 //!   counts, flagged `cut` (its start was heard), with `heard_chars` when the call said how far
 //!   playback got;
 //! - dropped before it played: superseded by a newer message (`newer_turn`), not received by a call
-//!   that dropped (`unheard`), stopped by a change of conversation or the end of the call
+//!   that dropped or whose channel was full (`unheard`), stopped by a change of conversation or the end of the call
 //!   (`focus_changed`, `call_ended`, `session_changed`), refused for a full queue or failed on the
 //!   page (`queue_full`, `playback_failed`);
 //! - published with nobody listening on its conversation (`text_only`).

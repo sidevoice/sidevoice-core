@@ -8,10 +8,19 @@ pub(super) const MAX_UTTERANCES: usize = 2048;
 /// What one call did with an utterance: the revision it was sent under and how far it got there.
 pub(super) type ClientEntry = (u64, String);
 
+/// How an utterance ended on one call: why it stopped short, and how many of its characters were heard, when said.
+#[derive(Clone, Debug, Default)]
+pub(super) struct End {
+    pub(super) reason: Option<String>,
+    pub(super) heard_chars: Option<u64>,
+}
+
 #[derive(Default)]
 pub(super) struct UtteranceRecord {
     pub(super) row_id: String,
     pub(super) clients: HashMap<String, ClientEntry>,
+    /// How it ended on each call that ended it, by session; the journal row is derived from these and `clients`.
+    pub(super) ends: HashMap<String, End>,
     pub(super) parked: bool,
     pub(super) replay_of: Option<String>,
     /// Calls that heard this reply through: it played to the end, or that listener stopped it.
@@ -31,6 +40,24 @@ impl UtteranceRecord {
             .values()
             .map(|(_, status)| status.as_str())
             .max_by_key(|status| status_rank(status))
+    }
+    /// What the reply's journal row shows: the furthest status any call reached, with the reason and the heard extent
+    /// of the calls that ended there. A cut while it played (`user_interrupted`) is the reason told first, since its
+    /// start was heard; the furthest any of those calls heard is how far it was heard.
+    pub(super) fn outcome(&self) -> Option<(&str, Option<&str>, Option<u64>)> {
+        let best = self.best_status()?;
+        let ends: Vec<&End> = self
+            .clients
+            .iter()
+            .filter(|(_, (_, status))| status == best)
+            .filter_map(|(sid, _)| self.ends.get(sid))
+            .collect();
+        let reason = ends
+            .iter()
+            .filter_map(|end| end.reason.as_deref())
+            .min_by_key(|reason| (*reason != "user_interrupted", *reason));
+        let heard_chars = ends.iter().filter_map(|end| end.heard_chars).max();
+        Some((best, reason, heard_chars))
     }
     /// Whether no call will still play this utterance.
     fn finished(&self) -> bool {
@@ -91,19 +118,13 @@ impl Utterances {
             .iter()
             .find(|(_, record)| record.row_id == row_id && !record.is_replay())
     }
-    /// The furthest status of the original utterance spoken from a journal row. Replays share
-    /// the row but never decide its status.
-    pub(super) fn row_status(&self, row_id: &str) -> Option<&str> {
-        self.original_of_row(row_id)
-            .and_then(|(_, record)| record.best_status())
-    }
-    pub(super) fn set_client_status(&mut self, uid: &str, sid: &str, status: &str) {
-        if let Some(entry) = self
-            .by_id
-            .get_mut(uid)
-            .and_then(|record| record.clients.get_mut(sid))
-        {
-            entry.1 = status.into();
+    /// One call's entry for an utterance moves to `status`, ending there as `end` says.
+    pub(super) fn set_client_status(&mut self, uid: &str, sid: &str, status: &str, end: End) {
+        if let Some(record) = self.by_id.get_mut(uid) {
+            if let Some(entry) = record.clients.get_mut(sid) {
+                entry.1 = status.into();
+                record.ends.insert(sid.to_owned(), end);
+            }
         }
     }
     /// Whether a call has an utterance in one of `statuses`.
@@ -115,20 +136,22 @@ impl Utterances {
                 .is_some_and(|(_, status)| statuses.contains(&status.as_str()))
         })
     }
-    /// Stop everything a call still had to play. Returns the rows of original utterances that
-    /// no call is playing any more.
-    pub(super) fn interrupt_client(&mut self, sid: &str) -> Vec<String> {
+    /// Stop everything a call still had to play, for `reason`. Returns the rows of the original utterances it
+    /// stopped.
+    pub(super) fn interrupt_client(&mut self, sid: &str, reason: &str) -> Vec<String> {
         let mut rows = Vec::new();
         for record in self.by_id.values_mut() {
             if let Some(entry) = record.clients.get_mut(sid) {
                 if in_flight(&entry.1) {
                     entry.1 = "interrupted".into();
-                    if !record.is_replay()
-                        && record
-                            .clients
-                            .values()
-                            .all(|(_, status)| !in_flight(status))
-                    {
+                    record.ends.insert(
+                        sid.to_owned(),
+                        End {
+                            reason: Some(reason.to_owned()),
+                            heard_chars: None,
+                        },
+                    );
+                    if !record.is_replay() {
                         rows.push(record.row_id.clone());
                     }
                 }

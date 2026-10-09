@@ -100,7 +100,8 @@ impl Room {
         self.queue_voice_input(&turn, text)
     }
 
-    /// The person cancelled turn `revision`, from the page, while speaking it or before its words came: its words, when they come, are dropped.
+    /// The person cancelled turn `revision`, from the page, while speaking it or before its words came: its words,
+    /// when they come, are dropped.
     pub fn cancel_input(&self, sid: &str, revision: u64) -> Result<Value, RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
         let Some(browser) = inner.browsers.get_mut(sid) else {

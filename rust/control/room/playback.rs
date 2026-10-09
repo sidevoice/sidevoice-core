@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use super::error::RoomError;
 use super::latency::{latency_now_micros, LatencyEvent};
+use super::utterances::End;
 use super::{Inner, Room};
 
 /// What a call may report about a reply it was sent.
@@ -40,6 +41,17 @@ impl Room {
         if !inner.browsers.contains(sid) {
             return Err(stale());
         }
+        let Some(record) = inner.utterances.get(uid) else {
+            return Err(stale());
+        };
+        // How far a reply was heard is counted in its characters (Unicode scalar values), and cannot pass its end.
+        let length = inner
+            .journal
+            .find(&record.row_id)
+            .map(|row| row.text.chars().count() as u64);
+        if heard_chars.is_some_and(|heard| length.is_some_and(|length| heard > length)) {
+            return Err(RoomError::new(400, "room.receipt_invalid"));
+        }
         let Some(record) = inner.utterances.get_mut(uid) else {
             return Err(stale());
         };
@@ -57,6 +69,13 @@ impl Room {
             _ => ("playing", None),
         };
         let previous = std::mem::replace(&mut entry.1, next.to_owned());
+        record.ends.insert(
+            sid.to_owned(),
+            End {
+                reason: reason.map(str::to_owned),
+                heard_chars: heard_chars.filter(|_| status == "interrupted"),
+            },
+        );
         // A reply played to the end, or cut while it played, was heard by this call: a catch-up of it is not
         // offered again.
         if next == "playback_finished" || (status == "interrupted" && previous == "playing") {
@@ -65,12 +84,7 @@ impl Room {
         let catch_up_of = record.replay_of.clone();
         let original_row = (!record.is_replay()).then(|| record.row_id.clone());
         if let Some(row_id) = &original_row {
-            if status == "interrupted" {
-                if let Some(row) = inner.journal.find_mut(row_id) {
-                    row.heard_chars = heard_chars;
-                }
-            }
-            inner.sync_row(row_id, next, reason);
+            inner.sync_row(row_id);
         }
         if let Some(original) = catch_up_of {
             inner
@@ -98,21 +112,20 @@ impl Room {
 }
 
 impl Inner {
-    /// Show on a reply's journal row the furthest status any call reached with it; the reason
-    /// is kept only when that status is the one that just `changed`.
-    pub(super) fn sync_row(&mut self, row_id: &str, changed: &str, reason: Option<&str>) {
-        let best = self
+    /// Show on a reply's journal row what the calls it was sent to did with it (`UtteranceRecord::outcome`).
+    pub(super) fn sync_row(&mut self, row_id: &str) {
+        let Some((status, reason, heard_chars)) = self
             .utterances
-            .row_status(row_id)
-            .unwrap_or(changed)
-            .to_owned();
+            .original_of_row(row_id)
+            .and_then(|(_, record)| record.outcome())
+            .map(|(status, reason, heard)| (status.to_owned(), reason.map(str::to_owned), heard))
+        else {
+            return;
+        };
         if let Some(row) = self.journal.find_mut(row_id) {
-            row.reason = if best == changed {
-                reason.map(str::to_owned)
-            } else {
-                None
-            };
-            row.status = best;
+            row.status = status;
+            row.reason = reason;
+            row.heard_chars = heard_chars;
         }
         self.track_unheard(row_id);
     }
@@ -142,6 +155,9 @@ impl Inner {
         }
         let (thread, reply_revision) = (row.thread.clone(), row.revision);
         if !browser.offer(json!({"type":"voice-reply","data":data})) {
+            // The call's channel is full: the reply never reaches it, so it ends there unheard.
+            self.set_status_synced(uid, sid, "interrupted", Some("unheard"));
+            self.latency.set_reply_status(sid, uid, "failed");
             return;
         }
         if let Some(record) = self.utterances.get_mut(uid) {
@@ -159,14 +175,18 @@ impl Inner {
 
     /// One call's entry for an utterance moves; the journal row follows unless it is a replay.
     fn set_status_synced(&mut self, uid: &str, sid: &str, status: &str, reason: Option<&str>) {
-        self.utterances.set_client_status(uid, sid, status);
+        let end = End {
+            reason: reason.map(str::to_owned),
+            heard_chars: None,
+        };
+        self.utterances.set_client_status(uid, sid, status, end);
         if let Some(row_id) = self
             .utterances
             .get(uid)
             .filter(|r| !r.is_replay())
             .map(|r| r.row_id.clone())
         {
-            self.sync_row(&row_id, status, reason);
+            self.sync_row(&row_id);
         }
     }
 
@@ -193,7 +213,7 @@ impl Inner {
         self.utterances.retire_finished_replays();
     }
 
-    /// Stop everything a call had to play, marking `reason` on the rows nobody plays any more.
+    /// Stop everything a call had to play, for `reason`.
     pub(super) fn interrupt_client(&mut self, sid: &str, reason: &str) {
         // A halt that interrupted nothing is not a cancellation: counting it would make every turn look like one.
         if self
@@ -202,14 +222,8 @@ impl Inner {
         {
             self.count_cancel(sid, reason);
         }
-        for row_id in self.utterances.interrupt_client(sid) {
-            if let Some(row) = self.journal.find_mut(&row_id) {
-                if row.status != "playback_finished" {
-                    row.status = "interrupted".into();
-                    row.reason = Some(reason.into());
-                }
-            }
-            self.track_unheard(&row_id);
+        for row_id in self.utterances.interrupt_client(sid, reason) {
+            self.sync_row(&row_id);
         }
         self.utterances.retire_finished_replays();
     }

@@ -93,14 +93,24 @@ impl Call {
 
     /// What became of a reply on this call: the room keeps how far each one was heard.
     fn playback(&mut self, data: &Value) -> Vec<Value> {
-        let result = self.state.room.playback(
-            &self.session,
-            data["utterance_id"].as_str().unwrap_or(""),
-            data["status"].as_str().unwrap_or(""),
-            data["reason"].as_str(),
-            data["heard_chars"].as_u64(),
-            &data["timings_ms"],
-        );
+        // How far it was heard is optional; one that is given must be a count of characters.
+        let heard_chars = match data.get("heard_chars") {
+            None | Some(Value::Null) => Ok(None),
+            Some(heard) => heard
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| RoomError::new(400, "room.receipt_invalid")),
+        };
+        let result = heard_chars.and_then(|heard_chars| {
+            self.state.room.playback(
+                &self.session,
+                data["utterance_id"].as_str().unwrap_or(""),
+                data["status"].as_str().unwrap_or(""),
+                data["reason"].as_str(),
+                heard_chars,
+                &data["timings_ms"],
+            )
+        });
         match result {
             Ok(()) => Vec::new(),
             Err(error) => vec![self.refusal(error.key, client_msg_id(data))],

@@ -143,6 +143,35 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
         (refusal["key"].as_str(), refusal["client_msg_id"].as_str()),
         (Some("room.receipt_invalid"), Some(bad.as_str()))
     );
+    // How far a reply was heard is a count of its characters, never past its end: anything else is refused
+    // before it changes what the history says.
+    for heard in [
+        json!(-1),
+        json!("7"),
+        json!(1.5),
+        json!(21),
+        json!(u64::MAX),
+    ] {
+        let bad = browser
+            .report(
+                "voice-playback",
+                json!({"utterance_id": "whole", "status": "interrupted", "heard_chars": heard}),
+            )
+            .await;
+        let refusal = browser.frame("error").await;
+        assert_eq!(
+            (refusal["key"].as_str(), refusal["client_msg_id"].as_str()),
+            (Some("room.receipt_invalid"), Some(bad.as_str())),
+            "heard_chars {heard}"
+        );
+    }
+    assert_eq!(
+        row(
+            &core.history(&token, THREAD).await,
+            &format!("{session}:voice:whole")
+        )["status"],
+        "playback_finished"
+    );
     browser.playback("never-sent", "playing").await;
     assert_eq!(browser.frame("error").await["key"], "room.stale_utterance");
     browser.close().await;
