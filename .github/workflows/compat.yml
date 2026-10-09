@@ -24,10 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/setup
-      # The connector runs on Node 22 or later.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
       - run: cargo xtask compat
-      - if: failure()
+      # Only main's runs say anything in an issue: a run of a branch (workflow_dispatch) reports in its own log.
+      - if: failure() && github.ref == 'refs/heads/main'
         run: cargo xtask compat-report
