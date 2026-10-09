@@ -2,11 +2,11 @@
 
 use serde_json::json;
 
-use super::support::{defaults, report};
+use super::support::{defaults, report, report_json};
 use crate::models::{default_settings, device_models, unavailable};
 
 #[test]
-fn defaults_take_the_first_installed_reported_model_of_each_task() {
+fn defaults_take_the_model_the_device_reports_as_its_default_for_each_task() {
     let settings = defaults();
     assert_eq!(
         (&*settings.stt.place, &*settings.stt.model),
@@ -26,28 +26,32 @@ fn defaults_take_the_first_installed_reported_model_of_each_task() {
         ("en", "normal")
     );
 
-    let none_installed = json!({"version": 1, "models": [
-        {"id": "whisper-small", "capabilities": ["stt"], "languages": ["es"], "installed": false,
+    let spanish_only = json!({"version": 1, "defaults": {"stt": "whisper-small"}, "models": [
+        {"id": "whisper-base", "capabilities": ["stt"], "languages": ["en"],
          "builds": [{"backend": "whisper-cpp", "available": true}]},
-        {"id": "whisper-base", "capabilities": ["stt"], "languages": ["en"], "installed": false,
+        {"id": "whisper-small", "capabilities": ["stt"], "languages": ["es"],
          "builds": [{"backend": "whisper-cpp", "available": true}]}]});
-    let first = default_settings(None, device_models(Some(&none_installed)).unwrap());
-    assert_eq!(first.stt.model, "whisper-small");
+    let chosen = default_settings(None, device_models(Some(&spanish_only)).unwrap());
+    assert_eq!(chosen.stt.model, "whisper-small");
     assert_eq!(
-        first.stt.options["language"],
+        chosen.stt.options["language"],
         json!("auto"),
         "a model without English defaults to detection"
     );
+    assert_eq!(chosen.tts.model, "", "no default for tts: core picks none");
 }
 
 #[test]
-fn a_device_that_reports_no_model_for_a_task_gets_a_stage_the_call_refuses() {
+fn a_device_that_reports_no_default_for_a_task_gets_a_stage_the_call_refuses() {
+    let mut no_defaults = report_json();
+    no_defaults.as_object_mut().unwrap().remove("defaults");
     for settings in [
         default_settings(None, None),
         default_settings(
             None,
             device_models(Some(&json!({"version": 1, "models": []}))).unwrap(),
         ),
+        default_settings(None, device_models(Some(&no_defaults)).unwrap()),
     ] {
         assert_eq!(settings.stt.place, "device");
         assert_eq!(settings.stt.model, "");

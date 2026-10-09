@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use super::{
     catalog::speech_catalogue_language,
-    device_models::{device_schema, primary, serves},
+    device_models::{device_schema, model_for, primary},
     json::{field_str, strings, values},
     options::normalized_default,
 };
@@ -53,17 +53,16 @@ fn normalize_speech_language(tag: &str) -> String {
     }
 }
 
-/// The device's first reported model for `task`, an installed one first, with its option defaults. A device that
-/// reported none for `task` gets a stage naming no model, which a call refuses to run.
+/// The model the device reported as its default for `task`, with its option defaults. A device that reported no
+/// default for `task` gets a stage naming no model, which a call refuses to run.
 fn default_stage(task: &str, report: Option<&DeviceModels>, language: Option<&str>) -> SpeechStage {
-    let candidates = report
-        .into_iter()
-        .flat_map(|report| &report.models)
-        .filter(|model| serves(model, task));
-    let chosen = candidates
-        .clone()
-        .find(|model| model.installed)
-        .or_else(|| candidates.clone().next());
+    let chosen = report.and_then(|report| {
+        let default = match task {
+            "stt" => report.defaults.stt.as_deref(),
+            _ => report.defaults.tts.as_deref(),
+        }?;
+        model_for(report, task, default)
+    });
     let mut options = Map::new();
     if let Some(model) = chosen {
         let schema = device_schema(task, model);

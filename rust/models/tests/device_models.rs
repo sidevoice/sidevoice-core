@@ -16,6 +16,8 @@ fn a_report_is_read_with_the_engine_ids_and_without_the_fields_core_ignores() {
         .map(|model| model.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, ["whisper-base", "whisper-tiny", "kokoro-82m-v1.0"]);
+    assert_eq!(report.defaults.stt.as_deref(), Some("whisper-tiny"));
+    assert_eq!(report.defaults.tts.as_deref(), Some("kokoro-82m-v1.0"));
     let base = &report.models[0];
     assert_eq!(base.builds[0].backend, "transformers-js");
     assert_eq!(base.builds[0].accelerator.as_deref(), Some("wasm"));
@@ -38,6 +40,10 @@ fn an_unreadable_report_is_refused_with_its_key() {
         .remove("builds");
     let mut long_backend = report_json();
     long_backend["models"][0]["builds"][0]["backend"] = json!("b".repeat(121));
+    let mut unreported_default = report_json();
+    unreported_default["defaults"]["stt"] = json!("whisper-large-v3");
+    let mut cross_task_default = report_json();
+    cross_task_default["defaults"]["tts"] = json!("whisper-tiny");
     let mut too_many = report_json();
     too_many["models"] = json!(vec![report_json()["models"][1].clone(); 65]);
     for refused in [
@@ -48,6 +54,8 @@ fn an_unreadable_report_is_refused_with_its_key() {
         bad_id,
         no_builds,
         long_backend,
+        unreported_default,
+        cross_task_default,
         too_many,
     ] {
         assert_eq!(

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use super::{catalog::speech_languages, stage::valid_model_id};
 use crate::{
     messages::LocalizedMessage,
-    types::{DeviceModel, DeviceModels},
+    types::{DeviceDefaults, DeviceModel, DeviceModels},
 };
 
 /// The only report version this core reads.
@@ -39,8 +39,23 @@ fn read(value: &Value) -> Option<DeviceModels> {
     }
     let models = DeviceModels {
         models: serde_json::from_value(value.get("models")?.clone()).ok()?,
+        defaults: match value.get("defaults") {
+            None | Some(Value::Null) => DeviceDefaults::default(),
+            Some(defaults) => serde_json::from_value(defaults.clone()).ok()?,
+        },
     };
-    within_limits(&models).then_some(models)
+    (within_limits(&models) && defaults_are_reported(&models)).then_some(models)
+}
+
+/// A default must be a reported model serving its task.
+fn defaults_are_reported(report: &DeviceModels) -> bool {
+    [("stt", &report.defaults.stt), ("tts", &report.defaults.tts)]
+        .into_iter()
+        .all(|(task, default)| {
+            default
+                .as_deref()
+                .is_none_or(|model| model_for(report, task, model).is_some())
+        })
 }
 
 fn within_limits(report: &DeviceModels) -> bool {
@@ -82,7 +97,7 @@ pub(super) fn model_for<'a>(
         .filter(|model| serves(model, task))
 }
 
-pub(super) fn serves(model: &DeviceModel, task: &str) -> bool {
+fn serves(model: &DeviceModel, task: &str) -> bool {
     model
         .capabilities
         .iter()

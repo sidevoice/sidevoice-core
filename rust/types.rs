@@ -49,6 +49,18 @@ pub struct CallSettings {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct DeviceModels {
     pub models: Vec<DeviceModel>,
+    /// The model the device chose as its default for each task.
+    #[serde(default)]
+    pub defaults: DeviceDefaults,
+}
+
+/// The device's default model per task, by id; `None` when it has none for that task.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct DeviceDefaults {
+    #[serde(default)]
+    pub stt: Option<String>,
+    #[serde(default)]
+    pub tts: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -61,8 +73,6 @@ pub struct DeviceModel {
     pub languages: Vec<String>,
     #[serde(default)]
     pub voices: Vec<DeviceVoice>,
-    #[serde(default)]
-    pub installed: bool,
     pub builds: Vec<DeviceBuild>,
 }
 

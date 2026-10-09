@@ -11,7 +11,7 @@ use crate::{
 
 /// A device's report as a client builds it from sidevoice-engine's `models()`, with fields the core ignores.
 pub(super) fn report_json() -> Value {
-    json!({"version": 1, "models": [
+    json!({"version": 1, "defaults": {"stt": "whisper-tiny", "tts": "kokoro-82m-v1.0"}, "models": [
         {"id": "whisper-base", "family": "whisper", "capabilities": ["stt"], "languages": ["en", "es", "fr", "de"],
          "installed": false, "recommended_build": "whisper-base/transformers-js-q8",
          "builds": [

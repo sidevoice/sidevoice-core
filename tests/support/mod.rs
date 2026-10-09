@@ -1525,7 +1525,7 @@ pub fn device_models() -> Value {
                "installed": true, "builds": builds})
     };
     let voice = |id: &str, language: &str| json!({"id": id, "languages": [language]});
-    json!({"version": 1, "models": [
+    json!({"version": 1, "defaults": {"stt": "whisper-tiny", "tts": "kokoro-82m-v1.0"}, "models": [
         whisper("whisper-tiny"), whisper("whisper-base"), whisper("whisper-small"),
         {"id": "kokoro-82m-v1.0", "capabilities": ["tts"], "languages": ["en-US", "en-GB", "es"], "installed": true,
          "voices": [voice("ef_dora", "es"), voice("em_alex", "es"), voice("af_heart", "en-US"),
