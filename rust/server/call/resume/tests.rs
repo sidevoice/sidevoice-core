@@ -93,24 +93,41 @@ async fn a_token_takes_its_own_call_once_and_only_for_its_device() {
 }
 
 #[test]
-fn a_repeated_message_gets_its_first_answer_within_a_bounded_memory() {
+fn a_message_is_taken_once_per_device_within_a_bounded_memory() {
     let seen = SeenMessages::default();
-    assert!(seen.answer("device", "m1").is_none());
-    seen.remember("device", "m1", json!({"status":"playing"}));
-    seen.remember("device", "m1", json!({"status":"other"}));
-    assert_eq!(
-        seen.answer("device", "m1"),
-        Some(json!({"status":"playing"}))
-    );
-    assert!(seen.answer("another", "m1").is_none(), "ids are per device");
+    assert!(seen.claim("device", "m1"));
+    assert!(!seen.claim("device", "m1"), "a repeat");
+    assert!(seen.claim("another", "m1"), "ids are per device");
     for n in 0..super::SEEN_PER_DEVICE {
-        seen.remember("device", &format!("x{n}"), Value::Null);
+        assert!(seen.claim("device", &format!("x{n}")));
     }
-    assert!(
-        seen.answer("device", "m1").is_none(),
-        "the oldest is forgotten"
-    );
-    assert!(seen.answer("device", "x1").is_some());
+    assert!(seen.claim("device", "m1"), "the oldest is forgotten");
+    assert!(!seen.claim("device", "x1"));
+}
+
+/// Two calls of one device sending the same message at the same moment: it is taken once between them.
+#[test]
+fn the_same_message_from_two_calls_at_once_is_taken_once() {
+    use std::sync::{Arc, Barrier};
+    for _ in 0..200 {
+        let seen = Arc::new(SeenMessages::default());
+        let start = Arc::new(Barrier::new(2));
+        let calls: Vec<_> = (0..2)
+            .map(|_| {
+                let (seen, start) = (seen.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    seen.claim("device", "m1")
+                })
+            })
+            .collect();
+        let taken = calls
+            .into_iter()
+            .map(|call| call.join().unwrap())
+            .filter(|taken| *taken)
+            .count();
+        assert_eq!(taken, 1);
+    }
 }
 
 #[test]

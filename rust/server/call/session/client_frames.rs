@@ -43,9 +43,9 @@ impl Call {
             self.send(refusal).await;
             return;
         };
-        if self.state.seen.answer(&self.device, &id).is_none() {
+        // Claimed before it is applied: another call of this device sending it at the same time only acknowledges it.
+        if self.state.seen.claim(&self.device, &id) {
             let events = apply(self, data);
-            self.state.seen.remember(&self.device, &id, Value::Null);
             self.ack(&id).await;
             for event in events {
                 self.send(event).await;

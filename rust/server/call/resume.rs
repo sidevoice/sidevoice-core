@@ -203,36 +203,26 @@ struct Sent {
     text: String,
 }
 
-/// The client messages each device already had taken, with the answer each one got.
+/// The client messages each device already had taken, the newest [`SEEN_PER_DEVICE`] of them.
 #[derive(Default)]
 pub(in crate::server) struct SeenMessages {
-    devices: Mutex<HashMap<String, VecDeque<(String, Value)>>>,
+    devices: Mutex<HashMap<String, VecDeque<String>>>,
 }
 
 impl SeenMessages {
-    /// The answer `id` got the first time, if this device sent it before.
-    pub(in crate::server) fn answer(&self, device: &str, id: &str) -> Option<Value> {
-        self.lock()
-            .get(device)?
-            .iter()
-            .find(|(seen, _)| seen == id)
-            .map(|(_, answer)| answer.clone())
-    }
-
-    pub(in crate::server) fn remember(&self, device: &str, id: &str, answer: Value) {
-        let mut devices = self.lock();
+    /// Claims message `id` of `device` for whoever takes it: true the first time, false for a repeat, under one lock,
+    /// so two calls of one device sending the same message at once take it once between them.
+    pub(in crate::server) fn claim(&self, device: &str, id: &str) -> bool {
+        let mut devices = self.devices.lock().expect("seen messages lock");
         let seen = devices.entry(device.to_owned()).or_default();
-        if seen.iter().any(|(known, _)| known == id) {
-            return;
+        if seen.iter().any(|known| known == id) {
+            return false;
         }
-        seen.push_back((id.to_owned(), answer));
+        seen.push_back(id.to_owned());
         while seen.len() > SEEN_PER_DEVICE {
             seen.pop_front();
         }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, VecDeque<(String, Value)>>> {
-        self.devices.lock().expect("seen messages lock")
+        true
     }
 }
 
