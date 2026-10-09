@@ -132,3 +132,68 @@ fn of_two_offline_messages_a_late_reply_to_the_first_is_not_spoken() {
     assert_eq!(late["status"], "text_only");
     assert_eq!(late["reason"], "newer_turn");
 }
+
+#[test]
+fn words_longer_than_a_message_are_refused_whichever_way_they_come() {
+    let (_directory, room, sid, _events) = room_with_call();
+    let longest = "a".repeat(12_000);
+    let too_long = "a".repeat(12_001);
+    let turn = room.begin_turn(&sid).unwrap();
+    let refused = room
+        .finish_turn(&sid, turn.revision, Some(&too_long), &Value::Null)
+        .unwrap_err();
+    assert_eq!(refused.key, "room.text_too_long");
+    // The turn did not end: its words, within bounds, still go through.
+    room.finish_turn(&sid, turn.revision, Some(&longest), &Value::Null)
+        .unwrap();
+    assert_eq!(
+        room.offline_input(&sid, "m1", &too_long, None)
+            .unwrap_err()
+            .key,
+        "room.text_too_long"
+    );
+    let binding = room
+        .inner
+        .lock()
+        .unwrap()
+        .browsers
+        .get(&sid)
+        .unwrap()
+        .target
+        .as_ref()
+        .unwrap()
+        .binding_id
+        .clone();
+    let typed = room.send_text(
+        &too_long,
+        &sid,
+        "x",
+        &binding,
+        "00000000-0000-4000-8000-000000000001",
+    );
+    assert_eq!(typed.unwrap_err().key, "room.text_too_long");
+    assert_eq!(said(&room, "x"), [longest]);
+}
+
+#[test]
+fn messages_waiting_for_their_agent_are_bounded_in_number_and_in_bytes() {
+    let (_directory, room, sid, _events) = room_with_call();
+    for n in 0..256 {
+        room.offline_input(&sid, &format!("m{n}"), "Short words", None)
+            .unwrap();
+    }
+    let refused = room.offline_input(&sid, "one-more", "Short words", None);
+    assert_eq!(refused.unwrap_err().key, "room.input_backlog_full");
+
+    let (_directory, room, sid, _events) = room_with_call();
+    let long = "a".repeat(12_000);
+    let fit = (1024 * 1024) / long.len();
+    for n in 0..fit {
+        room.offline_input(&sid, &format!("m{n}"), &long, None)
+            .unwrap();
+    }
+    let turn = room.begin_turn(&sid).unwrap();
+    let refused = room.finish_turn(&sid, turn.revision, Some(&long), &Value::Null);
+    assert_eq!(refused.unwrap_err().key, "room.input_backlog_full");
+    assert_eq!(said(&room, "x").len(), fit);
+}

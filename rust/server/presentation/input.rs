@@ -13,8 +13,6 @@ use crate::server::refusal::{refuse, require_origin, room_refusal, Handled};
 use crate::server::request::room_payload;
 use crate::server::{AppState, AuthenticatedDevice};
 
-const MAX_TEXT_BYTES: usize = 12000;
-
 pub(super) async fn text(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -24,7 +22,7 @@ pub(super) async fn text(
     let data = room_payload(&body, &headers)?;
     let text = data["text"].as_str().unwrap_or("");
     let mid = data["message_id"].as_str().unwrap_or("");
-    if text.len() > MAX_TEXT_BYTES || Uuid::parse_str(mid).is_err() {
+    if Uuid::parse_str(mid).is_err() {
         return Err(refuse(
             "room.request_invalid",
             StatusCode::UNPROCESSABLE_ENTITY,

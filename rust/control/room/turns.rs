@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use super::browsers::MAX_OPEN_TURNS;
 use super::error::RoomError;
+use super::input::MAX_INPUT_BYTES;
 use super::latency::{latency_now_micros, LatencyEvent};
 use super::Room;
 
@@ -58,6 +59,10 @@ impl Room {
         text: Option<&str>,
         timings: &Value,
     ) -> Result<Value, RoomError> {
+        // Words too long to be a message are refused before the turn ends.
+        if text.is_some_and(|text| text.len() > MAX_INPUT_BYTES) {
+            return Err(RoomError::new(413, "room.text_too_long"));
+        }
         let turn = {
             let mut inner = self.inner.lock().expect("room lock");
             let Some(browser) = inner.browsers.get_mut(sid) else {

@@ -146,6 +146,15 @@ impl Journal {
             .iter_mut()
             .filter(move |r| r.is_input() && r.thread == thread)
     }
+    /// How many messages wait to reach their agents, and the bytes of their words.
+    pub(super) fn waiting_input(&self) -> (usize, usize) {
+        self.rows
+            .iter()
+            .filter(|r| r.is_input() && matches!(r.status.as_str(), "pending" | "sending"))
+            .fold((0, 0), |(count, bytes), r| {
+                (count + 1, bytes + r.text.len())
+            })
+    }
     /// Pending input whose next delivery attempt is due.
     pub(super) fn due_input(&mut self, now: u64) -> impl Iterator<Item = &mut Row> {
         self.rows

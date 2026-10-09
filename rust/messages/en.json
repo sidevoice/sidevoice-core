@@ -49,6 +49,8 @@
   "room.focus_changed": "The connection or conversation changed. The text was not sent.",
   "room.message_conflict": "That identifier already belongs to another message.",
   "room.text_empty": "Write a message.",
+  "room.text_too_long": "The message is too long.",
+  "room.input_backlog_full": "Too many messages are waiting to reach their conversations. Try again in a moment.",
   "room.request_invalid": "Invalid room request.",
   "room.stale_utterance": "Stale utterance.",
   "room.input_ended": "The message has already ended; it cannot be cancelled.",

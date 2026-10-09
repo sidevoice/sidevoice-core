@@ -49,6 +49,8 @@
   "room.focus_changed": "La conexión o la conversación cambió. El texto no se envió.",
   "room.message_conflict": "Ese identificador ya pertenece a otro mensaje.",
   "room.text_empty": "Escribe un mensaje.",
+  "room.text_too_long": "El mensaje es demasiado largo.",
+  "room.input_backlog_full": "Hay demasiados mensajes esperando a llegar a sus conversaciones. Vuelve a intentarlo en un momento.",
   "room.request_invalid": "La solicitud a la sala no es válida.",
   "room.stale_utterance": "La locución está desfasada.",
   "room.input_ended": "El mensaje ya terminó; no se puede cancelar.",
