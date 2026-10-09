@@ -174,6 +174,7 @@ async fn a_spoken_turn_reaches_the_conversation_and_its_reply_plays_on_the_devic
 
         let revision = core.revision(&token, &session).await;
         let uid = format!("{mode}-{}", message_id());
+        let published = std::time::Instant::now();
         let answer = publish(
             &call.peer,
             &call.binding,
@@ -378,13 +379,16 @@ async fn a_cloud_reply_is_rendered_once_and_every_replay_plays_what_was_rendered
     eprintln!("DIAG revision={revision} answer={answer}");
     eprintln!("DIAG room={} call={}", snapshot["room"], snapshot["call"]);
     eprintln!("DIAG history={:?}", core.history(&token, THREAD).await);
-    for event in browser
-        .settle(Duration::from_secs(20), Duration::from_secs(20))
-        .await
-    {
-        eprintln!("DIAG event={event}");
+    while let Some(event) = browser.next(Duration::from_secs(40)).await {
+        eprintln!("DIAG +{:?} event={event}", published.elapsed());
+        if event["type"] == "voice-speech-audio" {
+            break;
+        }
     }
-    eprintln!("DIAG history after={:?}", core.history(&token, THREAD).await);
+    eprintln!(
+        "DIAG history after={:?}",
+        core.history(&token, THREAD).await
+    );
     let audio = browser
         .frame_within("voice-speech-audio", Duration::from_secs(20))
         .await;
