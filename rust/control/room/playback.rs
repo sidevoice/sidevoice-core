@@ -82,7 +82,8 @@ impl Room {
             record.heard.insert(sid.to_owned());
         }
         let catch_up_of = record.replay_of.clone();
-        let original_row = (!record.is_replay()).then(|| record.row_id.clone());
+        let row_id = record.row_id.clone();
+        let original_row = (!record.is_replay()).then(|| row_id.clone());
         if let Some(row_id) = &original_row {
             inner.sync_row(row_id);
         }
@@ -90,6 +91,13 @@ impl Room {
             inner
                 .utterances
                 .replay_heard(&original, sid, &previous, next);
+            // A replay heard to its end: the person has now heard the reply, so the agent is not told it was missed.
+            // Its history row keeps how it first played; what a note already took to the agent stays told.
+            if next == "playback_finished" {
+                if let Some(thread) = inner.journal.find(&row_id).map(|row| row.thread.clone()) {
+                    inner.unheard.update(&thread, &row_id, None, None);
+                }
+            }
         }
         inner.latency.set_reply_status(sid, uid, next);
         if status == "playing" {

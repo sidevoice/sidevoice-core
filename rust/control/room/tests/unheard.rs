@@ -512,3 +512,105 @@ fn a_note_cut_off_by_its_connector_leaving_is_sent_again_with_the_same_list() {
         assert_eq!(again["unheard"], first["unheard"]);
     }
 }
+
+/// The words of reply `uid`'s replay `replay`, as call `received` gets them.
+fn replayed(received: &mut mpsc::Receiver<Value>, replay: &str) -> Value {
+    std::iter::from_fn(|| received.try_recv().ok())
+        .find(|event| event["type"] == "voice-reply" && event["data"]["utterance_id"] == replay)
+        .unwrap_or_else(|| panic!("no replay {replay}"))
+}
+
+#[test]
+fn a_reply_never_sent_to_a_call_can_still_be_replayed_on_request() {
+    // Superseded: the person said something newer before it was written.
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    let asked = revision(&room, &sid);
+    say(&room, &sid, "First.");
+    say(&room, &sid, "Second.");
+    let late = reply(&room, &sid, "t", "late", "An old answer.", asked);
+    assert_eq!(late["reason"], "newer_turn");
+    let history_id = format!("{sid}:voice:late");
+    room.replay_one(&sid, &history_id, "again").unwrap();
+    assert_eq!(
+        replayed(&mut received, "again")["data"]["text"],
+        "An old answer."
+    );
+
+    // Refused for a full queue: the room already held every utterance it keeps.
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    {
+        let mut inner = room.inner.lock().unwrap();
+        for n in 0..crate::control::room::utterances::MAX_UTTERANCES {
+            inner.utterances.insert(
+                &format!("filler-{n}"),
+                crate::control::room::utterances::UtteranceRecord {
+                    row_id: format!("filler-row-{n}"),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    let full = reply(
+        &room,
+        &sid,
+        "t",
+        "full",
+        "No room to speak.",
+        revision(&room, &sid),
+    );
+    assert_eq!(full["reason"], "queue_full");
+    room.replay_one(&sid, &format!("{sid}:voice:full"), "again")
+        .unwrap();
+    assert_eq!(
+        replayed(&mut received, "again")["data"]["text"],
+        "No room to speak."
+    );
+}
+
+#[test]
+fn a_replay_heard_to_its_end_takes_the_reply_off_what_the_agent_is_told() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    reply(
+        &room,
+        &sid,
+        "t",
+        "r1",
+        "The build is green.",
+        revision(&room, &sid),
+    );
+    report(&room, &sid, "r1", "unplayed");
+    room.replay_one(&sid, &format!("{sid}:voice:r1"), "again")
+        .unwrap();
+    // Only started: still unheard.
+    report(&room, &sid, "again", "playing");
+    assert!(room.inner.lock().unwrap().unheard.has("t"));
+    report(&room, &sid, "again", "heard");
+    assert!(!room.inner.lock().unwrap().unheard.has("t"));
+    say(&room, &sid, "Thanks.");
+    assert_eq!(told(&room, "Thanks."), None);
+    // Its history row keeps how it first played.
+    assert_eq!(status(&room, &sid, "r1").0, "interrupted");
+}
+
+#[test]
+fn a_replay_heard_before_a_pending_note_is_due_drops_the_note() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "elsewhere");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.select(&sid, "t").unwrap();
+    room.replay_one(&sid, &format!("{sid}:voice:p"), "again")
+        .unwrap();
+    report(&room, &sid, "again", "playing");
+    report(&room, &sid, "again", "heard");
+    room.inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due = 0;
+    assert!(deliveries(&room, "note").is_empty());
+}

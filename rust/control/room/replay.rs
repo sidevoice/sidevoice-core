@@ -18,14 +18,23 @@ impl Room {
         if inner.utterances.replay_count() >= MAX_REPLAY_RECORDS {
             return Err(RoomError::new(429, "room.replay_full"));
         }
-        let Some((original, _)) = inner.utterances.original_of_row(history_id) else {
-            return Err(RoomError::new(404, "room.replay_missing"));
-        };
-        let original = original.clone();
-        let Some(row) = inner.journal.find(history_id) else {
+        let Some(row) = inner
+            .journal
+            .find(history_id)
+            .filter(|row| row.role == "assistant")
+        else {
             return Err(RoomError::new(404, "room.replay_missing"));
         };
         let thread = row.thread.clone();
+        // The utterance it repeats; a reply saved without being sent to any call (superseded, or refused for a full
+        // queue) has none, and is repeated by the id it was published with.
+        let original = match inner.utterances.original_of_row(history_id) {
+            Some((original, _)) => original.clone(),
+            None => history_id
+                .rsplit_once(":voice:")
+                .map_or(history_id, |(_, uid)| uid)
+                .to_owned(),
+        };
         let Some(browser) = inner.browsers.get(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
         };
