@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 use super::support::{pull_room, report, say};
 use crate::control::room::unheard::{unheard, TOLD_CHARS, TOLD_REPLIES};
-use crate::control::room::Room;
+use crate::control::room::{ConnectorPeer, Room};
 
 /// A room with one push binding on `thread`: the room, its binding and the connector's generation.
 fn room_on(thread: &str) -> (tempfile::TempDir, Room, String, String) {
@@ -474,4 +474,41 @@ fn how_far_a_reply_was_heard_cannot_pass_its_end_in_characters() {
         told(&room, "Again?").unwrap()["replies"][0]["heard_chars"],
         5
     );
+}
+
+#[test]
+fn a_note_cut_off_by_its_connector_leaving_is_sent_again_with_the_same_list() {
+    // The connector drops before it answers and comes back, or a new connection replaces it at once.
+    for dropped_first in [true, false] {
+        let (_directory, room, _, generation) = room_on("t");
+        let (sid, _received) = call(&room, "elsewhere");
+        reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+        room.select(&sid, "t").unwrap();
+        room.inner
+            .lock()
+            .unwrap()
+            .unheard
+            .note_mut("t")
+            .unwrap()
+            .due = 0;
+        let (_, note_id, _, first) = only(room.pending_delivery());
+        if dropped_first {
+            room.detach("connector", &generation);
+        }
+        let (requests, _receiver) = mpsc::channel(4);
+        let (stop, _stopped) = tokio::sync::watch::channel(false);
+        room.attach(
+            "connector",
+            ConnectorPeer {
+                generation: "next".into(),
+                sender: requests,
+                stop,
+            },
+        );
+        room.register("connector", &json!({"thread":"t","harness":"claude"}))
+            .unwrap();
+        let (_, again_id, _, again) = only(room.pending_delivery());
+        assert_eq!(again_id, note_id, "dropped first: {dropped_first}");
+        assert_eq!(again["unheard"], first["unheard"]);
+    }
 }
