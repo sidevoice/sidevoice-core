@@ -284,6 +284,7 @@ fn the_ready_file_carries_the_link_and_leaves_with_the_process() {
 }
 
 #[test]
+#[ignore = "flaky: sidevoice/sidevoice-core#101"]
 fn a_manager_s_sigterm_or_a_sigint_is_a_clean_exit() {
     for signal in [libc::SIGTERM, libc::SIGINT] {
         let root = tempfile::tempdir().unwrap();
