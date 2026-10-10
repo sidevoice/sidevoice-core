@@ -1,6 +1,5 @@
-//! The pinned connector's links on the Unix listener, Socket.IO v2 and JSON-RPC v3,
-//! and what both protocols share: attaching as the room's peer and the room calls
-//! they forward.
+//! The pinned connector's link on the Unix listener, JSON-RPC v3: attaching as the room's peer and the room
+//! calls it forwards.
 
 use std::sync::Arc;
 
@@ -14,10 +13,7 @@ use crate::control::room::{ConnectorPeer, PeerRequest, Room};
 
 use super::AppState;
 
-mod v2;
 mod v3;
-
-pub(super) use v2::layer as v2_layer;
 
 /// Requests the room may queue for a connector before it has read them.
 const PEER_QUEUE: usize = 128;

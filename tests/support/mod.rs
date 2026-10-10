@@ -942,6 +942,26 @@ impl Rpc {
         .await
     }
 
+    /// A request to the core; its result.
+    pub async fn call(&mut self, method: &str, params: Value) -> Value {
+        self.request(method, params).await["result"].clone()
+    }
+
+    /// A notification to the core: no answer.
+    pub fn emit(&self, method: &str, params: Value) {
+        self.send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
+    }
+
+    /// The core's next request named `name`, waiting as long as a step.
+    pub async fn event(&mut self, name: &str) -> Value {
+        self.method(name, STEP).await
+    }
+
+    /// Ends the link from the connector's side.
+    pub fn disconnect(self) {
+        let _ = self.tx.send(Message::Close(None));
+    }
+
     pub fn answer(&self, id: &Value, result: Value) {
         self.send(json!({"jsonrpc": "2.0", "id": id, "result": result}));
     }
@@ -1365,24 +1385,6 @@ impl Sio {
     }
 }
 
-/// The connector's Socket.IO v2 link to the core, over the local socket.
-pub async fn connector_v2(core: &Core, identity: Value) -> Sio {
-    let stream = UnixStream::connect(core.socket()).await.unwrap();
-    let (ws, _) = tokio_tungstenite::client_async(
-        "ws://localhost/api/connectors/link/?EIO=4&transport=websocket",
-        stream,
-    )
-    .await
-    .expect("the v2 link opens over the local socket");
-    let mut auth = json!({"connector_id": core.connector_id(), "token": core.connector_token(), "protocol": 2});
-    if let (Some(auth), Some(identity)) = (auth.as_object_mut(), identity.as_object()) {
-        auth.extend(identity.clone());
-    }
-    Sio::client(ws, "/connectors", auth)
-        .await
-        .expect("the core accepts its own connector credential")
-}
-
 /// A room listening for the core's outbound Socket.IO link: every connection it accepts, with the client's auth
 /// and the path it asked for.
 pub struct Room {
@@ -1446,26 +1448,19 @@ pub async fn dial(core: &Core, auth: Value) -> Result<Sio, Value> {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// A connector's conversation on the v2 link.
-
-/// What a connector says about its machine when it links.
-pub fn identity() -> Value {
-    json!({"host": "test-machine", "platform": "linux", "version": "test", "harnesses": ["fixture"]})
-}
+// A connector's conversation on the v3 link.
 
 pub fn registration(client_ref: &str, thread: &str) -> Value {
     json!({"client_ref": client_ref, "harness": "fixture", "thread": thread, "title": "A conversation",
         "capabilities": {"deliver": "supported", "working": "supported"}, "inbound": {"ok": true}})
 }
 
-/// A connector on the v2 link with one conversation registered on `thread`; the binding the core gave it.
-pub async fn v2_with_binding(core: &Core, client_ref: &str, thread: &str) -> (Sio, String) {
-    let mut peer = connector_v2(core, identity()).await;
-    assert_eq!(peer.event("connector.welcome").await.data["protocol"], 2);
+/// A connector on the v3 link with one conversation registered on `thread`; the binding the core gave it.
+pub async fn connector_with_binding(core: &Core, client_ref: &str, thread: &str) -> (Rpc, String) {
+    let mut peer = Rpc::hello(core).await;
     let binding = peer
         .call("binding.register", registration(client_ref, thread))
-        .await
-        .data;
+        .await;
     assert_eq!(binding["thread"], thread, "{binding}");
     let id = binding["binding_id"]
         .as_str()
@@ -1474,19 +1469,19 @@ pub async fn v2_with_binding(core: &Core, client_ref: &str, thread: &str) -> (Si
     (peer, id)
 }
 
-/// Acknowledges the next delivery as the conversation having taken it.
-pub async fn accept_delivery(peer: &mut Sio) -> SioEvent {
+/// Acknowledges the next delivery as the conversation having taken it; what was delivered.
+pub async fn accept_delivery(peer: &mut Rpc) -> Value {
     let delivery = peer.event("input.deliver").await;
     peer.answer(
-        delivery.id.expect("a delivery asks for an answer"),
+        &delivery["id"],
         json!({"status": "accepted", "detail": "accepted by the test connector"}),
     );
-    delivery
+    delivery["params"].clone()
 }
 
-/// A conversation's reply, as the connector publishes it on the v2 link.
+/// A conversation's reply, as the connector publishes it.
 pub async fn publish(
-    peer: &Sio,
+    peer: &mut Rpc,
     binding: &str,
     session: &str,
     revision: u64,
@@ -1499,7 +1494,6 @@ pub async fn publish(
             "session_id": session, "revision": revision, "text": text, "language": "en"}),
     )
     .await
-    .data
 }
 
 pub fn message_id() -> String {

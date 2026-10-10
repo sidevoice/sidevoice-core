@@ -42,7 +42,6 @@ fn heard_reply() -> (
     let original = room.publish(
         &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,
             "utterance_id":"original","text":"Original reply"}),
-        false,
     );
     assert_eq!(original["status"], "queued");
     report(&room, &sid, "original", "playing");

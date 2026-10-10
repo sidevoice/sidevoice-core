@@ -38,9 +38,7 @@ fn revision(room: &Room, sid: &str) -> u64 {
 
 fn reply(room: &Room, sid: &str, thread: &str, uid: &str, text: &str, revision: u64) -> Value {
     room.publish(
-        &json!({"session_id":sid,"thread_id":thread,"revision":revision,"utterance_id":uid,"text":text}),
-        false,
-    )
+        &json!({"session_id":sid,"thread_id":thread,"revision":revision,"utterance_id":uid,"text":text}))
 }
 
 fn status(room: &Room, sid: &str, uid: &str) -> (String, Option<String>) {

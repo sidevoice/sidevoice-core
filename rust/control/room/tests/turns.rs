@@ -40,9 +40,7 @@ fn delivered_to(room: &Room) -> Vec<String> {
 
 fn publish(room: &Room, sid: &str, uid: &str, revision: u64) -> Value {
     room.publish(
-        &json!({"session_id":sid,"thread_id":"x","revision":revision,"utterance_id":uid,"text":"A reply."}),
-        false,
-    )
+        &json!({"session_id":sid,"thread_id":"x","revision":revision,"utterance_id":uid,"text":"A reply."}))
 }
 
 #[test]
