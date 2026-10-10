@@ -171,3 +171,68 @@ async fn a_page_that_never_comes_back_gives_its_seat_back_when_the_park_ends() {
     leaving.close().await;
     core.calls_become(0).await;
 }
+
+/// The answer to a started turn names the room session its revision counts in: the call's own id, the session of
+/// the turn's row. A resumed call keeps it, and its revisions go on; a replacement session has a new one, and its
+/// revisions start over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_started_turn_names_the_session_its_revision_counts_in() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let (_peer, _binding) = connector_with_binding(&core, "sessions", THREAD).await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    core.select(&token, &session, THREAD).await;
+    let resume = browser.welcome["resume"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let first = started(&mut browser, "first").await;
+    assert_eq!(first["session_id"], session.as_str());
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase": "finished", "turn_id": "first", "text": "Said in the first session"}),
+        )
+        .await;
+    let receipt = browser.receipt("pending").await;
+    assert_eq!(
+        receipt["history_id"],
+        format!("{}:user-turn:first", first["session_id"].as_str().unwrap())
+    );
+
+    // Resumed: the same session, and the revisions go on from where they were.
+    let last_seq = browser.last_seq;
+    browser.drop_link().await;
+    let mut back = core.resume(&token, &session, &resume, last_seq).await;
+    let again = started(&mut back, "again").await;
+    assert_eq!(again["session_id"], session.as_str());
+    assert!(again["revision"].as_u64() > first["revision"].as_u64());
+    back.close().await;
+
+    // A replacement session: a new id, and its revisions start over.
+    let mut fresh = core.join(&token, Value::Null).await;
+    core.select(&token, &fresh.session, THREAD).await;
+    let replaced = started(&mut fresh, "replaced").await;
+    assert_eq!(replaced["session_id"], fresh.session.as_str());
+    assert_ne!(replaced["session_id"], session.as_str());
+    assert!(replaced["revision"].as_u64() <= first["revision"].as_u64());
+    fresh.close().await;
+}
+
+/// Starts turn `turn`: the room's started frame for it.
+async fn started(browser: &mut Browser, turn: &str) -> Value {
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase": "started", "turn_id": turn}),
+        )
+        .await;
+    browser
+        .wait("voice-user-turn", STEP, |data| {
+            data["phase"] == "started" && data["turn_id"] == turn
+        })
+        .await
+}
