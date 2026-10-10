@@ -33,7 +33,7 @@ impl Room {
         };
         let view = target.view();
         client.refocus(target);
-        inner.interrupt_client(sid, "focus_changed");
+        inner.withdraw(sid, "focus_changed", |_, _| true);
         inner.report_working(sid);
         inner.offer_note(sid);
         Ok(json!({"status":"activated","binding":view}))
@@ -75,7 +75,7 @@ impl Room {
         let target = Target::none();
         let view = target.view();
         c.refocus(target);
-        inner.interrupt_client(sid, "focus_changed");
+        inner.withdraw(sid, "focus_changed", |_, _| true);
         Ok(json!({"status":"activated","binding":view}))
     }
 }

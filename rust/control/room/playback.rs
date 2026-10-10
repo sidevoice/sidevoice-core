@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use super::error::RoomError;
 use super::latency::{latency_now_micros, LatencyEvent};
-use super::utterances::End;
+use super::utterances::{ClientEntry, End, UtteranceRecord};
 use super::{Inner, Room};
 
 /// What a call may report about a reply it was sent.
@@ -217,6 +217,48 @@ impl Inner {
         for uid in dropped {
             self.set_status_synced(&uid, sid, "interrupted", Some("unheard"));
             self.latency.set_reply_status(sid, &uid, "failed");
+        }
+        self.utterances.retire_finished_replays();
+    }
+
+    /// Withdraws from call `sid` the replies `stale` picks among those it has not finished, for `reason`
+    /// (`newer_turn`, `focus_changed`). Ones it was sent are named in one `voice-reply-withdrawn`: the call cancels
+    /// them, and its playback reports say what became of each (how far each was heard, or that it never played).
+    /// Ones it was never sent, or a withdrawal it cannot be handed, end here, unheard for `reason`.
+    pub(super) fn withdraw(
+        &mut self,
+        sid: &str,
+        reason: &str,
+        stale: impl Fn(&UtteranceRecord, &ClientEntry) -> bool,
+    ) {
+        let (sent, unsent): (Vec<_>, Vec<_>) = self
+            .utterances
+            .iter()
+            .filter(|(_, record)| {
+                record.clients.get(sid).is_some_and(|entry| {
+                    matches!(entry.1.as_str(), "queued" | "playing") && stale(record, entry)
+                })
+            })
+            .map(|(uid, record)| (uid.clone(), record.sent.contains(sid)))
+            .partition(|(_, sent)| *sent);
+        let sent: Vec<String> = sent.into_iter().map(|(uid, _)| uid).collect();
+        let mut ended: Vec<String> = unsent.into_iter().map(|(uid, _)| uid).collect();
+        if sent.is_empty() && ended.is_empty() {
+            return;
+        }
+        self.count_cancel(sid, reason);
+        if !sent.is_empty() {
+            let told = self.browsers.get(sid).is_some_and(|browser| {
+                browser.offer(json!({"type":"voice-reply-withdrawn","data":{
+                    "session_id":sid,"utterance_ids":sent,"reason":reason}}))
+            });
+            if !told {
+                ended.extend(sent);
+            }
+        }
+        for uid in ended {
+            self.set_status_synced(&uid, sid, "interrupted", Some(reason));
+            self.latency.set_reply_status(sid, &uid, "interrupted");
         }
         self.utterances.retire_finished_replays();
     }

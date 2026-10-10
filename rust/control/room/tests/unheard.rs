@@ -612,3 +612,140 @@ fn a_replay_heard_before_a_pending_note_is_due_drops_the_note() {
         .due = 0;
     assert!(deliveries(&room, "note").is_empty());
 }
+
+/// The `voice-reply-withdrawn` frames call `received` got so far, as their data.
+fn withdrawn(received: &mut mpsc::Receiver<Value>) -> Vec<Value> {
+    std::iter::from_fn(|| received.try_recv().ok())
+        .filter(|event| event["type"] == "voice-reply-withdrawn")
+        .map(|event| event["data"].clone())
+        .collect()
+}
+
+#[test]
+fn a_new_turn_withdraws_the_replies_sent_before_it_that_have_not_started() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    let asked = revision(&room, &sid);
+    reply(&room, &sid, "t", "waiting", "Not started yet.", asked);
+    reply(&room, &sid, "t", "sounding", "Already playing.", asked);
+    report(&room, &sid, "sounding", "playing");
+    room.replay_one(&sid, &format!("{sid}:voice:sounding"), "asked-again")
+        .unwrap();
+    withdrawn(&mut received);
+
+    room.begin_turn(&sid, "next").unwrap();
+    // Only the one not started: the one playing is the call's to cut, and a replay the person asked for stays.
+    assert_eq!(
+        withdrawn(&mut received),
+        [json!({"session_id":sid,"utterance_ids":["waiting"],"reason":"newer_turn"})]
+    );
+    // A reply published while the turn is open was sent after it started: it is not withdrawn by it.
+    reply(&room, &sid, "t", "during", "Written meanwhile.", asked);
+    assert!(withdrawn(&mut received).is_empty());
+
+    // The call's report says what became of it; until then the row is as it was.
+    assert_eq!(status(&room, &sid, "waiting").0, "queued");
+    room.playback(
+        &sid,
+        "waiting",
+        "unplayed",
+        Some("newer_turn"),
+        None,
+        &Value::Null,
+    )
+    .unwrap();
+    assert_eq!(
+        status(&room, &sid, "waiting"),
+        ("interrupted".into(), Some("newer_turn".into()))
+    );
+    room.finish_turn(&sid, "next", Some("Go on."), &Value::Null)
+        .unwrap();
+    assert_eq!(
+        told(&room, "Go on.").unwrap()["replies"][0],
+        json!({"text":"Not started yet.","truncated":false,"cut":false})
+    );
+}
+
+#[test]
+fn moving_the_focus_withdraws_every_reply_the_call_has_not_finished() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    let asked = revision(&room, &sid);
+    reply(&room, &sid, "t", "waiting", "Not started yet.", asked);
+    reply(&room, &sid, "t", "sounding", "Already playing.", asked);
+    report(&room, &sid, "sounding", "playing");
+    withdrawn(&mut received);
+
+    room.select(&sid, "elsewhere").unwrap();
+    let frames = withdrawn(&mut received);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["reason"], "focus_changed");
+    let mut ids: Vec<_> = frames[0]["utterance_ids"].as_array().unwrap().clone();
+    ids.sort_by_key(|id| id.to_string());
+    assert_eq!(ids, [json!("sounding"), json!("waiting")]);
+    // How far the playing one was heard comes from the call.
+    room.playback(
+        &sid,
+        "sounding",
+        "interrupted",
+        Some("focus_changed"),
+        Some(7),
+        &Value::Null,
+    )
+    .unwrap();
+    let inner = room.inner.lock().unwrap();
+    let row = inner
+        .journal
+        .find(&format!("{sid}:voice:sounding"))
+        .unwrap();
+    assert_eq!(
+        (row.status.as_str(), row.reason.as_deref(), row.heard_chars),
+        ("interrupted", Some("focus_changed"), Some(7))
+    );
+}
+
+#[test]
+fn a_reply_the_call_cannot_be_told_to_drop_ends_unheard_in_the_room() {
+    // Never sent: the call was away when it was published.
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    room.park(&sid, true);
+    reply(
+        &room,
+        &sid,
+        "t",
+        "unsent",
+        "Published while away.",
+        revision(&room, &sid),
+    );
+    room.park(&sid, false);
+    room.select(&sid, "elsewhere").unwrap();
+    assert!(withdrawn(&mut received).is_empty());
+    assert_eq!(
+        status(&room, &sid, "unsent"),
+        ("interrupted".into(), Some("focus_changed".into()))
+    );
+
+    // Sent, but the call's channel is full when the withdrawal is due.
+    let (_directory, room, _, _) = room_on("t");
+    let (events, mut received) = mpsc::channel(8);
+    let sid = room
+        .join("device".into(), "en".into(), events.clone())
+        .unwrap();
+    room.select(&sid, "t").unwrap();
+    while received.try_recv().is_ok() {}
+    reply(
+        &room,
+        &sid,
+        "t",
+        "sent",
+        "Sent, then stale.",
+        revision(&room, &sid),
+    );
+    while events.try_send(json!({"type":"filler"})).is_ok() {}
+    room.begin_turn(&sid, "next").unwrap();
+    assert_eq!(
+        status(&room, &sid, "sent"),
+        ("interrupted".into(), Some("newer_turn".into()))
+    );
+}

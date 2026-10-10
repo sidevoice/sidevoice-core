@@ -46,7 +46,7 @@ impl Room {
             if let Some(browser) = inner.browsers.get_mut(&sid) {
                 browser.refocus(Target::none());
             }
-            inner.interrupt_client(&sid, "focus_changed");
+            inner.withdraw(&sid, "focus_changed", |_, _| true);
         }
         let binding_id = binding.map(|(bid, _)| bid);
         Ok((json!({"status":"closed","binding_id":binding_id}), notify))

@@ -111,6 +111,17 @@ fn replay_skips_close_and_leave_keep_original_history() {
     assert!(!kept(&room, "leaving-replay"));
     room.replay_one(&sid, &history_id, "closed-replay").unwrap();
     room.close_channel("replay-thread").unwrap();
+    // Withdrawn from the call, which says it never played it: then it is gone.
+    assert!(kept(&room, "closed-replay"));
+    room.playback(
+        &sid,
+        "closed-replay",
+        "unplayed",
+        Some("focus_changed"),
+        None,
+        &Value::Null,
+    )
+    .unwrap();
     assert!(!kept(&room, "closed-replay"));
     assert_eq!(status(&room, &history_id), "playback_finished");
     room.leave(&sid);

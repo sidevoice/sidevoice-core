@@ -36,7 +36,9 @@ pub(super) fn valid_turn_id(turn_id: &str) -> bool {
 
 impl Room {
     /// The person started speaking turn `turn_id` in call `sid`: a new revision, and the focus the turn's words will
-    /// go to. A turn the call already holds is not started again.
+    /// go to. A turn the call already holds is not started again. The replies the call was sent before it and has not
+    /// started playing answer an older turn: they are withdrawn (`newer_turn`). One playing is the call's to cut, and
+    /// a replay the person asked for is never stale.
     pub fn begin_turn(&self, sid: &str, turn_id: &str) -> Result<VoiceTurn, RoomError> {
         if !valid_turn_id(turn_id) {
             return Err(RoomError::new(400, "room.request_invalid"));
@@ -68,6 +70,9 @@ impl Room {
             cancelled: false,
         };
         c.turns.push_back(turn.clone());
+        inner.withdraw(sid, "newer_turn", |record, (sent_at, status)| {
+            status == "queued" && *sent_at < revision && !record.requested
+        });
         Ok(turn)
     }
 
