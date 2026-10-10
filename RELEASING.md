@@ -29,7 +29,7 @@ did not start on Debian 12 or Ubuntu 22.04. The floor is fixed in `xtask/src/gli
 
 - `dist` links the Linux binary with `cargo zigbuild --target <arch>-unknown-linux-gnu.2.28` (zig's glibc 2.28 stubs
   instead of the runner's library) and records the floor in the archive's inventory (`"glibc": "2.28"`). Everything
-  it links (Rust, BoringSSL, SQLite) is compiled against the floor; the C++ in BoringSSL takes zig's libc++, linked
+  it links (Rust, BoringSSL) is compiled against the floor; the C++ in BoringSSL takes zig's libc++, linked
   statically. The binary loads no library beyond the system's.
 - `verify` reads the GLIBC symbol versions of the binary (`readelf --version-info`) and fails if any is newer than the
   floor the inventory records, or if it loads a library that is not on every glibc system; its report gives the

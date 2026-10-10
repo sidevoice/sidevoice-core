@@ -78,10 +78,9 @@ pub struct Room {
 }
 impl Room {
     pub fn load(dir: PrivateDir) -> io::Result<Self> {
-        let state = match dir.read_json("room-state.json")? {
-            Some(v) => v,
-            None => dir.import_legacy_connectors()?,
-        };
+        let state = dir
+            .read_json("room-state.json")?
+            .unwrap_or_else(|| serde_json::json!({"connectors": {}}));
         let credentials = Credentials::from_state(&state);
         Ok(Self {
             dir,

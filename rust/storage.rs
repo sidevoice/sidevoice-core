@@ -1,7 +1,5 @@
 //! The single owner of private files and process locks.
 
-mod legacy;
-
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
