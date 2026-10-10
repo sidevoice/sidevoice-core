@@ -190,14 +190,9 @@ fn server_ms(reply: &Reply<'_>, indexed: &MarkIndex<'_>) -> Map<String, Value> {
             r(Event::ReplyReceived),
         ),
         (
-            "reply_received_to_synthesis_started_ms",
+            "reply_received_to_dispatched_ms",
             r(Event::ReplyReceived),
             r(Event::ReplyDispatched),
-        ),
-        (
-            "synthesis_started_to_audio_ready_ms",
-            r(Event::ReplyDispatched),
-            r(Event::AudioReady),
         ),
         (
             "audio_dispatched_to_playing_receipt_ms",

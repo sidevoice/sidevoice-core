@@ -336,9 +336,8 @@ fn stages_ended_by(event: LatencyEvent) -> &'static [(&'static str, LatencyEvent
             ("read_to_reply", LatencyEvent::Read, false),
             ("input_queued_to_reply", LatencyEvent::Queued, false),
         ],
-        // The reply handed to the call as text; the stage keeps the name it is reported under.
         LatencyEvent::ReplyDispatched => {
-            &[("reply_to_synthesis", LatencyEvent::ReplyReceived, true)]
+            &[("reply_to_dispatch", LatencyEvent::ReplyReceived, true)]
         }
         _ => &[],
     }

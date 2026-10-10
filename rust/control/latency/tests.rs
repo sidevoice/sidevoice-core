@@ -79,7 +79,7 @@ fn filters_other_sessions_and_keeps_the_response_shape() {
         250.0
     );
     assert!(result["replies"][0]["server_ms"]
-        .get("reply_received_to_synthesis_started_ms")
+        .get("reply_received_to_dispatched_ms")
         .is_none());
     assert!(!result.to_string().contains("secret"));
     assert_eq!(

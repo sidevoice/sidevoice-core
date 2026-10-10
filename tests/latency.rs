@@ -61,8 +61,7 @@ fn server_intervals_include_only_the_matching_original_turn() {
             "input_queued_to_delivery_accepted_ms": 200.0,
             "input_queued_to_reply_received_ms": 2000.0,
             "delivery_accepted_to_reply_received_ms": 1800.0,
-            "reply_received_to_synthesis_started_ms": 1000.0,
-            "synthesis_started_to_audio_ready_ms": 1000.0,
+            "reply_received_to_dispatched_ms": 1000.0,
         })
     );
 }
