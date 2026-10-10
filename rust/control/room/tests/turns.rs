@@ -270,3 +270,23 @@ fn a_turn_past_the_open_bound_is_refused_and_the_open_ones_keep_their_words() {
     // With room again, a new turn starts.
     room.begin_turn(&sid, "ninth").unwrap();
 }
+
+#[test]
+fn a_call_still_open_is_known_however_many_calls_came_and_went() {
+    let (_directory, room, sid, _events) = room_with_call();
+    for _ in 0..80 {
+        let (events, _received) = mpsc::channel(4);
+        let other = room.join("other".into(), "en".into(), events).unwrap();
+        room.leave(&other);
+    }
+    let turn = room.begin_turn(&sid, "after").unwrap();
+    let taken = room
+        .finish_turn(&sid, "after", Some("Still here"), &Value::Null)
+        .unwrap();
+    assert_eq!(taken["accepted"], true);
+    // A reply to it is the call's own, not one for a session that changed.
+    assert_eq!(
+        publish(&room, &sid, "to-after", turn.revision)["status"],
+        "queued"
+    );
+}
