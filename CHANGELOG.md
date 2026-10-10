@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0](https://github.com/sidevoice/sidevoice-core/compare/v0.2.1...v0.3.0) (2026-10-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* keep only the room in core: turns and replies as text, no audio ([#91](https://github.com/sidevoice/sidevoice-core/issues/91))
+
+### Features
+
+* keep only the room in core: turns and replies as text, no audio ([#91](https://github.com/sidevoice/sidevoice-core/issues/91)) ([93a040c](https://github.com/sidevoice/sidevoice-core/commit/93a040c359d6803bd7a4dc22c78d3e8675c13ec3))
+* resume dropped calls and take client messages once ([#88](https://github.com/sidevoice/sidevoice-core/issues/88)) ([e057270](https://github.com/sidevoice/sidevoice-core/commit/e057270a87d06a6ba3b8613a81d40adb69f06b98))
+* **room:** tell the agent what the person did not hear, never play it late ([#90](https://github.com/sidevoice/sidevoice-core/issues/90)) ([a277de4](https://github.com/sidevoice/sidevoice-core/commit/a277de48379c2e9d35de35c704fc173dbc13d65c))
+
+
+### Bug Fixes
+
+* **compat:** check the core against the released Rust connector ([#92](https://github.com/sidevoice/sidevoice-core/issues/92)) ([4a4e311](https://github.com/sidevoice/sidevoice-core/commit/4a4e3114fd7e05aaafa6cc72c60f9acf4cf7ff4c))
+* night sweep, room turn admission, unheard notes, replays, no v2 link or SQLite import ([#96](https://github.com/sidevoice/sidevoice-core/issues/96)) ([b158d53](https://github.com/sidevoice/sidevoice-core/commit/b158d5313e4a4849d8c6a368bda0cd4cdf85269f))
+
 ## [0.2.1](https://github.com/sidevoice/sidevoice-core/compare/v0.2.0...v0.2.1) (2026-10-06)
 
 
