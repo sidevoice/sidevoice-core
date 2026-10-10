@@ -75,41 +75,7 @@ impl Room {
     /// Commit a completed transcript to the same memory journal/outbox as typed input.
     /// The captured focus may differ from today's selection after a mid-turn switch.
     pub fn queue_voice_input(&self, turn: &VoiceTurn, text: &str) -> Result<Value, RoomError> {
-        words(text)?;
-        if turn.cancelled {
-            return Err(RoomError::new(409, "room.input_ended"));
-        }
-        let mut inner = self.inner.lock().expect("room lock");
-        if !inner.browsers.is_recent(&turn.session_id) {
-            return Err(RoomError::new(409, "room.focus_changed"));
-        }
-        let row_id = turn_row(&turn.session_id, &turn.turn_id);
-        if let Some(row) = inner.journal.find(&row_id) {
-            return repeated(
-                row,
-                text,
-                turn.thread_id.as_deref() == Some(row.thread.as_str()),
-            );
-        }
-        let (Some(thread), Some(bid)) = (turn.thread_id.as_deref(), turn.binding_id.as_deref())
-        else {
-            return Ok(inner.not_sent(&turn.session_id, row_id, turn.revision, &turn.turn_id));
-        };
-        let message_id = id();
-        inner.queue_input(InputDraft {
-            row_id,
-            text,
-            session_id: &turn.session_id,
-            revision: turn.revision,
-            thread_id: thread,
-            binding_id: bid,
-            title: turn.title.clone(),
-            language: &turn.language,
-            message_id: &message_id,
-            turn_id: Some(&turn.turn_id),
-            offline: None,
-            time: None,
-        })
+        self.inner.lock().expect("room lock").queue_turn(turn, text)
     }
     /// Turn `turn_id`, spoken and transcribed while the call had no room, is its own input row, sent to the
     /// conversation the call is on now. It takes the call's next revision, as a turn does when it starts: it is newer
@@ -191,6 +157,43 @@ fn repeated(row: &Row, text: &str, same_thread: bool) -> Result<Value, RoomError
 }
 
 impl Inner {
+    /// Commits turn `turn`'s words to the journal and its outbox; the turn must be one the call ended.
+    pub(super) fn queue_turn(&mut self, turn: &VoiceTurn, text: &str) -> Result<Value, RoomError> {
+        words(text)?;
+        if turn.cancelled {
+            return Err(RoomError::new(409, "room.input_ended"));
+        }
+        if !self.browsers.is_recent(&turn.session_id) {
+            return Err(RoomError::new(409, "room.focus_changed"));
+        }
+        let row_id = turn_row(&turn.session_id, &turn.turn_id);
+        if let Some(row) = self.journal.find(&row_id) {
+            return repeated(
+                row,
+                text,
+                turn.thread_id.as_deref() == Some(row.thread.as_str()),
+            );
+        }
+        let (Some(thread), Some(bid)) = (turn.thread_id.as_deref(), turn.binding_id.as_deref())
+        else {
+            return Ok(self.not_sent(&turn.session_id, row_id, turn.revision, &turn.turn_id));
+        };
+        let message_id = id();
+        self.queue_input(InputDraft {
+            row_id,
+            text,
+            session_id: &turn.session_id,
+            revision: turn.revision,
+            thread_id: thread,
+            binding_id: bid,
+            title: turn.title.clone(),
+            language: &turn.language,
+            message_id: &message_id,
+            turn_id: Some(&turn.turn_id),
+            offline: None,
+            time: None,
+        })
+    }
     fn queue_input(&mut self, draft: InputDraft<'_>) -> Result<Value, RoomError> {
         self.room_for(draft.text)?;
         let InputDraft {
@@ -247,7 +250,7 @@ impl Inner {
     }
     /// Refuses `text` when the messages already waiting to reach their agents are as many, or as long, as the room
     /// keeps: a message is only taken when it can wait for its agent.
-    fn room_for(&self, text: &str) -> Result<(), RoomError> {
+    pub(super) fn room_for(&self, text: &str) -> Result<(), RoomError> {
         let (count, bytes) = self.journal.waiting_input();
         if count >= MAX_WAITING_INPUT || bytes + text.len() > MAX_WAITING_BYTES {
             return Err(RoomError::new(429, "room.input_backlog_full"));

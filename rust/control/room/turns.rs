@@ -72,6 +72,8 @@ impl Room {
 
     /// Turn `turn_id` of call `sid` ended. With `text`, its words go to the conversation it was spoken to, as a
     /// message; without (cancelled, or nothing said), it just ends. `timings` are the call's own measures of it.
+    /// A refusal the call may retry (`room.text_too_long`, `room.input_backlog_full`) leaves the turn open, with the
+    /// revision and focus it started with; the turn ends only with its words taken, or with none.
     pub fn finish_turn(
         &self,
         sid: &str,
@@ -79,35 +81,41 @@ impl Room {
         text: Option<&str>,
         timings: &Value,
     ) -> Result<Value, RoomError> {
-        // Words too long to be a message are refused before the turn ends.
         if text.is_some_and(|text| text.len() > MAX_INPUT_BYTES) {
             return Err(RoomError::new(413, "room.text_too_long"));
         }
-        let turn = {
-            let mut inner = self.inner.lock().expect("room lock");
-            let Some(browser) = inner.browsers.get_mut(sid) else {
-                return Err(RoomError::new(409, "room.browser_absent"));
-            };
-            let Some(index) = browser
-                .turns
-                .iter()
-                .position(|turn| turn.turn_id == turn_id)
-            else {
-                return Err(RoomError::new(409, "room.input_ended"));
-            };
-            let turn = browser.turns.remove(index).expect("the turn found");
-            if browser.open_turn == Some(turn.revision) {
-                browser.speaking = false;
-                browser.open_turn = None;
-            }
-            turn
+        let text = text.filter(|text| !text.trim().is_empty());
+        let mut guard = self.inner.lock().expect("room lock");
+        let inner = &mut *guard;
+        let Some(browser) = inner.browsers.get_mut(sid) else {
+            return Err(RoomError::new(409, "room.browser_absent"));
         };
+        let Some(index) = browser
+            .turns
+            .iter()
+            .position(|turn| turn.turn_id == turn_id)
+        else {
+            return Err(RoomError::new(409, "room.input_ended"));
+        };
+        let open = &browser.turns[index];
+        if let Some(text) = text.filter(|_| !open.cancelled && open.thread_id.is_some()) {
+            inner.room_for(text)?;
+        }
+        let browser = inner
+            .browsers
+            .get_mut(sid)
+            .expect("the call, under the same lock");
+        let turn = browser.turns.remove(index).expect("the turn found");
+        if browser.open_turn == Some(turn.revision) {
+            browser.speaking = false;
+            browser.open_turn = None;
+        }
         let revision = turn.revision;
-        let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+        let Some(text) = text else {
             return Ok(json!({"accepted":false,"revision":revision}));
         };
         if let Some(thread) = turn.thread_id.as_deref() {
-            self.latency_mark(
+            inner.mark_latency(
                 sid,
                 thread,
                 revision,
@@ -118,12 +126,19 @@ impl Room {
             if let Some(timings) = timings.as_object() {
                 for (name, milliseconds) in timings {
                     if let Some(milliseconds) = milliseconds.as_f64() {
-                        self.latency_duration(sid, thread, revision, None, name, milliseconds);
+                        inner.record_latency_duration(
+                            sid,
+                            thread,
+                            revision,
+                            None,
+                            name,
+                            milliseconds,
+                        );
                     }
                 }
             }
         }
-        self.queue_voice_input(&turn, text)
+        inner.queue_turn(&turn, text)
     }
 
     /// The person cancelled turn `turn_id`, from the page, while speaking it or before its words came: its words,
