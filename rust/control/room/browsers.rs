@@ -11,7 +11,7 @@ use super::util::id;
 
 /// How many recent session IDs the room remembers, including calls that already ended.
 const RECENT_SESSIONS: usize = 64;
-/// How many of a call's turns may wait for their words at once; starting one more forgets the oldest.
+/// How many of a call's turns may wait for their words at once; one more is refused (`room.turns_full`) until one ends.
 pub(super) const MAX_OPEN_TURNS: usize = 8;
 
 /// The conversation a call is focused on; an empty thread means it is focused on none.

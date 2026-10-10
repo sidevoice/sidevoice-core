@@ -243,3 +243,30 @@ fn a_turn_refused_for_a_full_backlog_stays_open_for_its_retry() {
         assert_eq!(taken["thread_id"], "x");
     }
 }
+
+#[test]
+fn a_turn_past_the_open_bound_is_refused_and_the_open_ones_keep_their_words() {
+    let (_directory, room, sid, _events) = room_with_call();
+    for n in 0..8 {
+        room.begin_turn(&sid, &format!("t{n}")).unwrap();
+    }
+    assert_eq!(
+        room.begin_turn(&sid, "ninth").unwrap_err().key,
+        "room.turns_full"
+    );
+    // The focus moves while they wait: each turn's words still go where it was spoken.
+    room.select(&sid, "y").unwrap();
+    for n in 0..8 {
+        room.finish_turn(
+            &sid,
+            &format!("t{n}"),
+            Some(&format!("Words {n}")),
+            &Value::Null,
+        )
+        .unwrap();
+    }
+    assert_eq!(said(&room, "x").len(), 8);
+    assert!(said(&room, "y").is_empty());
+    // With room again, a new turn starts.
+    room.begin_turn(&sid, "ninth").unwrap();
+}

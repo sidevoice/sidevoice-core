@@ -48,6 +48,10 @@ impl Room {
         if c.turns.iter().any(|turn| turn.turn_id == turn_id) {
             return Err(RoomError::new(409, "room.request_invalid"));
         }
+        // The turns already open keep their words' destination: a new one waits until one of them ends.
+        if c.turns.len() >= MAX_OPEN_TURNS {
+            return Err(RoomError::new(429, "room.turns_full"));
+        }
         let revision = c.next_revision();
         c.turn_revision = revision;
         c.speaking = true;
@@ -64,9 +68,6 @@ impl Room {
             cancelled: false,
         };
         c.turns.push_back(turn.clone());
-        if c.turns.len() > MAX_OPEN_TURNS {
-            c.turns.pop_front();
-        }
         Ok(turn)
     }
 
