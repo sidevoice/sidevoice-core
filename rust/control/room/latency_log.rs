@@ -121,14 +121,6 @@ impl LatencyLog {
         while marks.len() > MAX_LATENCY_MARKS {
             marks.pop_front();
         }
-        if event == LatencyEvent::SynthesisStarted {
-            // A new synthesis attempt starts its provider and browser timings over.
-            if let Some(reply) = uid.and_then(|uid| self.reply_mut(sid, uid)) {
-                reply.synthesis_attempt += 1;
-                reply.provider_ms.clear();
-                reply.browser_ms.clear();
-            }
-        }
         self.observe_stages(sid, thread, revision, uid, event, at_micros);
     }
     fn observe_stages(
@@ -191,7 +183,6 @@ impl LatencyLog {
             revision,
             utterance_id: uid.into(),
             status: status.into(),
-            synthesis_attempt: 0,
             input_ms: input,
             provider_ms: Vec::new(),
             browser_ms: Vec::new(),
@@ -345,7 +336,8 @@ fn stages_ended_by(event: LatencyEvent) -> &'static [(&'static str, LatencyEvent
             ("read_to_reply", LatencyEvent::Read, false),
             ("input_queued_to_reply", LatencyEvent::Queued, false),
         ],
-        LatencyEvent::SynthesisStarted => {
+        // The reply handed to the call as text; the stage keeps the name it is reported under.
+        LatencyEvent::ReplyDispatched => {
             &[("reply_to_synthesis", LatencyEvent::ReplyReceived, true)]
         }
         _ => &[],

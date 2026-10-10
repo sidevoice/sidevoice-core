@@ -176,7 +176,7 @@ impl Inner {
             &thread,
             reply_revision,
             Some(uid),
-            LatencyEvent::SynthesisStarted,
+            LatencyEvent::ReplyDispatched,
             latency_now_micros(),
         );
     }

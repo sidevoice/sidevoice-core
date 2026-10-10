@@ -27,7 +27,6 @@ fn reply<'a>(
         revision: 1,
         utterance_id: "u",
         status: "queued",
-        synthesis_attempt: 1,
         input_ms,
         provider_ms,
         browser_ms,
@@ -44,7 +43,7 @@ fn server_intervals_include_only_the_matching_original_turn() {
         mark(Event::Queued, None, 10.0),
         mark(Event::DeliveryAccepted, None, 10.2),
         mark(Event::ReplyReceived, Some("u"), 12.0),
-        mark(Event::SynthesisStarted, Some("u"), 13.0),
+        mark(Event::ReplyDispatched, Some("u"), 13.0),
         mark(Event::AudioReady, Some("u"), 14.0),
     ];
     // Another turn's and another thread's marks are not this reply's.

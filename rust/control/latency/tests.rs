@@ -32,7 +32,7 @@ fn filters_other_sessions_and_keeps_the_response_shape() {
             thread_id: "thread",
             revision: 2,
             utterance_id: Some("reply"),
-            event: Event::SynthesisStarted,
+            event: Event::ReplyDispatched,
             at_micros: 1_550_000,
         },
     ];
@@ -43,7 +43,6 @@ fn filters_other_sessions_and_keeps_the_response_shape() {
             revision: 2,
             utterance_id: "reply",
             status: "received",
-            synthesis_attempt: 0,
             input_ms: &[
                 Duration {
                     name: "audio_ms",
@@ -63,7 +62,6 @@ fn filters_other_sessions_and_keeps_the_response_shape() {
             revision: 2,
             utterance_id: "secret",
             status: "received",
-            synthesis_attempt: 0,
             input_ms: &[],
             provider_ms: &[],
             browser_ms: &[],
