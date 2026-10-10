@@ -64,9 +64,6 @@ impl Call {
         let id = client_msg_id(data);
         let turn_id = data["turn_id"].as_str().unwrap_or("");
         // The turn's boundary, as the call learns it: the revision the room gave the turn, and where its words go.
-        // `session_id` is the room session the revision counts in: the call's own id, the `S` of the turn's row
-        // `S:user-turn:T`. It is opaque and compared only for equality: the same one after a resume, a new one for a
-        // replacement session, whose revisions start over.
         let started = |revision: &Value, thread: &Value| {
             json!({"type":"voice-user-turn","data":{"session_id":self.session,"phase":"started",
                 "turn_id":turn_id,"revision":revision,"thread_id":thread}})
