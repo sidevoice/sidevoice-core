@@ -23,7 +23,6 @@ fn publish(room: &Room, sid: &str, uid: &str) -> Value {
     room.publish(
         &json!({"session_id":sid,"thread_id":"thread","revision":revision(room, sid),
             "utterance_id":uid,"text":"A reply of thirty characters."}),
-        false,
     )
 }
 

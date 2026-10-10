@@ -35,7 +35,7 @@ pub(super) async fn dispatch(
             }) {
                 return Err((-32602, "speech.publish requires bounded identifiers"));
             }
-            let result = room.connector_speech(&link.cid, &params, true);
+            let result = room.connector_speech(&link.cid, &params);
             Ok(echo_ids(result, &params, &["event_id", "utterance_id"]))
         }
         "input.pull" => room

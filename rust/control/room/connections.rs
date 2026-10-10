@@ -73,7 +73,8 @@ impl Room {
 
 impl Inner {
     /// Bindings `ids` lost their connection: input they claimed by pull returns to the queue, and
-    /// a push delivery still awaiting their acknowledgement is retried at once.
+    /// a push delivery still awaiting their acknowledgement is retried at once: a message, or a note with the list it
+    /// was telling.
     fn bindings_went_offline(&mut self, ids: &[String]) {
         self.release_pull_claims(|row| {
             row.pull_claimed_by
@@ -82,7 +83,11 @@ impl Inner {
         });
         for bid in ids {
             if let Some(row_id) = self.inflight.finish(bid) {
-                if let Some(row) = self.journal.find_mut(&row_id) {
+                if let Some(thread) = self.unheard.note_thread(&row_id) {
+                    if let Some(note) = self.unheard.note_mut(&thread) {
+                        note.due = 0;
+                    }
+                } else if let Some(row) = self.journal.find_mut(&row_id) {
                     row.requeue();
                 }
             }

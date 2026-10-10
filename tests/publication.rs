@@ -64,7 +64,6 @@ impl Fixture {
         self.room.publish(
             &json!({"session_id": sid, "thread_id": thread, "revision": revision,
                 "utterance_id": uuid::Uuid::new_v4().to_string(), "text": "A reply"}),
-            false,
         )
     }
 }

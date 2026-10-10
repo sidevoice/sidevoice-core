@@ -24,7 +24,7 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
-    let (_peer, _binding) = v2_with_binding(&core, "resumed", THREAD).await;
+    let (_peer, _binding) = connector_with_binding(&core, "resumed", THREAD).await;
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
@@ -107,7 +107,7 @@ async fn a_reply_published_while_the_page_was_away_is_marked_unheard_not_played(
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
-    let (peer, binding) = v2_with_binding(&core, "resumed", THREAD).await;
+    let (mut peer, binding) = connector_with_binding(&core, "resumed", THREAD).await;
     let browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
@@ -120,7 +120,7 @@ async fn a_reply_published_while_the_page_was_away_is_marked_unheard_not_played(
     browser.drop_link().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let answer = publish(
-        &peer,
+        &mut peer,
         &binding,
         &session,
         revision,

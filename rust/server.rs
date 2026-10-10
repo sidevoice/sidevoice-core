@@ -149,7 +149,7 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .fallback(refusal::not_found)
         .with_state(state.clone());
     let router = if local {
-        connectors::v2_layer(router, state.clone())
+        router
     } else {
         rendezvous::layer(router, state.clone())
     };

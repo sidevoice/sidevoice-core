@@ -75,13 +75,3 @@ pub(super) async fn client_error(
     let data = room_payload(&body, &headers)?;
     Ok(Json(state.room.report_client_error(&data)).into_response())
 }
-
-pub(super) async fn speak(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Handled {
-    require_origin(&headers)?;
-    let data = room_payload(&body, &headers)?;
-    Ok(Json(state.room.publish(&data, false)).into_response())
-}

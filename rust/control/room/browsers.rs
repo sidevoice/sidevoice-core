@@ -9,9 +9,10 @@ use super::journal::InputRef;
 use super::turns::VoiceTurn;
 use super::util::id;
 
-/// How many recent session IDs the room remembers, including calls that already ended.
+/// How many recent session IDs the room remembers, including calls that already ended; calls still in the room are
+/// always among them.
 const RECENT_SESSIONS: usize = 64;
-/// How many of a call's turns may wait for their words at once; starting one more forgets the oldest.
+/// How many of a call's turns may wait for their words at once; one more is refused (`room.turns_full`) until one ends.
 pub(super) const MAX_OPEN_TURNS: usize = 8;
 
 /// The conversation a call is focused on; an empty thread means it is focused on none.
@@ -103,12 +104,21 @@ pub(super) struct Browsers {
     recent: VecDeque<String>,
 }
 impl Browsers {
+    /// A call joins. The oldest calls that already ended make room in the recent sessions: a call still in the room
+    /// is never forgotten there.
     pub(super) fn join(&mut self, sid: &str, browser: Browser) {
-        self.recent.push_back(sid.to_owned());
-        if self.recent.len() > RECENT_SESSIONS {
-            self.recent.pop_front();
-        }
         self.calls.insert(sid.to_owned(), browser);
+        self.recent.push_back(sid.to_owned());
+        while self.recent.len() > RECENT_SESSIONS {
+            let Some(ended) = self
+                .recent
+                .iter()
+                .position(|recent| !self.calls.contains_key(recent))
+            else {
+                break;
+            };
+            self.recent.remove(ended);
+        }
     }
     pub(super) fn leave(&mut self, sid: &str) {
         self.calls.remove(sid);

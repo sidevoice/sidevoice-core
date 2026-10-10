@@ -241,16 +241,17 @@ async fn the_released_connector_links_delivers_and_publishes() {
     );
 }
 
-/// The paths a page asks of a node (this core). The rest of `/api/` is the room's own (`/api/connectors…`,
-/// `/api/telemetry`), never a node's.
-const NODE: [&str; 4] = [
+/// The route families this core serves a page. Every `/api/` path a page's bundle names must be in one of them and
+/// exist here: the core is the only server the page reaches.
+const NODE: [&str; 5] = [
     "/api/presentation",
     "/api/device",
-    "/api/models",
     "/api/rendezvous",
+    "/api/connectors",
+    "/api/host",
 ];
 
-/// Every node path written in the bundle's JavaScript; one ending in `/` is a prefix the bundle appends ids to.
+/// Every `/api/` path written in the bundle's JavaScript; one ending in `/` is a prefix the bundle appends ids to.
 fn routes(site: &Path) -> BTreeSet<String> {
     fn scripts(dir: &Path, found: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -276,15 +277,52 @@ fn routes(site: &Path) -> BTreeSet<String> {
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-'))
                 .collect();
-            if NODE
-                .iter()
-                .any(|prefix| route == *prefix || route.starts_with(&format!("{prefix}/")))
-            {
+            if route.len() > "/api/".len() {
                 routes.insert(route);
             }
         }
     }
     routes
+}
+
+/// The routes of `routes` this core does not serve: outside every [`NODE`] family, or falling through to its
+/// fallback.
+async fn missing(core: &Core, token: &str, routes: &BTreeSet<String>) -> Vec<String> {
+    let messages: Value = serde_json::from_slice(
+        &std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("rust/messages/en.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let unknown = messages["request.not_found"].clone();
+    let mut missing = Vec::new();
+    for route in routes {
+        let family = NODE
+            .iter()
+            .any(|prefix| route == *prefix || route.starts_with(&format!("{prefix}/")));
+        // A route the core does not have falls through to its fallback; a route it has may still answer 404
+        // about what it was asked (no such session), in its own words. A prefix stands for one or two ids.
+        let candidates = if route.ends_with('/') {
+            vec![format!("{route}x"), format!("{route}x/x")]
+        } else {
+            vec![route.clone()]
+        };
+        let mut known = false;
+        for candidate in candidates.iter().filter(|_| family) {
+            for reply in [
+                core.get(candidate).token(token).send().await,
+                core.local("GET", candidate).token(token).send().await,
+            ] {
+                let fallback = reply.status == 404
+                    && serde_json::from_slice::<Value>(&reply.body)
+                        .is_ok_and(|body| body["detail"] == unknown);
+                known |= !fallback;
+            }
+        }
+        if !known {
+            missing.push(route.clone());
+        }
+    }
+    missing
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -301,39 +339,35 @@ async fn every_route_the_released_web_client_names_exists() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
-    let messages: Value = serde_json::from_slice(
-        &std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("rust/messages/en.json"))
-            .unwrap(),
-    )
-    .unwrap();
-    let unknown = messages["request.not_found"].clone();
-    let mut missing = Vec::new();
-    for route in &routes {
-        // A route the core does not have falls through to its fallback; a route it has may still answer 404
-        // about what it was asked (no such session), in its own words. A prefix stands for one or two ids.
-        let candidates = if route.ends_with('/') {
-            vec![format!("{route}x"), format!("{route}x/x")]
-        } else {
-            vec![route.clone()]
-        };
-        let mut known = false;
-        for candidate in &candidates {
-            for reply in [
-                core.get(candidate).token(&token).send().await,
-                core.local("GET", candidate).token(&token).send().await,
-            ] {
-                let fallback = reply.status == 404
-                    && serde_json::from_slice::<Value>(&reply.body)
-                        .is_ok_and(|body| body["detail"] == unknown);
-                known |= !fallback;
-            }
-        }
-        if !known {
-            missing.push(route.clone());
-        }
-    }
+    let missing = missing(&core, &token, &routes).await;
     assert!(
         missing.is_empty(),
         "routes the released web client calls and this core does not serve: {missing:?}"
+    );
+}
+
+/// The check itself: a bundle naming a host, connector or unknown route this core lacks is caught, whatever family
+/// it is in, and the routes the core has pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_route_check_catches_any_route_this_core_lacks() {
+    let root = tempfile::tempdir().unwrap();
+    let site = root.path().join("site");
+    std::fs::create_dir_all(site.join("voice/assets")).unwrap();
+    std::fs::write(
+        site.join("voice/assets/app.js"),
+        r#"fetch("/api/presentation/ws");fetch("/api/host/agents");fetch("/api/host/definitely-missing");
+fetch("/api/connectors/definitely-missing");fetch("/api/elsewhere/thing");"#,
+    )
+    .unwrap();
+    let routes = routes(&site);
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    assert_eq!(
+        missing(&core, &token, &routes).await,
+        [
+            "/api/connectors/definitely-missing",
+            "/api/elsewhere/thing",
+            "/api/host/definitely-missing",
+        ]
     );
 }

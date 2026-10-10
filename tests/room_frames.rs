@@ -23,7 +23,7 @@ async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
-    let (mut peer, binding) = v2_with_binding(&core, "frames", THREAD).await;
+    let (mut peer, binding) = connector_with_binding(&core, "frames", THREAD).await;
     let mut browser = core.join(&token, json!({"ui_language": "en"})).await;
     assert!(
         browser.welcome.get("sample_rate").is_none(),
@@ -33,9 +33,9 @@ async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
 
     let revision = browser.say("Run the tests, please.").await;
     let delivery = accept_delivery(&mut peer).await;
-    assert_eq!(delivery.data["binding_id"], binding);
-    assert_eq!(delivery.data["text"], "Run the tests, please.");
-    assert_eq!(delivery.data["revision"], revision);
+    assert_eq!(delivery["binding_id"], binding);
+    assert_eq!(delivery["text"], "Run the tests, please.");
+    assert_eq!(delivery["revision"], revision);
 
     // A turn that ended with nothing said, or that the person cancelled, sends nothing.
     browser.start_turn("cancelled").await;
@@ -74,7 +74,7 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
-    let (mut peer, binding) = v2_with_binding(&core, "overlap", THREAD).await;
+    let (mut peer, binding) = connector_with_binding(&core, "overlap", THREAD).await;
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
@@ -105,7 +105,7 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
     assert_eq!(browser.receipt("pending").await["turn_id"], "first");
     let delivered = accept_delivery(&mut peer).await;
     assert_eq!(
-        (&delivered.data["text"], &delivered.data["revision"]),
+        (&delivered["text"], &delivered["revision"]),
         (&json!("First words"), &json!(first))
     );
     browser
@@ -115,9 +115,17 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
         )
         .await;
     let delivered = accept_delivery(&mut peer).await;
-    assert_eq!(delivered.data["revision"], second);
+    assert_eq!(delivered["revision"], second);
     // The agent answers the first turn after the second one's words: it is not spoken.
-    let late = publish(&peer, &binding, &session, first, "late", "An old answer.").await;
+    let late = publish(
+        &mut peer,
+        &binding,
+        &session,
+        first,
+        "late",
+        "An old answer.",
+    )
+    .await;
     assert_eq!(
         (late["status"].as_str(), late["reason"].as_str()),
         (Some("text_only"), Some("newer_turn")),
@@ -147,14 +155,14 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
-    let (peer, binding) = v2_with_binding(&core, "frames", THREAD).await;
+    let (mut peer, binding) = connector_with_binding(&core, "frames", THREAD).await;
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
     let revision = core.revision(&token, &session).await;
 
     let answer = publish(
-        &peer,
+        &mut peer,
         &binding,
         &session,
         revision,
@@ -178,7 +186,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
         )
         .await;
     publish(
-        &peer,
+        &mut peer,
         &binding,
         &session,
         revision,

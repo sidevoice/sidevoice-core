@@ -4,35 +4,31 @@ use serde_json::{json, Value};
 
 use super::browsers::Browser;
 use super::journal::Row;
-use super::util::{default_title, field, id, millis, seconds, valid_thread};
+use super::util::{default_title, field, millis, seconds, valid_thread};
 use super::utterances::{UtteranceRecord, MAX_UTTERANCES};
 use super::{Inner, Room};
 
 const SPEECH_LANGUAGES: [&str; 6] = ["es", "en", "fr", "it", "pt", "hi"];
 
 impl Room {
-    pub fn publish(&self, p: &Value, v3: bool) -> Value {
+    /// A reply the connector publishes, named by its `utterance_id`.
+    pub fn publish(&self, p: &Value) -> Value {
         let thread = field(p, "thread_id");
-        let requested_uid = field(p, "utterance_id");
+        let uid = field(p, "utterance_id");
         let text = field(p, "text");
-        let generated = id();
-        let uid = if requested_uid.is_empty() && !v3 {
-            generated.as_str()
-        } else {
-            requested_uid
-        };
         let Some(revision) = p.get("revision").and_then(Value::as_u64) else {
-            return rejected(v3);
+            return rejected();
         };
         if text.is_empty()
             || text.chars().count() > 6000
+            || uid.is_empty()
             || uid.len() > 200
             || !valid_thread(thread)
             || p.get("language")
                 .and_then(Value::as_str)
                 .is_some_and(|language| !SPEECH_LANGUAGES.contains(&language))
         {
-            return rejected(v3);
+            return rejected();
         }
         let mut guard = self.inner.lock().expect("room lock");
         let inner = &mut *guard;
@@ -41,13 +37,13 @@ impl Room {
             .get(uid)
             .and_then(|record| inner.journal.find(&record.row_id))
         {
-            return repeated(row, text, thread, uid, v3);
+            return repeated(row, text, thread, uid);
         }
         let audience = inner.browsers.ids_on_thread(thread);
         let (sid, revision) = inner.speaker(field(p, "session_id"), revision, &audience);
         let row_id = format!("{sid}:voice:{uid}");
         if let Some(row) = inner.journal.find(&row_id) {
-            return repeated(row, text, thread, uid, v3);
+            return repeated(row, text, thread, uid);
         }
         let asker = inner.browsers.get(&sid);
         let reason = refusal(inner.browsers.is_recent(&sid), asker, thread, revision);
@@ -115,22 +111,18 @@ impl Room {
             json!({"status":status,"utterance_id":uid,"session_id":sid,"revision":spoken_revision,"text_saved":true})
         }
     }
-    pub fn connector_speech(&self, cid: &str, p: &Value, v3: bool) -> Value {
+    pub fn connector_speech(&self, cid: &str, p: &Value) -> Value {
         let bid = field(p, "binding_id");
         let thread = {
             let inner = self.inner.lock().expect("room lock");
             inner.bindings.live_of(cid, bid).map(|b| b.thread.clone())
         };
         let Some(thread) = thread else {
-            return if v3 {
-                json!({"status":"unknown_binding","event_id":p.get("event_id"),"utterance_id":p.get("utterance_id")})
-            } else {
-                json!({"status":"rejected","error":"room.binding_foreign","event_id":p.get("event_id")})
-            };
+            return json!({"status":"unknown_binding","event_id":p.get("event_id"),"utterance_id":p.get("utterance_id")});
         };
         let mut speech = p.clone();
         speech["thread_id"] = json!(thread);
-        self.publish(&speech, v3)
+        self.publish(&speech)
     }
 }
 
@@ -216,16 +208,16 @@ fn deferrable(reason: &str) -> bool {
     ["newer_turn", "user_speaking"].contains(&reason)
 }
 
-fn rejected(v3: bool) -> Value {
-    json!({"status":"rejected","error":"room.speech_invalid","terminal":v3,"reason_code":"application_refusal"})
+fn rejected() -> Value {
+    json!({"status":"rejected","error":"room.speech_invalid","terminal":true,"reason_code":"application_refusal"})
 }
 
 /// The answer to a reply whose row already exists: accepted again if it is the same words on
 /// the same thread, refused otherwise.
-fn repeated(row: &Row, text: &str, thread: &str, uid: &str, v3: bool) -> Value {
+fn repeated(row: &Row, text: &str, thread: &str, uid: &str) -> Value {
     if row.text == text && row.thread == thread {
         json!({"status":row.status,"text_saved":true,"utterance_id":uid})
     } else {
-        rejected(v3)
+        rejected()
     }
 }

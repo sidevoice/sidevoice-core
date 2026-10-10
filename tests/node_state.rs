@@ -1,6 +1,6 @@
 //! What the core keeps on disk and says about itself, driven as the real process: the requests that must not
-//! pass for local or authenticated ones, its log, and the state it repairs or imports at start — a broken
-//! connector credential, a legacy room history. Command line, identity proof, log rotation and the trust
+//! pass for local or authenticated ones, its log, and the state it repairs at start, a broken connector
+//! credential, or ignores, an obsolete room history. Command line, identity proof, log rotation and the trust
 //! boundary are `runtime`, `devices` and `server` unit tests and `node_process`.
 
 mod support;
@@ -8,10 +8,8 @@ mod support;
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
-use std::time::Duration;
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use support::*;
 
 fn private_dir(path: &Path) {
@@ -24,10 +22,6 @@ fn mode(path: &Path) -> u32 {
 
 fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
-}
-
-fn failure_key(data: &Path) -> Value {
-    read_json(&data.join("core-failure.json"))["key"].clone()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -162,77 +156,24 @@ async fn a_broken_connector_credential_is_replaced_and_nothing_else_is() {
     assert_eq!(core.stop(), 0);
 }
 
-fn legacy_history(data: &Path, rows: &[(&str, &str, &str, Value)]) {
-    let db = rusqlite::Connection::open(data.join("room-history.sqlite3")).unwrap();
-    db.execute_batch(
-        "CREATE TABLE connectors (id TEXT, token_hash TEXT, host TEXT, created INTEGER, last_seen INTEGER, revoked INTEGER)",
-    )
-    .unwrap();
-    for (id, token, host, created) in rows {
-        let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
-        let created: Box<dyn rusqlite::ToSql> = match created {
-            Value::Number(number) => Box::new(number.as_i64().unwrap()),
-            other => Box::new(other.as_str().unwrap().to_owned()),
-        };
-        db.execute(
-            "INSERT INTO connectors VALUES (?1, ?2, ?3, ?4, 2, 0)",
-            rusqlite::params![id, hash, host, created],
-        )
-        .unwrap();
-    }
-}
-
+/// A room history from before the room kept its state as JSON is not read: whatever is in it, the core starts with an
+/// empty room, and no connector it named can link.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_legacy_room_history_is_imported_whole_or_not_at_all() {
+async fn an_obsolete_room_history_neither_stops_the_start_nor_reaches_the_room() {
     let root = tempfile::tempdir().unwrap();
-    let legacy = root.path().join("legacy");
-    private_dir(&legacy);
-    legacy_history(
-        &legacy,
-        &[("legacy-id", "legacy-token", "old-machine", json!(1))],
-    );
-    let mut core = Launch::new(&legacy).start();
-    assert_eq!(core.stop(), 0);
-    let kept = read_json(&legacy.join("room-state.json"))["connectors"]["legacy-id"].clone();
-    assert_eq!(kept["host"], "old-machine");
-    assert_eq!(
-        kept["token_hash"],
-        format!("{:x}", Sha256::digest(b"legacy-token"))
-    );
-
-    // A history that is not a database stops the start and leaves no state behind.
-    let repair = root.path().join("repair");
-    private_dir(&repair);
-    fs::write(repair.join("room-history.sqlite3"), "not a sqlite database").unwrap();
-    let mut broken = Launch::new(&repair).spawn();
-    assert_eq!(broken.exited(Duration::from_secs(15)), Some(0));
-    assert_eq!(failure_key(&repair), "start.failed");
-    assert!(!repair.join("room-state.json").exists());
-
-    // One unreadable row: nothing is imported, not even the good one.
-    fs::remove_file(repair.join("room-history.sqlite3")).unwrap();
-    legacy_history(
-        &repair,
-        &[
-            ("kept-id", "kept-token", "repair-host", json!(1)),
-            ("bad-id", "bad-token", "bad-host", json!("not-an-integer")),
-        ],
-    );
-    let mut broken = Launch::new(&repair).spawn();
-    assert_eq!(broken.exited(Duration::from_secs(15)), Some(0));
-    assert!(
-        !repair.join("room-state.json").exists(),
-        "a partial import never becomes the room's state"
-    );
-
-    let db = rusqlite::Connection::open(repair.join("room-history.sqlite3")).unwrap();
-    db.execute("DELETE FROM connectors WHERE id = 'bad-id'", [])
-        .unwrap();
-    drop(db);
-    let mut repaired = Launch::new(&repair).start();
-    assert_eq!(repaired.stop(), 0);
-    assert_eq!(
-        read_json(&repair.join("room-state.json"))["connectors"]["kept-id"]["host"],
-        "repair-host"
-    );
+    for (name, history) in [
+        ("garbage", b"not a sqlite database".to_vec()),
+        ("database", b"SQLite format 3\0".to_vec()),
+    ] {
+        let data = root.path().join(name);
+        private_dir(&data);
+        fs::write(data.join("room-history.sqlite3"), history).unwrap();
+        let mut core = Launch::new(&data).start();
+        let own = core.connector_id();
+        assert_eq!(core.stop(), 0, "{name}");
+        // The only connector the room knows is the one this core made for its own machine.
+        let connectors = read_json(&data.join("room-state.json"))["connectors"].clone();
+        let known: Vec<_> = connectors.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(known, [own], "{name}");
+    }
 }

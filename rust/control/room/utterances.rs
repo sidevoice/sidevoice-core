@@ -22,6 +22,7 @@ pub(super) struct UtteranceRecord {
     /// How it ended on each call that ended it, by session; the journal row is derived from these and `clients`.
     pub(super) ends: HashMap<String, End>,
     pub(super) parked: bool,
+    /// For a replay: the utterance it repeats, by id; one never sent to a call has no record of its own.
     pub(super) replay_of: Option<String>,
     /// Calls that heard this reply through: it played to the end, or that listener stopped it.
     pub(super) heard: HashSet<String>,

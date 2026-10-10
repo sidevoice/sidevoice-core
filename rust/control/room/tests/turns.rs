@@ -40,9 +40,7 @@ fn delivered_to(room: &Room) -> Vec<String> {
 
 fn publish(room: &Room, sid: &str, uid: &str, revision: u64) -> Value {
     room.publish(
-        &json!({"session_id":sid,"thread_id":"x","revision":revision,"utterance_id":uid,"text":"A reply."}),
-        false,
-    )
+        &json!({"session_id":sid,"thread_id":"x","revision":revision,"utterance_id":uid,"text":"A reply."}))
 }
 
 #[test]
@@ -196,4 +194,97 @@ fn messages_waiting_for_their_agent_are_bounded_in_number_and_in_bytes() {
     let refused = room.finish_turn(&sid, &turn.turn_id, Some(&long), &Value::Null);
     assert_eq!(refused.unwrap_err().key, "room.input_backlog_full");
     assert_eq!(said(&room, "x").len(), fit);
+}
+
+/// One message waiting for its agent reaches it: its row is no longer pending.
+fn deliver_one(room: &Room) {
+    let mut inner = room.inner.lock().unwrap();
+    let row = inner
+        .journal
+        .input_mut("x")
+        .find(|row| row.status == "pending")
+        .expect("a waiting message");
+    row.status = "delivered".into();
+}
+
+#[test]
+fn a_turn_refused_for_a_full_backlog_stays_open_for_its_retry() {
+    for long in [false, true] {
+        let (_directory, room, sid, _events) = room_with_call();
+        let text = if long {
+            "a".repeat(12_000)
+        } else {
+            "Short words".to_owned()
+        };
+        let mut n = 0;
+        while room
+            .offline_input(&sid, &format!("m{n}"), &text, None)
+            .is_ok()
+        {
+            n += 1;
+        }
+        let turn = room.begin_turn(&sid, "kept").unwrap();
+        room.select(&sid, "y").unwrap();
+        let refused = room.finish_turn(&sid, "kept", Some(&text), &Value::Null);
+        assert_eq!(
+            refused.unwrap_err().key,
+            "room.input_backlog_full",
+            "long: {long}"
+        );
+        deliver_one(&room);
+        // The same turn, retried once there is room: its words go where and when it was spoken.
+        let taken = room
+            .finish_turn(&sid, "kept", Some(&text), &Value::Null)
+            .unwrap();
+        assert_eq!(taken["accepted"], true, "long: {long}");
+        assert_eq!(taken["revision"], turn.revision);
+        assert_eq!(taken["thread_id"], "x");
+    }
+}
+
+#[test]
+fn a_turn_past_the_open_bound_is_refused_and_the_open_ones_keep_their_words() {
+    let (_directory, room, sid, _events) = room_with_call();
+    for n in 0..8 {
+        room.begin_turn(&sid, &format!("t{n}")).unwrap();
+    }
+    assert_eq!(
+        room.begin_turn(&sid, "ninth").unwrap_err().key,
+        "room.turns_full"
+    );
+    // The focus moves while they wait: each turn's words still go where it was spoken.
+    room.select(&sid, "y").unwrap();
+    for n in 0..8 {
+        room.finish_turn(
+            &sid,
+            &format!("t{n}"),
+            Some(&format!("Words {n}")),
+            &Value::Null,
+        )
+        .unwrap();
+    }
+    assert_eq!(said(&room, "x").len(), 8);
+    assert!(said(&room, "y").is_empty());
+    // With room again, a new turn starts.
+    room.begin_turn(&sid, "ninth").unwrap();
+}
+
+#[test]
+fn a_call_still_open_is_known_however_many_calls_came_and_went() {
+    let (_directory, room, sid, _events) = room_with_call();
+    for _ in 0..80 {
+        let (events, _received) = mpsc::channel(4);
+        let other = room.join("other".into(), "en".into(), events).unwrap();
+        room.leave(&other);
+    }
+    let turn = room.begin_turn(&sid, "after").unwrap();
+    let taken = room
+        .finish_turn(&sid, "after", Some("Still here"), &Value::Null)
+        .unwrap();
+    assert_eq!(taken["accepted"], true);
+    // A reply to it is the call's own, not one for a session that changed.
+    assert_eq!(
+        publish(&room, &sid, "to-after", turn.revision)["status"],
+        "queued"
+    );
 }

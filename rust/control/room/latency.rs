@@ -24,7 +24,7 @@ pub enum LatencyEvent {
     DeliveryAccepted,
     Read,
     ReplyReceived,
-    SynthesisStarted,
+    ReplyDispatched,
     AudioReady,
     AudioDispatched,
     PlayingReceipt,
@@ -53,7 +53,6 @@ pub struct LatencyReply {
     pub revision: u64,
     pub utterance_id: String,
     pub status: String,
-    pub synthesis_attempt: u32,
     pub input_ms: Vec<LatencyDuration>,
     pub provider_ms: Vec<LatencyDuration>,
     pub browser_ms: Vec<LatencyDuration>,
@@ -81,15 +80,8 @@ impl Room {
         name: &str,
         milliseconds: f64,
     ) {
-        if !milliseconds.is_finite() || !(0.0..=3_600_000.0).contains(&milliseconds) {
-            return;
-        }
         let mut inner = self.inner.lock().expect("room lock");
-        if inner.browsers.contains(sid) {
-            inner
-                .latency
-                .record_duration(sid, thread, revision, uid, name, milliseconds);
-        }
+        inner.record_latency_duration(sid, thread, revision, uid, name, milliseconds);
     }
     /// Clone only the authenticated call's bounded records for T6's borrowed snapshot API.
     pub fn latency_records(
@@ -129,6 +121,24 @@ impl Room {
 }
 
 impl Inner {
+    /// Record a duration a call measured, in milliseconds, if it is a plausible one and the call is still in the room.
+    pub(super) fn record_latency_duration(
+        &mut self,
+        sid: &str,
+        thread: &str,
+        revision: u64,
+        uid: Option<&str>,
+        name: &str,
+        milliseconds: f64,
+    ) {
+        if milliseconds.is_finite()
+            && (0.0..=3_600_000.0).contains(&milliseconds)
+            && self.browsers.contains(sid)
+        {
+            self.latency
+                .record_duration(sid, thread, revision, uid, name, milliseconds);
+        }
+    }
     /// Mark a latency event of a call that is still in the room.
     pub(super) fn mark_latency(
         &mut self,

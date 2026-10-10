@@ -24,7 +24,7 @@ const LOCAL_PATHS: [(&str, &str); 4] = [
     ("GET", "/api/local/health"),
     ("POST", "/api/device/local/pair"),
     ("DELETE", "/api/device/local"),
-    ("GET", "/api/connectors/link/?EIO=4&transport=polling"),
+    ("GET", "/api/connectors/v3"),
 ];
 
 struct Node {
@@ -195,9 +195,16 @@ async fn a_page_reaching_the_socket_gets_none_of_it() {
     assert!(node.devices_on_disk().is_empty(), "nothing was paired");
 }
 
+/// Through the socket the connector's link is there, JSON-RPC v3 only: the old Socket.IO link is gone.
 #[tokio::test]
-async fn through_the_socket_the_link_is_open_it_carries_its_own_credential() {
+async fn through_the_socket_the_link_is_v3_only() {
     let node = Node::new();
+    let (status, _, _) = send(&node.socket(), "GET", "/api/connectors/v3", &[], None).await;
+    assert_ne!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a plain GET reaches the v3 upgrade"
+    );
     let (status, _, _) = send(
         &node.socket(),
         "GET",
@@ -206,7 +213,7 @@ async fn through_the_socket_the_link_is_open_it_carries_its_own_credential() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

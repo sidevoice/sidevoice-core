@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 use super::support::{pull_room, report, say};
 use crate::control::room::unheard::{unheard, TOLD_CHARS, TOLD_REPLIES};
-use crate::control::room::Room;
+use crate::control::room::{ConnectorPeer, Room};
 
 /// A room with one push binding on `thread`: the room, its binding and the connector's generation.
 fn room_on(thread: &str) -> (tempfile::TempDir, Room, String, String) {
@@ -38,9 +38,7 @@ fn revision(room: &Room, sid: &str) -> u64 {
 
 fn reply(room: &Room, sid: &str, thread: &str, uid: &str, text: &str, revision: u64) -> Value {
     room.publish(
-        &json!({"session_id":sid,"thread_id":thread,"revision":revision,"utterance_id":uid,"text":text}),
-        false,
-    )
+        &json!({"session_id":sid,"thread_id":thread,"revision":revision,"utterance_id":uid,"text":text}))
 }
 
 fn status(room: &Room, sid: &str, uid: &str) -> (String, Option<String>) {
@@ -473,5 +471,281 @@ fn how_far_a_reply_was_heard_cannot_pass_its_end_in_characters() {
     assert_eq!(
         told(&room, "Again?").unwrap()["replies"][0]["heard_chars"],
         5
+    );
+}
+
+#[test]
+fn a_note_cut_off_by_its_connector_leaving_is_sent_again_with_the_same_list() {
+    // The connector drops before it answers and comes back, or a new connection replaces it at once.
+    for dropped_first in [true, false] {
+        let (_directory, room, _, generation) = room_on("t");
+        let (sid, _received) = call(&room, "elsewhere");
+        reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+        room.select(&sid, "t").unwrap();
+        room.inner
+            .lock()
+            .unwrap()
+            .unheard
+            .note_mut("t")
+            .unwrap()
+            .due = 0;
+        let (_, note_id, _, first) = only(room.pending_delivery());
+        if dropped_first {
+            room.detach("connector", &generation);
+        }
+        let (requests, _receiver) = mpsc::channel(4);
+        let (stop, _stopped) = tokio::sync::watch::channel(false);
+        room.attach(
+            "connector",
+            ConnectorPeer {
+                generation: "next".into(),
+                sender: requests,
+                stop,
+            },
+        );
+        room.register("connector", &json!({"thread":"t","harness":"claude"}))
+            .unwrap();
+        let (_, again_id, _, again) = only(room.pending_delivery());
+        assert_eq!(again_id, note_id, "dropped first: {dropped_first}");
+        assert_eq!(again["unheard"], first["unheard"]);
+    }
+}
+
+/// The words of reply `uid`'s replay `replay`, as call `received` gets them.
+fn replayed(received: &mut mpsc::Receiver<Value>, replay: &str) -> Value {
+    std::iter::from_fn(|| received.try_recv().ok())
+        .find(|event| event["type"] == "voice-reply" && event["data"]["utterance_id"] == replay)
+        .unwrap_or_else(|| panic!("no replay {replay}"))
+}
+
+#[test]
+fn a_reply_never_sent_to_a_call_can_still_be_replayed_on_request() {
+    // Superseded: the person said something newer before it was written.
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    let asked = revision(&room, &sid);
+    say(&room, &sid, "First.");
+    say(&room, &sid, "Second.");
+    let late = reply(&room, &sid, "t", "late", "An old answer.", asked);
+    assert_eq!(late["reason"], "newer_turn");
+    let history_id = format!("{sid}:voice:late");
+    room.replay_one(&sid, &history_id, "again").unwrap();
+    assert_eq!(
+        replayed(&mut received, "again")["data"]["text"],
+        "An old answer."
+    );
+
+    // Refused for a full queue: the room already held every utterance it keeps.
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    {
+        let mut inner = room.inner.lock().unwrap();
+        for n in 0..crate::control::room::utterances::MAX_UTTERANCES {
+            inner.utterances.insert(
+                &format!("filler-{n}"),
+                crate::control::room::utterances::UtteranceRecord {
+                    row_id: format!("filler-row-{n}"),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    let full = reply(
+        &room,
+        &sid,
+        "t",
+        "full",
+        "No room to speak.",
+        revision(&room, &sid),
+    );
+    assert_eq!(full["reason"], "queue_full");
+    room.replay_one(&sid, &format!("{sid}:voice:full"), "again")
+        .unwrap();
+    assert_eq!(
+        replayed(&mut received, "again")["data"]["text"],
+        "No room to speak."
+    );
+}
+
+#[test]
+fn a_replay_heard_to_its_end_takes_the_reply_off_what_the_agent_is_told() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    reply(
+        &room,
+        &sid,
+        "t",
+        "r1",
+        "The build is green.",
+        revision(&room, &sid),
+    );
+    report(&room, &sid, "r1", "unplayed");
+    room.replay_one(&sid, &format!("{sid}:voice:r1"), "again")
+        .unwrap();
+    // Only started: still unheard.
+    report(&room, &sid, "again", "playing");
+    assert!(room.inner.lock().unwrap().unheard.has("t"));
+    report(&room, &sid, "again", "heard");
+    assert!(!room.inner.lock().unwrap().unheard.has("t"));
+    say(&room, &sid, "Thanks.");
+    assert_eq!(told(&room, "Thanks."), None);
+    // Its history row keeps how it first played.
+    assert_eq!(status(&room, &sid, "r1").0, "interrupted");
+}
+
+#[test]
+fn a_replay_heard_before_a_pending_note_is_due_drops_the_note() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "elsewhere");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.select(&sid, "t").unwrap();
+    room.replay_one(&sid, &format!("{sid}:voice:p"), "again")
+        .unwrap();
+    report(&room, &sid, "again", "playing");
+    report(&room, &sid, "again", "heard");
+    room.inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due = 0;
+    assert!(deliveries(&room, "note").is_empty());
+}
+
+/// The `voice-reply-withdrawn` frames call `received` got so far, as their data.
+fn withdrawn(received: &mut mpsc::Receiver<Value>) -> Vec<Value> {
+    std::iter::from_fn(|| received.try_recv().ok())
+        .filter(|event| event["type"] == "voice-reply-withdrawn")
+        .map(|event| event["data"].clone())
+        .collect()
+}
+
+#[test]
+fn a_new_turn_withdraws_the_replies_sent_before_it_that_have_not_started() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    let asked = revision(&room, &sid);
+    reply(&room, &sid, "t", "waiting", "Not started yet.", asked);
+    reply(&room, &sid, "t", "sounding", "Already playing.", asked);
+    report(&room, &sid, "sounding", "playing");
+    room.replay_one(&sid, &format!("{sid}:voice:sounding"), "asked-again")
+        .unwrap();
+    withdrawn(&mut received);
+
+    room.begin_turn(&sid, "next").unwrap();
+    // Only the one not started: the one playing is the call's to cut, and a replay the person asked for stays.
+    assert_eq!(
+        withdrawn(&mut received),
+        [json!({"session_id":sid,"utterance_ids":["waiting"],"reason":"newer_turn"})]
+    );
+    // A reply published while the turn is open was sent after it started: it is not withdrawn by it.
+    reply(&room, &sid, "t", "during", "Written meanwhile.", asked);
+    assert!(withdrawn(&mut received).is_empty());
+
+    // The call's report says what became of it; until then the row is as it was.
+    assert_eq!(status(&room, &sid, "waiting").0, "queued");
+    room.playback(
+        &sid,
+        "waiting",
+        "unplayed",
+        Some("newer_turn"),
+        None,
+        &Value::Null,
+    )
+    .unwrap();
+    assert_eq!(
+        status(&room, &sid, "waiting"),
+        ("interrupted".into(), Some("newer_turn".into()))
+    );
+    room.finish_turn(&sid, "next", Some("Go on."), &Value::Null)
+        .unwrap();
+    assert_eq!(
+        told(&room, "Go on.").unwrap()["replies"][0],
+        json!({"text":"Not started yet.","truncated":false,"cut":false})
+    );
+}
+
+#[test]
+fn moving_the_focus_withdraws_every_reply_the_call_has_not_finished() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    let asked = revision(&room, &sid);
+    reply(&room, &sid, "t", "waiting", "Not started yet.", asked);
+    reply(&room, &sid, "t", "sounding", "Already playing.", asked);
+    report(&room, &sid, "sounding", "playing");
+    withdrawn(&mut received);
+
+    room.select(&sid, "elsewhere").unwrap();
+    let frames = withdrawn(&mut received);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["reason"], "focus_changed");
+    let mut ids: Vec<_> = frames[0]["utterance_ids"].as_array().unwrap().clone();
+    ids.sort_by_key(|id| id.to_string());
+    assert_eq!(ids, [json!("sounding"), json!("waiting")]);
+    // How far the playing one was heard comes from the call.
+    room.playback(
+        &sid,
+        "sounding",
+        "interrupted",
+        Some("focus_changed"),
+        Some(7),
+        &Value::Null,
+    )
+    .unwrap();
+    let inner = room.inner.lock().unwrap();
+    let row = inner
+        .journal
+        .find(&format!("{sid}:voice:sounding"))
+        .unwrap();
+    assert_eq!(
+        (row.status.as_str(), row.reason.as_deref(), row.heard_chars),
+        ("interrupted", Some("focus_changed"), Some(7))
+    );
+}
+
+#[test]
+fn a_reply_the_call_cannot_be_told_to_drop_ends_unheard_in_the_room() {
+    // Never sent: the call was away when it was published.
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    room.park(&sid, true);
+    reply(
+        &room,
+        &sid,
+        "t",
+        "unsent",
+        "Published while away.",
+        revision(&room, &sid),
+    );
+    room.park(&sid, false);
+    room.select(&sid, "elsewhere").unwrap();
+    assert!(withdrawn(&mut received).is_empty());
+    assert_eq!(
+        status(&room, &sid, "unsent"),
+        ("interrupted".into(), Some("focus_changed".into()))
+    );
+
+    // Sent, but the call's channel is full when the withdrawal is due.
+    let (_directory, room, _, _) = room_on("t");
+    let (events, mut received) = mpsc::channel(8);
+    let sid = room
+        .join("device".into(), "en".into(), events.clone())
+        .unwrap();
+    room.select(&sid, "t").unwrap();
+    while received.try_recv().is_ok() {}
+    reply(
+        &room,
+        &sid,
+        "t",
+        "sent",
+        "Sent, then stale.",
+        revision(&room, &sid),
+    );
+    while events.try_send(json!({"type":"filler"})).is_ok() {}
+    room.begin_turn(&sid, "next").unwrap();
+    assert_eq!(
+        status(&room, &sid, "sent"),
+        ("interrupted".into(), Some("newer_turn".into()))
     );
 }

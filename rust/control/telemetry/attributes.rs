@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 /// Ids and names are bounded like every other string the room keeps.
 pub(super) const MAX_VALUE: usize = 200;
 
-pub(super) const ALLOWED: [&str; 24] = [
+pub(super) const ALLOWED: [&str; 23] = [
     "sidevoice.session_id",
     "sidevoice.thread_id",
     "sidevoice.turn_revision",
@@ -23,7 +23,6 @@ pub(super) const ALLOWED: [&str; 24] = [
     "sidevoice.turn_end_mode",
     "sidevoice.harness",
     "sidevoice.shared_audio",
-    "sidevoice.synthesis_attempt",
     "sidevoice.stage",
     "sidevoice.duration_ms",
     "sidevoice.audio_output",

@@ -20,7 +20,7 @@ pub enum Event {
     DeliveryAccepted,
     Read,
     ReplyReceived,
-    SynthesisStarted,
+    ReplyDispatched,
     AudioReady,
     AudioDispatched,
     PlayingReceipt,
@@ -52,7 +52,6 @@ pub struct Reply<'a> {
     pub revision: u64,
     pub utterance_id: &'a str,
     pub status: &'a str,
-    pub synthesis_attempt: u32,
     pub input_ms: &'a [Duration<'a>],
     pub provider_ms: &'a [Duration<'a>],
     pub browser_ms: &'a [Duration<'a>],
@@ -149,7 +148,6 @@ fn reply_row(reply: &Reply<'_>, indexed: &MarkIndex<'_>) -> Value {
     json!({
         "utterance_id":reply.utterance_id,"thread_id":reply.thread_id,
         "reply_revision":reply.revision,"status":reply.status,
-        "synthesis_attempt":reply.synthesis_attempt,
         "input_ms":durations(reply.input_ms,&INPUT_STAGES),
         "server_ms":server_ms(reply, indexed),
         "provider_ms":durations(reply.provider_ms,&PROVIDER_STAGES),
@@ -192,14 +190,9 @@ fn server_ms(reply: &Reply<'_>, indexed: &MarkIndex<'_>) -> Map<String, Value> {
             r(Event::ReplyReceived),
         ),
         (
-            "reply_received_to_synthesis_started_ms",
+            "reply_received_to_dispatched_ms",
             r(Event::ReplyReceived),
-            r(Event::SynthesisStarted),
-        ),
-        (
-            "synthesis_started_to_audio_ready_ms",
-            r(Event::SynthesisStarted),
-            r(Event::AudioReady),
+            r(Event::ReplyDispatched),
         ),
         (
             "audio_dispatched_to_playing_receipt_ms",

@@ -196,7 +196,7 @@ fn over_tcp(port: u64, method: &str, path: &str) -> (u16, Value) {
 }
 
 const LOCAL_PATHS: [(&str, &str); 4] = [
-    ("GET", "/api/connectors/link/?EIO=4&transport=polling"),
+    ("GET", "/api/connectors/v3"),
     ("GET", "/api/local/health"),
     ("POST", "/api/device/local/pair"),
     ("DELETE", "/api/device/local"),

@@ -1,5 +1,5 @@
-//! The connector's two links to the core, driven from the connector's side of the wire: Socket.IO v2 and
-//! JSON-RPC v3, both on the local socket only. A conversation registers a binding, a browser focuses it and types,
+//! The connector's link to the core, driven from the connector's side of the wire: JSON-RPC v3, on the local
+//! socket only. A conversation registers a binding, a browser focuses it and types,
 //! the input is delivered and acknowledged, the receipts reach the browser, and the conversation's replies reach
 //! the browser as text with how far each was heard — across a reconnect, a replaced connection and a saturated one.
 
@@ -53,7 +53,7 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
-    let (mut peer, binding) = v2_with_binding(&core, "typed", THREAD).await;
+    let (mut peer, binding) = connector_with_binding(&core, "typed", THREAD).await;
     assert_eq!(core.participant(&token, THREAD).await["thread_id"], THREAD);
     let focus = core.select(&token, &session, THREAD).await;
     let revision = core.revision(&token, &session).await;
@@ -70,7 +70,7 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
     assert_eq!(sent["revision"], revision);
     assert_eq!(browser.receipt("pending").await["history_id"], sent["id"]);
     let delivery = accept_delivery(&mut peer).await;
-    assert_eq!(delivery.data["binding_id"], binding);
+    assert_eq!(delivery["binding_id"], binding);
     assert_eq!(browser.receipt("delivered").await["history_id"], sent["id"]);
     peer.emit(
         "input.read",
@@ -92,8 +92,7 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
             "speech.publish",
             publish("reply", &session, revision, "Reply from the connector"),
         )
-        .await
-        .data;
+        .await;
     assert_eq!(
         (answer["status"].as_str(), answer["text_saved"].as_bool()),
         (Some("queued"), Some(true))
@@ -131,8 +130,7 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
                     &format!("Queued reply {index}"),
                 ),
             )
-            .await
-            .data;
+            .await;
         assert_eq!(answer["status"], "queued");
         assert_eq!(
             browser.frame("voice-reply").await["utterance_id"],
@@ -173,8 +171,7 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
             "speech.publish",
             publish("both", &session, revision, "One reply for both listeners"),
         )
-        .await
-        .data;
+        .await;
     assert_eq!(answer["status"], "queued");
     assert_eq!(browser.frame("voice-reply").await["utterance_id"], "both");
     assert_eq!(second.frame("voice-reply").await["utterance_id"], "both");
@@ -200,7 +197,7 @@ async fn a_slow_host_scan_holds_no_input_and_a_host_refusal_keeps_only_its_key()
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
-    let (mut peer, _) = v2_with_binding(&core, "scan", THREAD).await;
+    let (mut peer, _) = connector_with_binding(&core, "scan", THREAD).await;
     let focus = core.select(&token, &session, THREAD).await;
 
     let scan = tokio::spawn(core.get("/api/host/agents?rescan=1").token(&token).send());
@@ -222,7 +219,7 @@ async fn a_slow_host_scan_holds_no_input_and_a_host_refusal_keeps_only_its_key()
         .await;
     assert_eq!(delivered["history_id"], sent["id"]);
     peer.answer(
-        ask.id.unwrap(),
+        &ask["id"],
         json!({"agents": [], "custom": {}, "scanned_at": null}),
     );
     assert_eq!(scan.await.unwrap().status, 200);
@@ -230,7 +227,7 @@ async fn a_slow_host_scan_holds_no_input_and_a_host_refusal_keeps_only_its_key()
     let listing = tokio::spawn(core.get("/api/host/agents").token(&token).send());
     let ask = peer.event("agents.list").await;
     peer.answer(
-        ask.id.unwrap(),
+        &ask["id"],
         json!({"error": {"key": "host.agent-unavailable", "message": "A message the connector rendered",
             "params": {"agent": "fixture", "raw_output": "private output"}}}),
     );
@@ -250,7 +247,7 @@ async fn a_reconnected_connector_keeps_its_binding_and_a_replaced_one_settles_no
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
-    let (peer, binding) = v2_with_binding(&core, "reconnect", THREAD).await;
+    let (peer, binding) = connector_with_binding(&core, "reconnect", THREAD).await;
     let focus = core.select(&token, &session, THREAD).await;
 
     peer.disconnect();
@@ -267,7 +264,7 @@ async fn a_reconnected_connector_keeps_its_binding_and_a_replaced_one_settles_no
     )
     .await;
     browser.receipt("pending").await;
-    let (mut second, again) = v2_with_binding(&core, "reconnect", THREAD).await;
+    let (mut second, again) = connector_with_binding(&core, "reconnect", THREAD).await;
     assert_eq!(
         again, binding,
         "the conversation keeps its binding across a reconnect"
@@ -287,11 +284,11 @@ async fn a_reconnected_connector_keeps_its_binding_and_a_replaced_one_settles_no
     .await;
     browser.receipt("pending").await;
     let held = second.event("input.deliver").await;
-    let (mut third, again) = v2_with_binding(&core, "reconnect", THREAD).await;
+    let (mut third, again) = connector_with_binding(&core, "reconnect", THREAD).await;
     assert_eq!(again, binding);
     accept_delivery(&mut third).await;
     browser.receipt("delivered").await;
-    second.answer(held.id.unwrap(), json!({"status": "accepted"}));
+    second.answer(&held["id"], json!({"status": "accepted"}));
     tokio::time::sleep(Duration::from_millis(500)).await;
     let history = core.history(&token, THREAD).await;
     let row = history

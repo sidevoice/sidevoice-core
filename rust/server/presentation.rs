@@ -26,6 +26,5 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/api/presentation/text", post(input::text))
         .route("/api/presentation/cancel-input", post(input::cancel_input))
         .route("/api/presentation/client-error", post(input::client_error))
-        .route("/api/presentation/speak", post(input::speak))
         .route("/api/presentation/replay", post(replay::replay))
 }

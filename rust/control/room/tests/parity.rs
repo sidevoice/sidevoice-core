@@ -43,7 +43,6 @@ fn reply(room: &Room, sid: &str, thread: &str, uid: &str, text: &str) -> Value {
     room.publish(
         &json!({"session_id":sid,"thread_id":thread,"revision":revision(room, sid),
             "utterance_id":uid,"text":text}),
-        false,
     )
 }
 

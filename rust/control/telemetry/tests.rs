@@ -47,14 +47,14 @@ fn private_values_and_unlisted_attributes_never_pass() {
 }
 
 #[test]
-fn the_allow_list_is_twenty_four_names() {
-    assert_eq!(super::attributes::ALLOWED.len(), 24);
+fn the_allow_list_is_twenty_three_names() {
+    assert_eq!(super::attributes::ALLOWED.len(), 23);
     let every: serde_json::Map<String, serde_json::Value> = super::attributes::ALLOWED
         .iter()
         .map(|name| ((*name).to_owned(), json!("v")))
         .collect();
     let kept = attributes(&serde_json::Value::Object(every));
-    assert_eq!(kept.as_object().unwrap().len(), 24);
+    assert_eq!(kept.as_object().unwrap().len(), 23);
 }
 
 async fn collector() -> MockServer {
