@@ -53,4 +53,18 @@ fn devices_persist_and_revoke_by_id() {
     assert_eq!(registry.authenticate(&token), None);
 }
 
+#[test]
+fn a_rename_persists_and_an_unknown_device_is_not_renamed() {
+    let (root, mut registry) = registry();
+    let (id, _, _) = registry.pair_local(Some("Desk")).unwrap();
+    assert!(registry.rename(&id, "Studio").unwrap());
+    assert!(!registry.rename("nobody", "Studio").unwrap());
+    let reloaded =
+        DeviceRegistry::load(PrivateDir::open(root.path().join("core")).unwrap()).unwrap();
+    let listing = reloaded.listing(&id);
+    assert_eq!(listing["devices"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["devices"][0]["name"], "Studio");
+    assert_eq!(listing["devices"][0]["kind"], "local");
+}
+
 mod parity;

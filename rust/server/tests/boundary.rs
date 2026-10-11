@@ -363,7 +363,7 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
     let node = Node::new();
     let (_, token) = node.paired().await;
     let basic = format!("Basic {token}");
-    let protected: [(&str, &str, Option<Value>); 7] = [
+    let protected: [(&str, &str, Option<Value>); 8] = [
         ("GET", "/api/presentation/admission", None),
         ("GET", "/api/connectors", None),
         (
@@ -373,6 +373,11 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
         ),
         ("GET", "/api/device/devices", None),
         ("DELETE", "/api/device/devices/nobody", None),
+        (
+            "PATCH",
+            "/api/device/devices/nobody",
+            Some(json!({"name": "Phone"})),
+        ),
         ("GET", "/api/presentation/history", None),
         (
             "POST",
@@ -956,4 +961,98 @@ async fn revoking_a_device_ends_the_call_it_has_open_and_the_list_marks_the_aske
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "revoking is immediate");
+}
+
+#[tokio::test]
+async fn a_paired_device_renames_any_device_and_the_list_keeps_the_name() {
+    let node = Node::new();
+    let (phone, _) = node.paired().await;
+    let (_, laptop_token) = node.paired().await;
+    let authorization = bearer(&laptop_token);
+    let auth = [("authorization", authorization.as_str())];
+    let path = format!("/api/device/devices/{phone}");
+    let (status, _, answer) = send(
+        &node.tcp(),
+        "PATCH",
+        &path,
+        &auth,
+        Some(json!({"name": "  Kitchen \n phone "})),
+    )
+    .await;
+    assert_eq!(
+        (status, answer),
+        (StatusCode::OK, json!({"ok": true, "name": "Kitchen phone"}))
+    );
+    let sixty = "é".repeat(60);
+    let (status, _, _) = send(
+        &node.tcp(),
+        "PATCH",
+        &path,
+        &auth,
+        Some(json!({ "name": sixty })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "sixty characters, not bytes");
+    let (_, _, listing) = send(&node.tcp(), "GET", "/api/device/devices", &auth, None).await;
+    let renamed: Vec<_> = listing["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["id"] == phone.as_str())
+        .map(|row| row["name"].clone())
+        .collect();
+    assert_eq!(renamed, [json!(sixty)]);
+    let saved = node.dir.read_json("devices.json").unwrap().unwrap();
+    assert_eq!(saved["devices"][&phone]["name"], json!(sixty), "persisted");
+
+    for body in [
+        json!({"name": ""}),
+        json!({"name": "   "}),
+        json!({ "name": "é".repeat(61) }),
+        json!({"name": 7}),
+        json!({}),
+        json!("Phone"),
+    ] {
+        let (status, _, answer) =
+            send(&node.tcp(), "PATCH", &path, &auth, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            answer,
+            json!({"detail": "A device name needs 1 to 60 characters."}),
+            "{body}"
+        );
+    }
+    let (status, _, answer) = send(
+        &node.tcp(),
+        "PATCH",
+        "/api/device/devices/nobody",
+        &auth,
+        Some(json!({"name": "Phone"})),
+    )
+    .await;
+    assert_eq!(
+        (status, answer),
+        (
+            StatusCode::NOT_FOUND,
+            json!({"detail": "The paired device was not found."})
+        )
+    );
+    let (status, _, _) = send(
+        &node.tcp(),
+        "PATCH",
+        &path,
+        &[
+            ("authorization", &authorization),
+            ("origin", "https://elsewhere.example"),
+        ],
+        Some(json!({"name": "Phone"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a foreign page renames nothing"
+    );
+    let saved = node.dir.read_json("devices.json").unwrap().unwrap();
+    assert_eq!(saved["devices"][&phone]["name"], json!(sixty));
 }

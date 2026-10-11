@@ -124,6 +124,17 @@ impl DeviceRegistry {
         Ok(true)
     }
 
+    /// Give device `id` a new name, already validated; false if there is no such device.
+    pub fn rename(&mut self, id: &str, name: &str) -> io::Result<bool> {
+        let mut next = self.devices.clone();
+        let Some(row) = next.get_mut(id).and_then(Value::as_object_mut) else {
+            return Ok(false);
+        };
+        row.insert("name".to_owned(), json!(name));
+        self.save(next)?;
+        Ok(true)
+    }
+
     pub fn revoke_local(&mut self) -> io::Result<Vec<String>> {
         let removed = self.local_ids();
         if !removed.is_empty() {

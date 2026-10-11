@@ -1,4 +1,4 @@
-//! Device trust routes: node identity proof, pairing, listing and revocation.
+//! Device trust routes: node identity proof, pairing, listing, renaming and revocation.
 
 use std::sync::Arc;
 
@@ -17,13 +17,18 @@ use super::request::query;
 use super::{AppState, AuthenticatedDevice};
 
 const MAX_FIELD: usize = 200;
+/// The most characters (not bytes) a device's new name may have.
+const MAX_NAME: usize = 60;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/device/identity", get(identity))
         .route("/api/device/pair", post(pair))
         .route("/api/device/devices", get(devices))
-        .route("/api/device/devices/{device_id}", delete(revoke))
+        .route(
+            "/api/device/devices/{device_id}",
+            delete(revoke).patch(rename),
+        )
 }
 
 pub(super) fn local_routes() -> Router<Arc<AppState>> {
@@ -115,6 +120,47 @@ async fn revoke(
             state.close_calls(&id);
             Ok(Json(json!({"ok": true})).into_response())
         }
+        Ok(false) => Err(refuse("device.not_found", StatusCode::NOT_FOUND, &headers)),
+        Err(_) => Err(start_failed(&headers)),
+    }
+}
+
+#[derive(Deserialize)]
+struct Rename {
+    name: String,
+}
+
+/// Renames a paired device, authorised like revoking it. The name is trimmed with its inner
+/// whitespace collapsed, as at pairing, and must then have 1 to 60 characters.
+async fn rename(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    device: Option<Extension<AuthenticatedDevice>>,
+    body: Bytes,
+) -> Handled {
+    require_origin(&headers)?;
+    if device.is_none() {
+        return Err(unpaired(&headers));
+    }
+    let name = serde_json::from_slice::<Rename>(&body)
+        .ok()
+        .map(|payload| {
+            payload
+                .name
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|name| (1..=MAX_NAME).contains(&name.chars().count()))
+        .ok_or_else(|| refuse("device.name_invalid", StatusCode::BAD_REQUEST, &headers))?;
+    let renamed = state
+        .registry
+        .lock()
+        .expect("registry lock")
+        .rename(&id, &name);
+    match renamed {
+        Ok(true) => Ok(Json(json!({"ok": true, "name": name})).into_response()),
         Ok(false) => Err(refuse("device.not_found", StatusCode::NOT_FOUND, &headers)),
         Err(_) => Err(start_failed(&headers)),
     }
