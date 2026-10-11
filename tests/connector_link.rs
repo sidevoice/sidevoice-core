@@ -254,11 +254,34 @@ async fn a_host_agent_check_reaches_the_connector_and_an_unknown_action_does_not
     );
     let ask = peer.event("agents.check").await;
     assert_eq!(ask["params"], json!({"id": "claude"}));
+    let agents = json!([
+        {"id": "claude", "registration": "connected",
+         "health": {"state": "working", "error": null, "checked_at": "2026-10-12T08:14:03.512Z"}},
+        {"id": "codex", "registration": "connected",
+         "health": {"state": "not-starting", "error": "command not found", "checked_at": "2026-10-12T08:14:04.001Z"}},
+    ]);
     peer.answer(
         &ask["id"],
-        json!({"agents": [], "custom": {}, "scanned_at": null}),
+        json!({"agents": agents, "custom": {}, "scanned_at": null}),
     );
-    assert_eq!(check.await.unwrap().status, 200);
+    let checked = check.await.unwrap();
+    assert_eq!(checked.status, 200);
+    assert_eq!(checked.json()["agents"], agents);
+
+    // A connector that does not know the check refuses it by key, which the page receives as such.
+    let older = tokio::spawn(
+        core.post("/api/host/agents/claude/check", json!({}))
+            .token(&token)
+            .send(),
+    );
+    let ask = peer.event("agents.check").await;
+    peer.answer(
+        &ask["id"],
+        json!({"error": {"key": "connector.unknown-method", "message": "unknown method", "params": {}}}),
+    );
+    let refused = older.await.unwrap();
+    assert_eq!(refused.status, 409, "{refused:?}");
+    assert_eq!(refused.json()["error"]["key"], "connector.unknown-method");
 
     let unknown = core
         .post("/api/host/agents/claude/explode", json!({}))
