@@ -338,6 +338,47 @@ async fn a_paired_device_reads_the_sidevoice_version_the_linked_connector_said()
         (status().await.json()["version"].is_null()).then_some(())
     })
     .await;
+
+    // A reconnect that says no usable version reports none, not the one said before.
+    let hello = |version: Option<Value>| {
+        let mut params = json!({"protocol": 3, "connector_id": core.connector_id(),
+            "token": core.connector_token(), "host": "studio", "platform": "Linux x64"});
+        if let Some(version) = version {
+            params["version"] = version;
+        }
+        params
+    };
+    for (case, said) in [
+        ("missing", None),
+        ("null", Some(Value::Null)),
+        ("blank", Some(json!("  "))),
+        ("not a string", Some(json!(8))),
+        ("control characters only", Some(json!("\u{0}\u{1b}"))),
+    ] {
+        for (version, expected) in [(Some(json!("0.8.1")), json!("0.8.1")), (said, Value::Null)] {
+            let mut peer = Rpc::open(&core).await;
+            let welcome = peer.request("connector.hello", hello(version)).await;
+            assert_eq!(welcome["result"]["protocol"], 3, "{case}: {welcome}");
+            assert_eq!(status().await.json()["version"], expected, "{case}");
+            peer.disconnect();
+            eventually(STEP, "the connector to unlink", || async {
+                (status().await.json()["version"].is_null()).then_some(())
+            })
+            .await;
+        }
+    }
+    let mut peer = Rpc::open(&core).await;
+    let welcome = peer
+        .request("connector.hello", hello(Some(json!("\u{7}0.9.0\n"))))
+        .await;
+    assert_eq!(welcome["result"]["protocol"], 3, "{welcome}");
+    assert_eq!(
+        status().await.json()["version"],
+        "0.9.0",
+        "control characters are dropped"
+    );
+    peer.disconnect();
+
     assert_eq!(
         core.get("/api/host/status").send().await.status,
         401,

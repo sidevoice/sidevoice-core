@@ -88,15 +88,23 @@ impl Credentials {
         };
         entry.insert("last_seen".into(), json!(seconds()));
         for (key, limit) in [("host", 200), ("platform", 60), ("version", 40)] {
-            if let Some(s) = identity
+            let said = identity
                 .get(key)
                 .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-            {
-                entry.insert(
-                    key.into(),
-                    json!(s.trim().chars().take(limit).collect::<String>()),
-                );
+                .map(|s| {
+                    let visible: String = s.chars().filter(|c| !c.is_control()).collect();
+                    visible.trim().chars().take(limit).collect::<String>()
+                })
+                .filter(|s| !s.is_empty());
+            match said {
+                Some(s) => {
+                    entry.insert(key.into(), json!(s));
+                }
+                // The version is what the connector says now: one it no longer says is not kept.
+                None if key == "version" => {
+                    entry.remove(key);
+                }
+                None => {}
             }
         }
         if let Some(names) = identity.get("harnesses").and_then(Value::as_array) {
