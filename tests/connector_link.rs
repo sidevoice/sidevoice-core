@@ -241,6 +241,34 @@ async fn a_slow_host_scan_holds_no_input_and_a_host_refusal_keeps_only_its_key()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_host_agent_check_reaches_the_connector_and_an_unknown_action_does_not() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let (mut peer, _) = connector_with_binding(&core, "check", THREAD).await;
+
+    let check = tokio::spawn(
+        core.post("/api/host/agents/claude/check", json!({}))
+            .token(&token)
+            .send(),
+    );
+    let ask = peer.event("agents.check").await;
+    assert_eq!(ask["params"], json!({"id": "claude"}));
+    peer.answer(
+        &ask["id"],
+        json!({"agents": [], "custom": {}, "scanned_at": null}),
+    );
+    assert_eq!(check.await.unwrap().status, 200);
+
+    let unknown = core
+        .post("/api/host/agents/claude/explode", json!({}))
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(unknown.status, 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_reconnected_connector_keeps_its_binding_and_a_replaced_one_settles_nothing() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
