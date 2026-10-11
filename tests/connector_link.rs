@@ -305,6 +305,47 @@ async fn a_reconnected_connector_keeps_its_binding_and_a_replaced_one_settles_no
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_paired_device_reads_the_sidevoice_version_the_linked_connector_said() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let status = || async { core.get("/api/host/status").token(&token).send().await };
+    let core_version = env!("CARGO_PKG_VERSION");
+    let unknown = status().await;
+    assert_eq!(unknown.status, 200, "{unknown:?}");
+    assert_eq!(
+        unknown.json(),
+        json!({"version": null, "core_version": core_version}),
+        "no connector linked: unknown, not guessed"
+    );
+
+    let mut peer = Rpc::open(&core).await;
+    let welcome = peer
+        .request(
+            "connector.hello",
+            json!({"protocol": 3, "connector_id": core.connector_id(), "token": core.connector_token(),
+                "host": "studio", "platform": "Linux x64", "version": " 0.8.1 "}),
+        )
+        .await;
+    assert_eq!(welcome["result"]["protocol"], 3, "{welcome}");
+    assert_eq!(
+        status().await.json(),
+        json!({"version": "0.8.1", "core_version": core_version})
+    );
+
+    peer.disconnect();
+    eventually(STEP, "the version to be unknown again", || async {
+        (status().await.json()["version"].is_null()).then_some(())
+    })
+    .await;
+    assert_eq!(
+        core.get("/api/host/status").send().await.status,
+        401,
+        "only a paired device reads it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_v3_connector_speaks_json_rpc_on_the_local_socket_only() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
