@@ -116,6 +116,11 @@ impl DeviceRegistry {
         json!({"devices": rows})
     }
 
+    /// Whether device `id` is still paired.
+    pub fn contains(&self, id: &str) -> bool {
+        self.devices.contains_key(id)
+    }
+
     pub fn revoke(&mut self, id: &str) -> io::Result<bool> {
         if !self.devices.contains_key(id) {
             return Ok(false);

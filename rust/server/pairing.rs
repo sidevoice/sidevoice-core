@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{body::Bytes, Json, Router};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::control::devices::valid_nonce;
 
@@ -125,13 +125,8 @@ async fn revoke(
     }
 }
 
-#[derive(Deserialize)]
-struct Rename {
-    name: String,
-}
-
-/// Renames a paired device, authorised like revoking it. The name is trimmed with its inner
-/// whitespace collapsed, as at pairing, and must then have 1 to 60 characters.
+/// Renames a paired device, authorised like revoking it. The body must be a JSON object whose
+/// `name` is a valid [`new_name`].
 async fn rename(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -140,30 +135,49 @@ async fn rename(
     body: Bytes,
 ) -> Handled {
     require_origin(&headers)?;
-    if device.is_none() {
+    let Some(Extension(AuthenticatedDevice(caller))) = device else {
         return Err(unpaired(&headers));
-    }
-    let name = serde_json::from_slice::<Rename>(&body)
+    };
+    let name = serde_json::from_slice::<Value>(&body)
         .ok()
-        .map(|payload| {
-            payload
-                .name
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .filter(|name| (1..=MAX_NAME).contains(&name.chars().count()))
+        .and_then(|payload| new_name(payload.as_object()?.get("name")?.as_str()?))
         .ok_or_else(|| refuse("device.name_invalid", StatusCode::BAD_REQUEST, &headers))?;
-    let renamed = state
-        .registry
-        .lock()
-        .expect("registry lock")
-        .rename(&id, &name);
+    let renamed = {
+        let mut registry = state.registry.lock().expect("registry lock");
+        // The caller was authenticated before its body arrived, and may have been revoked since.
+        if !registry.contains(&caller) {
+            return Err(unpaired(&headers));
+        }
+        registry.rename(&id, &name)
+    };
     match renamed {
         Ok(true) => Ok(Json(json!({"ok": true, "name": name})).into_response()),
         Ok(false) => Err(refuse("device.not_found", StatusCode::NOT_FOUND, &headers)),
         Err(_) => Err(start_failed(&headers)),
     }
+}
+
+/// `text` as a device's new name: trimmed with its inner whitespace collapsed, as at pairing;
+/// then 1 to 60 characters, none of them a control or a bidirectional embedding, override or
+/// isolate, and at least one visible. `None` if it is not one.
+fn new_name(text: &str) -> Option<String> {
+    let name = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let allowed = (1..=MAX_NAME).contains(&name.chars().count())
+        && !name.chars().any(|c| {
+            c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        })
+        && name.chars().any(|c| !c.is_whitespace() && !invisible(c));
+    allowed.then_some(name)
+}
+
+/// Whether `c` draws nothing: a zero-width, joiner, filler or other format character. Allowed
+/// inside a name, as joiners are in many scripts and emoji, but not as all of it.
+fn invisible(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}'
+        | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}' | '\u{2800}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}'
+        | '\u{FFA0}' | '\u{FFF9}'..='\u{FFFB}' | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E0FFF}')
 }
 
 #[derive(Deserialize, Default)]

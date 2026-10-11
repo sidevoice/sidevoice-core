@@ -8,7 +8,7 @@
   "device.secret_invalid": "The pairing secret is invalid.",
   "device.nonce_invalid": "The identity challenge is invalid.",
   "device.not_found": "The paired device was not found.",
-  "device.name_invalid": "A device name needs 1 to 60 characters.",
+  "device.name_invalid": "A device name needs 1 to 60 characters, at least one of them visible, and no control characters.",
   "request.origin_invalid": "The request origin is not allowed.",
   "request.host_invalid": "The request host is not allowed.",
   "request.not_found": "The requested resource was not found.",
