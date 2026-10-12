@@ -29,6 +29,7 @@ fn t1_runtime_keys_are_present_and_render_without_parameters() {
         "device.secret_invalid",
         "device.nonce_invalid",
         "device.not_found",
+        "device.name_invalid",
         "request.origin_invalid",
         "request.host_invalid",
         "request.not_found",

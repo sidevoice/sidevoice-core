@@ -116,11 +116,27 @@ impl DeviceRegistry {
         json!({"devices": rows})
     }
 
+    /// Whether device `id` is still paired.
+    pub fn contains(&self, id: &str) -> bool {
+        self.devices.contains_key(id)
+    }
+
     pub fn revoke(&mut self, id: &str) -> io::Result<bool> {
         if !self.devices.contains_key(id) {
             return Ok(false);
         }
         self.save(self.without(&[id.to_owned()]))?;
+        Ok(true)
+    }
+
+    /// Give device `id` a new name, already validated; false if there is no such device.
+    pub fn rename(&mut self, id: &str, name: &str) -> io::Result<bool> {
+        let mut next = self.devices.clone();
+        let Some(row) = next.get_mut(id).and_then(Value::as_object_mut) else {
+            return Ok(false);
+        };
+        row.insert("name".to_owned(), json!(name));
+        self.save(next)?;
         Ok(true)
     }
 
