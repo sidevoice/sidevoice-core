@@ -1,5 +1,5 @@
-//! Device routes about the pinned connector: its listing, and the host agents it
-//! manages, proxied to it as requests.
+//! Device routes about the pinned connector: its listing, the Sidevoice version it reports,
+//! and the host agents it manages, proxied to it as requests.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::refusal::{refuse, require_origin, Handled, Refusal};
 use super::request::query;
@@ -25,6 +25,7 @@ const AGENT_ACTIONS: [&str; 3] = ["connect", "disconnect", "dismiss"];
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/connectors", get(connector_listing))
+        .route("/api/host/status", get(host_status))
         .route("/api/host/agents", get(host_agents))
         .route(
             "/api/host/agents/{agent_id}/{action}",
@@ -38,6 +39,22 @@ async fn connector_listing(State(state): State<Arc<AppState>>, headers: HeaderMa
         json!({"connectors":state.room.paired_connectors(),"bindings":state.room.binding_views()}),
     )
     .into_response())
+}
+
+/// The Sidevoice installed on this machine: the version its connector said at its last handshake,
+/// `null` while no connector is linked or it said none; and this core's own version.
+async fn host_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Handled {
+    require_page_origin(&headers)?;
+    let identity = state.room.latest_connector_identity();
+    let version = identity
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|version| !version.is_empty());
+    Ok(
+        Json(json!({"version": version, "core_version": env!("CARGO_PKG_VERSION")}))
+            .into_response(),
+    )
 }
 
 async fn host_agents(State(state): State<Arc<AppState>>, headers: HeaderMap, uri: Uri) -> Handled {

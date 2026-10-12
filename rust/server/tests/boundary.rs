@@ -363,7 +363,7 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
     let node = Node::new();
     let (_, token) = node.paired().await;
     let basic = format!("Basic {token}");
-    let protected: [(&str, &str, Option<Value>); 7] = [
+    let protected: [(&str, &str, Option<Value>); 8] = [
         ("GET", "/api/presentation/admission", None),
         ("GET", "/api/connectors", None),
         (
@@ -373,6 +373,7 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
         ),
         ("GET", "/api/device/devices", None),
         ("DELETE", "/api/device/devices/nobody", None),
+        ("GET", "/api/host/status", None),
         ("GET", "/api/presentation/history", None),
         (
             "POST",

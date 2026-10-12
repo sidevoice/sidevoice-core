@@ -107,6 +107,13 @@ async fn foreign_origins_are_refused_by_host_agents() {
         .unwrap();
     assert_eq!(agents.status(), StatusCode::FORBIDDEN);
     assert_eq!(body_json(agents).await, json!({"key":"origin-not-allowed"}));
+    let status = app
+        .clone()
+        .oneshot(request("GET", "/api/host/status", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(status).await, json!({"key":"origin-not-allowed"}));
     let action = app
         .oneshot(request(
             "POST",
