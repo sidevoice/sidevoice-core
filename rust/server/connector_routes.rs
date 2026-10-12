@@ -20,7 +20,7 @@ use crate::control::room::{ConnectorPeer, PeerError};
 mod answer;
 
 const AGENT_TIMEOUT: Duration = Duration::from_secs(20);
-const AGENT_ACTIONS: [&str; 3] = ["connect", "disconnect", "dismiss"];
+const AGENT_ACTIONS: [&str; 4] = ["connect", "disconnect", "dismiss", "check"];
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
