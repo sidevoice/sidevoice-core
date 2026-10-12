@@ -378,6 +378,7 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
             "/api/device/devices/nobody",
             Some(json!({"name": "Phone"})),
         ),
+        ("GET", "/api/host/status", None),
         ("GET", "/api/presentation/history", None),
         (
             "POST",
