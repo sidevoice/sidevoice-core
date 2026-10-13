@@ -85,16 +85,26 @@ pub(super) async fn admit(
     })
 }
 
-/// The interface language a hello asks for: `en` or `es`. Without one, the machine's; one the core does not
-/// offer is refused with its key, and the call goes on in the machine's.
+/// The interface language a hello asks for: `en` or `es`. Without one, or with one the core does not offer, the
+/// machine's; one that is not text is refused with its key, and the call goes on in the machine's.
 pub(super) fn hello_language(asked: Option<&Value>) -> (String, Option<&'static str>) {
-    let fallback = ui_locale(&crate::runtime::system_language()).to_owned();
+    let fallback = || ui_locale(&crate::runtime::system_language()).to_owned();
+    match offered_language(asked) {
+        Ok(Some(language)) => (language, None),
+        Ok(None) => (fallback(), None),
+        Err(key) => (fallback(), Some(key)),
+    }
+}
+
+/// The offered interface language `asked` names; none when it names no language or one the core does not offer
+/// (a newer page may know more), and the refusal key when it is not text.
+pub(super) fn offered_language(asked: Option<&Value>) -> Result<Option<String>, &'static str> {
     match asked {
-        None | Some(Value::Null) => (fallback, None),
-        Some(Value::String(language)) if matches!(language.as_str(), "en" | "es") => {
-            (language.clone(), None)
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(language)) => {
+            Ok(matches!(language.as_str(), "en" | "es").then(|| language.clone()))
         }
-        Some(_) => (fallback, Some("settings.ui_language_invalid")),
+        Some(_) => Err("settings.ui_language_invalid"),
     }
 }
 

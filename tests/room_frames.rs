@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use support::*;
+use tokio_tungstenite::tungstenite::Message;
 
 const THREAD: &str = "frames-thread";
 
@@ -256,8 +257,8 @@ async fn a_client_message_without_an_id_is_refused_in_the_call_s_language() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
-    let mut browser = core.join(&token, json!({"ui_language": "fr"})).await;
-    // A language the core does not offer: refused with its key, and the call goes on.
+    let mut browser = core.join(&token, json!({"ui_language": 42})).await;
+    // A language that is not text: refused with its key, and the call goes on.
     assert_eq!(
         browser.frame("error").await["key"],
         "settings.ui_language_invalid"
@@ -293,6 +294,7 @@ async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part
     let token = core.pair_local("Browser").await;
     let (mut peer, binding) = connector_with_binding(&core, "unknown", THREAD).await;
     let mut browser = core.join(&token, Value::Null).await;
+    browser.no_errors = true;
     let session = browser.session.clone();
     core.select(&token, &session, THREAD).await;
 
@@ -342,13 +344,57 @@ async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part
     browser.close().await;
 }
 
-/// Every message a page sends, with fields this core does not know at the top level and nested, and a frame type it
-/// does not know: all are taken as their known part says.
+/// An interface language this core does not offer (a newer page may offer more) is no error: a hello goes on in the
+/// machine's language, and a settings change keeps the call's current one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interface_language_the_core_does_not_offer_falls_back_without_an_error() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut browser = core.join(&token, json!({"ui_language": "fr"})).await;
+    browser.no_errors = true;
+    browser
+        .none_of(&["error"], Duration::from_millis(300))
+        .await;
+    for language in ["es", "fr"] {
+        browser
+            .send(
+                "voice-settings",
+                json!({"session_id": browser.session, "ui_language": language}),
+            )
+            .await;
+    }
+    browser
+        .none_of(&["error"], Duration::from_millis(300))
+        .await;
+    // Still Spanish: a refusal comes in the language the call kept.
+    browser.no_errors = false;
+    browser
+        .send(
+            "voice-user-turn",
+            json!({"session_id": browser.session, "phase": "started"}),
+        )
+        .await;
+    let refusal = browser.frame("error").await;
+    assert_eq!(refusal["key"], "room.request_invalid");
+    assert_eq!(refusal["message"], "La solicitud a la sala no es válida.");
+    browser.close().await;
+}
+
+/// Every message a page sends, with fields this core does not know at the top level, nested, next to the frame's
+/// `type` and `data`, and in query strings, and a frame type it does not know: all are taken as their known part says,
+/// and no error frame is sent at any step.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
-    let token = core.pair_local("Browser").await;
+    let paired = core
+        .local("POST", "/api/device/local/pair")
+        .json(json!({"name": "Browser", "added_later": {"nested": true}}))
+        .send()
+        .await;
+    assert_eq!(paired.status, 200, "{paired:?}");
+    let token = paired.json()["token"].as_str().unwrap().to_owned();
     let (mut peer, binding) = connector_with_binding(&core, "sweep", THREAD).await;
     let extra = json!({"added_later": {"nested": [1, {"deeper": true}]}});
     let mut browser = core
@@ -357,6 +403,7 @@ async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
             json!({"ui_language": "en", "future": extra, "telemetry": {"future": extra}}),
         )
         .await;
+    browser.no_errors = true;
     let session = browser.session.clone();
     browser
         .send(
@@ -397,11 +444,14 @@ async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
     assert_eq!(typed.status, 200, "{typed:?}");
     assert_eq!(accept_delivery(&mut peer).await["text"], "Typed");
 
+    // An extra key next to `type` and `data`.
+    browser.send_raw(Message::text(
+        json!({"type": "voice-user-turn", "added_later": extra, "data": {"session_id": session,
+            "client_msg_id": "envelope", "phase": "started", "turn_id": "spoken", "future": extra}})
+        .to_string(),
+    ));
     browser
-        .report(
-            "voice-user-turn",
-            json!({"phase": "started", "turn_id": "spoken", "future": extra}),
-        )
+        .wait("voice-ack", STEP, |ack| ack["client_msg_id"] == "envelope")
         .await;
     browser.turn("started", STEP).await;
     browser
@@ -432,14 +482,75 @@ async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
         .token(&token)
         .send()
         .await;
-    assert_eq!(reported.status, 200, "{reported:?}");
+    assert_eq!(reported.json()["status"], "recorded", "{reported:?}");
+
+    // Query parameters the core does not read.
+    let snapshot = core
+        .get(&format!(
+            "/api/presentation?session_id={session}&added_later=1"
+        ))
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(snapshot.json()["room"]["revision"], revision);
+    let history = core
+        .get(&format!(
+            "/api/presentation/history?thread_id={THREAD}&added_later=1"
+        ))
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(
+        row(
+            history.json()["messages"].as_array().unwrap(),
+            &format!("{session}:voice:reply")
+        )["status"],
+        "playback_finished"
+    );
+    let participants = core
+        .get("/api/presentation/participants?added_later=1")
+        .token(&token)
+        .send()
+        .await;
+    assert!(
+        participants.json()["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["thread_id"] == THREAD),
+        "{participants:?}"
+    );
+    let latency = core
+        .get(&format!(
+            "/api/presentation/latency?session_id={session}&added_later=1"
+        ))
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(latency.status, 200, "{latency:?}");
     browser
         .none_of(&["error"], Duration::from_millis(300))
         .await;
-    let history = core.history(&token, THREAD).await;
+
+    // A resume with fields the core does not know lands on the same call.
+    let resume = browser.welcome["resume"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let last_seq = browser.last_seq;
+    browser.drop_link().await;
+    let mut back = Browser::new(core.open_call(&token).await);
+    back.send(
+        "voice-hello",
+        json!({"added_later": extra, "resume": {"session_id": session, "token": resume,
+            "last_seq": last_seq, "added_later": extra}}),
+    )
+    .await;
+    let welcome = back.frame("voice-session").await;
     assert_eq!(
-        row(&history, &format!("{session}:voice:reply"))["status"],
-        "playback_finished"
+        (&welcome["session_id"], &welcome["resumed"]),
+        (&json!(session), &json!(true)),
+        "{welcome}"
     );
-    browser.close().await;
+    back.close().await;
 }

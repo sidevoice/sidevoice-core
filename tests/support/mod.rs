@@ -637,6 +637,8 @@ pub struct Browser {
     pub close_code: Option<u16>,
     /// The highest `seq` among the frames read so far.
     pub last_seq: u64,
+    /// Fail on an `error` frame met while waiting for any other kind, instead of passing over it.
+    pub no_errors: bool,
 }
 
 impl Browser {
@@ -649,6 +651,7 @@ impl Browser {
             welcome: Value::Null,
             close_code: None,
             last_seq: 0,
+            no_errors: false,
         }
     }
 
@@ -766,6 +769,11 @@ impl Browser {
             if event["type"] == kind && accept(&event["data"]) {
                 return event["data"].clone();
             }
+            assert!(
+                !(self.no_errors && event["type"] == "error"),
+                "an error while waiting for {kind}: {}",
+                summary(&event)
+            );
             seen.push(summary(&event));
         }
     }

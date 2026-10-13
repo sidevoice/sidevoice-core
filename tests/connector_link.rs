@@ -706,9 +706,9 @@ async fn a_reply_in_a_language_the_core_does_not_know_is_still_sent() {
     );
 }
 
-/// Every message a connector sends, with fields this core does not know at the top level and nested: the hello, a
-/// registration, its reports, a delivery answer, a reply, a pull and an answer about host agents. All are taken as
-/// their known part says.
+/// Every message a connector sends, with fields this core does not know at the top level, nested and next to `jsonrpc`
+/// and `method`: the hello, a registration, its reports, a delivery answer, a reply, a pull, answers about host agents
+/// and a room pairing, and an unregistration. All are taken as their known part says.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
     let root = tempfile::tempdir().unwrap();
@@ -733,15 +733,30 @@ async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
         .to_owned();
     let focus = core.select(&token, &session, THREAD).await;
 
-    peer.emit(
-        "input.working",
-        json!({"binding_id": binding, "working": true, "added_later": extra}),
+    // An extra key next to `jsonrpc` and `method`.
+    peer.send(
+        json!({"jsonrpc": "2.0", "method": "input.working", "added_later": extra,
+        "params": {"binding_id": binding, "working": true, "added_later": extra}}),
     );
     assert_eq!(browser.frame("voice-conversation").await["working"], true);
     peer.emit(
         "input.engine",
         json!({"binding_id": binding, "engine": {"model": "m2", "added_later": extra}, "added_later": extra}),
     );
+    eventually(STEP, "the binding to show the engine it changed to", || {
+        let listing = core.get("/api/connectors").token(&token).send();
+        let binding = binding.clone();
+        async move {
+            let listing = listing.await.json();
+            let view = listing["bindings"]
+                .as_array()?
+                .iter()
+                .find(|view| view["id"] == binding.as_str())?
+                .clone();
+            (view["engine"] == json!({"model": "m2"})).then_some(())
+        }
+    })
+    .await;
 
     let message = message_id();
     let sent = core
@@ -785,8 +800,14 @@ async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
         .await;
     assert_eq!(checked["count"], 0, "{checked}");
 
-    let listing = tokio::spawn(core.get("/api/host/agents").token(&token).send());
+    // A query parameter the core does not read, and an answer with keys it does not read.
+    let listing = tokio::spawn(
+        core.get("/api/host/agents?added_later=1")
+            .token(&token)
+            .send(),
+    );
     let ask = peer.event("agents.list").await;
+    assert_eq!(ask["params"], json!({"rescan": false}));
     let agents = json!([{"id": "claude", "registration": "connected", "added_later": extra}]);
     peer.answer(
         &ask["id"],
@@ -795,4 +816,52 @@ async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
     let listed = listing.await.unwrap();
     assert_eq!(listed.status, 200, "{listed:?}");
     assert_eq!(listed.json()["agents"], agents);
+
+    // Pairing with a room: the page's body and the connector's answer, both with keys the core does not read.
+    let pairing = tokio::spawn(
+        core.post(
+            "/api/rendezvous/pair",
+            json!({"room": "https://room.example", "code": "ABCD", "added_later": extra}),
+        )
+        .origin("tauri://localhost")
+        .token(&token)
+        .send(),
+    );
+    let ask = peer.event("pair.request").await;
+    assert_eq!(
+        ask["params"],
+        json!({"room": "https://room.example", "code": "ABCD"})
+    );
+    peer.answer(
+        &ask["id"],
+        json!({"ok": true, "origin": "https://room.example", "connector_id": "c-1", "added_later": extra}),
+    );
+    let paired = pairing.await.unwrap();
+    assert_eq!(paired.status, 200, "{paired:?}");
+    assert_eq!(
+        paired.json(),
+        json!({"ok": true, "room": "https://room.example", "connector_id": "c-1"})
+    );
+
+    peer.emit(
+        "binding.unregister",
+        json!({"binding_id": binding, "added_later": extra}),
+    );
+    eventually(
+        STEP,
+        "the unregistered binding to leave the listing",
+        || {
+            let listing = core.get("/api/connectors").token(&token).send();
+            let binding = binding.clone();
+            async move {
+                let listing = listing.await.json();
+                (!listing["bindings"]
+                    .as_array()?
+                    .iter()
+                    .any(|view| view["id"] == binding.as_str()))
+                .then_some(())
+            }
+        },
+    )
+    .await;
 }
