@@ -41,7 +41,7 @@
   "room.turns_full": "Trop de tours sont encore en cours de transcription. Attendez qu’un se termine.",
   "room.input_backlog_full": "Trop de messages attendent d’atteindre leurs conversations. Réessayez dans un instant.",
   "room.request_invalid": "Requête non valide.",
-  "room.stale_utterance": "Énoncé obsolète.",
+  "room.stale_utterance": "Prise de parole obsolète.",
   "room.input_ended": "Le message est déjà terminé ; il ne peut pas être annulé.",
   "room.replay_invalid": "Choisissez une réponse à réécouter.",
   "room.replay_missing": "Cette réponse n’est plus disponible.",
