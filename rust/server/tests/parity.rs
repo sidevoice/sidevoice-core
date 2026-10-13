@@ -81,7 +81,7 @@ async fn a_refused_pairing_keeps_the_connectors_reason() {
     assert_eq!(generic.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         body_json(generic).await,
-        json!({"detail":"The room pairing failed."})
+        json!({"detail":"Pairing failed."})
     );
 }
 
