@@ -54,7 +54,7 @@ Rust 1.98 and a C compiler:
 
 ```sh
 cargo test --locked --all-features
-cargo run --locked --release        # listens on 127.0.0.1:8768
+cargo run --locked --release        # listens on 127.0.0.1:10829
 ```
 
 `--help` lists its options. The connector starts it as `sidevoice-core-rust --data-dir D --port P`; `D/core.json`
@@ -73,7 +73,7 @@ Its data — paired devices, the machine's identity key, the conversation journa
 | `SIDEVOICE_PUBLIC_URLS` | Comma-separated addresses where devices can reach this machine directly; they go into pairing codes. Each must be `https://` (see Security). |
 | `SIDEVOICE_TRUSTED_CLUSTER_HOSTS` | Hosts that may receive credentials over plain HTTP. Empty by default (see Security). |
 | `SIDEVOICE_ALLOWED_HOSTS`, `SIDEVOICE_ALLOWED_ORIGINS` | Host names and page origins to answer besides loopback, for a machine you made reachable. |
-| `SIDEVOICE_CORE_HOST`, `SIDEVOICE_CORE_PORT` | Where to listen (default `127.0.0.1:8768`). |
+| `SIDEVOICE_CORE_HOST`, `SIDEVOICE_CORE_PORT` | Where to listen (default `127.0.0.1:10829`). |
 
 ## Security
 

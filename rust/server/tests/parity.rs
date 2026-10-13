@@ -93,7 +93,7 @@ async fn foreign_origins_are_refused_by_host_agents() {
         Request::builder()
             .method(method)
             .uri(uri)
-            .header("host", "localhost:8768")
+            .header("host", "localhost:10829")
             .header("origin", "https://elsewhere.example")
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/json")
