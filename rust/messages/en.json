@@ -28,7 +28,6 @@
   "room.thread_invalid": "Invalid conversation identifier.",
   "room.connector_disconnected": "The connector is not connected.",
   "room.binding_foreign": "Unknown or foreign binding.",
-  "room.input_mode_invalid": "Unknown input mode for this conversation.",
   "room.pull_binding_invalid": "This conversation is not connected for pulled voice input.",
   "room.pull_binding_superseded": "Another connection now receives this conversation's voice input.",
   "room.pull_operation_invalid": "Unknown voice input operation.",

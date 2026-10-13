@@ -24,12 +24,14 @@ impl Room {
             || uid.is_empty()
             || uid.len() > 200
             || !valid_thread(thread)
-            || p.get("language")
-                .and_then(Value::as_str)
-                .is_some_and(|language| !SPEECH_LANGUAGES.contains(&language))
         {
             return rejected();
         }
+        // A language the room does not know is left out: the reply is kept and spoken as one that names none.
+        let language = p
+            .get("language")
+            .and_then(Value::as_str)
+            .filter(|language| SPEECH_LANGUAGES.contains(language));
         let mut guard = self.inner.lock().expect("room lock");
         let inner = &mut *guard;
         if let Some(row) = inner
@@ -81,7 +83,7 @@ impl Room {
             time: millis(),
             status: status.into(),
             reason: reason.map(str::to_owned),
-            language: p.get("language").and_then(Value::as_str).map(str::to_owned),
+            language: language.map(str::to_owned),
             queued_at: seconds(),
             ..Row::default()
         });

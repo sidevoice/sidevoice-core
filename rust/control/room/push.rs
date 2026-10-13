@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::latency::{latency_now_micros, LatencyEvent};
 use super::peers::{ConnectorPeer, PeerError};
-use super::util::{field, seconds};
+use super::util::seconds;
 use super::{Inner, Room};
 use crate::control::telemetry::Counted;
 
@@ -14,38 +14,26 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(60);
 const RETRY_SECONDS: [u64; 4] = [2, 5, 15, 60];
 /// Attempts after which a note is given up.
 const NOTE_ATTEMPTS: usize = 5;
+/// The longest `detail` of a delivery answer the room keeps, in bytes.
+const MAX_DETAIL: usize = 1000;
 
 fn retry_after(attempts: usize) -> u64 {
     RETRY_SECONDS[attempts.clamp(1, RETRY_SECONDS.len()) - 1]
 }
 
-fn valid_delivery_ack(value: &Value) -> Option<&str> {
-    let fields = value.as_object()?;
-    if serde_json::to_vec(value).ok()?.len() > 4096
-        || fields
-            .keys()
-            .any(|k| !["status", "detail", "error"].contains(&k.as_str()))
-    {
-        return None;
-    }
-    for key in ["detail", "error"] {
-        if fields
-            .get(key)
-            .is_some_and(|v| v.as_str().is_none_or(|s| s.len() > 1000))
-        {
-            return None;
-        }
-    }
-    let status = field(value, "status");
-    [
-        "accepted",
-        "unknown",
-        "unsupported",
-        "failed",
-        "unknown_binding",
-    ]
-    .contains(&status)
-    .then_some(status)
+/// The status a connector answered a delivery with. Every other key of the answer is ignored; a status the
+/// room does not know (or none) is tried again later, as `failed` is.
+fn delivery_status(value: &Value) -> Option<&str> {
+    value.get("status").and_then(Value::as_str)
+}
+
+/// The `detail` of a delivery answer, when it is text of at most [`MAX_DETAIL`] bytes; otherwise none.
+fn delivery_detail(value: &Value) -> Option<String> {
+    value
+        .get("detail")
+        .and_then(Value::as_str)
+        .filter(|detail| detail.len() <= MAX_DETAIL)
+        .map(str::to_owned)
 }
 
 impl Room {
@@ -108,7 +96,7 @@ impl Room {
         }
         let harness = b.harness.clone();
         inner.inflight.finish(bid);
-        let status = answer.as_ref().ok().and_then(valid_delivery_ack);
+        let status = answer.as_ref().ok().and_then(delivery_status);
         if let Some(thread) = inner.unheard.note_thread(rid) {
             settle_note(inner, &thread, status);
             return;
@@ -127,12 +115,7 @@ impl Room {
         };
         row.status = new_status.into();
         row.reason = match status {
-            Some("unknown") => answer
-                .as_ref()
-                .ok()
-                .and_then(|v| v.get("detail"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            Some("unknown") => answer.as_ref().ok().and_then(delivery_detail),
             Some("unsupported") => Some("unsupported".into()),
             _ => None,
         };

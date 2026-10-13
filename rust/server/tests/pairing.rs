@@ -55,3 +55,27 @@ async fn one_time_code_redeems_over_real_router() {
         1
     );
 }
+
+/// The protocol only grows (#112): a pairing body with fields this core does not know still redeems its code.
+#[tokio::test]
+async fn a_pairing_body_with_fields_the_core_does_not_know_still_redeems() {
+    let (_temp, dir) = private_dir();
+    let room = Arc::new(Room::load(dir.clone()).unwrap());
+    let state = app_state(&dir, room, "fixture-host");
+    let code = state.issue_code();
+    let secret = code["payload"]["secret"].as_str().unwrap();
+    let body =
+        json!({"secret": secret, "name": "Test device", "added_later": {"nested": [1, true]}});
+    let pair = Request::builder()
+        .method("POST")
+        .uri("/api/device/pair")
+        .header("host", "localhost")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let answer = router(state, false).oneshot(pair).await.unwrap();
+    assert_eq!(answer.status(), StatusCode::OK);
+    let answer: Value =
+        serde_json::from_slice(&to_bytes(answer.into_body(), 4096).await.unwrap()).unwrap();
+    assert!(answer["token"].is_string(), "{answer}");
+}

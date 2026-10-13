@@ -593,3 +593,275 @@ async fn a_saturated_v3_link_recovers_and_a_malformed_id_ends_it_without_losing_
     rpc.answer(&delivery["id"], json!({"status": "accepted"}));
     assert_eq!(browser.receipt("delivered").await["history_id"], sent["id"]);
 }
+
+/// The protocol only grows (#112): a delivery answer from a newer connector may carry keys this core does not read
+/// (sidevoice-connector#115 added `reason`), or a status it does not know. The first still settles the delivery; the
+/// second is tried again, as a failed one is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delivery_answer_with_keys_the_core_does_not_read_still_settles_it() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    let (mut peer, _) = connector_with_binding(&core, "answers", THREAD).await;
+    let focus = core.select(&token, &session, THREAD).await;
+
+    let sent = core
+        .text(&token, (&session, THREAD, &focus), "First", &message_id())
+        .await;
+    let delivery = peer.event("input.deliver").await;
+    peer.answer(
+        &delivery["id"],
+        json!({"status": "accepted", "reason": "queued_in_harness", "error": {"nested": true},
+            "added_later": {"nested": {"deeper": [1, 2]}}}),
+    );
+    assert_eq!(browser.receipt("delivered").await["history_id"], sent["id"]);
+
+    let sent = core
+        .text(&token, (&session, THREAD, &focus), "Second", &message_id())
+        .await;
+    let delivery = peer.event("input.deliver").await;
+    peer.answer(&delivery["id"], json!({"status": "deferred_by_harness"}));
+    let again = peer.event("input.deliver").await;
+    assert_eq!(again["params"]["event_id"], delivery["params"]["event_id"]);
+    peer.answer(&again["id"], json!({"status": "accepted"}));
+    assert_eq!(browser.receipt("delivered").await["history_id"], sent["id"]);
+}
+
+/// A registration from a newer connector, with an input mode, capabilities, a route and fields this core does not
+/// know: it binds, as push, and the capabilities it does not know are left out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registration_with_values_the_core_does_not_know_binds_as_push() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    let mut peer = Rpc::hello(&core).await;
+    let mut registration = registration("future", THREAD);
+    registration["input_mode"] = json!("stream");
+    registration["route"] = json!("future-route");
+    registration["capabilities"] =
+        json!({"deliver": "supported", "working": "partially", "teleport": "supported"});
+    registration["engine"] = json!({"model": "m", "context": {"window": 1}});
+    registration["added_later"] = json!({"nested": {"deeper": true}});
+    let bound = peer.call("binding.register", registration).await;
+    assert_eq!(bound["thread"], THREAD, "{bound}");
+    let binding = bound["binding_id"].as_str().unwrap().to_owned();
+    let listing = core
+        .get("/api/connectors")
+        .token(&token)
+        .send()
+        .await
+        .json();
+    let view = listing["bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["id"] == binding.as_str())
+        .cloned()
+        .expect("the binding is listed");
+    assert_eq!(view["capabilities"]["deliver"], "supported");
+    assert_eq!(view["capabilities"]["working"], "unknown");
+    assert!(view["capabilities"].get("teleport").is_none(), "{view}");
+    assert_eq!(
+        (&view["input_mode"], &view["route"]),
+        (&json!("push"), &Value::Null)
+    );
+
+    let focus = core.select(&token, &session, THREAD).await;
+    core.text(&token, (&session, THREAD, &focus), "Pushed", &message_id())
+        .await;
+    assert_eq!(
+        accept_delivery(&mut peer).await["binding_id"],
+        binding.as_str()
+    );
+    browser.receipt("delivered").await;
+}
+
+/// A reply in a language this core does not speak is kept and sent to the call as one that names no language.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_in_a_language_the_core_does_not_know_is_still_sent() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    let (mut peer, binding) = connector_with_binding(&core, "language", THREAD).await;
+    core.select(&token, &session, THREAD).await;
+    let revision = core.revision(&token, &session).await;
+    let answer = peer
+        .call(
+            "speech.publish",
+            json!({"event_id": "event-de", "utterance_id": "de", "binding_id": binding,
+                "session_id": session, "revision": revision, "text": "Guten Tag.", "language": "de"}),
+        )
+        .await;
+    assert_eq!(answer["status"], "queued", "{answer}");
+    let reply = browser.frame("voice-reply").await;
+    assert_eq!(
+        (&reply["text"], &reply["language"]),
+        (&json!("Guten Tag."), &Value::Null)
+    );
+}
+
+/// Every message a connector sends, with fields this core does not know at the top level, nested and next to `jsonrpc`
+/// and `method`: the hello, a registration, its reports, a delivery answer, a reply, a pull, answers about host agents
+/// and a room pairing, and an unregistration. All are taken as their known part says.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    let extra = json!({"nested": {"deeper": [1, {"x": true}]}});
+
+    let mut peer = Rpc::open(&core).await;
+    peer.send(json!({"jsonrpc": "2.0", "id": 1, "method": "connector.hello", "added_later": extra,
+        "params": {"protocol": 3, "connector_id": core.connector_id(), "token": core.connector_token(),
+            "version": "9.9.9", "added_later": extra}}));
+    let welcome = peer.frame(STEP, |frame| frame["id"] == 1).await;
+    assert_eq!(welcome["result"]["protocol"], 3, "{welcome}");
+
+    let mut registration = registration("sweep", THREAD);
+    registration["added_later"] = extra.clone();
+    let binding = peer.call("binding.register", registration).await["binding_id"]
+        .as_str()
+        .expect("a binding")
+        .to_owned();
+    let focus = core.select(&token, &session, THREAD).await;
+
+    // An extra key next to `jsonrpc` and `method`.
+    peer.send(
+        json!({"jsonrpc": "2.0", "method": "input.working", "added_later": extra,
+        "params": {"binding_id": binding, "working": true, "added_later": extra}}),
+    );
+    assert_eq!(browser.frame("voice-conversation").await["working"], true);
+    peer.emit(
+        "input.engine",
+        json!({"binding_id": binding, "engine": {"model": "m2", "added_later": extra}, "added_later": extra}),
+    );
+    eventually(STEP, "the binding to show the engine it changed to", || {
+        let listing = core.get("/api/connectors").token(&token).send();
+        let binding = binding.clone();
+        async move {
+            let listing = listing.await.json();
+            let view = listing["bindings"]
+                .as_array()?
+                .iter()
+                .find(|view| view["id"] == binding.as_str())?
+                .clone();
+            (view["engine"] == json!({"model": "m2"})).then_some(())
+        }
+    })
+    .await;
+
+    let message = message_id();
+    let sent = core
+        .text(&token, (&session, THREAD, &focus), "Swept", &message)
+        .await;
+    let delivery = peer.event("input.deliver").await;
+    peer.answer(
+        &delivery["id"],
+        json!({"status": "accepted", "detail": "taken", "added_later": extra}),
+    );
+    assert_eq!(browser.receipt("delivered").await["history_id"], sent["id"]);
+    peer.emit(
+        "input.read",
+        json!({"binding_id": binding, "message_id": message, "added_later": extra}),
+    );
+    assert_eq!(browser.receipt("read").await["history_id"], sent["id"]);
+
+    let revision = core.revision(&token, &session).await;
+    let published = peer
+        .call(
+            "speech.publish",
+            json!({"event_id": "event-swept", "utterance_id": "swept", "binding_id": binding,
+                "session_id": session, "revision": revision, "text": "Swept reply.", "language": "en",
+                "added_later": extra}),
+        )
+        .await;
+    assert_eq!(published["status"], "queued", "{published}");
+    assert_eq!(browser.frame("voice-reply").await["text"], "Swept reply.");
+
+    let pulled = peer
+        .call(
+            "binding.register",
+            json!({"thread": "pull-thread", "harness": "fixture", "input_mode": "pull", "added_later": extra}),
+        )
+        .await;
+    let checked = peer
+        .call(
+            "input.pull",
+            json!({"binding_id": pulled["binding_id"], "operation": "check", "added_later": extra}),
+        )
+        .await;
+    assert_eq!(checked["count"], 0, "{checked}");
+
+    // A query parameter the core does not read, and an answer with keys it does not read.
+    let listing = tokio::spawn(
+        core.get("/api/host/agents?added_later=1")
+            .token(&token)
+            .send(),
+    );
+    let ask = peer.event("agents.list").await;
+    assert_eq!(ask["params"], json!({"rescan": false}));
+    let agents = json!([{"id": "claude", "registration": "connected", "added_later": extra}]);
+    peer.answer(
+        &ask["id"],
+        json!({"agents": agents, "custom": {"added_later": extra}, "scanned_at": null, "added_later": extra}),
+    );
+    let listed = listing.await.unwrap();
+    assert_eq!(listed.status, 200, "{listed:?}");
+    assert_eq!(listed.json()["agents"], agents);
+
+    // Pairing with a room: the page's body and the connector's answer, both with keys the core does not read.
+    let pairing = tokio::spawn(
+        core.post(
+            "/api/rendezvous/pair",
+            json!({"room": "https://room.example", "code": "ABCD", "added_later": extra}),
+        )
+        .origin("tauri://localhost")
+        .token(&token)
+        .send(),
+    );
+    let ask = peer.event("pair.request").await;
+    assert_eq!(
+        ask["params"],
+        json!({"room": "https://room.example", "code": "ABCD"})
+    );
+    peer.answer(
+        &ask["id"],
+        json!({"ok": true, "origin": "https://room.example", "connector_id": "c-1", "added_later": extra}),
+    );
+    let paired = pairing.await.unwrap();
+    assert_eq!(paired.status, 200, "{paired:?}");
+    assert_eq!(
+        paired.json(),
+        json!({"ok": true, "room": "https://room.example", "connector_id": "c-1"})
+    );
+
+    peer.emit(
+        "binding.unregister",
+        json!({"binding_id": binding, "added_later": extra}),
+    );
+    eventually(
+        STEP,
+        "the unregistered binding to leave the listing",
+        || {
+            let listing = core.get("/api/connectors").token(&token).send();
+            let binding = binding.clone();
+            async move {
+                let listing = listing.await.json();
+                (!listing["bindings"]
+                    .as_array()?
+                    .iter()
+                    .any(|view| view["id"] == binding.as_str()))
+                .then_some(())
+            }
+        },
+    )
+    .await;
+}

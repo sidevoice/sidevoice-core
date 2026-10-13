@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::control::room::RoomError;
 use crate::messages::{render, LocalizedMessage};
-use crate::server::call::admission::hello_language;
+use crate::server::call::admission::offered_language;
 use crate::server::call::client_msg_id;
 
 use super::Call;
@@ -94,6 +94,8 @@ impl Call {
                 room.finish_turn(&self.session, turn_id, text, &data["timings_ms"])
                     .map(|_| Value::Null)
             }
+            // A phase the room does not know is taken and changes nothing; a turn report without one is refused.
+            Some(phase) if !phase.is_empty() => Ok(Value::Null),
             _ => Err(RoomError::new(400, "room.request_invalid")),
         };
         match result {
@@ -129,18 +131,18 @@ impl Call {
         }
     }
 
-    /// The call's interface language changed.
+    /// The call's interface language changed. One the core does not offer keeps the current language.
     async fn update_settings(&mut self, data: &Value) {
-        match hello_language(data.get("ui_language")) {
-            (language, None) if data.get("ui_language").is_some() => {
+        match offered_language(data.get("ui_language")) {
+            Ok(Some(language)) => {
                 self.state.room.set_language(&self.session, &language);
                 self.language = language;
             }
-            (_, Some(key)) => {
+            Ok(None) => {}
+            Err(key) => {
                 let refusal = self.refusal(key, None);
                 self.send(refusal).await;
             }
-            _ => {}
         }
     }
 
