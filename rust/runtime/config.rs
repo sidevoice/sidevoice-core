@@ -59,7 +59,7 @@ impl Draft {
             port: std::env::var("SIDEVOICE_CORE_PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(8768),
+                .unwrap_or(10829),
             launch_id: Uuid::new_v4().to_string(),
             log_file: None,
             room_credential: std::env::var("SIDEVOICE_ROOM_CREDENTIAL").ok(),

@@ -22,7 +22,7 @@ pub(in crate::server) fn app_state(dir: &PrivateDir, room: Arc<Room>, host: &str
     let registry = DeviceRegistry::load(dir.clone()).unwrap();
     let relay = rendezvous::Rendezvous::new(
         None,
-        Url::parse("http://127.0.0.1:8768/").unwrap(),
+        Url::parse("http://127.0.0.1:10829/").unwrap(),
         host.to_owned(),
         room.clone(),
     );
@@ -32,7 +32,7 @@ pub(in crate::server) fn app_state(dir: &PrivateDir, room: Arc<Room>, host: &str
         registry,
         "fixture".to_owned(),
         host.to_owned(),
-        8768,
+        10829,
         room,
         relay,
     ))

@@ -111,7 +111,7 @@ async fn send(
         .iter()
         .any(|(name, _)| name.eq_ignore_ascii_case("host"))
     {
-        request = request.header("host", "127.0.0.1:8768");
+        request = request.header("host", "127.0.0.1:10829");
     }
     for (name, value) in headers {
         request = request.header(*name, *value);
@@ -572,7 +572,7 @@ async fn a_code_is_redeemed_once() {
 fn a_code_says_where_the_node_answers() {
     let node = Node::new();
     let payload = node.state.issue_code()["payload"].clone();
-    assert_eq!(payload["urls"][0], "http://127.0.0.1:8768");
+    assert_eq!(payload["urls"][0], "http://127.0.0.1:10829");
     assert_eq!(payload["rv"], Value::Null, "no rendezvous, no room");
     assert_eq!(payload["host"], "fixture-host");
 }
@@ -702,7 +702,7 @@ async fn a_foreign_host_is_still_refused_first() {
     let node = Node::new();
     for host in [
         "attacker.example",
-        "attacker.example:8768",
+        "attacker.example:10829",
         "127.0.0.1.evil.example",
     ] {
         let (status, _, _) = send(
@@ -1037,7 +1037,7 @@ async fn a_paired_device_renames_any_device_and_the_list_keeps_the_name() {
         let request = Request::builder()
             .method("PATCH")
             .uri(&path)
-            .header("host", "127.0.0.1:8768")
+            .header("host", "127.0.0.1:10829")
             .header("authorization", &authorization)
             .header("content-type", "application/json")
             .body(Body::from(body))
@@ -1122,7 +1122,7 @@ async fn a_device_revoked_while_its_rename_is_on_the_way_renames_nothing() {
     let request = Request::builder()
         .method("PATCH")
         .uri(format!("/api/device/devices/{phone}"))
-        .header("host", "127.0.0.1:8768")
+        .header("host", "127.0.0.1:10829")
         .header("authorization", bearer(&laptop_token))
         .header("content-type", "application/json")
         .body(Body::from_stream(body))

@@ -138,7 +138,7 @@ fn a_code_is_the_payload_it_carries() {
     let (_root, dir) = private_dir();
     let identity = NodeIdentity::load_or_create(&dir).unwrap();
     let mut registry = DeviceRegistry::load(dir.clone()).unwrap();
-    let urls = vec!["http://127.0.0.1:8768".to_owned()];
+    let urls = vec!["http://127.0.0.1:10829".to_owned()];
     let issued = registry.issue_code(&identity, Some("laptop"), &urls);
     let code = issued["code"].as_str().unwrap();
     assert!(code.starts_with("SV1."));

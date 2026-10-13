@@ -37,9 +37,9 @@ fn local_paths_survive_encoding_and_dot_segments() {
 fn safe_urls_are_https_or_loopback_http() {
     for url in [
         "https://room.example",
-        "http://localhost:8768",
+        "http://localhost:10829",
         "http://127.0.0.1/",
-        "http://[::1]:8768",
+        "http://[::1]:10829",
         "http://LOCALHOST./",
     ] {
         assert!(safe_url(url), "{url}");
@@ -51,15 +51,15 @@ fn safe_urls_are_https_or_loopback_http() {
 
 #[test]
 fn host_name_drops_port_and_brackets() {
-    assert_eq!(host_name("[::1]:8768"), "::1");
+    assert_eq!(host_name("[::1]:10829"), "::1");
     assert_eq!(host_name("Example.COM:80"), "example.com");
     assert_eq!(host_name("localhost"), "localhost");
 }
 
 #[test]
 fn loopback_hosts_are_allowed_and_missing_host_is_not() {
-    assert!(host_allowed(&headers(&[(header::HOST, "localhost:8768")])));
-    assert!(host_allowed(&headers(&[(header::HOST, "[::1]:8768")])));
+    assert!(host_allowed(&headers(&[(header::HOST, "localhost:10829")])));
+    assert!(host_allowed(&headers(&[(header::HOST, "[::1]:10829")])));
     assert!(!host_allowed(&HeaderMap::new()));
 }
 
@@ -71,12 +71,12 @@ fn origins_are_allowed_when_absent_desktop_or_same_as_host() {
         "tauri://localhost/"
     )])));
     assert!(origin_allowed(&headers(&[
-        (header::ORIGIN, "http://192.168.1.4:8768"),
-        (header::HOST, "192.168.1.4:8768"),
+        (header::ORIGIN, "http://192.168.1.4:10829"),
+        (header::HOST, "192.168.1.4:10829"),
     ])));
     assert!(!origin_allowed(&headers(&[
         (header::ORIGIN, "http://192.168.1.4:9000"),
-        (header::HOST, "192.168.1.4:8768"),
+        (header::HOST, "192.168.1.4:10829"),
     ])));
     assert!(!origin_allowed(&headers(&[(
         header::ORIGIN,

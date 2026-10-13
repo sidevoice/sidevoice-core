@@ -24,8 +24,8 @@ fn pairing_and_public_origin_keep_existing_shape() {
     assert!(Pairing::read(&path).is_none());
     fs::write(
         &path,
-        r#"{"url":"ws://[::1]:8768/link","connector_id":"node-1","token":"secret"}"#,
+        r#"{"url":"ws://[::1]:10829/link","connector_id":"node-1","token":"secret"}"#,
     )
     .unwrap();
-    assert_eq!(Pairing::read(&path).unwrap().origin, "http://[::1]:8768");
+    assert_eq!(Pairing::read(&path).unwrap().origin, "http://[::1]:10829");
 }
