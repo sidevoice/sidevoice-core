@@ -94,6 +94,8 @@ impl Call {
                 room.finish_turn(&self.session, turn_id, text, &data["timings_ms"])
                     .map(|_| Value::Null)
             }
+            // A phase the room does not know is taken and changes nothing; a turn report without one is refused.
+            Some(phase) if !phase.is_empty() => Ok(Value::Null),
             _ => Err(RoomError::new(400, "room.request_invalid")),
         };
         match result {

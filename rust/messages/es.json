@@ -28,7 +28,6 @@
   "room.thread_invalid": "El identificador de conversación no es válido.",
   "room.connector_disconnected": "El conector no está conectado.",
   "room.binding_foreign": "Vínculo desconocido o ajeno.",
-  "room.input_mode_invalid": "Modo de entrada desconocido para esta conversación.",
   "room.pull_binding_invalid": "Esta conversación no está conectada para recoger la entrada de voz.",
   "room.pull_binding_superseded": "Ahora es otra conexión la que recibe la entrada de voz de esta conversación.",
   "room.pull_operation_invalid": "Operación de entrada de voz desconocida.",

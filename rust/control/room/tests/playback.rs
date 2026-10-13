@@ -107,13 +107,39 @@ fn a_report_on_an_ended_reply_changes_nothing_and_a_bad_one_is_refused() {
         room.playback(&sid, uid, status, reason, None, &Value::Null)
             .unwrap_err()
     };
-    assert_eq!(refused("r", "paused", None).key, "room.receipt_invalid");
-    assert_eq!(
-        refused("r", "interrupted", Some("bored")).key,
-        "room.receipt_invalid"
-    );
+    assert_eq!(refused("r", "", None).key, "room.receipt_invalid");
     let unknown = refused("unknown", "playing", None);
     assert_eq!((unknown.status, unknown.key), (409, "room.stale_utterance"));
+}
+
+/// A newer call may report a status or a reason this room does not know: the status is taken and changes
+/// nothing, the reason is read as none, and the rest of the report still counts.
+#[test]
+fn an_unknown_playback_status_changes_nothing_and_an_unknown_reason_is_read_as_none() {
+    let (_directory, room) = room_on_thread();
+    let (sid, _events) = join(&room, "thread");
+    publish(&room, &sid, "r");
+    room.playback(&sid, "r", "paused", None, None, &Value::Null)
+        .unwrap();
+    assert_eq!(row(&room, &format!("{sid}:voice:r")).0, "queued");
+    report(&room, &sid, "r", "playing");
+    room.playback(
+        &sid,
+        "r",
+        "interrupted",
+        Some("bored"),
+        Some(4),
+        &Value::Null,
+    )
+    .unwrap();
+    assert_eq!(
+        row(&room, &format!("{sid}:voice:r")),
+        (
+            "interrupted".into(),
+            Some("user_interrupted".into()),
+            Some(4)
+        )
+    );
 }
 
 /// A replay shares its original's journal row; only the original's calls decide that row's

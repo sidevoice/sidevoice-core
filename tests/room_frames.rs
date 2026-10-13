@@ -210,10 +210,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
 
     // A report the room cannot read is refused with its key; one for a reply it never sent, too.
     let bad = browser
-        .report(
-            "voice-playback",
-            json!({"utterance_id": "whole", "status": "paused"}),
-        )
+        .report("voice-playback", json!({"utterance_id": "whole"}))
         .await;
     let refusal = browser.frame("error").await;
     assert_eq!(
@@ -283,5 +280,166 @@ async fn a_client_message_without_an_id_is_refused_in_the_call_s_language() {
     browser
         .none_of(&["voice-user-turn"], Duration::from_millis(300))
         .await;
+    browser.close().await;
+}
+
+/// The protocol only grows (#112): a newer page may name a turn phase, a playback status or a reason this core does
+/// not know. Each report is acknowledged and refused by nobody; the unknown part changes nothing, the known part
+/// counts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part_counts() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let (mut peer, binding) = connector_with_binding(&core, "unknown", THREAD).await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    core.select(&token, &session, THREAD).await;
+
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase": "paused", "turn_id": "future"}),
+        )
+        .await;
+    browser
+        .none_of(&["error", "voice-user-turn"], Duration::from_millis(300))
+        .await;
+
+    let revision = core.revision(&token, &session).await;
+    publish(
+        &mut peer,
+        &binding,
+        &session,
+        revision,
+        "cut",
+        "A reply cut short.",
+    )
+    .await;
+    browser.frame("voice-reply").await;
+    browser
+        .report(
+            "voice-playback",
+            json!({"utterance_id": "cut", "status": "buffering"}),
+        )
+        .await;
+    browser.playback("cut", "playing").await;
+    browser
+        .report(
+            "voice-playback",
+            json!({"utterance_id": "cut", "status": "interrupted", "reason": "phone_rang", "heard_chars": 7}),
+        )
+        .await;
+    browser
+        .none_of(&["error"], Duration::from_millis(300))
+        .await;
+    let history = core.history(&token, THREAD).await;
+    let cut = row(&history, &format!("{session}:voice:cut"));
+    assert_eq!(
+        (&cut["status"], &cut["audio_reason"], &cut["heard_chars"]),
+        (&json!("interrupted"), &json!("user_interrupted"), &json!(7))
+    );
+    browser.close().await;
+}
+
+/// Every message a page sends, with fields this core does not know at the top level and nested, and a frame type it
+/// does not know: all are taken as their known part says.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let (mut peer, binding) = connector_with_binding(&core, "sweep", THREAD).await;
+    let extra = json!({"added_later": {"nested": [1, {"deeper": true}]}});
+    let mut browser = core
+        .join(
+            &token,
+            json!({"ui_language": "en", "future": extra, "telemetry": {"future": extra}}),
+        )
+        .await;
+    let session = browser.session.clone();
+    browser
+        .send(
+            "voice-future-frame",
+            json!({"session_id": session, "future": extra}),
+        )
+        .await;
+    browser
+        .send(
+            "voice-settings",
+            json!({"session_id": session, "ui_language": "en", "future": extra}),
+        )
+        .await;
+
+    let selected = core
+        .post(
+            "/api/presentation/select",
+            json!({"session_id": session, "thread_id": THREAD, "future": extra}),
+        )
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(selected.status, 200, "{selected:?}");
+    let focus = selected.json()["binding"]["binding_id"]
+        .as_str()
+        .expect("a focus")
+        .to_owned();
+
+    let typed = core
+        .post(
+            "/api/presentation/text",
+            json!({"text": "Typed", "session_id": session, "thread_id": THREAD, "binding_id": focus,
+                "message_id": message_id(), "future": extra}),
+        )
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(typed.status, 200, "{typed:?}");
+    assert_eq!(accept_delivery(&mut peer).await["text"], "Typed");
+
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase": "started", "turn_id": "spoken", "future": extra}),
+        )
+        .await;
+    browser.turn("started", STEP).await;
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase": "finished", "turn_id": "spoken", "text": "Spoken",
+                "timings_ms": {"future_ms": 3, "nested": extra}, "future": extra}),
+        )
+        .await;
+    assert_eq!(accept_delivery(&mut peer).await["text"], "Spoken");
+
+    let revision = core.revision(&token, &session).await;
+    publish(&mut peer, &binding, &session, revision, "reply", "A reply.").await;
+    browser.frame("voice-reply").await;
+    for status in ["playing", "heard"] {
+        browser
+            .report(
+                "voice-playback",
+                json!({"utterance_id": "reply", "status": status, "timings_ms": extra, "future": extra}),
+            )
+            .await;
+    }
+    let reported = core
+        .post(
+            "/api/presentation/client-error",
+            json!({"session_id": session, "kind": "future", "message": "m", "future": extra}),
+        )
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(reported.status, 200, "{reported:?}");
+    browser
+        .none_of(&["error"], Duration::from_millis(300))
+        .await;
+    let history = core.history(&token, THREAD).await;
+    assert_eq!(
+        row(&history, &format!("{session}:voice:reply"))["status"],
+        "playback_finished"
+    );
     browser.close().await;
 }

@@ -26,11 +26,8 @@ impl Room {
             return Err(RoomError::new(409, "room.connector_disconnected"));
         }
         let requested = field(data, "binding_id");
-        let pull_input = match field(data, "input_mode") {
-            "" | "push" => false,
-            "pull" => true,
-            _ => return Err(RoomError::new(400, "room.input_mode_invalid")),
-        };
+        // A mode the room does not know registers as push, as one that names no mode does.
+        let pull_input = field(data, "input_mode") == "pull";
         let bid = match inner.bindings.get(requested) {
             Some(existing) if existing.connector != cid => {
                 return Err(RoomError::new(409, "room.binding_foreign"));

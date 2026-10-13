@@ -22,7 +22,8 @@ const REASONS: [&str; 6] = [
 impl Room {
     /// Call `sid` reports what became of reply `uid` there: it started playing, was heard to the end, was cut
     /// (with how many of its characters were heard), was never played, or failed. A report on a reply that
-    /// already ended is taken without changing it.
+    /// already ended is taken without changing it. A report with no status is refused; one whose status the room
+    /// does not know is taken and changes nothing, and a reason it does not know is read as none.
     pub fn playback(
         &self,
         sid: &str,
@@ -32,9 +33,13 @@ impl Room {
         heard_chars: Option<u64>,
         timings: &Value,
     ) -> Result<(), RoomError> {
-        if !REPORTS.contains(&status) || reason.is_some_and(|reason| !REASONS.contains(&reason)) {
+        if status.is_empty() {
             return Err(RoomError::new(400, "room.receipt_invalid"));
         }
+        if !REPORTS.contains(&status) {
+            return Ok(());
+        }
+        let reason = reason.filter(|reason| REASONS.contains(reason));
         let stale = || RoomError::new(409, "room.stale_utterance");
         let mut guard = self.inner.lock().expect("room lock");
         let inner = &mut *guard;
