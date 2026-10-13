@@ -85,8 +85,9 @@ pub(super) async fn admit(
     })
 }
 
-/// The interface language a hello asks for: `en` or `es`. Without one, or with one the core does not offer, the
-/// machine's; one that is not text is refused with its key, and the call goes on in the machine's.
+/// The interface language a hello asks for, one of those `crate::messages::offered` names. Without one, or with one
+/// the core does not offer, the machine's; one that is not text is refused with its key, and the call goes on in the
+/// machine's.
 pub(super) fn hello_language(asked: Option<&Value>) -> (String, Option<&'static str>) {
     let fallback = || ui_locale(&crate::runtime::system_language()).to_owned();
     match offered_language(asked) {
@@ -101,9 +102,7 @@ pub(super) fn hello_language(asked: Option<&Value>) -> (String, Option<&'static 
 pub(super) fn offered_language(asked: Option<&Value>) -> Result<Option<String>, &'static str> {
     match asked {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(language)) => {
-            Ok(matches!(language.as_str(), "en" | "es").then(|| language.clone()))
-        }
+        Some(Value::String(language)) => Ok(crate::messages::offered(language).map(str::to_owned)),
         Some(_) => Err("settings.ui_language_invalid"),
     }
 }

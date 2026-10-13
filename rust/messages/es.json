@@ -12,7 +12,7 @@
   "bind.core-running": "Ya hay otro proceso del núcleo en ejecución.",
   "bind.port-in-use": "El puerto solicitado ya está en uso.",
   "start.failed": "No se pudo iniciar el núcleo.",
-  "settings.ui_language_invalid": "El valor debe ser 'es' o 'en'",
+  "settings.ui_language_invalid": "El idioma de la interfaz no es válido.",
   "latency.note_clocks": "Solo duraciones; nunca se restan los relojes del servidor y del navegador.",
   "latency.note_delivery": "Que la entrega se acepte no significa que el modelo la ejecute ni la lea.",
   "latency.note_playback": "Reproduciendo significa reproducción programada en Web Audio, no que se oiga por Bluetooth.",

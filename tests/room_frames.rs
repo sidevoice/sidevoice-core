@@ -351,12 +351,12 @@ async fn an_interface_language_the_core_does_not_offer_falls_back_without_an_err
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
-    let mut browser = core.join(&token, json!({"ui_language": "fr"})).await;
+    let mut browser = core.join(&token, json!({"ui_language": "ko"})).await;
     browser.no_errors = true;
     browser
         .none_of(&["error"], Duration::from_millis(300))
         .await;
-    for language in ["es", "fr"] {
+    for language in ["es", "ko"] {
         browser
             .send(
                 "voice-settings",

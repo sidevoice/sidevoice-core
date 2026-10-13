@@ -83,7 +83,7 @@ fn filters_other_sessions_and_keeps_the_response_shape() {
         .is_none());
     assert!(!result.to_string().contains("secret"));
     assert_eq!(
-        snapshot("own", "fr", &marks, &replies)["notes"],
+        snapshot("own", "ko", &marks, &replies)["notes"],
         result["notes"]
     );
 }

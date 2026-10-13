@@ -9,8 +9,20 @@ use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
 
-static ENGLISH: OnceLock<Value> = OnceLock::new();
-static SPANISH: OnceLock<Value> = OnceLock::new();
+/// The interface languages the core offers, as a page names them, each with its bundle. English comes first: it is
+/// the fallback.
+const BUNDLES: [(&str, &str); 8] = [
+    ("en", include_str!("messages/en.json")),
+    ("es", include_str!("messages/es.json")),
+    ("fr", include_str!("messages/fr.json")),
+    ("it", include_str!("messages/it.json")),
+    ("de", include_str!("messages/de.json")),
+    ("ja", include_str!("messages/ja.json")),
+    ("zh-Hans", include_str!("messages/zh-Hans.json")),
+    ("pl", include_str!("messages/pl.json")),
+];
+
+static PARSED: [OnceLock<Value>; BUNDLES.len()] = [const { OnceLock::new() }; BUNDLES.len()];
 
 /// An internal message key and its render parameters. Convert it at a boundary; never serialize it directly.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,12 +45,33 @@ impl LocalizedMessage {
     }
 }
 
-/// The supported UI locale from a system or device language tag, with English as the fallback.
+/// The interface language a page asked for by its exact name, if the core offers it.
+pub fn offered(language: &str) -> Option<&'static str> {
+    BUNDLES
+        .iter()
+        .map(|(locale, _)| *locale)
+        .find(|locale| *locale == language)
+}
+
+/// The supported UI locale from a system or device language tag, with English as the fallback. Chinese is offered
+/// only in Simplified script: a tag naming Traditional script or a region that writes it falls back to English.
 pub fn ui_locale(language: &str) -> &'static str {
-    match primary_subtag(language).to_ascii_lowercase().as_str() {
-        "es" => "es",
-        "en" => "en",
-        _ => "en",
+    let tag = language
+        .split([',', ';', '.', '@'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mut subtags = tag.split(['-', '_']);
+    match subtags.next().unwrap_or("") {
+        "zh" => {
+            let traditional = subtags.any(|subtag| matches!(subtag, "hant" | "tw" | "hk" | "mo"));
+            if traditional {
+                "en"
+            } else {
+                "zh-Hans"
+            }
+        }
+        primary => offered(primary).unwrap_or("en"),
     }
 }
 
@@ -57,17 +90,12 @@ pub fn render(message: &LocalizedMessage, language: &str) -> String {
     template::interpolate(template, &message.params)
 }
 
-fn primary_subtag(language: &str) -> &str {
-    language.split(['-', '_']).next().unwrap_or("")
-}
-
 fn bundle(locale: &str) -> &'static Value {
-    let (slot, source) = if locale == "es" {
-        (&SPANISH, include_str!("messages/es.json"))
-    } else {
-        (&ENGLISH, include_str!("messages/en.json"))
-    };
-    slot.get_or_init(|| {
-        serde_json::from_str(source).expect("embedded message bundle is valid JSON")
+    let index = BUNDLES
+        .iter()
+        .position(|(name, _)| *name == locale)
+        .unwrap_or(0);
+    PARSED[index].get_or_init(|| {
+        serde_json::from_str(BUNDLES[index].1).expect("embedded message bundle is valid JSON")
     })
 }
