@@ -30,6 +30,7 @@ impl Call {
             Some("voice-turn-trace") => trace_turn(&self.session, &data),
             Some("voice-user-turn") => self.once(&data, Self::user_turn).await,
             Some("voice-playback") => self.once(&data, Self::playback).await,
+            Some("voice-speech") => self.once(&data, Self::speech).await,
             Some("voice-settings") => self.update_settings(&data).await,
             _ => {}
         }
@@ -64,25 +65,31 @@ impl Call {
         let id = client_msg_id(data);
         let turn_id = data["turn_id"].as_str().unwrap_or("");
         // The turn's boundary, as the call learns it: the revision the room gave the turn, and where its words go.
-        let started = |revision: &Value, thread: &Value| {
+        let started = |revision: &Value, epoch: &Value, thread: &Value| {
             json!({"type":"voice-user-turn","data":{"session_id":self.session,"phase":"started",
-                "turn_id":turn_id,"revision":revision,"thread_id":thread}})
+                "turn_id":turn_id,"revision":revision,"epoch":epoch,"thread_id":thread}})
         };
         let result = match data["phase"].as_str() {
-            Some("started") => room
-                .begin_turn(&self.session, turn_id)
-                .map(|turn| started(&json!(turn.revision), &json!(turn.thread_id))),
+            Some("started") => room.begin_turn(&self.session, turn_id).map(|turn| {
+                started(
+                    &json!(turn.revision),
+                    &json!(turn.epoch),
+                    &json!(turn.thread_id),
+                )
+            }),
             // A turn spoken offline arrives finished: once taken, its boundary is said as a started turn's is.
             Some("finished") if data["offline"].as_bool() == Some(true) => room
-                .offline_input(
+                .offline_input_captured(
                     &self.session,
                     turn_id,
                     data["text"].as_str().unwrap_or(""),
                     data["started_at"].as_u64(),
+                    data["thread_id"].as_str().unwrap_or(""),
+                    data["binding_id"].as_str().unwrap_or(""),
                 )
                 .map(|taken| {
                     if taken["accepted"] == true {
-                        started(&taken["revision"], &taken["thread_id"])
+                        started(&taken["revision"], &taken["epoch"], &taken["thread_id"])
                     } else {
                         Value::Null
                     }
@@ -91,8 +98,14 @@ impl Call {
                 let text = (phase == "finished")
                     .then(|| data["text"].as_str())
                     .flatten();
-                room.finish_turn(&self.session, turn_id, text, &data["timings_ms"])
-                    .map(|_| Value::Null)
+                room.finish_turn_merged(
+                    &self.session,
+                    turn_id,
+                    text,
+                    &data["timings_ms"],
+                    data["merged"].as_bool() == Some(true),
+                )
+                .map(|_| Value::Null)
             }
             // A phase the room does not know is taken and changes nothing; a turn report without one is refused.
             Some(phase) if !phase.is_empty() => Ok(Value::Null),
@@ -127,6 +140,17 @@ impl Call {
         });
         match result {
             Ok(()) => Vec::new(),
+            Err(error) => vec![self.refusal(error.key, client_msg_id(data))],
+        }
+    }
+
+    fn speech(&mut self, data: &Value) -> Vec<Value> {
+        match self.state.room.set_speech(
+            &self.session,
+            data["on"].as_bool().unwrap_or(false),
+            data["reason"].as_str(),
+        ) {
+            Ok(_) => Vec::new(),
             Err(error) => vec![self.refusal(error.key, client_msg_id(data))],
         }
     }

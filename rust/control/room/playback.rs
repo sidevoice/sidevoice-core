@@ -10,13 +10,17 @@ use super::{Inner, Room};
 /// What a call may report about a reply it was sent.
 const REPORTS: [&str; 5] = ["playing", "heard", "interrupted", "unplayed", "failed"];
 /// Why a reply stopped short, as a call may say.
-const REASONS: [&str; 6] = [
+const REASONS: [&str; 10] = [
     "user_interrupted",
     "newer_turn",
     "user_skipped",
     "focus_changed",
     "call_ended",
     "unheard",
+    "agents_muted",
+    "voice_off",
+    "connector_disconnected",
+    "heard_elsewhere",
 ];
 
 impl Room {
@@ -64,10 +68,30 @@ impl Room {
             return Err(stale());
         };
         if !matches!(entry.1.as_str(), "queued" | "playing") {
+            if entry.1 == "interrupted" && matches!(status, "heard" | "interrupted") {
+                if let Some(end) = record.ends.get_mut(sid) {
+                    let prior = end.heard_chars.unwrap_or(0);
+                    if status == "heard" {
+                        entry.1 = "playback_finished".into();
+                        end.heard_chars = length;
+                        end.reason = None;
+                        record.heard.insert(sid.to_owned());
+                    } else if heard_chars.is_some_and(|heard| heard > prior) {
+                        end.heard_chars = heard_chars;
+                    }
+                    let row_id = record.row_id.clone();
+                    if !record.is_replay() {
+                        inner.sync_row(&row_id);
+                    }
+                }
+            }
             return Ok(());
         }
         let (next, reason) = match status {
             "heard" => ("playback_finished", None),
+            "interrupted" | "unplayed" if reason == Some("user_skipped") => {
+                ("skipped", Some("user_skipped"))
+            }
             "interrupted" => ("interrupted", Some(reason.unwrap_or("user_interrupted"))),
             "unplayed" => ("interrupted", Some(reason.unwrap_or("newer_turn"))),
             "failed" => ("failed", Some("playback_failed")),
@@ -78,12 +102,16 @@ impl Room {
             sid.to_owned(),
             End {
                 reason: reason.map(str::to_owned),
-                heard_chars: heard_chars.filter(|_| status == "interrupted"),
+                heard_chars: if matches!(next, "playback_finished" | "skipped") {
+                    length
+                } else {
+                    heard_chars.filter(|_| status == "interrupted")
+                },
             },
         );
         // A reply played to the end, or cut while it played, was heard by this call: a catch-up of it is not
         // offered again.
-        if next == "playback_finished" || (status == "interrupted" && previous == "playing") {
+        if matches!(next, "playback_finished" | "skipped") {
             record.heard.insert(sid.to_owned());
         }
         let catch_up_of = record.replay_of.clone();
@@ -91,6 +119,26 @@ impl Room {
         let original_row = (!record.is_replay()).then(|| row_id.clone());
         if let Some(row_id) = &original_row {
             inner.sync_row(row_id);
+            if next == "skipped" {
+                inner.queue_skip_note(row_id, sid);
+            }
+            if matches!(next, "playback_finished" | "skipped") {
+                let listeners: Vec<String> = inner
+                    .utterances
+                    .get(uid)
+                    .into_iter()
+                    .flat_map(|record| record.clients.iter())
+                    .filter(|(listener, (_, status))| {
+                        listener.as_str() != sid && status == "queued"
+                    })
+                    .map(|(listener, _)| listener.clone())
+                    .collect();
+                for listener in listeners {
+                    inner.withdraw(&listener, "heard_elsewhere", |record, (_, status)| {
+                        record.row_id == *row_id && status == "queued"
+                    });
+                }
+            }
         }
         if let Some(original) = catch_up_of {
             inner
@@ -98,8 +146,11 @@ impl Room {
                 .replay_heard(&original, sid, &previous, next);
             // A replay heard to its end: the person has now heard the reply, so the agent is not told it was missed.
             // Its history row keeps how it first played; what a note already took to the agent stays told.
-            if next == "playback_finished" {
+            if matches!(next, "playback_finished" | "skipped") {
                 if let Some(thread) = inner.journal.find(&row_id).map(|row| row.thread.clone()) {
+                    if let Some(row) = inner.journal.find_mut(&row_id) {
+                        row.globally_heard = true;
+                    }
                     inner.unheard.update(&thread, &row_id, None, None);
                 }
             }
@@ -139,8 +190,26 @@ impl Inner {
             row.status = status;
             row.reason = reason;
             row.heard_chars = heard_chars;
+            row.globally_heard |= matches!(row.status.as_str(), "playback_finished" | "skipped");
         }
         self.track_unheard(row_id);
+        if let Some(row) = self.journal.find(row_id) {
+            let thread = row.thread.clone();
+            let session = row.session.clone();
+            let epoch = row.epoch;
+            if matches!(row.status.as_str(), "interrupted" | "failed")
+                && !self.conversations.is_open(&thread)
+            {
+                if let Some(message_id) = self.journal.newer_spoken_message(&thread, epoch) {
+                    self.flush_all_unheard_notes(
+                        &thread,
+                        &session,
+                        "reply_not_played",
+                        Some(&message_id),
+                    );
+                }
+            }
+        }
     }
 
     /// Send reply `uid` to call `sid` as text. A call that is away gets nothing: when it comes back, what was
@@ -158,7 +227,7 @@ impl Inner {
         let Some(row) = self.journal.find(&record.row_id) else {
             return;
         };
-        let mut data = json!({"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":row.revision,
+        let mut data = json!({"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":row.revision,"epoch":row.epoch,
             "thread_id":row.thread,"text":row.text,"language":row.language,"history_id":row.id});
         if record.is_replay() {
             data["replay"] = json!(true);
@@ -206,16 +275,15 @@ impl Inner {
     /// What a returning call never received stays written and is marked unheard: it is not played late. A reply
     /// published while it was away was never sent to it; `unreceived` are those sent whose frame never reached the
     /// page. One the page did receive may still be playing there, and its report counts.
-    pub(super) fn drop_unheard(&mut self, sid: &str, unreceived: &[String]) {
+    pub(super) fn drop_unheard(&mut self, sid: &str, _unreceived: &[String]) {
         let dropped: Vec<String> = self
             .utterances
             .iter()
-            .filter(|(uid, record)| {
+            .filter(|(_, record)| {
                 record
                     .clients
                     .get(sid)
-                    .is_some_and(|(_, status)| status == "queued")
-                    && (!record.sent.contains(sid) || unreceived.contains(uid))
+                    .is_some_and(|(_, status)| matches!(status.as_str(), "queued" | "playing"))
             })
             .map(|(uid, _)| uid.clone())
             .collect();

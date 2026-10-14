@@ -19,6 +19,30 @@ fn max_browsers() -> usize {
 }
 
 impl Room {
+    /// Device output eligibility. Microphone mute is independent of this state.
+    pub fn set_speech(
+        &self,
+        sid: &str,
+        on: bool,
+        reason: Option<&str>,
+    ) -> Result<Value, RoomError> {
+        if !on && !matches!(reason, Some("voice_off" | "agents_muted")) {
+            return Err(RoomError::new(400, "room.speech_eligibility_invalid"));
+        }
+        let mut inner = self.inner.lock().expect("room lock");
+        let Some(browser) = inner.browsers.get_mut(sid) else {
+            return Err(RoomError::new(409, "room.browser_absent"));
+        };
+        let changed = browser.speech_on != on || browser.speech_reason.as_deref() != reason;
+        browser.speech_on = on;
+        browser.speech_reason = if on { None } else { reason.map(str::to_owned) };
+        if changed && !on {
+            inner.withdraw(sid, reason.unwrap_or("voice_off"), |_, _| true);
+        } else if changed && on {
+            inner.offer_note(sid);
+        }
+        Ok(json!({"on":on,"reason":if on {None} else {reason}}))
+    }
     pub fn join(
         &self,
         device: String,
@@ -38,6 +62,19 @@ impl Room {
     }
     pub fn leave(&self, sid: &str) {
         let mut inner = self.inner.lock().expect("room lock");
+        let turns: Vec<_> = inner
+            .browsers
+            .get(sid)
+            .map(|browser| browser.turns.iter().cloned().collect())
+            .unwrap_or_default();
+        for turn in turns {
+            if let Some(thread) = turn.thread_id.as_deref() {
+                inner
+                    .conversations
+                    .finish(thread, sid, &turn.turn_id, turn.epoch);
+                inner.settle_empty_turn(thread, sid, turn.epoch);
+            }
+        }
         inner.browsers.leave(sid);
         inner.interrupt_client(sid, "call_ended");
         if let Some(telemetry) = super::telemetry::shared() {
@@ -56,6 +93,9 @@ impl Room {
             (None, true) => browser.parked = Some(std::time::Instant::now()),
             (Some(_), false) => browser.parked = None,
             _ => {}
+        }
+        if parked {
+            inner.drop_unheard(sid, &[]);
         }
     }
     /// The page is back: what was published while it was away, and a reply handed to it that never

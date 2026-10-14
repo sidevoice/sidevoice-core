@@ -83,18 +83,16 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
     let first = browser.start_turn("first").await;
     let second = browser.start_turn("second").await;
     assert!(second > first, "each turn its own boundary");
-    // A name the call already holds is not started again.
-    let again = browser
+    // A duplicate start returns the same boundary and cannot advance the epoch.
+    browser
         .report(
             "voice-user-turn",
             json!({"phase": "started", "turn_id": "first"}),
         )
         .await;
-    let refusal = browser.frame("error").await;
-    assert_eq!(
-        (refusal["key"].as_str(), refusal["client_msg_id"].as_str()),
-        (Some("room.request_invalid"), Some(again.as_str()))
-    );
+    let duplicate = browser.frame("voice-user-turn").await;
+    assert_eq!(duplicate["revision"], first);
+    assert_eq!(duplicate["epoch"], 1);
 
     // The first turn's words come after the second turn started: both reach the conversation, each with its turn.
     browser
@@ -123,6 +121,7 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
         &binding,
         &session,
         first,
+        1,
         "late",
         "An old answer.",
     )
@@ -167,6 +166,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
         &binding,
         &session,
         revision,
+        0,
         "cut",
         "A reply cut short.",
     )
@@ -175,7 +175,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
     let reply = browser.frame("voice-reply").await;
     assert_eq!(
         reply,
-        json!({"session_id": session, "utterance_id": "cut", "revision": revision, "reply_revision": revision,
+        json!({"session_id": session, "utterance_id": "cut", "revision": revision, "reply_revision": revision,"epoch":0,
             "thread_id": THREAD, "text": "A reply cut short.", "language": "en",
             "history_id": format!("{session}:voice:cut")})
     );
@@ -191,6 +191,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
         &binding,
         &session,
         revision,
+        0,
         "whole",
         "A reply heard whole.",
     )
@@ -314,6 +315,7 @@ async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part
         &binding,
         &session,
         revision,
+        0,
         "cut",
         "A reply cut short.",
     )
@@ -464,7 +466,16 @@ async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
     assert_eq!(accept_delivery(&mut peer).await["text"], "Spoken");
 
     let revision = core.revision(&token, &session).await;
-    publish(&mut peer, &binding, &session, revision, "reply", "A reply.").await;
+    publish(
+        &mut peer,
+        &binding,
+        &session,
+        revision,
+        revision.saturating_sub(1),
+        "reply",
+        "A reply.",
+    )
+    .await;
     browser.frame("voice-reply").await;
     for status in ["playing", "heard"] {
         browser

@@ -51,6 +51,8 @@ pub(super) struct Browser {
     pub(super) sent: u64,
     /// Since when the call has had no socket: nothing new is handed to it until its page is back.
     pub(super) parked: Option<Instant>,
+    pub(super) speech_on: bool,
+    pub(super) speech_reason: Option<String>,
 }
 impl Browser {
     pub(super) fn new(device: String, language: String, sender: mpsc::Sender<Value>) -> Self {
@@ -66,6 +68,8 @@ impl Browser {
             turns: VecDeque::new(),
             sent: 0,
             parked: None,
+            speech_on: true,
+            speech_reason: None,
         }
     }
     /// Send an event to the browser if its channel has room; false if it was dropped.
@@ -142,13 +146,6 @@ impl Browsers {
     pub(super) fn is_recent(&self, sid: &str) -> bool {
         self.recent.iter().any(|s| s == sid)
     }
-    /// The most recent session among `candidates`.
-    pub(super) fn most_recent_of(&self, candidates: &[String]) -> Option<&String> {
-        self.recent
-            .iter()
-            .rev()
-            .find(|candidate| candidates.contains(candidate))
-    }
     /// The calls focused on `thread`.
     pub(super) fn on_thread<'a>(
         &'a self,
@@ -161,11 +158,14 @@ impl Browsers {
     }
     /// Tell the call that sent an input row what became of it.
     pub(super) fn input_receipt(&self, input: &InputRef, status: &str) {
+        if input.note {
+            return;
+        }
         if let Some(browser) = self.calls.get(&input.session) {
             if let Some(telemetry) = crate::control::telemetry::shared() {
                 telemetry.receipt(&input.session, status, input.thread.as_deref());
             }
-            let mut data = json!({"revision":input.revision,"history_id":input.id,"thread_id":input.thread,
+            let mut data = json!({"revision":input.revision,"epoch":input.epoch,"history_id":input.id,"thread_id":input.thread,
                 "session_id":input.session,"status":status});
             if let Some(turn_id) = &input.turn_id {
                 data["turn_id"] = json!(turn_id);

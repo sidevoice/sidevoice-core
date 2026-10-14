@@ -10,28 +10,25 @@
 //!   page (`queue_full`, `playback_failed`);
 //! - published with nobody listening on its conversation (`text_only`).
 //!
-//! Nothing here is ever played. The list goes to the agent once, bounded ([`Told`]): with the
-//! next message on the conversation, or as a note when the person comes back to it and says
-//! nothing for [`NOTE_GRACE_SECONDS`].
-use std::collections::{HashMap, VecDeque};
+//! Nothing here is ever played. Full reply evidence goes to the agent in batches with the
+//! ending spoken message or through ordinary note rows after [`NOTE_GRACE_SECONDS`].
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{json, Value};
 
 use super::journal::Journal;
-use super::util::{id, seconds};
+use super::util::seconds;
 use super::Inner;
 
-/// Replies the agent is shown, the newest ones.
-pub(super) const TOLD_REPLIES: usize = 3;
-/// Characters of each reply the agent is shown.
-pub(super) const TOLD_CHARS: usize = 280;
-/// Replies remembered per conversation; older ones are only counted.
-const KEPT_PER_THREAD: usize = 64;
+/// Maximum full replies in one evidence envelope.
+pub(super) const TOLD_REPLIES: usize = 8;
+/// Room's maximum retained original replies.
+const KEPT_PER_THREAD: usize = 2048;
 /// How long a person who came back may stay silent before the agent is sent a note.
 pub(super) const NOTE_GRACE_SECONDS: u64 = 5;
 
 /// The reasons a reply that was not played to the end ends unheard with.
-const UNHEARD_REASONS: [&str; 8] = [
+const UNHEARD_REASONS: [&str; 14] = [
     "user_interrupted",
     "newer_turn",
     "unheard",
@@ -40,6 +37,12 @@ const UNHEARD_REASONS: [&str; 8] = [
     "session_changed",
     "queue_full",
     "playback_failed",
+    "agents_muted",
+    "voice_off",
+    "connector_disconnected",
+    "no_audience",
+    "disconnected",
+    "inactive_conversation",
 ];
 
 /// Whether a reply row with this status and reason was not heard; `Some(cut)` if so.
@@ -63,26 +66,21 @@ struct Missed {
 
 #[derive(Default)]
 struct Pending {
-    /// Oldest first.
+    /// Inserted when each reply becomes unheard; publication order is recovered from the journal.
     rows: VecDeque<Missed>,
-    /// Unheard replies no longer in `rows`.
-    overflow: usize,
 }
 
 /// A note waiting to tell an agent what its returning person did not hear.
 pub(super) struct Note {
-    pub(super) id: String,
     pub(super) session: String,
     pub(super) due: u64,
-    pub(super) attempts: usize,
-    /// What it tells, taken from the conversation's list when it is first sent.
-    pub(super) told: Option<Value>,
 }
 
 #[derive(Default)]
 pub(super) struct Unheard {
     by_thread: HashMap<String, Pending>,
     notes: HashMap<String, Note>,
+    empty_obligations: HashSet<(String, u64)>,
 }
 
 impl Unheard {
@@ -100,7 +98,10 @@ impl Unheard {
                 let pending = self.by_thread.entry(thread.to_owned()).or_default();
                 if let Some(entry) = pending.rows.iter_mut().find(|m| m.row_id == row_id) {
                     entry.cut |= cut;
-                    entry.heard_chars = heard_chars.or(entry.heard_chars);
+                    entry.heard_chars = match (entry.heard_chars, heard_chars) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    };
                     return;
                 }
                 pending.rows.push_back(Missed {
@@ -108,10 +109,8 @@ impl Unheard {
                     cut,
                     heard_chars,
                 });
-                if pending.rows.len() > KEPT_PER_THREAD {
-                    pending.rows.pop_front();
-                    pending.overflow += 1;
-                }
+                // Admission is bounded by the journal/utterance limits. Never discard evidence.
+                debug_assert!(pending.rows.len() <= KEPT_PER_THREAD);
             }
             None => {
                 if let Some(pending) = self.by_thread.get_mut(thread) {
@@ -124,31 +123,33 @@ impl Unheard {
     pub(super) fn has(&self, thread: &str) -> bool {
         self.by_thread
             .get(thread)
-            .is_some_and(|pending| pending.overflow > 0 || !pending.rows.is_empty())
+            .is_some_and(|pending| !pending.rows.is_empty())
     }
 
-    /// What `thread`'s agent is told, emptying the list: how many replies went unheard, and the
-    /// newest [`TOLD_REPLIES`] of them in the order they were published, each cut to [`TOLD_CHARS`],
-    /// with `heard_chars` where known.
+    /// Take up to [`TOLD_REPLIES`] full replies in publication order. Remaining evidence stays
+    /// pending for correlated follow-up notice rows.
     pub(super) fn take(&mut self, thread: &str, journal: &Journal) -> Option<Value> {
-        let pending = self.by_thread.remove(thread)?;
-        let count = pending.overflow + pending.rows.len();
+        let pending = self.by_thread.get_mut(thread)?;
+        let mut ordered: Vec<_> = pending.rows.drain(..).collect();
+        ordered.sort_by_key(|missed| journal.find(&missed.row_id).map_or(u64::MAX, |row| row.seq));
+        let remaining = ordered.split_off(ordered.len().min(TOLD_REPLIES));
+        pending.rows = remaining.into();
+        let batch = ordered;
+        let count = batch.len();
         if count == 0 {
             return None;
         }
-        let mut rows: Vec<_> = pending
-            .rows
+        let rows: Vec<_> = batch
             .iter()
             .filter_map(|missed| Some((journal.find(&missed.row_id)?, missed)))
             .collect();
-        rows.sort_by_key(|(row, _)| row.seq);
-        let shown = rows.len().saturating_sub(TOLD_REPLIES);
-        let replies: Vec<Value> = rows[shown..]
+        let replies: Vec<Value> = rows
             .iter()
             .map(|(row, missed)| {
-                let truncated = row.text.chars().count() > TOLD_CHARS;
-                let text: String = row.text.chars().take(TOLD_CHARS).collect();
-                let mut reply = json!({"text":text,"truncated":truncated,"cut":missed.cut});
+                let mut reply = json!({"utterance_id":row.id.rsplit_once(":voice:").map(|(_, id)| id).unwrap_or(""),
+                    "history_id":row.id,"session_id":row.session,"revision":row.revision,
+                    "epoch":row.epoch,"text":row.text,"fate":row.status,
+                    "reason":row.reason,"cut":missed.cut,"heard_chars":Value::Null});
                 if let Some(heard) = missed.heard_chars {
                     reply["heard_chars"] = json!(heard);
                 }
@@ -167,11 +168,8 @@ impl Unheard {
         self.notes.insert(
             thread.to_owned(),
             Note {
-                id: format!("note:{}", id()),
                 session: session.to_owned(),
                 due: seconds() + NOTE_GRACE_SECONDS,
-                attempts: 0,
-                told: None,
             },
         );
     }
@@ -193,12 +191,50 @@ impl Unheard {
         self.notes.remove(thread);
     }
 
-    /// The conversation a note was sent for, by its id.
-    pub(super) fn note_thread(&self, note_id: &str) -> Option<String> {
-        self.notes
-            .iter()
-            .find(|(_, note)| note.id == note_id)
-            .map(|(thread, _)| thread.clone())
+    pub(super) fn count(&self, thread: &str) -> usize {
+        self.by_thread.get(thread).map_or(0, |p| p.rows.len())
+    }
+
+    /// Bytes already owed to an agent but not yet placed in an input envelope.
+    pub(super) fn pending_bytes(&self, journal: &Journal) -> usize {
+        self.by_thread
+            .values()
+            .flat_map(|pending| pending.rows.iter())
+            .filter_map(|missed| journal.find(&missed.row_id))
+            .map(|row| row.text.len() + 512)
+            .sum()
+    }
+
+    pub(super) fn next_batch_bytes(&self, thread: &str, journal: &Journal) -> usize {
+        let mut rows: Vec<_> = self
+            .by_thread
+            .get(thread)
+            .into_iter()
+            .flat_map(|pending| pending.rows.iter())
+            .filter_map(|missed| journal.find(&missed.row_id))
+            .collect();
+        rows.sort_by_key(|row| row.seq);
+        2048 + rows
+            .into_iter()
+            .take(TOLD_REPLIES)
+            .map(|row| {
+                serde_json::to_string(&row.text).map_or(row.text.len() * 6, |text| text.len()) + 512
+            })
+            .sum::<usize>()
+    }
+
+    pub(super) fn reserve_empty(&mut self, thread: &str, epoch: u64) {
+        self.empty_obligations.insert((thread.to_owned(), epoch));
+    }
+
+    pub(super) fn finish_empty(&mut self, thread: &str, epoch: u64) -> bool {
+        self.empty_obligations.remove(&(thread.to_owned(), epoch))
+    }
+
+    pub(super) fn transfer_empty(&mut self, thread: &str, from: u64, to: u64) {
+        if self.finish_empty(thread, from) {
+            self.reserve_empty(thread, to);
+        }
     }
 }
 
@@ -212,8 +248,15 @@ impl Inner {
         else {
             return;
         };
-        let verdict = unheard(&row.status, row.reason.as_deref());
-        if verdict.is_some() || row.status == "playback_finished" {
+        let verdict = if row.globally_heard {
+            None
+        } else {
+            unheard(&row.status, row.reason.as_deref())
+        };
+        if row.globally_heard
+            || verdict.is_some()
+            || matches!(row.status.as_str(), "playback_finished" | "skipped")
+        {
             let thread = row.thread.clone();
             let heard_chars = row
                 .heard_chars

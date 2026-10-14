@@ -27,7 +27,7 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     let (_peer, _binding) = connector_with_binding(&core, "resumed", THREAD).await;
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
-    core.select(&token, &session, THREAD).await;
+    let target_binding = core.select(&token, &session, THREAD).await;
     assert_eq!(browser.welcome["resumed"], false);
     let resume = browser.welcome["resume"]["token"]
         .as_str()
@@ -73,7 +73,8 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     }
     // A turn the page spoke and transcribed while it had no room, sent twice: one row.
     let offline = json!({"session_id": session, "client_msg_id": "offline-1", "phase": "finished",
-        "turn_id": "away", "offline": true, "text": "Said while away"});
+        "turn_id": "away", "offline": true, "text": "Said while away",
+        "thread_id":THREAD,"binding_id":target_binding});
     back.send("voice-user-turn", offline.clone()).await;
     assert_eq!(back.frame("voice-ack").await["client_msg_id"], "offline-1");
     // Once taken, the offline turn's boundary is said as a started turn's is: after the one across the drop.
@@ -124,11 +125,12 @@ async fn a_reply_published_while_the_page_was_away_is_marked_unheard_not_played(
         &binding,
         &session,
         revision,
+        0,
         "away",
         "Said while nobody listened",
     )
     .await;
-    assert_eq!(answer["status"], "queued", "{answer}");
+    assert_eq!(answer["status"], "text_only", "{answer}");
 
     let mut back = core.resume(&token, &session, &resume, last_seq).await;
     assert_eq!(back.welcome["resumed"], true);
@@ -138,7 +140,7 @@ async fn a_reply_published_while_the_page_was_away_is_marked_unheard_not_played(
     let row = rows.last().expect("the reply stays written");
     assert_eq!(
         (row["status"].as_str(), row["audio_reason"].as_str()),
-        (Some("interrupted"), Some("unheard")),
+        (Some("text_only"), Some("disconnected")),
         "{row}"
     );
     back.close().await;

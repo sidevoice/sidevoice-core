@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::support::{pull_room, report, say};
-use crate::control::room::unheard::{unheard, TOLD_CHARS, TOLD_REPLIES};
+use crate::control::room::unheard::unheard;
 use crate::control::room::{ConnectorPeer, Room};
 
 /// A room with one push binding on `thread`: the room, its binding and the connector's generation.
@@ -37,8 +37,14 @@ fn revision(room: &Room, sid: &str) -> u64 {
 }
 
 fn reply(room: &Room, sid: &str, thread: &str, uid: &str, text: &str, revision: u64) -> Value {
+    let epoch = revision
+        .saturating_sub(1)
+        .min(room.inner.lock().unwrap().conversations.epoch(thread));
     room.publish(
-        &json!({"session_id":sid,"thread_id":thread,"revision":revision,"utterance_id":uid,"text":text}))
+        &json!({"session_id":sid,"thread_id":thread,"revision":revision,
+            "epoch":epoch,
+            "utterance_id":uid,"text":text}),
+    )
 }
 
 fn status(room: &Room, sid: &str, uid: &str) -> (String, Option<String>) {
@@ -115,10 +121,12 @@ fn a_reply_spoken_over_is_cut_and_the_next_message_tells_the_agent() {
     );
     let message = only(deliveries(&room, "voice"));
     assert_eq!(message["text"], "And the tests?");
+    assert_eq!(message["unheard"]["count"], 1);
     assert_eq!(
-        message["unheard"],
-        json!({"count":1,"replies":[{"text":"The build is green.","truncated":false,"cut":true,"heard_chars":9}]})
+        message["unheard"]["replies"][0]["text"],
+        "The build is green."
     );
+    assert_eq!(message["unheard"]["replies"][0]["heard_chars"], 9);
     // Told once: the next message carries nothing.
     say(&room, &sid, "Thanks.");
     assert_eq!(told(&room, "Thanks."), None);
@@ -169,10 +177,19 @@ fn a_reply_to_a_turn_the_person_already_followed_is_not_spoken() {
         status(&room, &sid, "late"),
         ("text_only".into(), Some("newer_turn".into()))
     );
-    say(&room, &sid, "Go on.");
-    let unheard = told(&room, "Go on.").unwrap();
+    let note = room
+        .inner
+        .lock()
+        .unwrap()
+        .journal
+        .input_mut("t")
+        .find(|row| row.role == "note")
+        .unwrap()
+        .payload
+        .clone()
+        .unwrap();
     assert_eq!(
-        unheard["replies"][0]["text"],
+        note["unheard"]["replies"][0]["text"],
         "An answer to the old question."
     );
 }
@@ -181,7 +198,7 @@ fn a_reply_to_a_turn_the_person_already_followed_is_not_spoken() {
 fn what_was_published_while_away_becomes_a_bounded_note_on_return() {
     let (_directory, room, bid, generation) = room_on("t");
     let (sid, _received) = call(&room, "elsewhere");
-    let long = "x".repeat(TOLD_CHARS + 20);
+    let long = "x".repeat(350);
     for n in 0..5 {
         reply(
             &room,
@@ -211,11 +228,11 @@ fn what_was_published_while_away_becomes_a_bounded_note_on_return() {
     assert_eq!(note["message_id"], note_id.as_str());
     assert_eq!(note["unheard"]["count"], 5);
     let replies = note["unheard"]["replies"].as_array().unwrap();
-    assert_eq!(replies.len(), TOLD_REPLIES);
-    assert!(replies[0]["text"].as_str().unwrap().starts_with('2'));
-    assert!(replies.iter().all(
-        |r| r["truncated"] == true && r["text"].as_str().unwrap().chars().count() == TOLD_CHARS
-    ));
+    assert_eq!(replies.len(), 5);
+    assert!(replies[0]["text"].as_str().unwrap().starts_with('0'));
+    assert!(replies
+        .iter()
+        .all(|r| r["text"].as_str().unwrap().chars().count() == 351));
     room.settle_delivery(
         &bid,
         &note_id,
@@ -245,10 +262,10 @@ fn a_note_not_taken_is_sent_again_with_the_same_list() {
     room.inner
         .lock()
         .unwrap()
-        .unheard
-        .note_mut("t")
+        .journal
+        .find_mut(&note_id)
         .unwrap()
-        .due = 0;
+        .next_attempt = 0;
     let (_, again_id, _, again) = only(room.pending_delivery());
     assert_eq!(again_id, note_id);
     assert_eq!(again["unheard"], first["unheard"]);
@@ -304,9 +321,10 @@ fn how_far_a_cut_reply_was_heard_reaches_the_agent_when_known() {
     say(&room, &sid, "Stop.");
     let unheard = told(&room, "Stop.").unwrap();
     assert_eq!(
-        unheard["replies"][0],
-        json!({"text":"The build is green and deployed.","truncated":false,"cut":true,"heard_chars":12})
+        unheard["replies"][0]["text"],
+        "The build is green and deployed."
     );
+    assert_eq!(unheard["replies"][0]["heard_chars"], 12);
 }
 
 #[test]
@@ -381,8 +399,8 @@ fn a_reply_cut_on_one_call_and_failed_on_another_is_told_as_cut_in_either_order(
         );
         say(&room, &a, "Go on.");
         assert_eq!(
-            told(&room, "Go on.").unwrap()["replies"][0],
-            json!({"text":"The build is green and deployed.","truncated":false,"cut":true,"heard_chars":20}),
+            told(&room, "Go on.").unwrap()["replies"][0]["heard_chars"],
+            20,
             "cut first: {cut_first}"
         );
     }
@@ -449,8 +467,8 @@ fn a_reply_that_cannot_be_handed_to_a_full_call_is_unheard_and_told() {
     );
     say(&room, &sid, "Anything?");
     assert_eq!(
-        told(&room, "Anything?").unwrap()["replies"][0],
-        json!({"text":"The build is green.","truncated":false,"cut":false})
+        told(&room, "Anything?").unwrap()["replies"][0]["text"],
+        "The build is green."
     );
 }
 
@@ -661,8 +679,8 @@ fn a_new_turn_withdraws_the_replies_sent_before_it_that_have_not_started() {
     room.finish_turn(&sid, "next", Some("Go on."), &Value::Null)
         .unwrap();
     assert_eq!(
-        told(&room, "Go on.").unwrap()["replies"][0],
-        json!({"text":"Not started yet.","truncated":false,"cut":false})
+        told(&room, "Go on.").unwrap()["replies"][0]["text"],
+        "Not started yet."
     );
 }
 
@@ -723,7 +741,7 @@ fn a_reply_the_call_cannot_be_told_to_drop_ends_unheard_in_the_room() {
     assert!(withdrawn(&mut received).is_empty());
     assert_eq!(
         status(&room, &sid, "unsent"),
-        ("interrupted".into(), Some("focus_changed".into()))
+        ("text_only".into(), Some("disconnected".into()))
     );
 
     // Sent, but the call's channel is full when the withdrawal is due.

@@ -39,7 +39,7 @@ fn a_reply_handed_to_a_call_is_marked_dispatched_not_synthesised() {
         .as_u64()
         .unwrap();
     room.publish(
-        &json!({"session_id":sid,"thread_id":"t","revision":revision,"utterance_id":"r","text":"Done."}));
+        &json!({"session_id":sid,"thread_id":"t","revision":revision,"epoch":0,"utterance_id":"r","text":"Done."}));
     room.latency_browser(
         &sid,
         "r",

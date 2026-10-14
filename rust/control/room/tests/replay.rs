@@ -40,7 +40,7 @@ fn heard_reply() -> (
         .as_u64()
         .unwrap();
     let original = room.publish(
-        &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,
+        &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,"epoch":0,
             "utterance_id":"original","text":"Original reply"}),
     );
     assert_eq!(original["status"], "queued");
@@ -100,6 +100,13 @@ fn replay_skips_close_and_leave_keep_original_history() {
     room.replay_one(&sid, &history_id, "turn-replay").unwrap();
     room.begin_turn(&sid, "turn").unwrap();
     assert_eq!(status(&room, &history_id), "playback_finished");
+    assert_eq!(
+        room.replay_one(&sid, &history_id, "during-turn")
+            .unwrap_err()
+            .key,
+        "room.replay_unavailable"
+    );
+    room.finish_turn(&sid, "turn", None, &Value::Null).unwrap();
     let (other_events, _other_received) = mpsc::channel(8);
     let other = room
         .join("other-device".into(), "en".into(), other_events)

@@ -61,7 +61,7 @@ pub(super) async fn cancel_input(
     }
     let result = state
         .room
-        .cancel_input(sid, turn_id)
+        .cancel_input_merged(sid, turn_id, data["merged"].as_bool() == Some(true))
         .map_err(|error| room_refusal(error, &headers))?;
     Ok(Json(result).into_response())
 }

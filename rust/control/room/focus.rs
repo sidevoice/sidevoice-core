@@ -22,7 +22,8 @@ impl Room {
         };
         if client.is_on(thread) {
             return Ok(
-                json!({"status":"already_active","binding":client.target.as_ref().map(Target::view)}),
+                json!({"status":"already_active","binding":client.target.as_ref().map(Target::view),
+                    "epoch":inner.conversations.epoch(thread)}),
             );
         }
         client.sent = 0;
@@ -36,7 +37,7 @@ impl Room {
         inner.withdraw(sid, "focus_changed", |_, _| true);
         inner.report_working(sid);
         inner.offer_note(sid);
-        Ok(json!({"status":"activated","binding":view}))
+        Ok(json!({"status":"activated","binding":view,"epoch":inner.conversations.epoch(thread)}))
     }
     /// Focus a call that just joined on the conversation its hello names, honoured only while
     /// that conversation is still in the room.
@@ -76,7 +77,7 @@ impl Room {
         let view = target.view();
         c.refocus(target);
         inner.withdraw(sid, "focus_changed", |_, _| true);
-        Ok(json!({"status":"activated","binding":view}))
+        Ok(json!({"status":"activated","binding":view,"epoch":0}))
     }
 }
 

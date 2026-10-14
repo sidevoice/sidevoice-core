@@ -20,8 +20,9 @@ fn revision(room: &Room, sid: &str) -> u64 {
 }
 
 fn publish(room: &Room, sid: &str, uid: &str) -> Value {
+    let epoch = room.inner.lock().unwrap().conversations.epoch("thread");
     room.publish(
-        &json!({"session_id":sid,"thread_id":"thread","revision":revision(room, sid),
+        &json!({"session_id":sid,"thread_id":"thread","revision":revision(room, sid),"epoch":epoch,
             "utterance_id":uid,"text":"A reply of thirty characters."}),
     )
 }
@@ -50,7 +51,7 @@ fn what_a_call_reports_is_what_the_reply_row_shows() {
         (
             "heard",
             &[("playing", None, None), ("heard", None, None)],
-            ("playback_finished", None, None),
+            ("playback_finished", None, Some(29)),
         ),
         (
             "cut",
@@ -63,7 +64,7 @@ fn what_a_call_reports_is_what_the_reply_row_shows() {
                 ("playing", None, None),
                 ("interrupted", Some("user_skipped"), Some(3)),
             ],
-            ("interrupted", Some("user_skipped"), Some(3)),
+            ("skipped", Some("user_skipped"), Some(29)),
         ),
         (
             "dropped",

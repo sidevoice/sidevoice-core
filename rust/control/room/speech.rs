@@ -1,8 +1,6 @@
-//! Speech publication: an agent's reply becoming a journal row and an utterance for its audience.
-
+//! Admission of an agent reply under the conversation's current speech epoch.
 use serde_json::{json, Value};
 
-use super::browsers::Browser;
 use super::journal::Row;
 use super::util::{default_title, field, millis, seconds, valid_thread};
 use super::utterances::{UtteranceRecord, MAX_UTTERANCES};
@@ -11,57 +9,150 @@ use super::{Inner, Room};
 const SPEECH_LANGUAGES: [&str; 6] = ["es", "en", "fr", "it", "pt", "hi"];
 
 impl Room {
-    /// A reply the connector publishes, named by its `utterance_id`.
     pub fn publish(&self, p: &Value) -> Value {
         let thread = field(p, "thread_id");
         let uid = field(p, "utterance_id");
         let text = field(p, "text");
-        let Some(revision) = p.get("revision").and_then(Value::as_u64) else {
-            return rejected();
+        let sid = field(p, "session_id");
+        let (Some(revision), Some(epoch)) = (
+            p.get("revision").and_then(Value::as_u64),
+            p.get("epoch").and_then(Value::as_u64),
+        ) else {
+            return rejected("room.speech_invalid");
         };
         if text.is_empty()
             || text.chars().count() > 6000
             || uid.is_empty()
             || uid.len() > 200
             || !valid_thread(thread)
+            || sid.is_empty()
         {
-            return rejected();
+            return rejected("room.speech_invalid");
         }
-        // A language the room does not know is left out: the reply is kept and spoken as one that names none.
-        let language = p
-            .get("language")
-            .and_then(Value::as_str)
-            .filter(|language| SPEECH_LANGUAGES.contains(language));
+        let bid = field(p, "binding_id");
+        let fingerprint = json!([
+            bid,
+            thread,
+            sid,
+            revision,
+            epoch,
+            text,
+            p.get("event_id"),
+            p.get("language"),
+            p.get("history_only")
+        ]);
         let mut guard = self.inner.lock().expect("room lock");
         let inner = &mut *guard;
+        if let Some((prior, disposition)) = inner.refusals.get(uid) {
+            return if *prior == fingerprint {
+                disposition.clone()
+            } else {
+                rejected("room.speech_conflict")
+            };
+        }
         if let Some(row) = inner
             .utterances
             .get(uid)
             .and_then(|record| inner.journal.find(&record.row_id))
+            .or_else(|| inner.journal.find(&format!("{sid}:voice:{uid}")))
         {
-            return repeated(row, text, thread, uid);
+            return if row.publication_context.as_ref() == Some(&fingerprint) {
+                row.publication
+                    .clone()
+                    .unwrap_or_else(|| rejected("room.speech_conflict"))
+            } else {
+                rejected("room.speech_conflict")
+            };
         }
-        let audience = inner.browsers.ids_on_thread(thread);
-        let (sid, revision) = inner.speaker(field(p, "session_id"), revision, &audience);
-        let row_id = format!("{sid}:voice:{uid}");
-        if let Some(row) = inner.journal.find(&row_id) {
-            return repeated(row, text, thread, uid);
+        let initial = sid == format!("binding:{bid}")
+            && revision == 0
+            && inner
+                .bindings
+                .get(bid)
+                .is_some_and(|binding| binding.thread == thread && binding.active);
+        if !inner.browsers.is_recent(sid) && !initial {
+            let disposition = rejected("room.speech_context_invalid");
+            inner.remember_refusal(uid, fingerprint, disposition.clone());
+            return disposition;
         }
-        let asker = inner.browsers.get(&sid);
-        let reason = refusal(inner.browsers.is_recent(&sid), asker, thread, revision);
-        // A reply to a turn the person already followed with a message is never spoken.
-        let deferred = reason.is_some_and(deferrable)
-            && !(reason == Some("newer_turn")
-                && inner.journal.has_newer_input(&sid, thread, revision));
+        // An open turn is a terminal refusal. Remember it through retries after that turn closes.
+        if inner.conversations.is_open(thread) {
+            let disposition = json!({"status":"rejected","terminal":true,"reason":"user_speaking",
+                "error":"room.user_speaking","instruction":"The person is speaking; this will not play. Wait for their message."});
+            inner.remember_refusal(uid, fingerprint, disposition.clone());
+            inner.empty_obligation(thread);
+            return disposition;
+        }
+        let current = inner.conversations.epoch(thread);
+        if epoch > current {
+            let disposition = rejected("room.speech_context_invalid");
+            inner.remember_refusal(uid, fingerprint, disposition.clone());
+            return disposition;
+        }
+        if inner
+            .room_for_bytes(text.len() + 2048 + inner.unheard.pending_bytes(&inner.journal))
+            .is_err()
+        {
+            let disposition = rejected("room.input_backlog_full");
+            inner.remember_refusal(uid, fingerprint, disposition.clone());
+            return disposition;
+        }
+        let mut audience = inner.browsers.ids_on_thread(thread);
+        audience.sort();
+        audience.retain(|listener| {
+            inner
+                .browsers
+                .get(listener)
+                .is_some_and(|browser| browser.parked.is_none() && browser.speech_on)
+        });
         let capacity = inner.utterances.original_count() >= MAX_UTTERANCES;
-        let can_speak = (reason.is_none() || deferred) && !audience.is_empty() && !capacity;
-        let status = if can_speak { "queued" } else { "text_only" };
-        let spoken_revision = if deferred {
-            asker.map_or(revision, |b| b.revision)
+        let reason = if epoch < current {
+            Some("newer_turn".to_owned())
+        } else if p.get("history_only").and_then(Value::as_bool) == Some(true) {
+            Some("connector_disconnected".to_owned())
+        } else if capacity {
+            Some("queue_full".to_owned())
+        } else if audience.is_empty() {
+            let on_thread: Vec<_> = inner
+                .browsers
+                .on_thread(thread)
+                .map(|(_, browser)| browser)
+                .collect();
+            Some(
+                if on_thread
+                    .iter()
+                    .any(|browser| browser.speech_reason.as_deref() == Some("agents_muted"))
+                {
+                    "agents_muted"
+                } else if on_thread
+                    .iter()
+                    .any(|browser| browser.speech_reason.as_deref() == Some("voice_off"))
+                {
+                    "voice_off"
+                } else if on_thread.iter().any(|browser| browser.parked.is_some()) {
+                    "disconnected"
+                } else if inner.browsers.contains(sid) {
+                    "inactive_conversation"
+                } else if inner.browsers.is_recent(sid) {
+                    "call_ended"
+                } else {
+                    "session_changed"
+                }
+                .to_owned(),
+            )
         } else {
-            revision
+            None
         };
-        let reason = if capacity { Some("queue_full") } else { reason };
+        let status = if reason.is_some() {
+            "text_only"
+        } else {
+            "queued"
+        };
+        let language = p
+            .get("language")
+            .and_then(Value::as_str)
+            .filter(|language| SPEECH_LANGUAGES.contains(language));
+        let asker = inner.browsers.get(sid);
         let name = inner
             .bindings
             .newest_active(thread)
@@ -72,47 +163,55 @@ impl Room {
                     .and_then(|t| t.title.clone())
             })
             .unwrap_or_else(|| default_title(thread, asker.map_or("en", |b| b.language.as_str())));
+        let row_id = format!("{sid}:voice:{uid}");
+        let disposition = if let Some(ref reason) = reason {
+            json!({"status":status,"utterance_id":uid,"session_id":sid,"revision":revision,
+                "epoch":epoch,"text_saved":true,"reason":reason})
+        } else {
+            json!({"status":status,"utterance_id":uid,"session_id":sid,"revision":revision,
+                "epoch":epoch,"text_saved":true})
+        };
         inner.append_row(Row {
             id: row_id.clone(),
             thread: thread.into(),
             role: "assistant",
             text: text.into(),
             name: Some(name),
-            session: sid.clone(),
+            session: sid.into(),
             revision,
+            epoch,
             time: millis(),
             status: status.into(),
-            reason: reason.map(str::to_owned),
+            reason: reason.clone(),
             language: language.map(str::to_owned),
             queued_at: seconds(),
+            publication: Some(disposition.clone()),
+            publication_context: Some(fingerprint.clone()),
             ..Row::default()
         });
-        if !can_speak {
-            inner.track_unheard(&row_id);
-        }
-        if can_speak {
-            inner.speak(uid, row_id, &audience, thread, revision);
-        } else if matches!(
-            reason,
-            Some("session_changed" | "call_ended" | "focus_changed")
-        ) && inner.utterances.original_count() < MAX_UTTERANCES
-        {
-            // Nobody heard it: keep it so that it can still be replayed later.
-            inner.utterances.insert(
-                uid,
-                UtteranceRecord {
-                    row_id,
-                    parked: true,
-                    ..Default::default()
-                },
-            );
-        }
-        if status == "text_only" {
-            json!({"status":"text_only","text_saved":true,"reason":reason.unwrap_or("call_ended")})
+        if reason.is_none() {
+            inner.speak(uid, row_id, &audience, thread, revision, epoch);
         } else {
-            json!({"status":status,"utterance_id":uid,"session_id":sid,"revision":spoken_revision,"text_saved":true})
+            inner.track_unheard(&row_id);
+            if !capacity {
+                inner.utterances.insert(
+                    uid,
+                    UtteranceRecord {
+                        row_id,
+                        epoch,
+                        parked: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            if reason.as_deref() == Some("newer_turn") {
+                inner.flush_all_unheard_notes(thread, sid, "reply_not_played", None);
+            }
         }
+        inner.remember_refusal(uid, fingerprint, disposition.clone());
+        disposition
     }
+
     pub fn connector_speech(&self, cid: &str, p: &Value) -> Value {
         let bid = field(p, "binding_id");
         let thread = {
@@ -120,7 +219,8 @@ impl Room {
             inner.bindings.live_of(cid, bid).map(|b| b.thread.clone())
         };
         let Some(thread) = thread else {
-            return json!({"status":"unknown_binding","event_id":p.get("event_id"),"utterance_id":p.get("utterance_id")});
+            return json!({"status":"unknown_binding","event_id":p.get("event_id"),
+                "utterance_id":p.get("utterance_id")});
         };
         let mut speech = p.clone();
         speech["thread_id"] = json!(thread);
@@ -129,21 +229,21 @@ impl Room {
 }
 
 impl Inner {
-    /// The call a reply is spoken for, and the revision it answers: the call that asked if it
-    /// is still here, otherwise the most recent call listening to the thread at its revision.
-    fn speaker(&self, asked: &str, revision: u64, audience: &[String]) -> (String, u64) {
-        if !self.browsers.contains(asked) {
-            if let Some(replacement) = self.browsers.most_recent_of(audience) {
-                let revision = self
-                    .browsers
-                    .get(replacement)
-                    .map_or(revision, |b| b.revision);
-                return (replacement.clone(), revision);
+    fn remember_refusal(&mut self, uid: &str, fingerprint: Value, disposition: Value) {
+        if self
+            .refusals
+            .insert(uid.to_owned(), (fingerprint, disposition))
+            .is_none()
+        {
+            self.refusal_order.push_back(uid.to_owned());
+        }
+        while self.refusal_order.len() > 2048 {
+            if let Some(old) = self.refusal_order.pop_front() {
+                self.refusals.remove(&old);
             }
         }
-        (asked.to_owned(), revision)
     }
-    /// Send a reply to every call in its audience; each call's voice module decides whether and when it plays.
+
     fn speak(
         &mut self,
         uid: &str,
@@ -151,6 +251,7 @@ impl Inner {
         audience: &[String],
         thread: &str,
         revision: u64,
+        epoch: u64,
     ) {
         let clients = audience
             .iter()
@@ -163,6 +264,7 @@ impl Inner {
             uid,
             UtteranceRecord {
                 row_id,
+                epoch,
                 clients,
                 ..Default::default()
             },
@@ -174,52 +276,6 @@ impl Inner {
     }
 }
 
-/// Why a reply cannot be spoken to the call it answers as it stands, if it cannot.
-fn refusal(
-    known: bool,
-    asker: Option<&Browser>,
-    thread: &str,
-    revision: u64,
-) -> Option<&'static str> {
-    let Some(asker) = asker else {
-        return Some(if known {
-            "call_ended"
-        } else {
-            "session_changed"
-        });
-    };
-    if !known {
-        Some("session_changed")
-    } else if !asker.is_on(thread) {
-        Some("focus_changed")
-    } else if asker.revision != revision {
-        Some(if asker.turn_revision > revision {
-            "newer_turn"
-        } else {
-            "focus_changed"
-        })
-    } else if asker.speaking {
-        Some("user_speaking")
-    } else {
-        None
-    }
-}
-
-/// Reasons a reply can still be spoken for, after the user's current turn.
-fn deferrable(reason: &str) -> bool {
-    ["newer_turn", "user_speaking"].contains(&reason)
-}
-
-fn rejected() -> Value {
-    json!({"status":"rejected","error":"room.speech_invalid","terminal":true,"reason_code":"application_refusal"})
-}
-
-/// The answer to a reply whose row already exists: accepted again if it is the same words on
-/// the same thread, refused otherwise.
-fn repeated(row: &Row, text: &str, thread: &str, uid: &str) -> Value {
-    if row.text == text && row.thread == thread {
-        json!({"status":row.status,"text_saved":true,"utterance_id":uid})
-    } else {
-        rejected()
-    }
+fn rejected(key: &str) -> Value {
+    json!({"status":"rejected","error":key,"terminal":true,"reason_code":"application_refusal"})
 }

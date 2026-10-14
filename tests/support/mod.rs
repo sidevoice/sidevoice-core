@@ -1493,13 +1493,14 @@ pub async fn publish(
     binding: &str,
     session: &str,
     revision: u64,
+    epoch: u64,
     utterance: &str,
     text: &str,
 ) -> Value {
     peer.call(
         "speech.publish",
         json!({"event_id": format!("event-{utterance}"), "utterance_id": utterance, "binding_id": binding,
-            "session_id": session, "revision": revision, "text": text, "language": "en"}),
+            "session_id": session, "revision": revision, "epoch":epoch, "text": text, "language": "en"}),
     )
     .await
 }

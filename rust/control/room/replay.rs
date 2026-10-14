@@ -41,11 +41,15 @@ impl Room {
         if !browser.is_on(&thread) {
             return Err(RoomError::new(404, "room.replay_missing"));
         }
+        if !browser.speech_on || browser.parked.is_some() || inner.conversations.is_open(&thread) {
+            return Err(RoomError::new(409, "room.replay_unavailable"));
+        }
         let revision = browser.revision;
         inner.utterances.insert(
             uid,
             UtteranceRecord {
                 row_id: history_id.to_owned(),
+                epoch: row.epoch,
                 clients: HashMap::from([(sid.to_owned(), (revision, "queued".to_owned()))]),
                 replay_of: Some(original),
                 requested: true,

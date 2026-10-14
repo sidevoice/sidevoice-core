@@ -11,8 +11,8 @@ impl Room {
         let mut utterances:Vec<(u64,Value,Option<Value>)>=inner.utterances.iter().filter_map(|(uid,record)|{
             let row=inner.journal.find(&record.row_id)?;
             let clients:Map<String,Value>=record.clients.iter().map(|(id,(_,status))|(id.clone(),json!(status))).collect();
-            let own=sid.and_then(|id|record.clients.get(id)).map(|(_,status)|json!({"utterance_id":uid,"revision":row.revision,"session_id":sid,"status":status}));
-            Some((row.seq,json!({"utterance_id":uid,"revision":row.revision,"thread_id":row.thread,"status":row.status,"parked":record.parked,"replay_of":record.replay_of,"clients":clients}),own))
+            let own=sid.and_then(|id|record.clients.get(id)).map(|(_,status)|json!({"utterance_id":uid,"revision":row.revision,"epoch":row.epoch,"session_id":sid,"status":status}));
+            Some((row.seq,json!({"utterance_id":uid,"revision":row.revision,"epoch":row.epoch,"thread_id":row.thread,"status":row.status,"parked":record.parked,"replay_of":record.replay_of,"clients":clients}),own))
         }).collect();
         utterances.sort_by_key(|entry| entry.0);
         let room_utterances: Vec<Value> = utterances.iter().map(|entry| entry.1.clone()).collect();

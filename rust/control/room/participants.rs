@@ -18,7 +18,11 @@ impl Room {
             json!({"thread_id":b.thread,"title":b.title.clone().unwrap_or_else(||default_title(&b.thread,language)),
                 "harness":b.harness,"available":b.live,"machine":{"id":b.connector,"host":host},
                 "capabilities":b.capabilities,"engine":b.engine,"route":b.route,
-                "reach":reachability(b,language),"selected":selected==Some(b.thread.as_str())})
+                "reach":reachability(b,language),"selected":selected==Some(b.thread.as_str()),
+                "epoch":inner.conversations.epoch(&b.thread),
+                "unheard":inner.journal.unheard_summary(&b.thread)
+                    .map_or(Value::Null, |(count,since)| json!({"count":count,"since":since})),
+                "working":inner.bindings.working(&b.thread)})
         }).collect::<Vec<_>>())
     }
 }

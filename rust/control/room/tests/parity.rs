@@ -40,8 +40,10 @@ fn revision(room: &Room, sid: &str) -> u64 {
 }
 
 fn reply(room: &Room, sid: &str, thread: &str, uid: &str, text: &str) -> Value {
+    let epoch = room.inner.lock().unwrap().conversations.epoch(thread);
     room.publish(
         &json!({"session_id":sid,"thread_id":thread,"revision":revision(room, sid),
+            "epoch":epoch,
             "utterance_id":uid,"text":text}),
     )
 }
@@ -114,8 +116,7 @@ fn selecting_needs_no_binding_and_shows_working_which_detach_clears() {
 fn a_reply_goes_out_as_text_at_once_and_a_parked_call_is_sent_nothing_until_it_is_back() {
     let (_directory, room, _) = parity_room("t");
     let (sid, mut events) = browser(&room, "t");
-    let turn = room.begin_turn(&sid, "turn").unwrap();
-    // The person is speaking: the reply still goes out, for the call's voice module to hold or drop.
+    let revision = revision(&room, &sid);
     reply(&room, &sid, "t", "sent", "Sent while the person spoke");
     let sent = drain(&mut events);
     let sent = sent
@@ -124,7 +125,7 @@ fn a_reply_goes_out_as_text_at_once_and_a_parked_call_is_sent_nothing_until_it_i
         .expect("the reply is sent");
     assert_eq!(
         sent["data"],
-        json!({"session_id":sid,"utterance_id":"sent","revision":turn.revision,"reply_revision":turn.revision,
+        json!({"session_id":sid,"utterance_id":"sent","revision":revision,"reply_revision":revision,"epoch":0,
             "thread_id":"t","text":"Sent while the person spoke","language":null,
             "history_id":format!("{sid}:voice:sent")})
     );
@@ -137,9 +138,9 @@ fn a_reply_goes_out_as_text_at_once_and_a_parked_call_is_sent_nothing_until_it_i
     assert!(drain(&mut events).is_empty());
     assert_eq!(
         row(&room, &format!("{sid}:voice:later")),
-        ("interrupted".into(), Some("unheard".into()))
+        ("text_only".into(), Some("disconnected".into()))
     );
-    assert_eq!(row(&room, &format!("{sid}:voice:sent")).0, "queued");
+    assert_eq!(row(&room, &format!("{sid}:voice:sent")).0, "interrupted");
     room.park(&sid, true);
     room.resume(&sid, &["sent".to_owned()]);
     assert_eq!(

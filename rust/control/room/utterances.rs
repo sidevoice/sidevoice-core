@@ -18,13 +18,14 @@ pub(super) struct End {
 #[derive(Default)]
 pub(super) struct UtteranceRecord {
     pub(super) row_id: String,
+    pub(super) epoch: u64,
     pub(super) clients: HashMap<String, ClientEntry>,
     /// How it ended on each call that ended it, by session; the journal row is derived from these and `clients`.
     pub(super) ends: HashMap<String, End>,
     pub(super) parked: bool,
     /// For a replay: the utterance it repeats, by id; one never sent to a call has no record of its own.
     pub(super) replay_of: Option<String>,
-    /// Calls that heard this reply through: it played to the end, or that listener stopped it.
+    /// Calls that heard this reply through or explicitly skipped it.
     pub(super) heard: HashSet<String>,
     /// Calls it was sent to. A call that was away when it was published never got it.
     pub(super) sent: HashSet<String>,
@@ -57,7 +58,7 @@ impl UtteranceRecord {
             .iter()
             .filter_map(|end| end.reason.as_deref())
             .min_by_key(|reason| (*reason != "user_interrupted", *reason));
-        let heard_chars = ends.iter().filter_map(|end| end.heard_chars).max();
+        let heard_chars = self.ends.values().filter_map(|end| end.heard_chars).max();
         Some((best, reason, heard_chars))
     }
     /// Whether no call will still play this utterance.
@@ -65,7 +66,7 @@ impl UtteranceRecord {
         self.clients.values().all(|(_, status)| {
             matches!(
                 status.as_str(),
-                "failed" | "playback_finished" | "interrupted"
+                "failed" | "playback_finished" | "interrupted" | "skipped"
             )
         })
     }
@@ -77,7 +78,8 @@ fn status_rank(status: &str) -> u8 {
         "interrupted" => 3,
         "queued" => 4,
         "playing" => 7,
-        "playback_finished" => 8,
+        "playback_finished" => 9,
+        "skipped" => 8,
         _ => 0,
     }
 }
@@ -162,8 +164,8 @@ impl Utterances {
     }
     /// A catch-up that actually sounded for `sid` says so on the reply it repeated, so the next
     /// return does not offer it again. One that never started playing says nothing.
-    pub(super) fn replay_heard(&mut self, original: &str, sid: &str, previous: &str, next: &str) {
-        if next == "playback_finished" || (next == "interrupted" && previous == "playing") {
+    pub(super) fn replay_heard(&mut self, original: &str, sid: &str, _previous: &str, next: &str) {
+        if next == "playback_finished" || next == "skipped" {
             if let Some(record) = self.by_id.get_mut(original) {
                 record.heard.insert(sid.to_owned());
             }

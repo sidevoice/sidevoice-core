@@ -66,6 +66,7 @@ impl Room {
     /// pull binding. Acknowledgement is idempotent: an ID this binding does not hold is ignored.
     pub fn pull_input(&self, cid: &str, data: &Value) -> Result<Value, RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
+        inner.materialize_due_notes();
         let bid = field(data, "binding_id");
         let Some(binding) = inner.bindings.get(bid).filter(|binding| {
             binding.connector == cid && binding.active && binding.live && binding.pull_input
@@ -149,10 +150,13 @@ impl Inner {
                     let payload = row.payload.clone().unwrap_or_default();
                     let mut message = json!({"message_id":payload["message_id"],
                         "session_id":payload["session_id"], "revision":payload["revision"],
-                        "channel":"voice", "text":row.text, "arrival_time":row.time,
+                        "epoch":payload["epoch"], "channel":payload["channel"], "text":row.text, "arrival_time":row.time,
                         "cursor":row.seq});
                     if let Some(unheard) = payload.get("unheard") {
                         message["unheard"] = unheard.clone();
+                    }
+                    if let Some(notice) = payload.get("notice") {
+                        message["notice"] = notice.clone();
                     }
                     page.messages.push(message);
                     if row.status == "pending" {

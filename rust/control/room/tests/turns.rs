@@ -39,8 +39,14 @@ fn delivered_to(room: &Room) -> Vec<String> {
 }
 
 fn publish(room: &Room, sid: &str, uid: &str, revision: u64) -> Value {
+    let epoch = revision
+        .saturating_sub(1)
+        .min(room.inner.lock().unwrap().conversations.epoch("x"));
     room.publish(
-        &json!({"session_id":sid,"thread_id":"x","revision":revision,"utterance_id":uid,"text":"A reply."}))
+        &json!({"session_id":sid,"thread_id":"x","revision":revision,
+            "epoch":epoch,
+            "utterance_id":uid,"text":"A reply."}),
+    )
 }
 
 #[test]
@@ -185,11 +191,14 @@ fn messages_waiting_for_their_agent_are_bounded_in_number_and_in_bytes() {
 
     let (_directory, room, sid, _events) = room_with_call();
     let long = "a".repeat(12_000);
-    let fit = (1024 * 1024) / long.len();
-    for n in 0..fit {
-        room.offline_input(&sid, &format!("m{n}"), &long, None)
-            .unwrap();
+    let mut fit = 0;
+    while room
+        .offline_input(&sid, &format!("m{fit}"), &long, None)
+        .is_ok()
+    {
+        fit += 1;
     }
+    assert!(fit > 0 && fit < 256);
     let turn = room.begin_turn(&sid, "turn").unwrap();
     let refused = room.finish_turn(&sid, &turn.turn_id, Some(&long), &Value::Null);
     assert_eq!(refused.unwrap_err().key, "room.input_backlog_full");

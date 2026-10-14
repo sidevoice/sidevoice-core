@@ -46,7 +46,10 @@ impl Room {
                 && (!pull_input || row.pull_claimed_by.as_deref() != Some(bid.as_str()))
         });
         Ok(
-            json!({"client_ref": data.get("client_ref"), "binding_id": bid, "thread": actual_thread}),
+            json!({"client_ref": data.get("client_ref"), "binding_id": bid, "thread": actual_thread,
+                "epoch":inner.conversations.epoch(&actual_thread),
+                "initial_reply_context":{"session_id":format!("binding:{bid}"),"revision":0,
+                    "epoch":inner.conversations.epoch(&actual_thread),"thread_id":actual_thread}}),
         )
     }
     pub fn unregister(&self, cid: &str, bid: &str) {
