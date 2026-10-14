@@ -8,7 +8,7 @@ use super::browsers::MAX_OPEN_TURNS;
 use super::error::RoomError;
 use super::input::MAX_INPUT_BYTES;
 use super::latency::{latency_now_micros, LatencyEvent};
-use super::Room;
+use super::{Inner, Room};
 
 /// The longest turn id the room takes, in bytes.
 const MAX_TURN_ID: usize = 64;
@@ -55,6 +55,17 @@ impl Room {
         if inner.conversations.prior(sid, turn_id).is_some() {
             return Err(RoomError::new(409, "room.input_ended"));
         }
+        if let Some(thread) = inner
+            .browsers
+            .get(sid)
+            .and_then(|browser| browser.bound_target())
+            .map(|t| t.thread.clone())
+        {
+            if !inner.conversations.can_begin(&thread) {
+                return Err(RoomError::new(429, "room.input_backlog_full"));
+            }
+            inner.room_for_bytes(2048)?;
+        }
         let c = inner.browsers.get_mut(sid).expect("call under lock");
         // The turns already open keep their words' destination: a new one waits until one of them ends.
         if c.turns.len() >= MAX_OPEN_TURNS {
@@ -79,31 +90,10 @@ impl Room {
         };
         let mut turn = turn;
         if let Some(thread) = turn.thread_id.as_deref() {
-            turn.epoch = inner.conversations.begin(thread, sid, turn_id);
+            turn.epoch = inner.advance_speech_epoch(thread, sid, turn_id);
         }
-        let thread = turn.thread_id.clone();
-        let epoch = turn.epoch;
         let c = inner.browsers.get_mut(sid).expect("call under lock");
         c.turns.push_back(turn.clone());
-        if let Some(thread) = thread {
-            let sessions: std::collections::HashSet<String> = inner
-                .utterances
-                .iter()
-                .filter(|(_, record)| {
-                    record.epoch < epoch
-                        && inner
-                            .journal
-                            .find(&record.row_id)
-                            .is_some_and(|row| row.thread == thread)
-                })
-                .flat_map(|(_, record)| record.clients.keys().cloned())
-                .collect();
-            for listener in sessions {
-                inner.withdraw(&listener, "newer_turn", |record, (_, status)| {
-                    status == "queued" && !record.requested && record.epoch < epoch
-                });
-            }
-        }
         Ok(turn)
     }
 
@@ -147,11 +137,12 @@ impl Room {
         };
         let open = &browser.turns[index];
         if let Some(text) = text.filter(|_| !open.cancelled && open.thread_id.is_some()) {
-            inner.room_for_bytes(
+            inner.room_for_bytes_with_turn_credit(
                 text.len()
                     + inner
                         .unheard
                         .next_batch_bytes(open.thread_id.as_deref().unwrap_or(""), &inner.journal),
+                1,
             )?;
         }
         let browser = inner
@@ -159,7 +150,9 @@ impl Room {
             .get_mut(sid)
             .expect("the call, under the same lock");
         let turn = browser.turns.remove(index).expect("the turn found");
-        let continuing = if merged {
+        // A finished merged transcript already includes earlier turns. Only an empty
+        // merged cancellation transfers its obligation to a later open turn.
+        let continuing = if merged && text.is_none() {
             browser
                 .turns
                 .iter()
@@ -272,5 +265,42 @@ impl Room {
             }
         }
         Ok(json!({"status":"cancelled"}))
+    }
+}
+
+impl Inner {
+    /// One qualified spoken boundary, shared by live and offline turns. Numeric epochs are
+    /// comparable only inside this conversation, so select rows before visiting audiences.
+    pub(super) fn advance_speech_epoch(&mut self, thread: &str, sid: &str, turn_id: &str) -> u64 {
+        assert!(
+            self.conversations.can_begin(thread),
+            "epoch context reserved before turn admission"
+        );
+        let epoch = self.conversations.begin(thread, sid, turn_id);
+        let rows: std::collections::HashSet<String> = self
+            .utterances
+            .iter()
+            .filter(|(_, record)| {
+                record.epoch < epoch
+                    && !record.requested
+                    && self
+                        .journal
+                        .find(&record.row_id)
+                        .is_some_and(|row| row.thread == thread)
+            })
+            .map(|(_, record)| record.row_id.clone())
+            .collect();
+        let sessions: std::collections::HashSet<String> = self
+            .utterances
+            .iter()
+            .filter(|(_, record)| rows.contains(&record.row_id))
+            .flat_map(|(_, record)| record.clients.keys().cloned())
+            .collect();
+        for listener in sessions {
+            self.withdraw(&listener, "newer_turn", |record, (_, status)| {
+                status == "queued" && !record.requested && rows.contains(&record.row_id)
+            });
+        }
+        epoch
     }
 }

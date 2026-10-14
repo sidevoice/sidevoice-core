@@ -68,10 +68,17 @@ impl Room {
             return Err(stale());
         };
         if !matches!(entry.1.as_str(), "queued" | "playing") {
-            if entry.1 == "interrupted" && matches!(status, "heard" | "interrupted") {
+            if entry.1 == "interrupted"
+                && (matches!(status, "heard" | "interrupted") || reason == Some("user_skipped"))
+            {
                 if let Some(end) = record.ends.get_mut(sid) {
                     let prior = end.heard_chars.unwrap_or(0);
-                    if status == "heard" {
+                    if reason == Some("user_skipped") {
+                        entry.1 = "skipped".into();
+                        end.heard_chars = length;
+                        end.reason = Some("user_skipped".into());
+                        record.heard.insert(sid.to_owned());
+                    } else if status == "heard" {
                         entry.1 = "playback_finished".into();
                         end.heard_chars = length;
                         end.reason = None;
@@ -82,6 +89,9 @@ impl Room {
                     let row_id = record.row_id.clone();
                     if !record.is_replay() {
                         inner.sync_row(&row_id);
+                        if reason == Some("user_skipped") {
+                            inner.queue_skip_note(&row_id, sid);
+                        }
                     }
                 }
             }
@@ -105,7 +115,7 @@ impl Room {
                 heard_chars: if matches!(next, "playback_finished" | "skipped") {
                     length
                 } else {
-                    heard_chars.filter(|_| status == "interrupted")
+                    heard_chars.filter(|_| matches!(status, "interrupted" | "failed"))
                 },
             },
         );
@@ -150,9 +160,19 @@ impl Room {
                 if let Some(thread) = inner.journal.find(&row_id).map(|row| row.thread.clone()) {
                     if let Some(row) = inner.journal.find_mut(&row_id) {
                         row.globally_heard = true;
+                        row.heard_chars = Some(row.text.chars().count() as u64);
                     }
                     inner.unheard.update(&thread, &row_id, None, None);
+                    inner.reconcile_unclaimed(&thread);
                 }
+            } else if let Some(heard) = heard_chars {
+                if let Some(row) = inner.journal.find_mut(&row_id) {
+                    row.heard_chars = Some(row.heard_chars.unwrap_or(0).max(heard));
+                }
+                inner.track_unheard(&row_id);
+            }
+            if next == "skipped" {
+                inner.queue_skip_note(&row_id, sid);
             }
         }
         inner.latency.set_reply_status(sid, uid, next);
@@ -193,6 +213,14 @@ impl Inner {
             row.globally_heard |= matches!(row.status.as_str(), "playback_finished" | "skipped");
         }
         self.track_unheard(row_id);
+        if self
+            .journal
+            .find(row_id)
+            .is_some_and(|row| row.globally_heard)
+        {
+            let thread = self.journal.find(row_id).unwrap().thread.clone();
+            self.reconcile_unclaimed(&thread);
+        }
         if let Some(row) = self.journal.find(row_id) {
             let thread = row.thread.clone();
             let session = row.session.clone();
@@ -200,13 +228,29 @@ impl Inner {
             if matches!(row.status.as_str(), "interrupted" | "failed")
                 && !self.conversations.is_open(&thread)
             {
-                if let Some(message_id) = self.journal.newer_spoken_message(&thread, epoch) {
-                    self.flush_all_unheard_notes(
-                        &thread,
-                        &session,
-                        "reply_not_played",
-                        Some(&message_id),
-                    );
+                let message = self.journal.newer_spoken_message(&thread, epoch);
+                let empty = self.conversations.empty_after(&thread, epoch);
+                let kind = if row.reason.as_deref() == Some("user_interrupted") {
+                    "reply_interrupted"
+                } else {
+                    "reply_not_played"
+                };
+                match (message, empty) {
+                    (Some((word_epoch, message_id)), Some((empty_epoch, _)))
+                        if word_epoch <= empty_epoch =>
+                    {
+                        self.flush_all_unheard_notes(&thread, &session, kind, Some(&message_id));
+                    }
+                    (_, Some((_, empty_session))) => {
+                        self.flush_all_unheard_notes(&thread, &empty_session, kind, None);
+                    }
+                    (Some((_, message_id)), None) => {
+                        self.flush_all_unheard_notes(&thread, &session, kind, Some(&message_id));
+                    }
+                    (None, None) if self.conversations.epoch(&thread) > epoch => {
+                        self.flush_all_unheard_notes(&thread, &session, kind, None);
+                    }
+                    (None, None) => {}
                 }
             }
         }

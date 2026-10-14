@@ -760,3 +760,981 @@ fn t16_full_input_queue_backpressures_new_speech_before_evidence_can_be_owed() {
         .iter()
         .all(|row| row["role"] != "assistant"));
 }
+#[test]
+fn review_ack_releases_backlog_capacity() {
+    let c = Case::new(true);
+    c.say("one", Some("One"));
+    let messages = c.pull();
+    c.room
+        .pull_input(
+            "connector",
+            &json!({"binding_id":c.bid,"operation":"get","ack_ids":[messages[0]["message_id"]]}),
+        )
+        .unwrap();
+    assert_eq!(
+        c.room.inner.lock().unwrap().journal.waiting_input().0,
+        0,
+        "acknowledged input must release capacity"
+    );
+}
+
+#[test]
+fn t16_pull_ack_cycles_release_capacity_for_more_input_and_speech() {
+    let c = Case::new(true);
+    let focus = c.room.select(&c.sid, "t").unwrap();
+    let focus_id = focus["binding"]["binding_id"].as_str().unwrap();
+    for n in 0..300 {
+        c.room
+            .send_text("Context", &c.sid, "t", focus_id, &format!("cycle-{n}"))
+            .unwrap();
+        let messages = c.pull();
+        assert_eq!(messages.len(), 1, "cycle {n}");
+        c.room
+            .pull_input(
+                "connector",
+                &json!({"binding_id":c.bid,"operation":"get",
+                    "ack_ids":[messages[0]["message_id"]]}),
+            )
+            .unwrap();
+    }
+    assert_eq!(c.room.inner.lock().unwrap().journal.waiting_input().0, 0);
+    assert_eq!(c.publish("after-acks", 0, "Answer")["status"], "queued");
+}
+
+#[test]
+fn review_new_epoch_does_not_withdraw_other_conversation() {
+    let mut c = Case::new(false);
+    c.publish("a-heard", 0, "Already heard in A");
+    c.report("a-heard", "heard", None, None);
+    c.room.select(&c.sid, "b").unwrap();
+    assert_eq!(c.room.publish(&json!({"session_id":c.sid,"thread_id":"b","revision":c.revision(),"epoch":0,"utterance_id":"b-queued","text":"Current B reply"}))["status"], "queued");
+    c.frames("voice-reply");
+    let (sender, _events) = mpsc::channel(64);
+    let a_device = c.room.join("a-device".into(), "en".into(), sender).unwrap();
+    c.room.select(&a_device, "t").unwrap();
+    c.room.begin_turn(&a_device, "new-a").unwrap();
+    assert!(
+        c.frames("voice-reply-withdrawn").is_empty(),
+        "A's epoch must not withdraw B's reply"
+    );
+}
+
+#[test]
+fn review_late_receipt_after_empty_turn_queues_notice() {
+    let c = Case::new(true);
+    c.publish("r", 0, "Never played");
+    c.say("empty", None);
+    c.report("r", "unplayed", Some("newer_turn"), None);
+    assert_eq!(
+        c.pull().len(),
+        1,
+        "late evidence after empty turn must be delivered"
+    );
+}
+
+#[test]
+fn review_duplicate_cut_receipt_does_not_renotify() {
+    let c = Case::new(true);
+    c.publish("r", 0, "Partly heard");
+    c.report("r", "interrupted", Some("user_interrupted"), Some(3));
+    c.say("next", Some("Wait"));
+    assert_eq!(c.pull().len(), 1);
+    c.report("r", "interrupted", Some("user_interrupted"), Some(3));
+    assert_eq!(
+        c.pull().len(),
+        1,
+        "identical terminal evidence must not create another notice"
+    );
+}
+
+#[test]
+fn review_offline_epoch_withdraws_other_devices_pending_reply() {
+    let mut c = Case::new(false);
+    c.publish("r", 0, "Pending before offline input");
+    c.frames("voice-reply");
+    let focus = c.room.select(&c.sid, "t").unwrap();
+    c.room
+        .offline_input_captured(
+            &c.sid,
+            "offline",
+            "New speech",
+            None,
+            "t",
+            focus["binding"]["binding_id"].as_str().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(c.frames("voice-reply-withdrawn").len(), 1);
+}
+
+#[test]
+fn review_return_before_terminal_receipt_still_schedules_notice() {
+    let c = Case::new(true);
+    c.publish("r", 0, "Mute stops me");
+    c.report("r", "playing", None, None);
+    c.room
+        .set_speech(&c.sid, false, Some("agents_muted"))
+        .unwrap();
+    c.room.set_speech(&c.sid, true, None).unwrap();
+    c.report("r", "interrupted", Some("agents_muted"), Some(2));
+    assert!(
+        c.room.inner.lock().unwrap().unheard.note_mut("t").is_some(),
+        "return notice owed even if receipt arrived after return"
+    );
+}
+
+#[test]
+fn review_skip_after_core_disconnect_settlement_still_counts_heard() {
+    let c = Case::new(true);
+    c.publish("r", 0, "Skipped just before socket loss");
+    c.room.park(&c.sid, true);
+    c.room.resume(&c.sid, &[]);
+    c.report("r", "interrupted", Some("user_skipped"), Some(2));
+    assert_eq!(
+        c.room.history(Some("t"))["messages"][0]["globally_heard"],
+        true
+    );
+    assert_eq!(c.notes()[0]["notice"]["kind"], "reply_skipped");
+}
+
+#[test]
+fn review_refusal_while_only_older_turn_open_keeps_empty_obligation() {
+    let c = Case::new(true);
+    c.room.begin_turn(&c.sid, "older").unwrap();
+    c.say("newer", Some("Newer words"));
+    assert_eq!(
+        c.publish("refused", 2, "Wait for older turn")["reason"],
+        "user_speaking"
+    );
+    c.room
+        .finish_turn(&c.sid, "older", None, &Value::Null)
+        .unwrap();
+    assert_eq!(c.notes().len(), 1);
+}
+
+#[test]
+fn review_expired_spoken_input_does_not_lose_attached_evidence() {
+    let c = Case::new(true);
+    c.publish("r", 0, "Must tell agent");
+    c.report("r", "interrupted", Some("user_interrupted"), Some(2));
+    c.say("next", Some("Wait"));
+    {
+        let mut inner = c.room.inner.lock().unwrap();
+        for row in inner.journal.input_mut("t") {
+            row.queued_at = 0;
+        }
+    }
+    c.room.pending_delivery();
+    assert!(
+        c.pull().iter().any(|m| m["unheard"]["count"] == 1),
+        "expiry must preserve owed evidence"
+    );
+}
+
+#[test]
+fn review_manual_replay_partial_extent_updates_history() {
+    let c = Case::new(true);
+    c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+    c.publish("r", 0, "Missed then replayed");
+    c.room.set_speech(&c.sid, true, None).unwrap();
+    let history = c.room.history(Some("t"));
+    let hid = history["messages"][0]["id"].as_str().unwrap();
+    c.room.replay_one(&c.sid, hid, "replay").unwrap();
+    c.report("replay", "interrupted", Some("user_interrupted"), Some(5));
+    assert_eq!(c.room.history(Some("t"))["messages"][0]["heard_chars"], 5);
+}
+
+#[test]
+fn review_manual_replay_skip_queues_skipped_notice() {
+    let c = Case::new(true);
+    c.publish("r", 0, "Replay and skip");
+    c.report("r", "heard", None, None);
+    let history = c.room.history(Some("t"));
+    c.room
+        .replay_one(
+            &c.sid,
+            history["messages"][0]["id"].as_str().unwrap(),
+            "replay",
+        )
+        .unwrap();
+    c.report("replay", "interrupted", Some("user_skipped"), Some(1));
+    assert_eq!(c.notes().len(), 1);
+}
+
+#[test]
+fn review_full_journal_with_one_old_miss_still_accepts_current_work() {
+    let mut c = Case::new(false);
+    c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+    c.publish("old-miss", 0, "One old unheard reply");
+    c.room.set_speech(&c.sid, true, None).unwrap();
+    // The ordinary notice was acknowledged; the original remains unheard by the person.
+    c.room
+        .inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due = 0;
+    let deliveries = c.room.pending_delivery();
+    for (bid, rid, peer, _) in deliveries {
+        c.room.settle_delivery(
+            &bid,
+            &rid,
+            &peer.generation,
+            Ok(json!({"status":"accepted"})),
+        );
+    }
+    for n in 0..1998 {
+        let uid = format!("heard-{n}");
+        assert_eq!(c.room.publish(&json!({"session_id":c.sid,"thread_id":"t","revision":1,"epoch":0,"utterance_id":uid,"text":"Heard"}))["status"],"queued","filling {n}");
+        c.frames("voice-reply");
+        c.report(&uid, "heard", None, None);
+    }
+    assert_eq!(
+        c.publish("fresh", 0, "Fresh work")["status"],
+        "queued",
+        "one old miss must not permanently block all input and publications"
+    );
+    assert!(
+        c.room.history(Some("t"))["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["text"] == "One old unheard reply"),
+        "protected miss stays visible for manual replay"
+    );
+}
+
+#[test]
+fn review_cancelled_turn_cannot_return_as_offline_speech() {
+    let c = Case::new(false);
+    let focus = c.room.select(&c.sid, "t").unwrap();
+    c.room.begin_turn(&c.sid, "cancelled").unwrap();
+    c.room.cancel_input(&c.sid, "cancelled").unwrap();
+    assert!(c
+        .room
+        .offline_input_captured(
+            &c.sid,
+            "cancelled",
+            "Cancelled words",
+            None,
+            "t",
+            focus["binding"]["binding_id"].as_str().unwrap()
+        )
+        .is_err());
+}
+
+#[test]
+fn review_unclaimed_return_note_is_reconciled_when_other_device_heard() {
+    let c = Case::new(true);
+    let (sender, _events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    c.publish("r", 0, "Heard elsewhere before notice delivery");
+    c.room.park(&c.sid, true);
+    c.room.park(&other, true);
+    c.room.resume(&c.sid, &[]);
+    {
+        let mut inner = c.room.inner.lock().unwrap();
+        inner.unheard.note_mut("t").unwrap().due = 0;
+        inner.materialize_due_notes();
+    }
+    c.room.resume(&other, &[]);
+    c.room
+        .playback(&other, "r", "heard", None, None, &Value::Null)
+        .unwrap();
+    assert!(
+        c.pull().is_empty(),
+        "a queued but unclaimed notice must not say already heard content was missed"
+    );
+}
+
+#[test]
+fn review_return_notice_uses_remaining_eligible_device() {
+    let c = Case::new(true);
+    c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+    c.publish("r", 0, "Missed");
+    c.room.set_speech(&c.sid, true, None).unwrap();
+    let (sender, _events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+    c.room
+        .inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due = 0;
+    assert_eq!(
+        c.pull().len(),
+        1,
+        "the other eligible device still constitutes a return"
+    );
+}
+
+#[test]
+fn review_held_publication_arriving_after_reconnect_still_notifies() {
+    let c = Case::new(true);
+    c.room.publish(&json!({"session_id":c.sid,"thread_id":"t","revision":c.revision(),"epoch":0,"utterance_id":"held","text":"Held across connector outage","history_only":true}));
+    assert!(
+        c.room.inner.lock().unwrap().unheard.note_mut("t").is_some(),
+        "held publication with a present listener owes a fresh-response notice"
+    );
+}
+
+#[test]
+fn review_push_retry_does_not_allow_later_notice_to_overtake() {
+    let c = Case::new(false);
+    for n in 0..2 {
+        let turn = c.room.begin_turn(&c.sid, &format!("turn-{n}")).unwrap();
+        c.publish(&format!("refused-{n}"), turn.epoch, "Attempt");
+        c.room
+            .finish_turn(&c.sid, &format!("turn-{n}"), None, &Value::Null)
+            .unwrap();
+    }
+    let first = c.room.pending_delivery();
+    assert_eq!(first.len(), 1);
+    let (bid, rid, peer, _) = &first[0];
+    c.room
+        .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"failed"})));
+    let second = c.room.pending_delivery();
+    assert!(
+        second.is_empty(),
+        "a later notice must not overtake the first notice's retry"
+    );
+}
+
+fn agent_view(message: &Value) -> Value {
+    let replies: Vec<Value> = message["unheard"]["replies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|reply| {
+            json!({"utterance_id":reply["utterance_id"],"text":reply["text"],"fate":reply["fate"],
+            "reason":reply["reason"],"cut":reply["cut"],"heard_chars":reply["heard_chars"]})
+        })
+        .collect();
+    let skipped: Vec<Value> = message["notice"]["skipped"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|reply| {
+            json!({"text":reply["text"],"fate":reply["fate"],"reason":reply["reason"],
+            "heard_chars":reply["heard_chars"]})
+        })
+        .collect();
+    json!({"channel":message["channel"],"text":message["text"],"epoch":message["epoch"],
+        "kind":message["notice"]["kind"],"instruction":message["notice"]["instruction"],
+        "count":message["unheard"]["count"],"replies":replies,"skipped":skipped})
+}
+
+fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
+    let c = Case::new(pull);
+    match scenario {
+        "cut_words" => {
+            c.publish("r", 0, "é🐙 rest");
+            c.report("r", "interrupted", Some("user_interrupted"), Some(2));
+            c.say("turn", Some("Wait"));
+        }
+        "cut_empty_early" => {
+            c.publish("r", 0, "Reply");
+            c.room.begin_turn(&c.sid, "turn").unwrap();
+            c.report("r", "interrupted", Some("user_interrupted"), Some(2));
+            c.room
+                .finish_turn(&c.sid, "turn", None, &Value::Null)
+                .unwrap();
+        }
+        "cut_empty_late" => {
+            c.publish("r", 0, "Reply");
+            c.say("turn", None);
+            c.report("r", "interrupted", Some("user_interrupted"), Some(2));
+        }
+        "unplayed_words" => {
+            c.publish("r", 0, "Reply");
+            c.report("r", "unplayed", Some("newer_turn"), None);
+            c.say("turn", Some("Wait"));
+        }
+        "unplayed_empty_early" => {
+            c.publish("r", 0, "Reply");
+            c.room.begin_turn(&c.sid, "turn").unwrap();
+            c.report("r", "unplayed", Some("newer_turn"), None);
+            c.room
+                .finish_turn(&c.sid, "turn", None, &Value::Null)
+                .unwrap();
+        }
+        "unplayed_empty_late" => {
+            c.publish("r", 0, "Reply");
+            c.say("turn", None);
+            c.report("r", "unplayed", Some("newer_turn"), None);
+        }
+        "refused_empty" => {
+            let turn = c.room.begin_turn(&c.sid, "turn").unwrap();
+            c.publish("r", turn.epoch, "Attempt");
+            c.room
+                .finish_turn(&c.sid, "turn", None, &Value::Null)
+                .unwrap();
+        }
+        "return" => {
+            c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+            c.publish("r", 0, "Missed reply");
+            c.room.set_speech(&c.sid, true, None).unwrap();
+            c.room
+                .inner
+                .lock()
+                .unwrap()
+                .unheard
+                .note_mut("t")
+                .unwrap()
+                .due = 0;
+        }
+        "skip" => {
+            c.publish("r", 0, "Skip reply");
+            c.report("r", "interrupted", Some("user_skipped"), Some(1));
+        }
+        "stale" => {
+            c.say("turn", Some("New words"));
+            c.publish("r", 0, "Old answer");
+        }
+        "full_evidence" => {
+            c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+            for n in 0..9 {
+                c.publish(&format!("r{n}"), 0, &format!("{n}{}TAIL", "é".repeat(300)));
+            }
+            c.room.set_speech(&c.sid, true, None).unwrap();
+            c.room
+                .inner
+                .lock()
+                .unwrap()
+                .unheard
+                .note_mut("t")
+                .unwrap()
+                .due = 0;
+        }
+        _ => panic!("unknown matrix scenario"),
+    }
+    let messages: Vec<Value> = if pull {
+        let first = c.pull();
+        let repeated = c.pull();
+        assert_eq!(
+            first, repeated,
+            "pull claim retries preserve IDs and payload"
+        );
+        first
+    } else {
+        let mut messages = Vec::new();
+        loop {
+            let work = c.room.pending_delivery();
+            if work.is_empty() {
+                break;
+            }
+            for (bid, rid, peer, data) in work {
+                messages.push(data);
+                c.room.settle_delivery(
+                    &bid,
+                    &rid,
+                    &peer.generation,
+                    Ok(json!({"status":"accepted"})),
+                );
+            }
+        }
+        messages
+    };
+    assert!(!messages.is_empty(), "{scenario} has agent-visible content");
+    assert!(messages
+        .iter()
+        .all(|message| message["message_id"].as_str().is_some()));
+    messages
+        .into_iter()
+        .map(|message| agent_view(&message))
+        .collect()
+}
+
+#[test]
+fn t16_push_pull_notice_parity_matrix() {
+    for scenario in [
+        "cut_words",
+        "cut_empty_early",
+        "cut_empty_late",
+        "unplayed_words",
+        "unplayed_empty_early",
+        "unplayed_empty_late",
+        "refused_empty",
+        "return",
+        "skip",
+        "stale",
+        "full_evidence",
+    ] {
+        assert_eq!(
+            matrix_messages(false, scenario),
+            matrix_messages(true, scenario),
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
+fn review_bounded_epoch_contexts_and_deferred_empty_obligations() {
+    let c = Case::new(true);
+    for n in 0..2047 {
+        c.room.select(&c.sid, &format!("context-{n}")).unwrap();
+    }
+    assert_eq!(
+        c.room.inner.lock().unwrap().conversations.context_count(),
+        2048
+    );
+    assert_eq!(
+        c.room.select("missing", "phantom").unwrap_err().key,
+        "room.browser_absent"
+    );
+    assert_eq!(
+        c.room.inner.lock().unwrap().conversations.context_count(),
+        2048
+    );
+    assert_eq!(
+        c.room.select(&c.sid, "overflow").unwrap_err().key,
+        "room.input_backlog_full"
+    );
+    c.room.select(&c.sid, "t").unwrap();
+    let focus = c.room.select(&c.sid, "t").unwrap();
+    let focus_id = focus["binding"]["binding_id"].as_str().unwrap().to_owned();
+    let turn = c.room.begin_turn(&c.sid, "held").unwrap();
+    for n in 0..255 {
+        c.room
+            .send_text("Context", &c.sid, "t", &focus_id, &format!("full-{n}"))
+            .unwrap();
+    }
+    assert_eq!(
+        c.publish("refused", turn.epoch, "Attempt")["reason"],
+        "user_speaking"
+    );
+    c.room
+        .finish_turn(&c.sid, "held", None, &Value::Null)
+        .unwrap();
+    assert_eq!(
+        c.room.begin_turn(&c.sid, "next").unwrap_err().key,
+        "room.input_backlog_full"
+    );
+    assert_eq!(c.notes().len(), 1);
+    assert!(c.room.inner.lock().unwrap().pending_notices.is_empty());
+}
+
+#[test]
+fn review_terminal_push_outcomes_salvage_attached_evidence() {
+    for outcome in ["unsupported", "unknown"] {
+        let c = Case::new(false);
+        c.publish("r", 0, "Reply evidence");
+        c.report("r", "interrupted", Some("user_interrupted"), Some(2));
+        c.say("turn", Some("Wait"));
+        let first = c.room.pending_delivery();
+        assert_eq!(first.len(), 1);
+        let (bid, rid, peer, data) = &first[0];
+        assert_eq!(data["unheard"]["count"], 1);
+        c.room
+            .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":outcome})));
+        let next = c.room.pending_delivery();
+        assert_eq!(next.len(), 1, "{outcome}");
+        assert_eq!(next[0].3["channel"], "note");
+        assert_eq!(next[0].3["unheard"]["replies"][0]["text"], "Reply evidence");
+        assert_eq!(
+            next[0].3["notice"]["related_message_id"],
+            data["message_id"]
+        );
+    }
+}
+
+#[test]
+fn review_channel_close_salvages_pending_attached_evidence_for_next_binding() {
+    let c = Case::new(true);
+    c.publish("r", 0, "Reply evidence");
+    c.report("r", "interrupted", Some("user_interrupted"), Some(2));
+    c.say("turn", Some("Wait"));
+    let original_id = c.input("Wait")["message_id"].clone();
+    c.room.close_channel("t").unwrap();
+    let new = c
+        .room
+        .register(
+            "connector",
+            &json!({"thread":"t","harness":"codex","input_mode":"pull"}),
+        )
+        .unwrap();
+    let messages = c
+        .room
+        .pull_input(
+            "connector",
+            &json!({"binding_id":new["binding_id"],"operation":"get"}),
+        )
+        .unwrap();
+    assert_eq!(messages["messages"][0]["channel"], "note");
+    assert_eq!(
+        messages["messages"][0]["notice"]["related_message_id"],
+        original_id
+    );
+    assert_eq!(
+        messages["messages"][0]["unheard"]["replies"][0]["text"],
+        "Reply evidence"
+    );
+}
+
+#[test]
+fn review_claimed_unheard_notice_gets_correlated_heard_correction() {
+    let c = Case::new(true);
+    let (sender, _events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    c.publish("r", 0, "Heard on second device");
+    c.room.park(&c.sid, true);
+    c.room.park(&other, true);
+    c.room.resume(&c.sid, &[]);
+    c.room
+        .inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due = 0;
+    let first = c.pull();
+    assert_eq!(first.len(), 1);
+    let prior = first[0]["message_id"].clone();
+    c.room.resume(&other, &[]);
+    c.room
+        .playback(&other, "r", "heard", None, None, &Value::Null)
+        .unwrap();
+    let messages = c.pull();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["notice"]["kind"], "reply_heard");
+    assert_eq!(messages[1]["notice"]["corrects_message_id"], prior);
+    assert_eq!(messages[1]["notice"]["heard"][0]["fate"], "heard");
+}
+
+#[test]
+fn review_finished_merged_transcript_keeps_its_words_with_another_turn_open() {
+    let c = Case::new(true);
+    c.room.begin_turn(&c.sid, "first").unwrap();
+    c.room.begin_turn(&c.sid, "later").unwrap();
+    c.room
+        .finish_turn_merged(&c.sid, "first", Some("Merged words"), &Value::Null, true)
+        .unwrap();
+    assert_eq!(c.input("Merged words")["text"], "Merged words");
+}
+
+#[test]
+fn t16_shared_voice_to_core_protocol_fixtures_have_the_documented_fates() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../docs/fixtures/conversation-flow.json"
+    ))
+    .unwrap();
+    for (index, mapping) in fixture["playback"].as_array().unwrap().iter().enumerate() {
+        let c = Case::new(true);
+        c.publish("r", 0, fixture["text"].as_str().unwrap());
+        let receipt = &mapping["core"];
+        c.report(
+            "r",
+            receipt["status"].as_str().unwrap(),
+            receipt["reason"].as_str(),
+            receipt["heard_chars"].as_u64(),
+        );
+        let row = &c.room.history(Some("t"))["messages"][0];
+        for field in ["status", "audio_reason", "heard_chars", "globally_heard"] {
+            assert_eq!(
+                row[field], mapping["history"][field],
+                "fixture {index} {field}"
+            );
+        }
+    }
+    let turns = fixture["turns"].as_array().unwrap();
+    assert_eq!(turns[0]["core"]["data"]["phase"], "cancelled");
+    assert_eq!(turns[1]["core"]["data"]["phase"], "finished");
+    assert_eq!(turns[2]["core"]["data"]["offline"], true);
+    assert!(turns
+        .iter()
+        .all(|turn| turn["core"]["data"]["client_msg_id"].as_str().is_some()));
+}
+
+#[test]
+fn t16_unacknowledged_notice_crosses_pull_push_handover_with_one_message_id() {
+    let c = Case::new(true);
+    let turn = c.room.begin_turn(&c.sid, "turn").unwrap();
+    c.publish("refused", turn.epoch, "Attempt");
+    c.room
+        .finish_turn(&c.sid, "turn", None, &Value::Null)
+        .unwrap();
+    let claimed = c.pull();
+    let id = claimed[0]["message_id"].clone();
+    let push = c
+        .room
+        .register(
+            "connector",
+            &json!({"thread":"t","harness":"codex","input_mode":"push"}),
+        )
+        .unwrap();
+    let due = c.room.pending_delivery();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].3["message_id"], id);
+    assert_eq!(due[0].3["notice"], claimed[0]["notice"]);
+    let (bid, rid, peer, _) = &due[0];
+    assert_eq!(push["binding_id"], *bid);
+    c.room
+        .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"failed"})));
+    let pull = c
+        .room
+        .register(
+            "connector",
+            &json!({"thread":"t","harness":"codex","input_mode":"pull"}),
+        )
+        .unwrap();
+    let fetched = c
+        .room
+        .pull_input(
+            "connector",
+            &json!({"binding_id":pull["binding_id"],"operation":"get"}),
+        )
+        .unwrap();
+    assert_eq!(fetched["messages"][0]["message_id"], id);
+    assert_eq!(fetched["messages"][0]["notice"], claimed[0]["notice"]);
+}
+
+#[test]
+fn review_skip_receipt_spellings_and_disconnect_orders_agree() {
+    for status in ["interrupted", "unplayed"] {
+        for before_disconnect in [false, true] {
+            let c = Case::new(true);
+            c.publish("r", 0, "Skip me");
+            if before_disconnect {
+                c.report("r", status, Some("user_skipped"), Some(0));
+            }
+            c.room.park(&c.sid, true);
+            c.room.resume(&c.sid, &[]);
+            if !before_disconnect {
+                c.report("r", status, Some("user_skipped"), Some(0));
+            }
+            c.report("r", status, Some("user_skipped"), Some(0));
+            assert_eq!(
+                c.room.history(Some("t"))["messages"][0]["globally_heard"],
+                true
+            );
+            let skipped: Vec<_> = c
+                .notes()
+                .into_iter()
+                .filter(|note| note["notice"]["kind"] == "reply_skipped")
+                .collect();
+            assert_eq!(
+                skipped.len(),
+                1,
+                "{status} before_disconnect={before_disconnect}"
+            );
+            assert_eq!(skipped[0]["notice"]["skipped"][0]["heard_chars"], 7);
+        }
+    }
+}
+
+#[test]
+fn review_replay_partial_extent_follows_words_or_empty_terminal() {
+    for words in [false, true] {
+        let c = Case::new(true);
+        c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+        c.publish("r", 0, "Missed then replayed");
+        c.room.set_speech(&c.sid, true, None).unwrap();
+        let history_id = c.room.history(Some("t"))["messages"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        c.room.replay_one(&c.sid, &history_id, "replay").unwrap();
+        c.room.begin_turn(&c.sid, "turn").unwrap();
+        c.report("replay", "interrupted", Some("user_interrupted"), Some(5));
+        c.room
+            .finish_turn(&c.sid, "turn", words.then_some("Wait"), &Value::Null)
+            .unwrap();
+        let messages = c.pull();
+        let with_evidence = messages
+            .iter()
+            .find(|message| message["unheard"]["count"] == 1)
+            .unwrap();
+        assert_eq!(with_evidence["unheard"]["replies"][0]["heard_chars"], 5);
+        assert_eq!(
+            with_evidence["channel"],
+            if words { "voice" } else { "note" }
+        );
+    }
+}
+
+#[test]
+fn review_claimed_notice_gets_skip_and_replay_corrections() {
+    for replay in [false, true] {
+        let c = Case::new(true);
+        c.publish("r", 0, "Reply");
+        c.room.park(&c.sid, true);
+        c.room.resume(&c.sid, &[]);
+        c.room
+            .inner
+            .lock()
+            .unwrap()
+            .unheard
+            .note_mut("t")
+            .unwrap()
+            .due = 0;
+        let prior = c.pull()[0]["message_id"].clone();
+        if replay {
+            let history_id = c.room.history(Some("t"))["messages"][0]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            c.room.replay_one(&c.sid, &history_id, "replay").unwrap();
+            c.report("replay", "heard", None, None);
+        } else {
+            c.report("r", "unplayed", Some("user_skipped"), None);
+        }
+        let messages = c.pull();
+        let correction = messages
+            .iter()
+            .find(|message| message["notice"]["kind"] == "reply_heard")
+            .unwrap();
+        assert_eq!(correction["notice"]["corrects_message_id"], prior);
+        assert_eq!(
+            correction["notice"]["heard"][0]["fate"],
+            if replay { "heard" } else { "skipped" }
+        );
+    }
+}
+
+#[test]
+fn review_claim_released_after_ttl_keeps_attached_evidence_and_id() {
+    let c = Case::new(true);
+    c.publish("r", 0, "Reply");
+    c.report("r", "interrupted", Some("user_interrupted"), Some(2));
+    c.say("turn", Some("Wait"));
+    let claimed = c.pull();
+    let id = claimed[0]["message_id"].clone();
+    {
+        let mut inner = c.room.inner.lock().unwrap();
+        for row in inner.journal.input_mut("t") {
+            row.queued_at = 0;
+        }
+    }
+    let replacement = c
+        .room
+        .register(
+            "connector",
+            &json!({"thread":"t","harness":"codex",
+        "input_mode":"pull","binding_id":"replacement"}),
+        )
+        .unwrap();
+    let fetched = c
+        .room
+        .pull_input(
+            "connector",
+            &json!({"binding_id":replacement["binding_id"],"operation":"get"}),
+        )
+        .unwrap();
+    assert_eq!(fetched["messages"][0]["message_id"], id);
+    assert_eq!(fetched["messages"][0]["unheard"], claimed[0]["unheard"]);
+}
+
+#[test]
+fn review_duplicate_cut_receipt_has_no_second_note_in_push_or_pull() {
+    for pull in [false, true] {
+        let c = Case::new(pull);
+        c.publish("r", 0, "Partly heard");
+        c.report("r", "interrupted", Some("user_interrupted"), Some(3));
+        c.say("turn", Some("Wait"));
+        let original = c.input("Wait")["message_id"].clone();
+        c.report("r", "interrupted", Some("user_interrupted"), Some(3));
+        assert!(c.notes().is_empty());
+        let messages = if pull {
+            c.pull()
+        } else {
+            c.room
+                .pending_delivery()
+                .into_iter()
+                .map(|(_, _, _, data)| data)
+                .collect()
+        };
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["message_id"], original);
+    }
+}
+
+#[test]
+fn review_offline_epoch_withdraws_second_device_and_correlates_its_late_receipt() {
+    let mut c = Case::new(true);
+    let (sender, mut other_events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    c.publish("r", 0, "Old answer");
+    c.frames("voice-reply");
+    while other_events.try_recv().is_ok() {}
+    let focus = c.room.select(&c.sid, "t").unwrap();
+    let binding = focus["binding"]["binding_id"].as_str().unwrap();
+    c.room
+        .offline_input_captured(&c.sid, "offline", "Offline words", None, "t", binding)
+        .unwrap();
+    assert_eq!(c.frames("voice-reply-withdrawn").len(), 1);
+    assert!(std::iter::from_fn(|| other_events.try_recv().ok())
+        .any(|frame| frame["type"] == "voice-reply-withdrawn"));
+    c.room.park(&c.sid, true);
+    c.room
+        .playback(
+            &other,
+            "r",
+            "unplayed",
+            Some("newer_turn"),
+            None,
+            &Value::Null,
+        )
+        .unwrap();
+    let messages = c.pull();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["notice"]["kind"], "reply_not_played");
+    assert_eq!(
+        messages[1]["notice"]["related_message_id"],
+        messages[0]["message_id"]
+    );
+    assert_eq!(messages[1]["unheard"]["replies"][0]["text"], "Old answer");
+}
+
+#[test]
+fn review_refusal_obligation_survives_both_turn_orders_and_devices() {
+    for two_devices in [false, true] {
+        for reverse in [false, true] {
+            for words in [false, true] {
+                let c = Case::new(true);
+                let second = if two_devices {
+                    let (sender, _events) = mpsc::channel(64);
+                    let sid = c.room.join("other".into(), "en".into(), sender).unwrap();
+                    c.room.select(&sid, "t").unwrap();
+                    sid
+                } else {
+                    c.sid.clone()
+                };
+                c.room.begin_turn(&c.sid, "first").unwrap();
+                let latest = c.room.begin_turn(&second, "second").unwrap();
+                assert_eq!(
+                    c.publish("refused", latest.epoch, "Attempt")["reason"],
+                    "user_speaking"
+                );
+                let turns = if reverse {
+                    [(&second, "second"), (&c.sid, "first")]
+                } else {
+                    [(&c.sid, "first"), (&second, "second")]
+                };
+                for (index, (sid, turn)) in turns.into_iter().enumerate() {
+                    c.room
+                        .finish_turn(
+                            sid,
+                            turn,
+                            (words && index == 0).then_some("Words"),
+                            &Value::Null,
+                        )
+                        .unwrap();
+                }
+                assert_eq!(
+                    c.notes().len(),
+                    usize::from(!words),
+                    "two_devices={two_devices} reverse={reverse} words={words}"
+                );
+            }
+        }
+    }
+}

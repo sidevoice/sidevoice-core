@@ -47,7 +47,15 @@ pub(super) async fn run(
     };
     let mut refused = None;
     if let Some(asked) = hello.get("data").and_then(|data| data.get("resume")) {
-        match reattach(&state, &id, socket, asked).await {
+        match reattach(
+            &state,
+            &id,
+            socket,
+            asked,
+            hello["data"].get("speech").cloned(),
+        )
+        .await
+        {
             None => return,
             Some((back, reason)) => {
                 socket = back;
@@ -88,6 +96,7 @@ async fn reattach(
     device: &str,
     socket: WebSocket,
     asked: &Value,
+    speech: Option<Value>,
 ) -> Option<(WebSocket, &'static str)> {
     let session = asked["session_id"].as_str().unwrap_or("");
     let token = asked["token"].as_str().unwrap_or("");
@@ -98,6 +107,7 @@ async fn reattach(
     let request = Reattach {
         socket,
         last_seq: asked["last_seq"].as_u64().unwrap_or(0),
+        speech,
         answer,
     };
     if let Err(mpsc::error::SendError(request)) = attach.send(request).await {
@@ -258,6 +268,7 @@ impl Call {
         let Reattach {
             socket,
             last_seq,
+            speech,
             answer,
         } = attach;
         let Some(Missed { unreceived, frames }) =
@@ -266,6 +277,19 @@ impl Call {
             let _ = answer.send(Err((socket, "gap")));
             return Flow::Stop;
         };
+        if let Some(speech) = speech.as_ref() {
+            let on = speech.get("on").and_then(Value::as_bool).unwrap_or(false);
+            let reason = speech.get("reason").and_then(Value::as_str);
+            if self
+                .state
+                .room
+                .set_speech(&self.session, on, reason)
+                .is_err()
+            {
+                let _ = answer.send(Err((socket, "invalid_speech")));
+                return Flow::Continue;
+            }
+        }
         if answer.send(Ok(())).is_err() {
             return Flow::Continue;
         }

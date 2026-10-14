@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use super::support::{pull_room, say};
 
 #[test]
-fn push_falls_back_to_an_idle_older_binding_as_before() {
+fn push_serializes_one_conversation_even_with_an_idle_older_binding() {
     let (_directory, room, _) = pull_room(&["connector"]);
     let older = room
         .register("connector", &json!({"thread":"busy","harness":"claude"}))
@@ -34,5 +34,11 @@ fn push_falls_back_to_an_idle_older_binding_as_before() {
     say(&room, &sid, "two");
     let delivery = room.pending_delivery();
     let targets: Vec<&str> = delivery.iter().map(|work| work.0.as_str()).collect();
-    assert_eq!(targets, [newer.as_str(), older.as_str()]);
+    assert_eq!(targets, [newer.as_str()]);
+    let (bid, rid, peer, _) = &delivery[0];
+    room.settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"accepted"})));
+    let following = room.pending_delivery();
+    assert_eq!(following.len(), 1);
+    assert_eq!(following[0].0, newer);
+    assert_ne!(following[0].0, older);
 }

@@ -113,6 +113,7 @@ impl Inner {
             .filter(|row| held(row, bid) && ack_ids.contains(&row.message_id()))
             .map(|row| {
                 row.status = "read".into();
+                row.pull_claimed_by = None;
                 row.input_ref()
             })
             .collect();

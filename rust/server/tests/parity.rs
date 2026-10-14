@@ -170,6 +170,92 @@ async fn hello(socket: &mut CallSocket, data: Value) {
         .unwrap();
 }
 
+async fn next_session(socket: &mut CallSocket) -> Value {
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .expect("session frame arrives")
+            .unwrap()
+            .unwrap();
+        if let Frame::Text(text) = frame {
+            let value: Value = serde_json::from_str(&text).unwrap();
+            if value["type"] == "voice-session" {
+                return value;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn resumed_hello_applies_output_off_before_new_publication() {
+    let (_temp, state, token) = paired();
+    let mut first = call_socket_client(state.clone(), &token).await;
+    hello(&mut first, json!({"speech":{"on":true}})).await;
+    let session = next_session(&mut first).await;
+    let sid = session["data"]["session_id"].as_str().unwrap().to_owned();
+    let resume_token = session["data"]["resume"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let seq = session["seq"].as_u64().unwrap_or(0);
+    state.room.select(&sid, "t").unwrap();
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let mut second = call_socket_client(state.clone(), &token).await;
+    hello(
+        &mut second,
+        json!({"resume":{"session_id":sid,"token":resume_token,"last_seq":seq},
+        "speech":{"on":false,"reason":"voice_off"}}),
+    )
+    .await;
+    assert_eq!(next_session(&mut second).await["data"]["resumed"], true);
+    let revision = state.room.snapshot(Some(&sid))["room"]["revision"]
+        .as_u64()
+        .unwrap();
+    let result = state.room.publish(
+        &json!({"session_id":sid,"thread_id":"t","revision":revision,
+        "epoch":0,"utterance_id":"off-after-resume","text":"Do not play"}),
+    );
+    assert_eq!(result["reason"], "voice_off");
+}
+
+#[tokio::test]
+async fn resumed_hello_applies_output_on_before_new_publication() {
+    let (_temp, state, token) = paired();
+    let mut first = call_socket_client(state.clone(), &token).await;
+    hello(
+        &mut first,
+        json!({"speech":{"on":false,"reason":"voice_off"}}),
+    )
+    .await;
+    let session = next_session(&mut first).await;
+    let sid = session["data"]["session_id"].as_str().unwrap().to_owned();
+    let resume_token = session["data"]["resume"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let seq = session["seq"].as_u64().unwrap_or(0);
+    state.room.select(&sid, "t").unwrap();
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let mut second = call_socket_client(state.clone(), &token).await;
+    hello(
+        &mut second,
+        json!({"resume":{"session_id":sid,"token":resume_token,"last_seq":seq},
+        "speech":{"on":true}}),
+    )
+    .await;
+    assert_eq!(next_session(&mut second).await["data"]["resumed"], true);
+    let revision = state.room.snapshot(Some(&sid))["room"]["revision"]
+        .as_u64()
+        .unwrap();
+    let result = state.room.publish(
+        &json!({"session_id":sid,"thread_id":"t","revision":revision,
+        "epoch":0,"utterance_id":"on-after-resume","text":"Play now"}),
+    );
+    assert_eq!(result["status"], "queued");
+}
+
 #[tokio::test]
 async fn a_full_room_is_said_right_after_the_hello() {
     let (_temp, state, token) = paired();

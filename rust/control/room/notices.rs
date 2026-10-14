@@ -12,15 +12,36 @@ pub(super) struct PendingNotice {
     related: Option<String>,
     skipped: Option<Value>,
     epoch: u64,
+    correction: Option<Value>,
+    replacement: Option<Value>,
+}
+impl PendingNotice {
+    pub(super) fn reserved_bytes(&self) -> usize {
+        2048 + self
+            .skipped
+            .as_ref()
+            .or(self.correction.as_ref())
+            .or(self.replacement.as_ref())
+            .map_or(0, |value| value.to_string().len())
+    }
 }
 
 impl Inner {
     pub(super) fn empty_obligation(&mut self, thread: &str) {
-        let epoch = self.conversations.epoch(thread);
-        self.unheard.reserve_empty(thread, epoch);
+        let epochs: Vec<u64> = self
+            .browsers
+            .iter()
+            .flat_map(|(_, browser)| browser.turns.iter())
+            .filter(|turn| turn.thread_id.as_deref() == Some(thread))
+            .map(|turn| turn.epoch)
+            .collect();
+        for epoch in epochs {
+            self.unheard.reserve_empty(thread, epoch);
+        }
     }
 
     pub(super) fn settle_empty_turn(&mut self, thread: &str, session: &str, epoch: u64) {
+        self.conversations.record_empty(thread, epoch, session);
         let obliged = self.unheard.finish_empty(thread, epoch);
         if obliged || self.unheard.has(thread) {
             self.flush_all_unheard_notes(thread, session, "turn_empty", None);
@@ -116,25 +137,18 @@ impl Inner {
     pub(super) fn materialize_due_notes(&mut self) {
         let now = seconds();
         for thread in self.unheard.due_notes(now) {
-            let Some(session) = self
-                .unheard
-                .note_mut(&thread)
-                .map(|note| note.session.clone())
-            else {
+            let session = self
+                .browsers
+                .on_thread(&thread)
+                .find(|(_, browser)| browser.parked.is_none() && browser.speech_on)
+                .map(|(sid, _)| sid.to_owned());
+            let Some(session) = session else {
                 continue;
             };
-            let eligible = self.browsers.get(&session).is_some_and(|browser| {
-                browser.is_on(&thread) && browser.parked.is_none() && browser.speech_on
-            });
-            if !eligible {
-                self.unheard.drop_note(&thread);
-                continue;
-            }
             if self.conversations.is_open(&thread) {
                 continue;
             }
             if !self.unheard.has(&thread) {
-                self.unheard.drop_note(&thread);
                 continue;
             }
             if self
@@ -161,6 +175,15 @@ impl Inner {
                 if !self.queue_skip_payload(&note.thread, &note.session, note.epoch, skipped) {
                     self.pending_notices.push_back(note);
                 }
+            } else if let Some(correction) = note.correction.clone() {
+                if !self.queue_heard_correction(&note.thread, &note.session, note.epoch, correction)
+                {
+                    self.pending_notices.push_back(note);
+                }
+            } else if let Some(replacement) = note.replacement.clone() {
+                if !self.queue_replacement(&note.thread, &note.session, note.epoch, replacement) {
+                    self.pending_notices.push_back(note);
+                }
             } else if self.unheard.has(&note.thread) || note.kind == "turn_empty" {
                 let before = self.journal.waiting_input().0;
                 self.flush_unheard_note(
@@ -174,6 +197,192 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// A notice that has not been offered to the agent may be rewritten when another
+    /// device confirms hearing. Claimed or dispatched messages remain frozen.
+    pub(super) fn reconcile_unclaimed(&mut self, thread: &str) {
+        let heard = self.journal.assistant_heard_facts(thread);
+        let mut corrections = Vec::new();
+        for row in self.journal.input_mut(thread) {
+            if row.payload.is_none() {
+                continue;
+            }
+            let payload = row.payload.as_mut().expect("checked");
+            let Some(replies) = payload
+                .pointer("/unheard/replies")
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            let newly_heard: Vec<_> = replies
+                .iter()
+                .filter_map(|reply| {
+                    let id = reply["history_id"].as_str()?;
+                    heard.get(id).map(|fact| (id.to_owned(), fact.clone()))
+                })
+                .collect();
+            if row.status == "pending" {
+                let replies = payload
+                    .pointer_mut("/unheard/replies")
+                    .and_then(Value::as_array_mut)
+                    .expect("checked");
+                replies.retain(|reply| {
+                    !reply["history_id"]
+                        .as_str()
+                        .is_some_and(|id| heard.contains_key(id))
+                });
+                let count = replies.len();
+                payload["unheard"]["count"] = json!(count);
+                if count == 0 {
+                    payload.as_object_mut().unwrap().remove("unheard");
+                    if row.role == "note" {
+                        row.status = "not_sent".into();
+                    } else {
+                        payload.as_object_mut().unwrap().remove("notice");
+                    }
+                }
+            } else if matches!(row.status.as_str(), "sending" | "delivered" | "read") {
+                for (id, fact) in newly_heard {
+                    if row.corrected_heard.insert(id) {
+                        corrections.push((
+                            row.session.clone(),
+                            row.epoch,
+                            row.message_id().to_owned(),
+                            fact,
+                        ));
+                    }
+                }
+            }
+        }
+        for (session, epoch, prior, fact) in corrections {
+            let correction = json!({"corrects_message_id":prior,"heard":[fact]});
+            if !self.queue_heard_correction(thread, &session, epoch, correction.clone()) {
+                self.pending_notices.push_back(PendingNotice {
+                    thread: thread.into(),
+                    session,
+                    kind: "reply_heard".into(),
+                    related: Some(prior),
+                    skipped: None,
+                    epoch,
+                    correction: Some(correction),
+                    replacement: None,
+                });
+            }
+        }
+    }
+
+    fn queue_heard_correction(
+        &mut self,
+        thread: &str,
+        session: &str,
+        epoch: u64,
+        correction: Value,
+    ) -> bool {
+        if self
+            .room_for_bytes(correction.to_string().len() + 1024)
+            .is_err()
+        {
+            return false;
+        }
+        let message_id = format!("note:{}", id());
+        let revision = self.browsers.get(session).map_or(0, |b| b.revision);
+        let payload = json!({"thread_id":thread,"channel":"note","text":"", "message_id":message_id,
+            "history_id":message_id,"session_id":session,"revision":revision,"epoch":epoch,
+            "notice":{"kind":"reply_heard","instruction":instruction("reply_heard"),
+                "corrects_message_id":correction["corrects_message_id"],"heard":correction["heard"]}});
+        self.append_row(Row {
+            id: message_id,
+            thread: thread.into(),
+            role: "note",
+            text: String::new(),
+            session: session.into(),
+            revision,
+            epoch,
+            time: millis(),
+            status: "pending".into(),
+            queued_at: seconds(),
+            payload: Some(payload),
+            ..Row::default()
+        });
+        true
+    }
+
+    /// A terminally undeliverable user row cannot take its notice evidence with it.
+    /// Requeue that evidence as a correlated Sidevoice note, preserving full text and IDs.
+    pub(super) fn salvage_input_notice(&mut self, row_id: &str) {
+        let Some(row) = self.journal.find(row_id) else {
+            return;
+        };
+        if row.role != "user"
+            || row.notice_salvaged
+            || !matches!(row.status.as_str(), "not_sent" | "unconfirmed")
+        {
+            return;
+        }
+        let Some(original) = row
+            .payload
+            .as_ref()
+            .filter(|payload| payload.get("notice").is_some())
+        else {
+            return;
+        };
+        let thread = row.thread.clone();
+        let session = row.session.clone();
+        let epoch = row.epoch;
+        let related = row.message_id().to_owned();
+        let mut replacement = original.clone();
+        replacement["channel"] = json!("note");
+        replacement["text"] = json!("");
+        replacement["notice"]["related_message_id"] = json!(related);
+        if let Some(row) = self.journal.find_mut(row_id) {
+            row.notice_salvaged = true;
+        }
+        if !self.queue_replacement(&thread, &session, epoch, replacement.clone()) {
+            self.pending_notices.push_back(PendingNotice {
+                thread,
+                session,
+                kind: "salvaged".into(),
+                related: Some(related),
+                skipped: None,
+                epoch,
+                correction: None,
+                replacement: Some(replacement),
+            });
+        }
+    }
+
+    fn queue_replacement(
+        &mut self,
+        thread: &str,
+        session: &str,
+        epoch: u64,
+        mut payload: Value,
+    ) -> bool {
+        if self
+            .room_for_bytes(payload.to_string().len() + 1024)
+            .is_err()
+        {
+            return false;
+        }
+        let message_id = format!("note:{}", id());
+        payload["message_id"] = json!(message_id);
+        payload["history_id"] = json!(message_id);
+        self.append_row(Row {
+            id: message_id,
+            thread: thread.into(),
+            role: "note",
+            text: String::new(),
+            session: session.into(),
+            revision: payload["revision"].as_u64().unwrap_or(0),
+            epoch,
+            time: millis(),
+            status: "pending".into(),
+            queued_at: seconds(),
+            payload: Some(payload),
+            ..Row::default()
+        });
+        true
     }
 
     pub(super) fn queue_skip_note(&mut self, row_id: &str, session: &str) {
@@ -257,6 +466,8 @@ impl Inner {
             related: related.map(str::to_owned),
             skipped,
             epoch,
+            correction: None,
+            replacement: None,
         });
     }
 }
@@ -266,6 +477,7 @@ pub(super) fn instruction(kind: &str) -> &'static str {
         "turn_empty" => "The person said nothing. Resend what you meant if it still matters.",
         "user_returned" => "The person is back. These replies were not heard. Send a fresh response if still relevant.",
         "reply_skipped" => "The person chose to skip this reply. Do not repeat it just because it was skipped.",
+        "reply_heard" => "This reply was heard after the earlier notice. Do not resend it solely because of that notice.",
         "reply_interrupted" => "The reply was interrupted. Use the heard extent and respond to the person's current message.",
         _ => "This reply was not played. Use the current context and resend what still matters.",
     }

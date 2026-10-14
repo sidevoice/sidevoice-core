@@ -280,13 +280,8 @@ fn a_message_before_the_note_is_due_takes_the_list_and_the_note_is_dropped() {
     say(&room, &sid, "Hi.");
     let message = only(deliveries(&room, "voice"));
     assert_eq!(message["unheard"]["count"], 1);
-    room.inner
-        .lock()
-        .unwrap()
-        .unheard
-        .note_mut("t")
-        .unwrap()
-        .due = 0;
+    // The spoken message consumes the return obligation at insertion.
+    assert!(room.inner.lock().unwrap().unheard.note_mut("t").is_none());
     assert!(deliveries(&room, "note").is_empty());
     assert!(room.inner.lock().unwrap().unheard.note_mut("t").is_none());
 }

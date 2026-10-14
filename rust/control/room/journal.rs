@@ -1,6 +1,7 @@
 //! The in-memory conversation journal: its rows in order, their bound, and the state of the
 //! user input waiting in it.
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
@@ -53,6 +54,8 @@ pub(super) struct Row {
     pub(super) attempts: usize,
     pub(super) next_attempt: u64,
     pub(super) pull_claimed_by: Option<String>,
+    pub(super) corrected_heard: HashSet<String>,
+    pub(super) notice_salvaged: bool,
 }
 impl Row {
     fn view(&self) -> Value {
@@ -71,7 +74,12 @@ impl Row {
     }
     /// Pending input that has waited too long to be worth delivering.
     pub(super) fn expired(&self, now: u64) -> bool {
-        self.role != "note" && now.saturating_sub(self.queued_at) >= input_ttl()
+        self.role != "note"
+            && self
+                .payload
+                .as_ref()
+                .is_none_or(|payload| payload.get("notice").is_none())
+            && now.saturating_sub(self.queued_at) >= input_ttl()
     }
     /// Put this input back in the queue, to be delivered at the next opportunity.
     pub(super) fn requeue(&mut self) {
@@ -109,7 +117,7 @@ pub(super) struct Journal {
 }
 fn protected(row: &Row) -> bool {
     matches!(row.status.as_str(), "pending" | "sending")
-        || row.pull_claimed_by.is_some()
+        || (row.status == "delivered" && row.pull_claimed_by.is_some())
         || (row.role == "assistant"
             && (matches!(row.status.as_str(), "queued" | "playing")
                 || (!row.globally_heard
@@ -117,7 +125,7 @@ fn protected(row: &Row) -> bool {
 }
 impl Journal {
     pub(super) fn can_append(&self) -> bool {
-        self.rows.len() < MAX_HISTORY || self.rows.front().is_some_and(|row| !protected(row))
+        self.rows.len() < MAX_HISTORY || self.rows.iter().any(|row| !protected(row))
     }
     /// Append a row under the next sequence number, then drop the oldest settled rows beyond
     /// the bound. Returns the IDs of the rows dropped.
@@ -130,9 +138,12 @@ impl Journal {
         row.seq = self.seq;
         self.rows.push_back(row);
         let mut dropped = Vec::new();
-        while self.rows.len() > MAX_HISTORY && self.rows.front().is_some_and(|r| !protected(r)) {
-            if let Some(row) = self.rows.pop_front() {
+        while self.rows.len() > MAX_HISTORY {
+            if let Some(index) = self.rows.iter().position(|row| !protected(row)) {
+                let row = self.rows.remove(index).expect("settled row found");
                 dropped.push(row.id);
+            } else {
+                break;
             }
         }
         dropped
@@ -153,6 +164,12 @@ impl Journal {
     pub(super) fn has_thread(&self, thread: &str) -> bool {
         self.rows.iter().any(|r| r.thread == thread)
     }
+    pub(super) fn assistant_heard_facts(&self, thread: &str) -> HashMap<String, Value> {
+        self.rows.iter().filter(|r| r.thread == thread && r.role == "assistant" && r.globally_heard)
+            .map(|r| (r.id.clone(), json!({"utterance_id":r.id.rsplit_once(":voice:").map(|(_, id)| id).unwrap_or(""),
+                "history_id":r.id,"fate":if r.status=="skipped" {"skipped"} else {"heard"},
+                "heard_chars":r.text.chars().count()}))).collect()
+    }
     pub(super) fn unheard_summary(&self, thread: &str) -> Option<(usize, u64)> {
         let rows: Vec<_> = self
             .rows
@@ -166,17 +183,16 @@ impl Journal {
             .collect();
         Some((rows.len(), rows.first()?.time))
     }
-    pub(super) fn newer_spoken_message(&self, thread: &str, epoch: u64) -> Option<String> {
+    pub(super) fn newer_spoken_message(&self, thread: &str, epoch: u64) -> Option<(u64, String)> {
         self.rows
             .iter()
-            .rev()
             .find(|row| {
                 row.role == "user"
                     && row.thread == thread
                     && row.turn_id.is_some()
                     && row.epoch > epoch
             })
-            .map(|row| row.message_id().to_owned())
+            .map(|row| (row.epoch, row.message_id().to_owned()))
     }
     /// A thread's input rows, oldest first.
     pub(super) fn input_mut<'a>(
@@ -194,7 +210,7 @@ impl Journal {
             .filter(|r| {
                 r.is_input()
                     && (matches!(r.status.as_str(), "pending" | "sending")
-                        || r.pull_claimed_by.is_some())
+                        || (r.status == "delivered" && r.pull_claimed_by.is_some()))
             })
             .fold((0, 0), |(count, bytes), r| {
                 (
@@ -206,11 +222,11 @@ impl Journal {
                 )
             })
     }
-    /// Pending input whose next delivery attempt is due.
-    pub(super) fn due_input(&mut self, now: u64) -> impl Iterator<Item = &mut Row> {
+    /// Unresolved push input in journal order, including rows waiting for their retry deadline.
+    pub(super) fn unresolved_input(&mut self) -> impl Iterator<Item = &mut Row> {
         self.rows
             .iter_mut()
-            .filter(move |r| r.is_input() && r.status == "pending" && r.next_attempt <= now)
+            .filter(|r| r.is_input() && matches!(r.status.as_str(), "pending" | "sending"))
     }
     /// Give up on pending input that waited too long.
     pub(super) fn expire_input(&mut self, now: u64) -> Vec<InputRef> {
@@ -244,6 +260,7 @@ impl Journal {
                 && !matches!(r.status.as_str(), "read" | "not_sent")
         })?;
         row.status = "read".into();
+        row.pull_claimed_by = None;
         Some(row.input_ref())
     }
     /// Return to the queue the pull input `released` selects among that fetched but not yet
@@ -267,13 +284,32 @@ impl Inner {
     pub(super) fn append_row(&mut self, row: Row) {
         let dropped = self.journal.append(row);
         self.utterances.forget_rows(&dropped);
+        self.unheard.forget_rows(&dropped);
     }
 }
 
 impl Room {
     pub fn history(&self, thread: Option<&str>) -> Value {
         let inner = self.inner.lock().expect("room lock");
-        json!({"messages":inner.journal.rows.iter().filter(|r|thread.is_none_or(|t|r.thread==t)).rev().take(1000).collect::<Vec<_>>().into_iter().rev().map(Row::view).collect::<Vec<_>>()})
+        let rows: Vec<_> = inner
+            .journal
+            .rows
+            .iter()
+            .filter(|r| thread.is_none_or(|t| r.thread == t))
+            .collect();
+        let recent = rows.len().saturating_sub(1000);
+        let messages: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .filter(|(index, row)| {
+                *index >= recent
+                    || (row.role == "assistant"
+                        && !row.globally_heard
+                        && super::unheard::unheard(&row.status, row.reason.as_deref()).is_some())
+            })
+            .map(|(_, row)| row.view())
+            .collect();
+        json!({"messages":messages})
     }
     pub fn reply_language(&self, row_id: &str) -> Option<String> {
         self.inner

@@ -25,6 +25,9 @@ impl Room {
         if !inner.peers.contains(cid) {
             return Err(RoomError::new(409, "room.connector_disconnected"));
         }
+        if !inner.conversations.ensure(thread) {
+            return Err(RoomError::new(429, "room.input_backlog_full"));
+        }
         let requested = field(data, "binding_id");
         // A mode the room does not know registers as push, as one that names no mode does.
         let pull_input = field(data, "input_mode") == "pull";

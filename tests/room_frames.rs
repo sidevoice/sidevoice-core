@@ -30,7 +30,7 @@ async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
         browser.welcome.get("sample_rate").is_none(),
         "no audio format"
     );
-    core.select(&token, &browser.session, THREAD).await;
+    let focus_binding = core.select(&token, &browser.session, THREAD).await;
 
     let revision = browser.say("Run the tests, please.").await;
     let delivery = accept_delivery(&mut peer).await;
@@ -58,6 +58,17 @@ async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
         (refusal["key"].as_str(), refusal["client_msg_id"].as_str()),
         (Some("room.input_ended"), Some(late.as_str()))
     );
+    // A new reliable frame ID cannot revive the same cancelled turn as offline speech.
+    let offline = browser
+        .report(
+            "voice-user-turn",
+            json!({"phase":"finished","turn_id":"cancelled","offline":true,
+                "thread_id":THREAD,"binding_id":focus_binding,"text":"Resurrected words"}),
+        )
+        .await;
+    let refusal = browser.frame("error").await;
+    assert_eq!(refusal["key"], "room.input_ended");
+    assert_eq!(refusal["client_msg_id"], offline);
     let history = core.history(&token, THREAD).await;
     let said: Vec<_> = history
         .iter()

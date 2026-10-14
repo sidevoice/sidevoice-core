@@ -12,6 +12,12 @@ impl Room {
             return Err(RoomError::new(400, "room.thread_invalid"));
         }
         let mut inner = self.inner.lock().expect("room lock");
+        if !inner.browsers.contains(sid) {
+            return Err(RoomError::new(409, "room.browser_absent"));
+        }
+        if !inner.conversations.ensure(thread) {
+            return Err(RoomError::new(429, "room.input_backlog_full"));
+        }
         // Selecting needs no active binding: the conversation may come back.
         let title = inner
             .bindings

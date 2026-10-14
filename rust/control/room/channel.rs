@@ -41,6 +41,7 @@ impl Room {
         }
         for input in inner.journal.cancel_unsent(thread, "channel_closed") {
             inner.browsers.input_receipt(&input, "not_sent");
+            inner.salvage_input_notice(&input.id);
         }
         for sid in inner.browsers.ids_on_thread(thread) {
             if let Some(browser) = inner.browsers.get_mut(&sid) {

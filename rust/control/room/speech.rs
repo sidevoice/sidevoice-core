@@ -75,6 +75,11 @@ impl Room {
             inner.remember_refusal(uid, fingerprint, disposition.clone());
             return disposition;
         }
+        if !inner.conversations.ensure(thread) {
+            let disposition = rejected("room.input_backlog_full");
+            inner.remember_refusal(uid, fingerprint, disposition.clone());
+            return disposition;
+        }
         // An open turn is a terminal refusal. Remember it through retries after that turn closes.
         if inner.conversations.is_open(thread) {
             let disposition = json!({"status":"rejected","terminal":true,"reason":"user_speaking",

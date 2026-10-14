@@ -205,19 +205,8 @@ fn messages_waiting_for_their_agent_are_bounded_in_number_and_in_bytes() {
     assert_eq!(said(&room, "x").len(), fit);
 }
 
-/// One message waiting for its agent reaches it: its row is no longer pending.
-fn deliver_one(room: &Room) {
-    let mut inner = room.inner.lock().unwrap();
-    let row = inner
-        .journal
-        .input_mut("x")
-        .find(|row| row.status == "pending")
-        .expect("a waiting message");
-    row.status = "delivered".into();
-}
-
 #[test]
-fn a_turn_refused_for_a_full_backlog_stays_open_for_its_retry() {
+fn a_turn_keeps_its_reserved_input_place_at_full_backlog() {
     for long in [false, true] {
         let (_directory, room, sid, _events) = room_with_call();
         let text = if long {
@@ -225,6 +214,7 @@ fn a_turn_refused_for_a_full_backlog_stays_open_for_its_retry() {
         } else {
             "Short words".to_owned()
         };
+        let turn = room.begin_turn(&sid, "kept").unwrap();
         let mut n = 0;
         while room
             .offline_input(&sid, &format!("m{n}"), &text, None)
@@ -232,16 +222,8 @@ fn a_turn_refused_for_a_full_backlog_stays_open_for_its_retry() {
         {
             n += 1;
         }
-        let turn = room.begin_turn(&sid, "kept").unwrap();
         room.select(&sid, "y").unwrap();
-        let refused = room.finish_turn(&sid, "kept", Some(&text), &Value::Null);
-        assert_eq!(
-            refused.unwrap_err().key,
-            "room.input_backlog_full",
-            "long: {long}"
-        );
-        deliver_one(&room);
-        // The same turn, retried once there is room: its words go where and when it was spoken.
+        // Other input is backpressured before consuming the slot reserved for this turn.
         let taken = room
             .finish_turn(&sid, "kept", Some(&text), &Value::Null)
             .unwrap();

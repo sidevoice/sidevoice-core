@@ -123,10 +123,39 @@ impl Room {
             return Err(RoomError::new(400, "room.thread_invalid"));
         }
         words(text)?;
+        let open = {
+            let inner = self.inner.lock().expect("room lock");
+            inner
+                .browsers
+                .get(sid)
+                .and_then(|browser| browser.turns.iter().find(|turn| turn.turn_id == turn_id))
+                .cloned()
+        };
+        if let Some(open) = open {
+            if open.thread_id.as_deref() != Some(thread)
+                || open.binding_id.as_deref() != Some(binding)
+            {
+                return Err(RoomError::new(409, "room.message_conflict"));
+            }
+            return self.finish_turn(sid, turn_id, Some(text), &Value::Null);
+        }
         let row_id = turn_row(sid, turn_id);
         let mut inner = self.inner.lock().expect("room lock");
         if let Some(row) = inner.journal.find(&row_id) {
             return repeated(row, text, row.thread == thread);
+        }
+        if inner.conversations.prior(sid, turn_id).is_some() {
+            return Err(RoomError::new(409, "room.input_ended"));
+        }
+        if inner
+            .browsers
+            .get(sid)
+            .is_some_and(|browser| browser.turns.iter().any(|turn| turn.turn_id == turn_id))
+        {
+            return Err(RoomError::new(409, "room.input_ended"));
+        }
+        if !inner.conversations.can_begin(thread) {
+            return Err(RoomError::new(429, "room.input_backlog_full"));
         }
         let Some(browser) = inner.browsers.get_mut(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
@@ -144,7 +173,7 @@ impl Room {
             .expect("the call, under the same lock");
         let revision = browser.next_revision();
         browser.turn_revision = revision;
-        let epoch = inner.conversations.begin(thread, sid, turn_id);
+        let epoch = inner.advance_speech_epoch(thread, sid, turn_id);
         inner.conversations.finish(thread, sid, turn_id, epoch);
         let message_id = id();
         inner.queue_input(InputDraft {
@@ -261,7 +290,7 @@ impl Inner {
             "history_id":row_id,"revision":revision,"epoch":epoch,"channel":"voice","binding_id":binding_id,"title":title});
         // Typed context does not consume a spoken turn's pending playback evidence.
         if turn_id.is_some() {
-            self.unheard.finish_empty(thread_id, epoch);
+            self.unheard.resolve_words(thread_id);
             if let Some(unheard) = self.unheard.take(thread_id, &self.journal) {
                 let kind = if unheard["replies"]
                     .as_array()
@@ -325,7 +354,23 @@ impl Inner {
         self.room_for_bytes(text.len() + 1024)
     }
     pub(super) fn room_for_bytes(&self, bytes_needed: usize) -> Result<(), RoomError> {
-        let (count, bytes) = self.journal.waiting_input();
+        self.room_for_bytes_with_turn_credit(bytes_needed, 0)
+    }
+    pub(super) fn room_for_bytes_with_turn_credit(
+        &self,
+        bytes_needed: usize,
+        turn_credit: usize,
+    ) -> Result<(), RoomError> {
+        let (journal_count, journal_bytes) = self.journal.waiting_input();
+        let reserved_turns = self.conversations.open_count().saturating_sub(turn_credit);
+        let count = journal_count + self.pending_notices.len() + reserved_turns;
+        let bytes = journal_bytes
+            + self
+                .pending_notices
+                .iter()
+                .map(|notice| notice.reserved_bytes())
+                .sum::<usize>()
+            + reserved_turns * 2048;
         if !self.journal.can_append()
             || count >= MAX_WAITING_INPUT
             || bytes + bytes_needed > MAX_WAITING_BYTES

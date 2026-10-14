@@ -64,6 +64,14 @@ struct Missed {
     heard_chars: Option<usize>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct EvidenceVersion {
+    fate: String,
+    reason: Option<String>,
+    cut: bool,
+    heard_chars: Option<usize>,
+}
+
 #[derive(Default)]
 struct Pending {
     /// Inserted when each reply becomes unheard; publication order is recovered from the journal.
@@ -72,18 +80,46 @@ struct Pending {
 
 /// A note waiting to tell an agent what its returning person did not hear.
 pub(super) struct Note {
-    pub(super) session: String,
     pub(super) due: u64,
 }
 
 #[derive(Default)]
 pub(super) struct Unheard {
     by_thread: HashMap<String, Pending>,
+    queued_versions: HashMap<String, EvidenceVersion>,
     notes: HashMap<String, Note>,
     empty_obligations: HashSet<(String, u64)>,
 }
 
 impl Unheard {
+    pub(super) fn already_queued(
+        &self,
+        row_id: &str,
+        fate: &str,
+        reason: Option<&str>,
+        cut: bool,
+        heard_chars: Option<usize>,
+    ) -> bool {
+        self.queued_versions.get(row_id).is_some_and(|queued| {
+            queued
+                == &EvidenceVersion {
+                    fate: fate.to_owned(),
+                    reason: reason.map(str::to_owned),
+                    cut,
+                    heard_chars,
+                }
+        })
+    }
+
+    pub(super) fn forget_rows(&mut self, rows: &[String]) {
+        for id in rows {
+            self.queued_versions.remove(id);
+        }
+        for pending in self.by_thread.values_mut() {
+            pending.rows.retain(|missed| !rows.contains(&missed.row_id));
+        }
+        self.by_thread.retain(|_, pending| !pending.rows.is_empty());
+    }
     /// A reply on `thread` ended unheard (`Some(cut)`, with `heard_chars` when known) or was
     /// heard (`None`).
     pub(super) fn update(
@@ -115,6 +151,9 @@ impl Unheard {
             None => {
                 if let Some(pending) = self.by_thread.get_mut(thread) {
                     pending.rows.retain(|m| m.row_id != row_id);
+                    if pending.rows.is_empty() {
+                        self.by_thread.remove(thread);
+                    }
                 }
             }
         }
@@ -139,6 +178,19 @@ impl Unheard {
         if count == 0 {
             return None;
         }
+        for missed in &batch {
+            if let Some(row) = journal.find(&missed.row_id) {
+                self.queued_versions.insert(
+                    missed.row_id.clone(),
+                    EvidenceVersion {
+                        fate: row.status.clone(),
+                        reason: row.reason.clone(),
+                        cut: missed.cut,
+                        heard_chars: missed.heard_chars,
+                    },
+                );
+            }
+        }
         let rows: Vec<_> = batch
             .iter()
             .filter_map(|missed| Some((journal.find(&missed.row_id)?, missed)))
@@ -161,14 +213,13 @@ impl Unheard {
 
     /// A person came back to `thread` in call `session`: if they missed something, the agent is
     /// told unless they speak first.
-    pub(super) fn offer_note(&mut self, thread: &str, session: &str) {
-        if !self.has(thread) || self.notes.contains_key(thread) {
+    pub(super) fn offer_note(&mut self, thread: &str, _session: &str) {
+        if self.notes.contains_key(thread) {
             return;
         }
         self.notes.insert(
             thread.to_owned(),
             Note {
-                session: session.to_owned(),
                 due: seconds() + NOTE_GRACE_SECONDS,
             },
         );
@@ -228,11 +279,22 @@ impl Unheard {
     }
 
     pub(super) fn finish_empty(&mut self, thread: &str, epoch: u64) -> bool {
-        self.empty_obligations.remove(&(thread.to_owned(), epoch))
+        let removed = self.empty_obligations.remove(&(thread.to_owned(), epoch));
+        removed
+            && !self
+                .empty_obligations
+                .iter()
+                .any(|(pending, _)| pending == thread)
+    }
+
+    pub(super) fn resolve_words(&mut self, thread: &str) {
+        self.empty_obligations
+            .retain(|(pending, _)| pending != thread);
+        self.notes.remove(thread);
     }
 
     pub(super) fn transfer_empty(&mut self, thread: &str, from: u64, to: u64) {
-        if self.finish_empty(thread, from) {
+        if self.empty_obligations.remove(&(thread.to_owned(), from)) {
             self.reserve_empty(thread, to);
         }
     }
@@ -261,7 +323,17 @@ impl Inner {
             let heard_chars = row
                 .heard_chars
                 .and_then(|heard| usize::try_from(heard).ok());
-            self.unheard.update(&thread, row_id, verdict, heard_chars);
+            if !verdict.is_some_and(|cut| {
+                self.unheard.already_queued(
+                    row_id,
+                    &row.status,
+                    row.reason.as_deref(),
+                    cut,
+                    heard_chars,
+                )
+            }) {
+                self.unheard.update(&thread, row_id, verdict, heard_chars);
+            }
         }
     }
 

@@ -1,4 +1,5 @@
 //! Push delivery: handing pending input to a connector and settling its acknowledgement.
+use std::collections::HashSet;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -44,7 +45,14 @@ impl Room {
             inner.browsers.input_receipt(&input, "not_sent");
         }
         let mut work = Vec::new();
-        for row in inner.journal.due_input(now) {
+        let mut blocked = HashSet::new();
+        for row in inner.journal.unresolved_input() {
+            if !blocked.insert(row.thread.clone())
+                || row.status != "pending"
+                || row.next_attempt > now
+            {
+                continue;
+            }
             // A pull binding consumes the room journal directly. Falling back to an older
             // push binding here would deliver the same words twice.
             if inner
@@ -136,6 +144,9 @@ impl Room {
             }
         }
         inner.browsers.input_receipt(&input, new_status);
+        if matches!(new_status, "not_sent" | "unconfirmed") {
+            inner.salvage_input_notice(&input.id);
+        }
         if let (Some(thread), "delivered") = (input.thread.as_deref(), new_status) {
             inner.mark_latency(
                 &input.session,
