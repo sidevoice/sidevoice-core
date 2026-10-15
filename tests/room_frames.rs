@@ -46,11 +46,22 @@ async fn delayed_socket_start_after_http_focus_change_keeps_captured_conversatio
         "text":"A's delayed words","thread_id":"captured-a","binding_id":a_focus}),
         )
         .await;
-    assert!(core
-        .history(&token, "captured-a")
-        .await
+    let history = core.history(&token, "captured-a").await;
+    let spoken = history
         .iter()
-        .any(|r| r["text"] == "A's delayed words"));
+        .find(|r| r["text"] == "A's delayed words")
+        .unwrap();
+    let id = spoken["id"].as_str().unwrap();
+    let resolved = core
+        .get(&format!(
+            "/api/presentation/history?thread_id=captured-a&resolve_id={id}&resolve_id=gone"
+        ))
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(resolved.status, 200);
+    assert_eq!(resolved.json()["resolved"][0]["id"], id);
+    assert_eq!(resolved.json()["missing_ids"], json!(["gone"]));
     assert!(!core
         .history(&token, "captured-b")
         .await

@@ -1801,6 +1801,55 @@ fn r5_late_original_receipt_cannot_reverse_replay_partial_or_correction_in_push_
 }
 
 #[test]
+fn r6_old_miss_heard_on_other_device_resolves_after_leaving_recent_history() {
+    use crate::control::room::journal::Row;
+    let c = Case::new(true);
+    c.publish("old", 0, "Older missed reply");
+    c.report("old", "interrupted", Some("user_interrupted"), Some(2));
+    let history_id = c.room.history(Some("t"))["messages"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    {
+        let mut inner = c.room.inner.lock().unwrap();
+        for n in 0..1001 {
+            inner.append_row(Row {
+                id: format!("later-{n}"),
+                thread: "t".into(),
+                role: "user",
+                text: "later".into(),
+                status: "read".into(),
+                ..Row::default()
+            });
+        }
+    }
+    assert!(c.room.history(Some("t"))["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == history_id));
+    let (sender, _events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    c.room
+        .replay_one(&other, &history_id, "other-replay")
+        .unwrap();
+    c.room
+        .playback(&other, "other-replay", "heard", None, None, &Value::Null)
+        .unwrap();
+    assert!(!c.room.history(Some("t"))["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == history_id));
+    let resolved = c.room.history_resolving(Some("t"), &[history_id.clone()]);
+    assert_eq!(resolved["resolved"][0]["id"], history_id);
+    assert_eq!(resolved["resolved"][0]["globally_heard"], true);
+    assert_eq!(resolved["resolved"][0]["heard_chars"], 18);
+    assert_eq!(resolved["missing_ids"], json!([]));
+}
+
+#[test]
 fn review_finished_merged_transcript_keeps_its_words_with_another_turn_open() {
     let c = Case::new(true);
     c.room.begin_turn(&c.sid, "first").unwrap();
