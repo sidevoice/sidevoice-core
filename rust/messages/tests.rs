@@ -136,3 +136,19 @@ fn keys_the_server_emits_have_english_text() {
         assert_ne!(render(&LocalizedMessage::new(key), "en"), key, "{key}");
     }
 }
+
+#[test]
+fn no_bundle_tells_the_person_about_a_room() {
+    for locale in ["en", "es"] {
+        for (key, template) in bundle(locale).as_object().unwrap() {
+            let text = template.as_str().unwrap().replace("--room-credential", "");
+            let says_room = text.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                matches!(
+                    word.to_lowercase().as_str(),
+                    "room" | "rooms" | "sala" | "salas"
+                )
+            });
+            assert!(!says_room, "{locale} {key}: {text}");
+        }
+    }
+}

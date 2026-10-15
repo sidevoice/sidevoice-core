@@ -277,7 +277,7 @@ async fn a_client_message_without_an_id_is_refused_in_the_call_s_language() {
         .await;
     let refusal = browser.frame("error").await;
     assert_eq!(refusal["key"], "room.request_invalid");
-    assert_eq!(refusal["message"], "La solicitud a la sala no es válida.");
+    assert_eq!(refusal["message"], "La solicitud no es válida.");
     browser
         .none_of(&["voice-user-turn"], Duration::from_millis(300))
         .await;
@@ -377,7 +377,7 @@ async fn an_interface_language_the_core_does_not_offer_falls_back_without_an_err
         .await;
     let refusal = browser.frame("error").await;
     assert_eq!(refusal["key"], "room.request_invalid");
-    assert_eq!(refusal["message"], "La solicitud a la sala no es válida.");
+    assert_eq!(refusal["message"], "La solicitud no es válida.");
     browser.close().await;
 }
 
