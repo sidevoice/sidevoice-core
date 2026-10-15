@@ -16,11 +16,9 @@
     {
       "voice": {
         "status": "heard-up-to",
-        "heard_chars": 2,
-        "reason": {
-          "reason": "barge-in"
-        }
+        "heard_chars": 2
       },
+      "app_action": "qualified turn in this conversation while playback was sounding",
       "core": {
         "status": "interrupted",
         "reason": "user_interrupted",
@@ -33,11 +31,9 @@
     },
     {
       "voice": {
-        "status": "not-played",
-        "reason": {
-          "reason": "barge-in"
-        }
+        "status": "not-played"
       },
+      "app_action": "qualified turn in this conversation before playback started",
       "core": {
         "status": "unplayed",
         "reason": "newer_turn"
@@ -49,11 +45,10 @@
     },
     {
       "voice": {
-        "type": "agent-interrupted",
-        "utterance_id": "local-handle",
-        "heard_until": 0,
-        "played": true
+        "status": "heard-up-to",
+        "heard_chars": 0
       },
+      "app_action": "qualified turn after playback started, with zero confirmed characters",
       "core": {
         "status": "interrupted",
         "reason": "user_interrupted",
@@ -62,22 +57,6 @@
       "history": {
         "status": "interrupted",
         "audio_reason": "user_interrupted"
-      }
-    },
-    {
-      "voice": {
-        "type": "agent-interrupted",
-        "utterance_id": "local-handle",
-        "heard_until": 0,
-        "played": false
-      },
-      "core": {
-        "status": "unplayed",
-        "reason": "newer_turn"
-      },
-      "history": {
-        "status": "interrupted",
-        "audio_reason": "newer_turn"
       }
     },
     {
@@ -263,7 +242,26 @@
       "thread_id": "CAPTURED_THREAD",
       "binding_id": "CAPTURED_FOCUS_BINDING"
     },
+    "source": "app tags the conversation call's turn at start; voice does not supply thread_id or binding_id",
     "meaning": "Start is pinned to this captured focus even after HTTP selects another focus; terminal cannot override it"
+  },
+  "focus_switch": {
+    "started": {
+      "session_id": "SESSION",
+      "turn_id": "A_TURN",
+      "thread_id": "A",
+      "binding_id": "A_FOCUS_BINDING"
+    },
+    "app_focuses": "B",
+    "on_switch": "no terminal turn frame; A remains open until its normal end-of-turn",
+    "normal_end_of_turn": {
+      "session_id": "SESSION",
+      "turn_id": "A_TURN",
+      "phase": "finished",
+      "text": "A's words",
+      "routed_to": "A"
+    },
+    "meaning": "A's later terminal words stay with A; B's separate call can finish in either order"
   },
   "history_resolution": {
     "request": "GET /api/presentation/history?thread_id=t&resolve_id=OLD_REPLY&resolve_id=EVICTED",
