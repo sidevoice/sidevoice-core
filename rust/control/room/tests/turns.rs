@@ -38,6 +38,102 @@ fn delivered_to(room: &Room) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn delayed_captured_start_routes_to_original_focus_after_http_selection_and_binding_replacement() {
+    let (_directory, room, sid, _events) = room_with_call();
+    let first = room.snapshot(Some(&sid))["binding"].clone();
+    room.select(&sid, "y").unwrap();
+    room.select(&sid, "x").unwrap();
+    let second = room.snapshot(Some(&sid))["binding"].clone();
+    assert_ne!(first["binding_id"], second["binding_id"]);
+    room.select(&sid, "y").unwrap();
+    let turn = room
+        .begin_turn_captured(&sid, "delayed", "x", first["binding_id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(turn.thread_id.as_deref(), Some("x"));
+    assert_eq!(turn.epoch, 1);
+    assert_eq!(
+        room.snapshot(Some(&sid))["call"]["target"]["thread_id"],
+        "y"
+    );
+    assert_eq!(
+        room.begin_turn_captured(&sid, "delayed", "y", first["binding_id"].as_str().unwrap())
+            .unwrap_err()
+            .key,
+        "room.message_conflict"
+    );
+    room.finish_turn(&sid, "delayed", Some("A words"), &Value::Null)
+        .unwrap();
+    assert_eq!(said(&room, "x"), ["A words"]);
+    assert!(said(&room, "y").is_empty());
+    assert_eq!(
+        room.history(Some("y"))["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        room.begin_turn_captured(&sid, "invalid", "x", "unknown")
+            .unwrap_err()
+            .key,
+        "room.focus_changed"
+    );
+}
+
+#[test]
+fn explicit_history_resolution_reports_old_heard_row_and_missing_identity() {
+    use crate::control::room::journal::Row;
+    let (_directory, room, _sid, _events) = room_with_call();
+    {
+        let mut inner = room.inner.lock().unwrap();
+        inner.append_row(Row {
+            id: "older-miss".into(),
+            thread: "x".into(),
+            role: "assistant",
+            text: "old missed reply".into(),
+            status: "interrupted".into(),
+            reason: Some("user_interrupted".into()),
+            ..Row::default()
+        });
+        for n in 0..1001 {
+            inner.append_row(Row {
+                id: format!("new-{n}"),
+                thread: "x".into(),
+                role: "user",
+                text: "new".into(),
+                ..Row::default()
+            });
+        }
+    }
+    assert!(room.history(Some("x"))["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["id"] == "older-miss"));
+    {
+        let mut inner = room.inner.lock().unwrap();
+        let row = inner.journal.find_mut("older-miss").unwrap();
+        row.globally_heard = true;
+        row.heard_chars = Some(16);
+    }
+    let ordinary = room.history(Some("x"));
+    assert!(!ordinary["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["id"] == "older-miss"));
+    let resolved = room.history_resolving(Some("x"), &["older-miss".into(), "gone".into()]);
+    assert_eq!(resolved["resolved"][0]["id"], "older-miss");
+    assert_eq!(resolved["resolved"][0]["globally_heard"], true);
+    assert_eq!(resolved["resolved"][0]["heard_chars"], 16);
+    assert_eq!(resolved["missing_ids"], json!(["gone"]));
+    assert_eq!(
+        room.history_resolving(Some("y"), &["older-miss".into()])["missing_ids"],
+        json!(["older-miss"])
+    );
+}
+
 fn publish(room: &Room, sid: &str, uid: &str, revision: u64) -> Value {
     let epoch = revision
         .saturating_sub(1)

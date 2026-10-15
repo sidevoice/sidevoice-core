@@ -20,6 +20,48 @@ fn row<'a>(history: &'a [Value], id: &str) -> &'a Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn delayed_socket_start_after_http_focus_change_keeps_captured_conversation() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let (_peer_a, _) = connector_with_binding(&core, "captured-a", "captured-a").await;
+    let (_peer_b, _) = connector_with_binding(&core, "captured-b", "captured-b").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let a_focus = core.select(&token, &browser.session, "captured-a").await;
+    core.select(&token, &browser.session, "captured-b").await;
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase":"started","turn_id":"a-turn",
+        "thread_id":"captured-a","binding_id":a_focus}),
+        )
+        .await;
+    let started = browser.turn("started", STEP).await;
+    assert_eq!(started["thread_id"], "captured-a");
+    assert_eq!(started["epoch"], 1);
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase":"finished","turn_id":"a-turn",
+        "text":"A's delayed words","thread_id":"captured-a","binding_id":a_focus}),
+        )
+        .await;
+    assert!(core
+        .history(&token, "captured-a")
+        .await
+        .iter()
+        .any(|r| r["text"] == "A's delayed words"));
+    assert!(!core
+        .history(&token, "captured-b")
+        .await
+        .iter()
+        .any(|r| r["role"] == "user"));
+    assert_eq!(core.participant(&token, "captured-a").await["epoch"], 1);
+    assert_eq!(core.participant(&token, "captured-b").await["epoch"], 0);
+    browser.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
@@ -89,7 +131,7 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
     let (mut peer, binding) = connector_with_binding(&core, "overlap", THREAD).await;
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
-    core.select(&token, &session, THREAD).await;
+    let focus = core.select(&token, &session, THREAD).await;
 
     let first = browser.start_turn("first").await;
     let second = browser.start_turn("second").await;
@@ -98,7 +140,7 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
     browser
         .report(
             "voice-user-turn",
-            json!({"phase": "started", "turn_id": "first"}),
+            json!({"phase": "started", "turn_id": "first", "thread_id": THREAD, "binding_id": focus}),
         )
         .await;
     let duplicate = browser.frame("voice-user-turn").await;
@@ -460,7 +502,8 @@ async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
     // An extra key next to `type` and `data`.
     browser.send_raw(Message::text(
         json!({"type": "voice-user-turn", "added_later": extra, "data": {"session_id": session,
-            "client_msg_id": "envelope", "phase": "started", "turn_id": "spoken", "future": extra}})
+            "client_msg_id": "envelope", "phase": "started", "turn_id": "spoken",
+            "thread_id": THREAD, "binding_id": focus, "future": extra}})
         .to_string(),
     ));
     browser

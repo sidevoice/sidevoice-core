@@ -42,6 +42,29 @@ impl Room {
     /// started playing answer an older turn: they are withdrawn (`newer_turn`). One playing is the call's to cut, and
     /// a replay the person asked for is never stale.
     pub fn begin_turn(&self, sid: &str, turn_id: &str) -> Result<VoiceTurn, RoomError> {
+        self.begin_turn_at(sid, turn_id, None)
+    }
+
+    /// Begin a wire turn at the captured focus, even if HTTP focus selection has since changed.
+    pub fn begin_turn_captured(
+        &self,
+        sid: &str,
+        turn_id: &str,
+        thread_id: &str,
+        binding_id: &str,
+    ) -> Result<VoiceTurn, RoomError> {
+        if binding_id.is_empty() && !thread_id.is_empty() {
+            return Err(RoomError::new(400, "room.request_invalid"));
+        }
+        self.begin_turn_at(sid, turn_id, Some((thread_id, binding_id)))
+    }
+
+    fn begin_turn_at(
+        &self,
+        sid: &str,
+        turn_id: &str,
+        captured: Option<(&str, &str)>,
+    ) -> Result<VoiceTurn, RoomError> {
         if !valid_turn_id(turn_id) {
             return Err(RoomError::new(400, "room.request_invalid"));
         }
@@ -50,15 +73,43 @@ impl Room {
             return Err(RoomError::new(409, "room.browser_absent"));
         };
         if let Some(turn) = c.turns.iter().find(|turn| turn.turn_id == turn_id) {
+            if captured.is_some_and(|(thread, binding)| {
+                turn.thread_id.as_deref().unwrap_or("") != thread
+                    || turn.binding_id.as_deref() != Some(binding)
+            }) {
+                return Err(RoomError::new(409, "room.message_conflict"));
+            }
             return Ok(turn.clone());
         }
         if inner.conversations.prior(sid, turn_id).is_some() {
             return Err(RoomError::new(409, "room.input_ended"));
         }
-        if let Some(thread) = inner
-            .browsers
-            .get(sid)
-            .and_then(|browser| browser.bound_target())
+        let bound = match captured {
+            Some(("", ""))
+                if inner
+                    .browsers
+                    .get(sid)
+                    .is_some_and(|browser| browser.target.is_none()) =>
+            {
+                None
+            }
+            Some((thread, binding)) => Some(
+                inner
+                    .browsers
+                    .get(sid)
+                    .and_then(|browser| browser.captured_target(thread, binding))
+                    .ok_or_else(|| RoomError::new(409, "room.focus_changed"))?
+                    .clone(),
+            ),
+            None => inner
+                .browsers
+                .get(sid)
+                .and_then(|browser| browser.bound_target())
+                .cloned(),
+        };
+        if let Some(thread) = bound
+            .as_ref()
+            .filter(|t| !t.thread.is_empty())
             .map(|t| t.thread.clone())
         {
             if !inner.conversations.can_begin(&thread) {
@@ -75,16 +126,18 @@ impl Room {
         c.turn_revision = revision;
         c.speaking = true;
         c.open_turn = Some(revision);
-        let bound = c.bound_target();
-        let thread_id = bound.map(|t| t.thread.clone());
+        let thread_id = bound
+            .as_ref()
+            .filter(|t| !t.thread.is_empty())
+            .map(|t| t.thread.clone());
         let turn = VoiceTurn {
             session_id: sid.into(),
             turn_id: turn_id.into(),
             revision,
             epoch: 0,
             thread_id,
-            binding_id: bound.map(|t| t.binding_id.clone()),
-            title: c.target.as_ref().and_then(|t| t.title.clone()),
+            binding_id: bound.as_ref().map(|t| t.binding_id.clone()),
+            title: bound.as_ref().and_then(|t| t.title.clone()),
             language: c.language.clone(),
             cancelled: false,
         };

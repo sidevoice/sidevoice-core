@@ -299,6 +299,11 @@ impl Inner {
 
 impl Room {
     pub fn history(&self, thread: Option<&str>) -> Value {
+        self.history_resolving(thread, &[])
+    }
+
+    /// Resolve explicit retained row IDs independently of the recent/unheard projection.
+    pub fn history_resolving(&self, thread: Option<&str>, resolve_ids: &[String]) -> Value {
         let inner = self.inner.lock().expect("room lock");
         let rows: Vec<_> = inner
             .journal
@@ -318,7 +323,19 @@ impl Room {
             })
             .map(|(_, row)| row.view())
             .collect();
-        json!({"messages":messages})
+        if resolve_ids.is_empty() {
+            return json!({"messages":messages});
+        }
+        let mut resolved = Vec::new();
+        let mut missing_ids = Vec::new();
+        for id in resolve_ids {
+            if let Some(row) = rows.iter().find(|row| row.id == *id) {
+                resolved.push(row.view());
+            } else {
+                missing_ids.push(id);
+            }
+        }
+        json!({"messages":messages,"resolved":resolved,"missing_ids":missing_ids})
     }
     pub fn reply_language(&self, row_id: &str) -> Option<String> {
         self.inner

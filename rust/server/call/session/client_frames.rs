@@ -70,13 +70,20 @@ impl Call {
                 "turn_id":turn_id,"revision":revision,"epoch":epoch,"thread_id":thread}})
         };
         let result = match data["phase"].as_str() {
-            Some("started") => room.begin_turn(&self.session, turn_id).map(|turn| {
-                started(
-                    &json!(turn.revision),
-                    &json!(turn.epoch),
-                    &json!(turn.thread_id),
-                )
-            }),
+            Some("started") => data["thread_id"]
+                .as_str()
+                .zip(data["binding_id"].as_str())
+                .ok_or_else(|| RoomError::new(400, "room.request_invalid"))
+                .and_then(|(thread, binding)| {
+                    room.begin_turn_captured(&self.session, turn_id, thread, binding)
+                })
+                .map(|turn| {
+                    started(
+                        &json!(turn.revision),
+                        &json!(turn.epoch),
+                        &json!(turn.thread_id),
+                    )
+                }),
             // A turn spoken offline arrives finished: once taken, its boundary is said as a started turn's is.
             Some("finished") if data["offline"].as_bool() == Some(true) => room
                 .offline_input_captured(

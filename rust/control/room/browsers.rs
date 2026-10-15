@@ -14,6 +14,8 @@ use super::util::id;
 const RECENT_SESSIONS: usize = 64;
 /// How many of a call's turns may wait for their words at once; one more is refused (`room.turns_full`) until one ends.
 pub(super) const MAX_OPEN_TURNS: usize = 8;
+/// Focus identities retained for a delayed turn start from this call.
+const RECENT_FOCI: usize = 128;
 
 /// The conversation a call is focused on; an empty thread means it is focused on none.
 #[derive(Clone)]
@@ -40,6 +42,7 @@ pub(super) struct Browser {
     pub(super) language: String,
     sender: mpsc::Sender<Value>,
     pub(super) target: Option<Target>,
+    recent_targets: VecDeque<Target>,
     pub(super) revision: u64,
     pub(super) turn_revision: u64,
     pub(super) speaking: bool,
@@ -61,6 +64,7 @@ impl Browser {
             language,
             sender,
             target: None,
+            recent_targets: VecDeque::new(),
             revision: 0,
             turn_revision: 0,
             speaking: false,
@@ -91,7 +95,19 @@ impl Browser {
         self.next_revision();
         self.speaking = false;
         self.open_turn = None;
-        self.target = Some(target);
+        if let Some(previous) = self.target.replace(target) {
+            self.recent_targets.push_back(previous);
+            if self.recent_targets.len() > RECENT_FOCI {
+                self.recent_targets.pop_front();
+            }
+        }
+    }
+    /// Find exactly the focus the client captured, including a focus replaced since capture.
+    pub(super) fn captured_target(&self, thread: &str, binding_id: &str) -> Option<&Target> {
+        self.target
+            .iter()
+            .chain(self.recent_targets.iter().rev())
+            .find(|target| target.thread == thread && target.binding_id == binding_id)
     }
     pub(super) fn is_on(&self, thread: &str) -> bool {
         self.target.as_ref().is_some_and(|t| t.thread == thread)

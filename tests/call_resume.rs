@@ -38,7 +38,8 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
     browser
         .send(
             "voice-user-turn",
-            json!({"session_id": session, "client_msg_id": "turn-started", "turn_id": "across", "phase": "started"}),
+            json!({"session_id": session, "client_msg_id": "turn-started", "turn_id": "across", "phase": "started",
+                "thread_id": THREAD, "binding_id": target_binding}),
         )
         .await;
     let started = browser
