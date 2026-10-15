@@ -112,12 +112,6 @@ impl Browser {
     pub(super) fn is_on(&self, thread: &str) -> bool {
         self.target.as_ref().is_some_and(|t| t.thread == thread)
     }
-    pub(super) fn has_focused(&self, thread: &str) -> bool {
-        self.target
-            .iter()
-            .chain(self.recent_targets.iter())
-            .any(|target| target.thread == thread)
-    }
     /// The focus, if the call is focused on a conversation.
     pub(super) fn bound_target(&self) -> Option<&Target> {
         self.target.as_ref().filter(|t| !t.thread.is_empty())

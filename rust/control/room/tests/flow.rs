@@ -247,12 +247,9 @@ fn semantic_hearing_requires_matching_identity_and_valid_extent() {
             key
         );
     }
-    let (sender, _) = mpsc::channel(64);
-    let foreign = c.room.join("foreign".into(), "en".into(), sender).unwrap();
-    c.room.select(&foreign, "other").unwrap();
     assert_eq!(
         c.room
-            .reply_hearing(&foreign, &id, "r", "heard", None)
+            .reply_hearing("absent-session", &id, "r", "heard", None)
             .unwrap_err()
             .key,
         "room.stale_utterance"
@@ -261,6 +258,117 @@ fn semantic_hearing_requires_matching_identity_and_valid_extent() {
         c.room.history(Some("t"))["messages"][0]["hearing"],
         Value::Null
     );
+}
+
+#[test]
+fn h4_saved_unavailable_history_can_be_acknowledged_from_other_or_unfocused_call() {
+    let c = Case::new(true);
+    let (publisher_sender, _publisher_events) = mpsc::channel(64);
+    let publisher = c
+        .room
+        .join("publisher".into(), "en".into(), publisher_sender)
+        .unwrap();
+    c.room.select(&publisher, "saved-b").unwrap();
+    c.room
+        .set_speech(&publisher, false, Some("voice_off"))
+        .unwrap();
+    let revision = c.room.snapshot(Some(&publisher))["room"]["revision"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        c.room
+            .publish(&json!({"session_id":publisher,"thread_id":"saved-b",
+            "revision":revision,"epoch":0,"utterance_id":"saved",
+            "text":"Saved reply"}))["status"],
+        "text_only"
+    );
+    let history_id = format!("{publisher}:voice:saved");
+    assert_eq!(
+        c.room.history(Some("saved-b"))["messages"][0]["id"],
+        history_id
+    );
+    c.room.leave(&publisher);
+    assert_eq!(c.room.snapshot(Some(&c.sid))["binding"]["thread_id"], "t");
+
+    let (new_sender, _new_events) = mpsc::channel(64);
+    let new_session = c
+        .room
+        .join("reader".into(), "en".into(), new_sender)
+        .unwrap();
+    c.room
+        .reply_hearing(&new_session, &history_id, "saved", "partial", Some(2))
+        .unwrap();
+    assert_eq!(
+        c.room.history(Some("saved-b"))["messages"][0]["hearing"],
+        "partial"
+    );
+    c.room
+        .reply_hearing(&c.sid, &history_id, "saved", "heard", None)
+        .unwrap();
+    assert_eq!(
+        c.room.history(Some("saved-b"))["messages"][0]["hearing"],
+        "heard"
+    );
+    assert_eq!(
+        c.room
+            .reply_hearing(&new_session, &history_id, "wrong", "heard", None)
+            .unwrap_err()
+            .key,
+        "room.stale_utterance"
+    );
+}
+
+#[test]
+fn h6_zero_partial_is_invalid_before_and_after_not_heard_exposure() {
+    let c = Case::new(true);
+    c.publish("r", 0, "Reply");
+    let history_id = format!("{}:voice:r", c.sid);
+    assert_eq!(
+        c.room
+            .reply_hearing(&c.sid, &history_id, "r", "partial", Some(0))
+            .unwrap_err()
+            .key,
+        "room.receipt_invalid"
+    );
+    assert_eq!(
+        c.room.history(Some("t"))["messages"][0]["hearing"],
+        Value::Null
+    );
+    c.hearing("r", "not_heard", None);
+    c.room
+        .playback_transport(&c.sid, "r", "interrupted", None, Some(0), &Value::Null)
+        .unwrap();
+    assert_eq!(
+        c.room
+            .reply_hearing(&c.sid, &history_id, "r", "partial", Some(0))
+            .unwrap_err()
+            .key,
+        "room.receipt_invalid"
+    );
+    c.say("turn", Some("Wait"));
+    let before = c.input("Wait");
+    assert_eq!(before["unheard"]["replies"][0]["fate"], "not_heard");
+    assert_eq!(
+        c.room
+            .reply_hearing(&c.sid, &history_id, "r", "partial", Some(0))
+            .unwrap_err()
+            .key,
+        "room.receipt_invalid"
+    );
+    let exposed = c.pull();
+    assert_eq!(exposed.len(), 1);
+    assert_eq!(exposed[0]["unheard"]["replies"][0]["fate"], "not_heard");
+    assert_eq!(
+        c.room
+            .reply_hearing(&c.sid, &history_id, "r", "partial", Some(0))
+            .unwrap_err()
+            .key,
+        "room.receipt_invalid"
+    );
+    assert_eq!(c.pull(), exposed);
+    let row = &c.room.history(Some("t"))["messages"][0];
+    assert_eq!(row["hearing"], "not_heard");
+    assert_eq!(row["heard_chars"], 0);
 }
 
 #[test]

@@ -41,26 +41,20 @@ impl Room {
                 return Err(stale());
             }
         }
-        let browser = inner.browsers.get(sid).ok_or_else(stale)?;
-        if !browser.has_focused(&thread) {
+        if !inner.browsers.contains(sid) {
             return Err(stale());
         }
         let extent = match (outcome, heard_chars) {
             ("heard", None) => length,
             ("not_heard", None) => 0,
-            ("partial", Some(n)) if n < length => n,
+            ("partial", Some(n)) if n > 0 && n < length => n,
             _ => return Err(invalid()),
         };
         let row = inner.journal.find_mut(history_id).ok_or_else(stale)?;
         let previous = row.hearing_reports.get(sid).cloned();
         let stronger = previous
             .as_ref()
-            .is_none_or(|(prior_outcome, prior_extent)| {
-                extent > *prior_extent
-                    || (extent == *prior_extent
-                        && outcome == "partial"
-                        && prior_outcome == "not_heard")
-            });
+            .is_none_or(|(_, prior_extent)| extent > *prior_extent);
         if !stronger {
             return Ok(());
         }

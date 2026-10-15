@@ -361,6 +361,34 @@
       }
     }
   ],
+  "hearing_authorization": {
+    "original_retained_history": {
+      "active_authenticated_call": true,
+      "audio_focus": "OTHER_THREAD_OR_NONE",
+      "row_thread": "SAVED_THREAD",
+      "result": "accepted",
+      "meaning": "A presented written reply can be acknowledged without changing audio focus"
+    },
+    "manual_replay_requires_reporting_session_target": true,
+    "absent_call_or_mismatched_pair": "room.stale_utterance"
+  },
+  "invalid_hearing": [
+    {
+      "frame": {
+        "type": "reply-hearing",
+        "data": {
+          "session_id": "SESSION",
+          "client_msg_id": "INVALID_ZERO",
+          "history_id": "HISTORY_ID",
+          "utterance_id": "REPLY_ID",
+          "outcome": "partial",
+          "heard_chars": 0
+        }
+      },
+      "error": "room.receipt_invalid",
+      "physical_playback_zero_remains_valid": true
+    }
+  ],
   "unconfirmed": {
     "history": {
       "hearing": null,

@@ -34,9 +34,6 @@ fn hearing_advances(next: &Value, previous: &Value) -> bool {
     if next_fate == "heard" {
         return true;
     }
-    if next_fate == "partial" && previous_fate == "not_heard" {
-        return true;
-    }
     let earlier = previous["heard_chars"].as_u64();
     let later = next["heard_chars"].as_u64();
     later.is_some_and(|later| earlier.is_none_or(|earlier| later > earlier))
