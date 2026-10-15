@@ -18,6 +18,9 @@ impl Room {
         if inner.utterances.replay_count() >= MAX_REPLAY_RECORDS {
             return Err(RoomError::new(429, "room.replay_full"));
         }
+        if inner.utterances.get(uid).is_some() {
+            return Err(RoomError::new(409, "room.stale_utterance"));
+        }
         let Some(row) = inner
             .journal
             .find(history_id)

@@ -43,6 +43,8 @@ pub(super) struct Row {
     /// For a reply cut while it played: how many characters of it the person heard, as the call reported.
     pub(super) heard_chars: Option<u64>,
     pub(super) globally_heard: bool,
+    /// Manual replay Skip does not rewrite the original playback status.
+    pub(super) globally_skipped: bool,
     pub(super) language: Option<String>,
     pub(super) offline: Option<Value>,
     pub(super) payload: Option<Value>,
@@ -169,7 +171,7 @@ impl Journal {
         self.rows.iter().filter(|r| r.thread == thread && r.role == "assistant")
             .filter_map(|r| {
                 let (fate, heard) = if r.globally_heard {
-                    (if r.status == "skipped" {"skipped"} else {"heard"}, Some(r.text.chars().count() as u64))
+                    (if r.status == "skipped" || r.globally_skipped {"skipped"} else {"heard"}, Some(r.text.chars().count() as u64))
                 } else {
                     ("partial", r.heard_chars)
                 };

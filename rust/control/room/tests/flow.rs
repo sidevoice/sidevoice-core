@@ -283,6 +283,98 @@ fn f4_released_pull_claim_keeps_original_payload_and_corrects_partial_full_and_s
 }
 
 #[test]
+fn f2_original_reply_final_receipt_after_park_resume_updates_global_hearing() {
+    let c = Case::new(true);
+    c.publish("original", 0, "Original reply");
+    c.room.park(&c.sid, true);
+    c.room.resume(&c.sid, &[]);
+    c.report("original", "heard", None, None);
+    let row = &c.room.history(Some("t"))["messages"][0];
+    assert_eq!(row["globally_heard"], true);
+    assert_eq!(row["heard_chars"], 14);
+}
+
+#[test]
+fn f2_manual_replay_late_receipts_after_park_resume_reconcile_original_and_notices() {
+    for (status, reason, extent, fate) in [
+        ("heard", None, None, "heard"),
+        ("interrupted", Some("user_interrupted"), Some(3), "partial"),
+        ("unplayed", Some("user_skipped"), None, "skipped"),
+    ] {
+        let c = Case::new(true);
+        c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+        c.publish("original", 0, "Replay me");
+        c.room.set_speech(&c.sid, true, None).unwrap();
+        c.room
+            .inner
+            .lock()
+            .unwrap()
+            .unheard
+            .note_mut("t")
+            .unwrap()
+            .due = 0;
+        let first = c.pull();
+        let prior = first[0]["message_id"].clone();
+        let history_id = c.room.history(Some("t"))["messages"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        c.room.replay_one(&c.sid, &history_id, "manual").unwrap();
+        c.room.park(&c.sid, true);
+        c.room.resume(&c.sid, &[]);
+        assert!(c.room.inner.lock().unwrap().utterances.contains("manual"));
+        c.report("manual", status, reason, extent);
+        let row = &c.room.history(Some("t"))["messages"][0];
+        assert_eq!(row["globally_heard"], fate != "partial", "{fate}");
+        assert_eq!(
+            row["heard_chars"],
+            if fate == "partial" {
+                json!(3)
+            } else {
+                json!(9)
+            }
+        );
+        let messages = c.pull();
+        assert!(
+            messages.iter().any(|message| {
+                message["notice"]["corrects_message_id"] == prior
+                    && message["notice"]["heard"][0]["fate"] == fate
+            }),
+            "{fate}: {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn f2_finished_replay_receipt_identities_are_bounded_without_blocking_new_replays() {
+    let mut c = Case::new(true);
+    c.publish("original", 0, "Reply");
+    c.report("original", "heard", None, None);
+    let history_id = c.room.history(Some("t"))["messages"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for n in 0..260 {
+        let uid = format!("manual-{n}");
+        c.room.replay_one(&c.sid, &history_id, &uid).unwrap();
+        c.report(&uid, "heard", None, None);
+        c.frames("voice-reply");
+    }
+    let inner = c.room.inner.lock().unwrap();
+    assert_eq!(inner.utterances.replay_count(), 0);
+    assert_eq!(
+        inner
+            .utterances
+            .iter()
+            .filter(|(_, r)| r.is_replay())
+            .count(),
+        256
+    );
+    assert!(!inner.utterances.contains("manual-0"));
+    assert!(inner.utterances.contains("manual-259"));
+}
+
+#[test]
 fn t01_playing_reply_cut_carries_full_unicode_evidence_with_the_words() {
     let c = Case::new(false);
     assert_eq!(c.publish("r", 0, "é🐙 rest")["status"], "queued");

@@ -1,9 +1,11 @@
 //! Utterances: how far each reply got in every call it was spoken to, and the replays of
 //! earlier replies.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Most original utterances the room keeps; replays are bounded separately.
 pub(super) const MAX_UTTERANCES: usize = 2048;
+/// Finished replay identities kept for a delayed reliable receipt after park/resume.
+pub(super) const MAX_REPLAY_RECEIPTS: usize = 256;
 
 /// What one call did with an utterance: the revision it was sent under and how far it got there.
 pub(super) type ClientEntry = (u64, String);
@@ -91,6 +93,7 @@ fn in_flight(status: &str) -> bool {
 #[derive(Default)]
 pub(super) struct Utterances {
     by_id: HashMap<String, UtteranceRecord>,
+    replay_order: VecDeque<String>,
 }
 impl Utterances {
     pub(super) fn get(&self, uid: &str) -> Option<&UtteranceRecord> {
@@ -104,7 +107,12 @@ impl Utterances {
         self.by_id.contains_key(uid)
     }
     pub(super) fn insert(&mut self, uid: &str, record: UtteranceRecord) {
+        if record.is_replay() {
+            self.replay_order.retain(|id| id != uid);
+            self.replay_order.push_back(uid.to_owned());
+        }
         self.by_id.insert(uid.to_owned(), record);
+        self.retire_finished_replays();
     }
     pub(super) fn iter(&self) -> impl Iterator<Item = (&String, &UtteranceRecord)> {
         self.by_id.iter()
@@ -113,7 +121,10 @@ impl Utterances {
         self.by_id.values().filter(|r| !r.is_replay()).count()
     }
     pub(super) fn replay_count(&self) -> usize {
-        self.by_id.values().filter(|r| r.is_replay()).count()
+        self.by_id
+            .values()
+            .filter(|r| r.is_replay() && !r.finished())
+            .count()
     }
     /// The original utterance spoken from a journal row, never one of its replays.
     pub(super) fn original_of_row(&self, row_id: &str) -> Option<(&String, &UtteranceRecord)> {
@@ -164,7 +175,7 @@ impl Utterances {
     }
     /// A catch-up that actually sounded for `sid` says so on the reply it repeated, so the next
     /// return does not offer it again. One that never started playing says nothing.
-    pub(super) fn replay_heard(&mut self, original: &str, sid: &str, _previous: &str, next: &str) {
+    pub(super) fn replay_heard(&mut self, original: &str, sid: &str, next: &str) {
         if next == "playback_finished" || next == "skipped" {
             if let Some(record) = self.by_id.get_mut(original) {
                 record.heard.insert(sid.to_owned());
@@ -175,19 +186,32 @@ impl Utterances {
     pub(super) fn forget_rows(&mut self, row_ids: &[String]) {
         if !row_ids.is_empty() {
             self.by_id.retain(|_, u| !row_ids.contains(&u.row_id));
+            self.replay_order.retain(|id| self.by_id.contains_key(id));
         }
     }
     pub(super) fn forget(&mut self, uid: &str) {
         self.by_id.remove(uid);
+        self.replay_order.retain(|id| id != uid);
     }
     /// Forget the replays a call that left was given.
     pub(super) fn forget_replays_of(&mut self, sid: &str) {
         self.by_id
             .retain(|_, record| !record.is_replay() || !record.clients.contains_key(sid));
+        self.replay_order.retain(|id| self.by_id.contains_key(id));
     }
-    /// Forget replays that no call will play any more; originals stay for history and replay.
+    /// Keep recent finished replay IDs for reliable late receipts, with bounded memory.
     pub(super) fn retire_finished_replays(&mut self) {
-        self.by_id
-            .retain(|_, record| !record.is_replay() || !record.finished());
+        while self.replay_order.len() > MAX_REPLAY_RECEIPTS {
+            let Some(index) = self
+                .replay_order
+                .iter()
+                .position(|id| self.by_id.get(id).is_none_or(UtteranceRecord::finished))
+            else {
+                break;
+            };
+            if let Some(id) = self.replay_order.remove(index) {
+                self.by_id.remove(&id);
+            }
+        }
     }
 }

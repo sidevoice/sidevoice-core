@@ -87,7 +87,12 @@ impl Room {
                         end.heard_chars = heard_chars;
                     }
                     let row_id = record.row_id.clone();
-                    if !record.is_replay() {
+                    let replay_of = record.replay_of.clone();
+                    let next = entry.1.clone();
+                    let extent = end.heard_chars;
+                    if let Some(original) = replay_of {
+                        inner.apply_replay_receipt(&original, sid, &row_id, &next, extent);
+                    } else {
                         inner.sync_row(&row_id);
                         if reason == Some("user_skipped") {
                             inner.queue_skip_note(&row_id, sid);
@@ -107,7 +112,7 @@ impl Room {
             "failed" => ("failed", Some("playback_failed")),
             _ => ("playing", None),
         };
-        let previous = std::mem::replace(&mut entry.1, next.to_owned());
+        entry.1 = next.to_owned();
         record.ends.insert(
             sid.to_owned(),
             End {
@@ -151,29 +156,7 @@ impl Room {
             }
         }
         if let Some(original) = catch_up_of {
-            inner
-                .utterances
-                .replay_heard(&original, sid, &previous, next);
-            // A replay heard to its end: the person has now heard the reply, so the agent is not told it was missed.
-            // Its history row keeps how it first played; what a note already took to the agent stays told.
-            if matches!(next, "playback_finished" | "skipped") {
-                if let Some(thread) = inner.journal.find(&row_id).map(|row| row.thread.clone()) {
-                    if let Some(row) = inner.journal.find_mut(&row_id) {
-                        row.globally_heard = true;
-                        row.heard_chars = Some(row.text.chars().count() as u64);
-                    }
-                    inner.unheard.update(&thread, &row_id, None, None);
-                    inner.reconcile_unclaimed(&thread);
-                }
-            } else if let Some(heard) = heard_chars {
-                if let Some(row) = inner.journal.find_mut(&row_id) {
-                    row.heard_chars = Some(row.heard_chars.unwrap_or(0).max(heard));
-                }
-                inner.track_unheard(&row_id);
-            }
-            if next == "skipped" {
-                inner.queue_skip_note(&row_id, sid);
-            }
+            inner.apply_replay_receipt(&original, sid, &row_id, next, heard_chars);
         }
         inner.latency.set_reply_status(sid, uid, next);
         if status == "playing" {
@@ -196,6 +179,39 @@ impl Room {
 }
 
 impl Inner {
+    /// A replay reports hearing against its original row, even after park terminalized the handle.
+    fn apply_replay_receipt(
+        &mut self,
+        original: &str,
+        sid: &str,
+        row_id: &str,
+        next: &str,
+        heard_chars: Option<u64>,
+    ) {
+        self.utterances.replay_heard(original, sid, next);
+        let Some(thread) = self.journal.find(row_id).map(|row| row.thread.clone()) else {
+            return;
+        };
+        if matches!(next, "playback_finished" | "skipped") {
+            if let Some(row) = self.journal.find_mut(row_id) {
+                row.globally_heard = true;
+                row.globally_skipped = next == "skipped";
+                row.heard_chars = Some(row.text.chars().count() as u64);
+            }
+            self.unheard.update(&thread, row_id, None, None);
+            self.reconcile_unclaimed(&thread);
+        } else if let Some(heard) = heard_chars {
+            if let Some(row) = self.journal.find_mut(row_id) {
+                row.heard_chars = Some(row.heard_chars.unwrap_or(0).max(heard));
+            }
+            self.track_unheard(row_id);
+            self.reconcile_unclaimed(&thread);
+        }
+        if next == "skipped" {
+            self.queue_skip_note(row_id, sid);
+        }
+    }
+
     /// Show on a reply's journal row what the calls it was sent to did with it (`UtteranceRecord::outcome`).
     pub(super) fn sync_row(&mut self, row_id: &str) {
         let Some((status, reason, heard_chars)) = self
