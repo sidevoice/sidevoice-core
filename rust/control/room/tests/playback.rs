@@ -2,6 +2,7 @@
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use super::support::BeginAtFocus;
 use super::support::{pull_room, report};
 use crate::control::room::replay::MAX_REPLAY_RECORDS;
 use crate::control::room::Room;
@@ -20,8 +21,9 @@ fn revision(room: &Room, sid: &str) -> u64 {
 }
 
 fn publish(room: &Room, sid: &str, uid: &str) -> Value {
+    let epoch = room.inner.lock().unwrap().conversations.epoch("thread");
     room.publish(
-        &json!({"session_id":sid,"thread_id":"thread","revision":revision(room, sid),
+        &json!({"session_id":sid,"thread_id":"thread","revision":revision(room, sid),"epoch":epoch,
             "utterance_id":uid,"text":"A reply of thirty characters."}),
     )
 }
@@ -46,39 +48,31 @@ fn room_on_thread() -> (tempfile::TempDir, Room) {
 fn what_a_call_reports_is_what_the_reply_row_shows() {
     let (_directory, room) = room_on_thread();
     let (sid, _events) = join(&room, "thread");
-    let cases: [(&str, &[Report], Report); 6] = [
+    let cases: [(&str, &[Report], Report); 5] = [
         (
             "heard",
             &[("playing", None, None), ("heard", None, None)],
-            ("playback_finished", None, None),
+            ("playback_finished", None, Some(29)),
         ),
         (
             "cut",
             &[("playing", None, None), ("interrupted", None, Some(12))],
-            ("interrupted", Some("user_interrupted"), Some(12)),
-        ),
-        (
-            "skipped",
-            &[
-                ("playing", None, None),
-                ("interrupted", Some("user_skipped"), Some(3)),
-            ],
-            ("interrupted", Some("user_skipped"), Some(3)),
+            ("interrupted", None, Some(12)),
         ),
         (
             "dropped",
             &[("unplayed", None, None)],
-            ("interrupted", Some("newer_turn"), None),
+            ("interrupted", None, Some(0)),
         ),
         (
             "away",
             &[("unplayed", Some("unheard"), None)],
-            ("interrupted", Some("unheard"), None),
+            ("interrupted", Some("unheard"), Some(0)),
         ),
         (
             "broken",
             &[("playing", None, None), ("failed", None, None)],
-            ("failed", Some("playback_failed"), None),
+            ("failed", Some("playback_failed"), Some(0)),
         ),
     ];
     for (uid, reports, (status, reason, heard)) in cases {
@@ -134,11 +128,7 @@ fn an_unknown_playback_status_changes_nothing_and_an_unknown_reason_is_read_as_n
     .unwrap();
     assert_eq!(
         row(&room, &format!("{sid}:voice:r")),
-        (
-            "interrupted".into(),
-            Some("user_interrupted".into()),
-            Some(4)
-        )
+        ("interrupted".into(), None, Some(4))
     );
 }
 
@@ -176,7 +166,7 @@ fn replays_never_decide_their_original_row_status() {
         assert_eq!(row(&room, &history_id).0, "playback_finished");
 
         // The other call still holds the original; its new turn leaves the original's row as it is.
-        room.begin_turn(&other, "turn").unwrap();
+        room.begin_at_focus(&other, "turn").unwrap();
         assert_eq!(row(&room, &history_id).0, "playback_finished");
     }
 }

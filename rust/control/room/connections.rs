@@ -83,11 +83,7 @@ impl Inner {
         });
         for bid in ids {
             if let Some(row_id) = self.inflight.finish(bid) {
-                if let Some(thread) = self.unheard.note_thread(&row_id) {
-                    if let Some(note) = self.unheard.note_mut(&thread) {
-                        note.due = 0;
-                    }
-                } else if let Some(row) = self.journal.find_mut(&row_id) {
+                if let Some(row) = self.journal.find_mut(&row_id) {
                     row.requeue();
                 }
             }

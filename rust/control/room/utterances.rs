@@ -1,9 +1,11 @@
 //! Utterances: how far each reply got in every call it was spoken to, and the replays of
 //! earlier replies.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Most original utterances the room keeps; replays are bounded separately.
 pub(super) const MAX_UTTERANCES: usize = 2048;
+/// Finished replay identities kept for a delayed reliable receipt after park/resume.
+pub(super) const MAX_REPLAY_RECEIPTS: usize = 256;
 
 /// What one call did with an utterance: the revision it was sent under and how far it got there.
 pub(super) type ClientEntry = (u64, String);
@@ -18,14 +20,13 @@ pub(super) struct End {
 #[derive(Default)]
 pub(super) struct UtteranceRecord {
     pub(super) row_id: String,
+    pub(super) epoch: u64,
     pub(super) clients: HashMap<String, ClientEntry>,
     /// How it ended on each call that ended it, by session; the journal row is derived from these and `clients`.
     pub(super) ends: HashMap<String, End>,
     pub(super) parked: bool,
     /// For a replay: the utterance it repeats, by id; one never sent to a call has no record of its own.
     pub(super) replay_of: Option<String>,
-    /// Calls that heard this reply through: it played to the end, or that listener stopped it.
-    pub(super) heard: HashSet<String>,
     /// Calls it was sent to. A call that was away when it was published never got it.
     pub(super) sent: HashSet<String>,
     /// A repetition the person asked for from the bubble, not a catch-up.
@@ -43,8 +44,7 @@ impl UtteranceRecord {
             .max_by_key(|status| status_rank(status))
     }
     /// What the reply's journal row shows: the furthest status any call reached, with the reason and the heard extent
-    /// of the calls that ended there. A cut while it played (`user_interrupted`) is the reason told first, since its
-    /// start was heard; the furthest any of those calls heard is how far it was heard.
+    /// of the calls that ended there. This is audio history only.
     pub(super) fn outcome(&self) -> Option<(&str, Option<&str>, Option<u64>)> {
         let best = self.best_status()?;
         let ends: Vec<&End> = self
@@ -53,11 +53,8 @@ impl UtteranceRecord {
             .filter(|(_, (_, status))| status == best)
             .filter_map(|(sid, _)| self.ends.get(sid))
             .collect();
-        let reason = ends
-            .iter()
-            .filter_map(|end| end.reason.as_deref())
-            .min_by_key(|reason| (*reason != "user_interrupted", *reason));
-        let heard_chars = ends.iter().filter_map(|end| end.heard_chars).max();
+        let reason = ends.iter().filter_map(|end| end.reason.as_deref()).min();
+        let heard_chars = self.ends.values().filter_map(|end| end.heard_chars).max();
         Some((best, reason, heard_chars))
     }
     /// Whether no call will still play this utterance.
@@ -77,7 +74,7 @@ fn status_rank(status: &str) -> u8 {
         "interrupted" => 3,
         "queued" => 4,
         "playing" => 7,
-        "playback_finished" => 8,
+        "playback_finished" => 9,
         _ => 0,
     }
 }
@@ -89,6 +86,7 @@ fn in_flight(status: &str) -> bool {
 #[derive(Default)]
 pub(super) struct Utterances {
     by_id: HashMap<String, UtteranceRecord>,
+    replay_order: VecDeque<String>,
 }
 impl Utterances {
     pub(super) fn get(&self, uid: &str) -> Option<&UtteranceRecord> {
@@ -102,7 +100,12 @@ impl Utterances {
         self.by_id.contains_key(uid)
     }
     pub(super) fn insert(&mut self, uid: &str, record: UtteranceRecord) {
+        if record.is_replay() {
+            self.replay_order.retain(|id| id != uid);
+            self.replay_order.push_back(uid.to_owned());
+        }
         self.by_id.insert(uid.to_owned(), record);
+        self.retire_finished_replays();
     }
     pub(super) fn iter(&self) -> impl Iterator<Item = (&String, &UtteranceRecord)> {
         self.by_id.iter()
@@ -111,7 +114,10 @@ impl Utterances {
         self.by_id.values().filter(|r| !r.is_replay()).count()
     }
     pub(super) fn replay_count(&self) -> usize {
-        self.by_id.values().filter(|r| r.is_replay()).count()
+        self.by_id
+            .values()
+            .filter(|r| r.is_replay() && !r.finished())
+            .count()
     }
     /// The original utterance spoken from a journal row, never one of its replays.
     pub(super) fn original_of_row(&self, row_id: &str) -> Option<(&String, &UtteranceRecord)> {
@@ -160,32 +166,36 @@ impl Utterances {
         }
         rows
     }
-    /// A catch-up that actually sounded for `sid` says so on the reply it repeated, so the next
-    /// return does not offer it again. One that never started playing says nothing.
-    pub(super) fn replay_heard(&mut self, original: &str, sid: &str, previous: &str, next: &str) {
-        if next == "playback_finished" || (next == "interrupted" && previous == "playing") {
-            if let Some(record) = self.by_id.get_mut(original) {
-                record.heard.insert(sid.to_owned());
-            }
-        }
-    }
     /// Forget the utterances spoken from journal rows that were dropped.
     pub(super) fn forget_rows(&mut self, row_ids: &[String]) {
         if !row_ids.is_empty() {
             self.by_id.retain(|_, u| !row_ids.contains(&u.row_id));
+            self.replay_order.retain(|id| self.by_id.contains_key(id));
         }
     }
     pub(super) fn forget(&mut self, uid: &str) {
         self.by_id.remove(uid);
+        self.replay_order.retain(|id| id != uid);
     }
     /// Forget the replays a call that left was given.
     pub(super) fn forget_replays_of(&mut self, sid: &str) {
         self.by_id
             .retain(|_, record| !record.is_replay() || !record.clients.contains_key(sid));
+        self.replay_order.retain(|id| self.by_id.contains_key(id));
     }
-    /// Forget replays that no call will play any more; originals stay for history and replay.
+    /// Keep recent finished replay IDs for reliable late receipts, with bounded memory.
     pub(super) fn retire_finished_replays(&mut self) {
-        self.by_id
-            .retain(|_, record| !record.is_replay() || !record.finished());
+        while self.replay_order.len() > MAX_REPLAY_RECEIPTS {
+            let Some(index) = self
+                .replay_order
+                .iter()
+                .position(|id| self.by_id.get(id).is_none_or(UtteranceRecord::finished))
+            else {
+                break;
+            };
+            if let Some(id) = self.replay_order.remove(index) {
+                self.by_id.remove(&id);
+            }
+        }
     }
 }

@@ -71,6 +71,20 @@ pub(super) async fn admit(
         refuse_full(socket, &admission).await;
         return None;
     };
+    if let Some(speech) = hello.get("data").and_then(|data| data.get("speech")) {
+        let on = speech.get("on").and_then(Value::as_bool).unwrap_or(false);
+        let reason = speech.get("reason").and_then(Value::as_str);
+        if let Err(error) = state.room.set_speech(&session, on, reason) {
+            let message = render(&LocalizedMessage::new(error.key), &language);
+            let _ = socket
+                .send(text(
+                    &json!({"type":"error","data":{"key":error.key,"message":message}}),
+                ))
+                .await;
+            state.room.leave(&session);
+            return None;
+        }
+    }
     let problems = problem
         .map(|key| {
             let message = render(&LocalizedMessage::new(key), &language);

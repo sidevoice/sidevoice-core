@@ -42,6 +42,7 @@ pub(super) fn new_token() -> String {
 pub(in crate::server) struct Reattach {
     pub(in crate::server) socket: WebSocket,
     pub(in crate::server) last_seq: u64,
+    pub(in crate::server) speech: Option<Value>,
     /// The socket comes back, with why, when the call cannot give the page what it missed.
     pub(in crate::server) answer: oneshot::Sender<Result<(), (WebSocket, &'static str)>>,
 }

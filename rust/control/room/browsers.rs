@@ -14,6 +14,8 @@ use super::util::id;
 const RECENT_SESSIONS: usize = 64;
 /// How many of a call's turns may wait for their words at once; one more is refused (`room.turns_full`) until one ends.
 pub(super) const MAX_OPEN_TURNS: usize = 8;
+/// Focus identities retained for a delayed turn start from this call.
+const RECENT_FOCI: usize = 128;
 
 /// The conversation a call is focused on; an empty thread means it is focused on none.
 #[derive(Clone)]
@@ -40,6 +42,7 @@ pub(super) struct Browser {
     pub(super) language: String,
     sender: mpsc::Sender<Value>,
     pub(super) target: Option<Target>,
+    recent_targets: VecDeque<Target>,
     pub(super) revision: u64,
     pub(super) turn_revision: u64,
     pub(super) speaking: bool,
@@ -51,6 +54,8 @@ pub(super) struct Browser {
     pub(super) sent: u64,
     /// Since when the call has had no socket: nothing new is handed to it until its page is back.
     pub(super) parked: Option<Instant>,
+    pub(super) speech_on: bool,
+    pub(super) speech_reason: Option<String>,
 }
 impl Browser {
     pub(super) fn new(device: String, language: String, sender: mpsc::Sender<Value>) -> Self {
@@ -59,6 +64,7 @@ impl Browser {
             language,
             sender,
             target: None,
+            recent_targets: VecDeque::new(),
             revision: 0,
             turn_revision: 0,
             speaking: false,
@@ -66,6 +72,8 @@ impl Browser {
             turns: VecDeque::new(),
             sent: 0,
             parked: None,
+            speech_on: true,
+            speech_reason: None,
         }
     }
     /// Send an event to the browser if its channel has room; false if it was dropped.
@@ -87,7 +95,19 @@ impl Browser {
         self.next_revision();
         self.speaking = false;
         self.open_turn = None;
-        self.target = Some(target);
+        if let Some(previous) = self.target.replace(target) {
+            self.recent_targets.push_back(previous);
+            if self.recent_targets.len() > RECENT_FOCI {
+                self.recent_targets.pop_front();
+            }
+        }
+    }
+    /// Find exactly the focus the client captured, including a focus replaced since capture.
+    pub(super) fn captured_target(&self, thread: &str, binding_id: &str) -> Option<&Target> {
+        self.target
+            .iter()
+            .chain(self.recent_targets.iter().rev())
+            .find(|target| target.thread == thread && target.binding_id == binding_id)
     }
     pub(super) fn is_on(&self, thread: &str) -> bool {
         self.target.as_ref().is_some_and(|t| t.thread == thread)
@@ -142,13 +162,6 @@ impl Browsers {
     pub(super) fn is_recent(&self, sid: &str) -> bool {
         self.recent.iter().any(|s| s == sid)
     }
-    /// The most recent session among `candidates`.
-    pub(super) fn most_recent_of(&self, candidates: &[String]) -> Option<&String> {
-        self.recent
-            .iter()
-            .rev()
-            .find(|candidate| candidates.contains(candidate))
-    }
     /// The calls focused on `thread`.
     pub(super) fn on_thread<'a>(
         &'a self,
@@ -161,11 +174,14 @@ impl Browsers {
     }
     /// Tell the call that sent an input row what became of it.
     pub(super) fn input_receipt(&self, input: &InputRef, status: &str) {
+        if input.note {
+            return;
+        }
         if let Some(browser) = self.calls.get(&input.session) {
             if let Some(telemetry) = crate::control::telemetry::shared() {
                 telemetry.receipt(&input.session, status, input.thread.as_deref());
             }
-            let mut data = json!({"revision":input.revision,"history_id":input.id,"thread_id":input.thread,
+            let mut data = json!({"revision":input.revision,"epoch":input.epoch,"history_id":input.id,"thread_id":input.thread,
                 "session_id":input.session,"status":status});
             if let Some(turn_id) = &input.turn_id {
                 data["turn_id"] = json!(turn_id);

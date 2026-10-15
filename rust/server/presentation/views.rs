@@ -3,12 +3,13 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::http::{header, HeaderMap, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
 
-use crate::server::refusal::{require_origin, Handled};
+use crate::server::refusal::{refuse, require_origin, Handled};
 use crate::server::request::query;
 use crate::server::AppState;
 
@@ -41,6 +42,28 @@ pub(super) async fn history(
     headers: HeaderMap,
 ) -> Handled {
     require_origin(&headers)?;
-    let history = state.room.history(query(&uri, "thread_id").as_deref());
+    let resolve_ids: Vec<String> = uri
+        .query()
+        .map(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .filter(|(name, _)| name == "resolve_id")
+                .map(|(_, id)| id.into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let thread = query(&uri, "thread_id");
+    if resolve_ids.len() > 64
+        || resolve_ids.iter().any(|id| id.is_empty() || id.len() > 256)
+        || (!resolve_ids.is_empty() && thread.as_deref().is_none_or(str::is_empty))
+    {
+        return Err(refuse(
+            "room.request_invalid",
+            StatusCode::BAD_REQUEST,
+            &headers,
+        ));
+    }
+    let history = state
+        .room
+        .history_resolving(thread.as_deref(), &resolve_ids);
     Ok(Json(history).into_response())
 }

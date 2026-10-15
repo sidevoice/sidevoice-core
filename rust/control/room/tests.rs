@@ -1,4 +1,5 @@
 //! Unit tests of the room, grouped by concern; shared fixtures live in `support`.
+mod flow;
 mod input;
 mod latency;
 mod parity;

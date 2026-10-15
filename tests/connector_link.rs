@@ -14,6 +14,129 @@ use tokio_tungstenite::tungstenite::Message;
 const THREAD: &str = "typed-thread";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn uncertain_speech_recovery_over_rpc_saves_without_audio_and_recovers_prior_answer() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    let (mut peer, binding) = connector_with_binding(&core, "recovery", THREAD).await;
+    core.select(&token, &session, THREAD).await;
+    let revision = core.revision(&token, &session).await;
+
+    let admitted = json!({"event_id":"known-event","utterance_id":"known","binding_id":binding,
+        "session_id":session,"revision":revision,"epoch":0,"text":"Known reply"});
+    let original = peer.call("speech.publish", admitted.clone()).await;
+    assert_eq!(original["status"], "queued");
+    assert_eq!(browser.frame("voice-reply").await["utterance_id"], "known");
+    let mut recover_known = admitted;
+    recover_known["recovery_binding_id"] = json!(binding);
+    assert_eq!(peer.call("speech.recover", recover_known).await, original);
+
+    let missing = json!({"event_id":"lost-event","utterance_id":"lost","binding_id":binding,
+        "recovery_binding_id":binding,"session_id":"old-session","revision":revision,
+        "epoch":0,"text":"Lost request"});
+    let recovered = peer.call("speech.recover", missing.clone()).await;
+    assert_eq!(recovered["status"], "text_only");
+    assert!(recovered.get("reason").is_none());
+    assert_eq!(recovered["text_saved"], true);
+    assert_eq!(recovered["event_id"], "lost-event");
+    assert_eq!(peer.call("speech.recover", missing).await, recovered);
+    browser
+        .hearing("old-session:voice:lost", "lost", "heard", None)
+        .await;
+    assert_eq!(
+        core.history(&token, THREAD)
+            .await
+            .iter()
+            .filter(|r| r["role"] == "assistant")
+            .count(),
+        2
+    );
+
+    browser.start_turn("fresh-turn").await;
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase":"finished","turn_id":"fresh-turn","text":"Next"}),
+        )
+        .await;
+    let fresh = peer.call("speech.publish", json!({"event_id":"fresh-event","utterance_id":"fresh",
+        "binding_id":binding,"session_id":session,"revision":revision,"epoch":1,"text":"Fresh reply"})).await;
+    assert_eq!(fresh["status"], "queued", "{fresh}");
+    assert_eq!(browser.frame("voice-reply").await["utterance_id"], "fresh");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_turn_refusal_keeps_rpc_identity_and_empty_notice_reaches_pull() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    let mut peer = Rpc::hello(&core).await;
+    let registered = peer
+        .call(
+            "binding.register",
+            json!({"client_ref":"pull-turn","harness":"fixture","thread":"turn-thread",
+                "input_mode":"pull"}),
+        )
+        .await;
+    let binding = registered["binding_id"].as_str().unwrap();
+    core.select(&token, &session, "turn-thread").await;
+    let revision = core.revision(&token, &session).await;
+    browser.start_turn("confirmed-turn").await;
+    let speech = json!({"event_id":"event-refused","utterance_id":"refused",
+        "binding_id":binding,"session_id":session,"revision":revision,"epoch":1,
+        "text":"Attempted while the person speaks"});
+    let refused = peer.call("speech.publish", speech.clone()).await;
+    assert_eq!(refused["status"], "rejected", "{refused}");
+    assert_eq!(refused["reason"], "user_speaking");
+    assert_eq!(refused["event_id"], "event-refused");
+    assert_eq!(refused["utterance_id"], "refused");
+
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase":"finished","turn_id":"confirmed-turn","text":""}),
+        )
+        .await;
+    let retry = peer.call("speech.publish", speech).await;
+    assert_eq!(retry, refused);
+    let first = peer
+        .call(
+            "input.pull",
+            json!({"binding_id":binding,"operation":"get"}),
+        )
+        .await;
+    assert_eq!(first["messages"][0]["channel"], "note", "{first}");
+    assert_eq!(first["messages"][0]["text"], "");
+    assert_eq!(first["messages"][0]["notice"]["kind"], "turn_empty");
+    let message_id = first["messages"][0]["message_id"].clone();
+    let again = peer
+        .call(
+            "input.pull",
+            json!({"binding_id":binding,"operation":"get"}),
+        )
+        .await;
+    assert_eq!(again["messages"][0]["message_id"], message_id);
+    let acked = peer
+        .call(
+            "input.pull",
+            json!({"binding_id":binding,"operation":"get",
+            "ack_ids":[message_id]}),
+        )
+        .await;
+    assert_eq!(acked["acknowledged"], 1);
+    assert_eq!(acked["count"], 0);
+    assert!(core
+        .history(&token, "turn-thread")
+        .await
+        .iter()
+        .all(|row| row["role"] != "assistant"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn refused_and_turned_away_calls_give_their_seat_back() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
@@ -85,7 +208,7 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
 
     let publish = |utterance: &str, session: &str, revision: u64, text: &str| {
         json!({"event_id": format!("event-{utterance}"), "utterance_id": utterance, "binding_id": binding,
-            "session_id": session, "revision": revision, "text": text, "language": "en"})
+            "session_id": session, "revision": revision, "epoch":0, "text": text, "language": "en"})
     };
     let answer = peer
         .call(
@@ -141,19 +264,35 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
     browser
         .report(
             "voice-playback",
-            json!({"utterance_id": "queued-3", "status": "interrupted", "reason": "user_skipped"}),
+            json!({"utterance_id": "queued-3", "status": "interrupted"}),
+        )
+        .await;
+    browser
+        .hearing(
+            &format!("{session}:voice:queued-3"),
+            "queued-3",
+            "heard",
+            None,
         )
         .await;
     let history = core.history(&token, THREAD).await;
-    let statuses: Vec<_> = history[history.len() - 2..]
+    let assistant_statuses: Vec<_> = history
         .iter()
+        .filter(|row| row["role"] == "assistant")
         .map(|row| row["status"].clone())
         .collect();
+    let statuses = &assistant_statuses[assistant_statuses.len() - 2..];
     assert_eq!(
         statuses,
         [json!("playback_finished"), json!("interrupted")],
         "{history:?}"
     );
+    assert!(history
+        .iter()
+        .filter(|row| row["role"] == "assistant")
+        .rev()
+        .take(2)
+        .all(|row| row["hearing"] == "heard"));
 
     // A browser that comes to the conversation is not played what it never heard on it.
     let mut returning = core.join(&token, Value::Null).await;
@@ -176,15 +315,22 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
     assert_eq!(browser.frame("voice-reply").await["utterance_id"], "both");
     assert_eq!(second.frame("voice-reply").await["utterance_id"], "both");
     browser.playback("both", "heard").await;
+    browser
+        .hearing(&format!("{session}:voice:both"), "both", "heard", None)
+        .await;
     second
         .report(
             "voice-playback",
-            json!({"utterance_id": "both", "status": "interrupted", "reason": "user_skipped"}),
+            json!({"utterance_id": "both", "status": "interrupted"}),
         )
         .await;
     let history = core.history(&token, THREAD).await;
     assert_eq!(
-        history.last().unwrap()["status"],
+        history
+            .iter()
+            .rev()
+            .find(|row| row["role"] == "assistant")
+            .unwrap()["status"],
         "playback_finished",
         "{history:?}"
     );
@@ -483,22 +629,28 @@ async fn a_v3_connector_speaks_json_rpc_on_the_local_socket_only() {
     rpc.answer(&delivery["id"], json!({"status": "accepted"}));
     assert_eq!(browser.receipt("delivered").await["history_id"], sent["id"]);
 
-    let publish = |utterance: &str, revision: u64, text: &str| {
+    let current_revision = browser.say("A spoken update").await;
+    browser.receipt("pending").await;
+    let spoken = rpc.method("input.deliver", STEP).await;
+    rpc.answer(&spoken["id"], json!({"status":"accepted"}));
+    browser.receipt("delivered").await;
+
+    let publish = |utterance: &str, revision: u64, epoch: u64, text: &str| {
         json!({"event_id": format!("event-{utterance}"), "utterance_id": utterance, "binding_id": binding,
-            "session_id": session, "revision": revision, "text": text})
+            "session_id": session, "revision": revision, "epoch":epoch, "text": text})
     };
     let stale = rpc
         .request(
             "speech.publish",
-            publish("stale", revision - 1, "A reply to a turn the focus left"),
+            publish("stale", revision, 0, "A reply to an older spoken epoch"),
         )
         .await;
     assert_eq!(stale["result"]["status"], "text_only", "{stale}");
-    assert_eq!(stale["result"]["reason"], "focus_changed", "{stale}");
+    assert!(stale["result"].get("reason").is_none(), "{stale}");
     let reply = rpc
         .request(
             "speech.publish",
-            publish("current", revision, "Reply over JSON-RPC"),
+            publish("current", current_revision, 1, "Reply over JSON-RPC"),
         )
         .await;
     assert_eq!(reply["result"]["status"], "queued", "{reply}");
@@ -695,7 +847,7 @@ async fn a_reply_in_a_language_the_core_does_not_know_is_still_sent() {
         .call(
             "speech.publish",
             json!({"event_id": "event-de", "utterance_id": "de", "binding_id": binding,
-                "session_id": session, "revision": revision, "text": "Guten Tag.", "language": "de"}),
+                "session_id": session, "revision": revision, "epoch":0, "text": "Guten Tag.", "language": "de"}),
         )
         .await;
     assert_eq!(answer["status"], "queued", "{answer}");
@@ -779,7 +931,7 @@ async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
         .call(
             "speech.publish",
             json!({"event_id": "event-swept", "utterance_id": "swept", "binding_id": binding,
-                "session_id": session, "revision": revision, "text": "Swept reply.", "language": "en",
+                "session_id": session, "revision": revision, "epoch":0, "text": "Swept reply.", "language": "en",
                 "added_later": extra}),
         )
         .await;

@@ -1,6 +1,7 @@
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
 
+use super::support::BeginAtFocus;
 use crate::control::room::util::id;
 use crate::control::room::{ConnectorPeer, Room};
 use crate::storage::PrivateDir;
@@ -32,7 +33,7 @@ fn completed_voice_turn_uses_captured_focus_and_shared_outbox() {
     let (events, _received) = mpsc::channel(8);
     let sid = room.join("device".into(), "en".into(), events).unwrap();
     room.select(&sid, "old-thread").unwrap();
-    let turn = room.begin_turn(&sid, "turn").unwrap();
+    let turn = room.begin_at_focus(&sid, "turn").unwrap();
     assert_eq!(turn.thread_id.as_deref(), Some("old-thread"));
     room.select(&sid, "new-thread").unwrap();
     let accepted = room

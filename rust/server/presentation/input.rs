@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use uuid::Uuid;
 
+use crate::control::room::Continuation;
 use crate::server::refusal::{refuse, require_origin, room_refusal, Handled};
 use crate::server::request::room_payload;
 use crate::server::{AppState, AuthenticatedDevice};
@@ -61,7 +62,15 @@ pub(super) async fn cancel_input(
     }
     let result = state
         .room
-        .cancel_input(sid, turn_id)
+        .cancel_turn(
+            sid,
+            turn_id,
+            if data["merged"].as_bool() == Some(true) {
+                Continuation::Merged
+            } else {
+                Continuation::Standalone
+            },
+        )
         .map_err(|error| room_refusal(error, &headers))?;
     Ok(Json(result).into_response())
 }

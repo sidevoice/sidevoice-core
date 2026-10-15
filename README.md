@@ -63,6 +63,9 @@ packages and verifies this machine's release archive, exactly as a release does 
 
 Compatibility with the latest published connector and web client is `cargo xtask compat`, run weekly in CI.
 
+The conversation epoch, speech admission, playback fate and common push/pull notice contract is in
+[`docs/conversation-flow.md`](docs/conversation-flow.md).
+
 ## Configuration
 
 Its data — paired devices, the machine's identity key, the conversation journal — lives in

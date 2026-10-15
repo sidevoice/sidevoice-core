@@ -3,6 +3,8 @@
 //! `Room` holds that state behind one lock. Each area of the state is a type of its own that
 //! keeps its collections private; the room's operations are split across the submodules below
 //! by concern and reach the state only through those types.
+use serde_json::Value;
+use std::collections::HashMap;
 use std::io;
 use std::sync::Mutex;
 
@@ -13,6 +15,7 @@ use crate::storage::PrivateDir;
 mod bindings;
 mod browsers;
 mod client_errors;
+mod conversations;
 mod credentials;
 mod inflight;
 mod journal;
@@ -27,8 +30,10 @@ mod connections;
 mod declaration;
 mod error;
 mod focus;
+mod hearing;
 mod input;
 mod latency;
+mod notices;
 mod pairing;
 mod participants;
 mod playback;
@@ -40,21 +45,24 @@ mod reports;
 mod sessions;
 mod snapshot;
 mod speech;
+mod turn_flow;
 mod turns;
 mod util;
 
 pub use error::RoomError;
 pub use latency::{latency_now_micros, LatencyDuration, LatencyEvent, LatencyMark, LatencyReply};
 pub use peers::{ConnectorPeer, PeerError, PeerRequest};
-pub use turns::VoiceTurn;
+pub use turns::{Continuation, VoiceTurn};
 
 use bindings::Bindings;
 use browsers::Browsers;
 use client_errors::ClientErrors;
+use conversations::Conversations;
 use credentials::Credentials;
 use inflight::Inflight;
 use journal::Journal;
 use latency_log::LatencyLog;
+use notices::PendingNotice;
 use peers::Peers;
 use unheard::Unheard;
 use utterances::Utterances;
@@ -64,12 +72,16 @@ struct Inner {
     peers: Peers,
     bindings: Bindings,
     browsers: Browsers,
+    conversations: Conversations,
     journal: Journal,
     utterances: Utterances,
     unheard: Unheard,
     inflight: Inflight,
     latency: LatencyLog,
     client_errors: ClientErrors,
+    refusals: HashMap<String, (Value, Value)>,
+    refusal_order: std::collections::VecDeque<String>,
+    pending_notices: std::collections::VecDeque<PendingNotice>,
 }
 
 pub struct Room {
@@ -89,12 +101,16 @@ impl Room {
                 peers: Peers::default(),
                 bindings: Bindings::default(),
                 browsers: Browsers::default(),
+                conversations: Conversations::default(),
                 journal: Journal::default(),
                 utterances: Utterances::default(),
                 unheard: Unheard::default(),
                 inflight: Inflight::default(),
                 latency: LatencyLog::new(telemetry::shared()),
                 client_errors: ClientErrors::default(),
+                refusals: HashMap::new(),
+                refusal_order: std::collections::VecDeque::new(),
+                pending_notices: std::collections::VecDeque::new(),
             }),
         })
     }

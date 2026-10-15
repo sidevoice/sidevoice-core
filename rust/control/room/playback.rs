@@ -1,5 +1,7 @@
 //! Replies on their way to the calls listening: each is sent once to every call on its conversation, whose voice
 //! module decides whether and when it plays, and the journal row shows how far it got from what the calls report.
+use std::collections::HashSet;
+
 use serde_json::{json, Value};
 
 use super::error::RoomError;
@@ -10,21 +12,21 @@ use super::{Inner, Room};
 /// What a call may report about a reply it was sent.
 const REPORTS: [&str; 5] = ["playing", "heard", "interrupted", "unplayed", "failed"];
 /// Why a reply stopped short, as a call may say.
-const REASONS: [&str; 6] = [
+const REASONS: [&str; 9] = [
     "user_interrupted",
     "newer_turn",
-    "user_skipped",
     "focus_changed",
     "call_ended",
     "unheard",
+    "agents_muted",
+    "voice_off",
+    "connector_disconnected",
+    "heard_elsewhere",
 ];
 
 impl Room {
-    /// Call `sid` reports what became of reply `uid` there: it started playing, was heard to the end, was cut
-    /// (with how many of its characters were heard), was never played, or failed. A report on a reply that
-    /// already ended is taken without changing it. A report with no status is refused; one whose status the room
-    /// does not know is taken and changes nothing, and a reason it does not know is read as none.
-    pub fn playback(
+    /// Physical playback and diagnostic stop cause. Semantic hearing arrives in reply-hearing.
+    pub fn playback_transport(
         &self,
         sid: &str,
         uid: &str,
@@ -49,7 +51,6 @@ impl Room {
         let Some(record) = inner.utterances.get(uid) else {
             return Err(stale());
         };
-        // How far a reply was heard is counted in its characters (Unicode scalar values), and cannot pass its end.
         let length = inner
             .journal
             .find(&record.row_id)
@@ -57,52 +58,53 @@ impl Room {
         if heard_chars.is_some_and(|heard| length.is_some_and(|length| heard > length)) {
             return Err(RoomError::new(400, "room.receipt_invalid"));
         }
-        let Some(record) = inner.utterances.get_mut(uid) else {
-            return Err(stale());
-        };
-        let Some(entry) = record.clients.get_mut(sid) else {
-            return Err(stale());
+        let record = inner.utterances.get_mut(uid).ok_or_else(stale)?;
+        let entry = record.clients.get_mut(sid).ok_or_else(stale)?;
+        let next = match status {
+            "heard" => "playback_finished",
+            "interrupted" | "unplayed" => "interrupted",
+            "failed" => "failed",
+            _ => "playing",
         };
         if !matches!(entry.1.as_str(), "queued" | "playing") {
+            // A delayed physical receipt may improve history diagnostics, never semantic hearing.
+            if entry.1 == "interrupted" && matches!(status, "heard" | "interrupted") {
+                if status == "heard" {
+                    entry.1 = next.into();
+                }
+                if let Some(end) = record.ends.get_mut(sid) {
+                    end.heard_chars = match (end.heard_chars, heard_chars) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    };
+                }
+                if !record.is_replay() {
+                    let row_id = record.row_id.clone();
+                    inner.sync_row(&row_id);
+                }
+            }
             return Ok(());
         }
-        let (next, reason) = match status {
-            "heard" => ("playback_finished", None),
-            "interrupted" => ("interrupted", Some(reason.unwrap_or("user_interrupted"))),
-            "unplayed" => ("interrupted", Some(reason.unwrap_or("newer_turn"))),
-            "failed" => ("failed", Some("playback_failed")),
-            _ => ("playing", None),
-        };
-        let previous = std::mem::replace(&mut entry.1, next.to_owned());
+        entry.1 = next.into();
         record.ends.insert(
             sid.to_owned(),
             End {
-                reason: reason.map(str::to_owned),
-                heard_chars: heard_chars.filter(|_| status == "interrupted"),
+                reason: match status {
+                    "heard" | "playing" => None,
+                    "interrupted" | "unplayed" => reason.map(str::to_owned),
+                    "failed" => Some("playback_failed".into()),
+                    _ => None,
+                },
+                heard_chars: if status == "heard" {
+                    length
+                } else {
+                    heard_chars
+                },
             },
         );
-        // A reply played to the end, or cut while it played, was heard by this call: a catch-up of it is not
-        // offered again.
-        if next == "playback_finished" || (status == "interrupted" && previous == "playing") {
-            record.heard.insert(sid.to_owned());
-        }
-        let catch_up_of = record.replay_of.clone();
         let row_id = record.row_id.clone();
-        let original_row = (!record.is_replay()).then(|| row_id.clone());
-        if let Some(row_id) = &original_row {
-            inner.sync_row(row_id);
-        }
-        if let Some(original) = catch_up_of {
-            inner
-                .utterances
-                .replay_heard(&original, sid, &previous, next);
-            // A replay heard to its end: the person has now heard the reply, so the agent is not told it was missed.
-            // Its history row keeps how it first played; what a note already took to the agent stays told.
-            if next == "playback_finished" {
-                if let Some(thread) = inner.journal.find(&row_id).map(|row| row.thread.clone()) {
-                    inner.unheard.update(&thread, &row_id, None, None);
-                }
-            }
+        if !record.is_replay() {
+            inner.sync_row(&row_id);
         }
         inner.latency.set_reply_status(sid, uid, next);
         if status == "playing" {
@@ -124,23 +126,89 @@ impl Room {
     }
 }
 
+#[cfg(test)]
+impl Room {
+    /// Test fixture app policy: translate a physical report to a separate semantic receipt.
+    /// Production clients send reply-hearing themselves and may choose a different policy.
+    pub fn playback(
+        &self,
+        sid: &str,
+        uid: &str,
+        status: &str,
+        reason: Option<&str>,
+        heard_chars: Option<u64>,
+        timings: &Value,
+    ) -> Result<(), RoomError> {
+        self.playback_transport(sid, uid, status, reason, heard_chars, timings)?;
+        let target = {
+            let inner = self.inner.lock().expect("room lock");
+            inner.utterances.get(uid).and_then(|record| {
+                inner
+                    .journal
+                    .find(&record.row_id)
+                    .map(|row| (row.id.clone(), row.text.chars().count() as u64))
+            })
+        };
+        if let Some((history_id, length)) = target {
+            let outcome = match (status, reason, heard_chars) {
+                ("heard", _, _) => Some(("heard", None)),
+                ("interrupted" | "failed", _, Some(extent)) if extent >= length => {
+                    Some(("heard", None))
+                }
+                ("interrupted" | "failed", _, Some(extent)) => Some(("partial", Some(extent))),
+                ("interrupted" | "unplayed" | "failed", _, _) => Some(("not_heard", None)),
+                _ => None,
+            };
+            if let Some((outcome, extent)) = outcome {
+                self.reply_hearing(sid, &history_id, uid, outcome, extent)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Inner {
-    /// Show on a reply's journal row what the calls it was sent to did with it (`UtteranceRecord::outcome`).
+    /// Withdraw queued, unrequested replies of older epochs on this conversation.
+    pub(super) fn withdraw_older_epoch_replies(&mut self, thread: &str, epoch: u64) {
+        let rows: HashSet<String> = self
+            .utterances
+            .iter()
+            .filter(|(_, record)| {
+                record.epoch < epoch
+                    && !record.requested
+                    && self
+                        .journal
+                        .find(&record.row_id)
+                        .is_some_and(|row| row.thread == thread)
+            })
+            .map(|(_, record)| record.row_id.clone())
+            .collect();
+        let sessions: HashSet<String> = self
+            .utterances
+            .iter()
+            .filter(|(_, record)| rows.contains(&record.row_id))
+            .flat_map(|(_, record)| record.clients.keys().cloned())
+            .collect();
+        for listener in sessions {
+            self.withdraw(&listener, "newer_turn", |record, (_, status)| {
+                status == "queued" && !record.requested && rows.contains(&record.row_id)
+            });
+        }
+    }
+
+    /// Show physical playback state in history without inferring semantic hearing from it.
     pub(super) fn sync_row(&mut self, row_id: &str) {
-        let Some((status, reason, heard_chars)) = self
+        let Some((status, reason, _)) = self
             .utterances
             .original_of_row(row_id)
             .and_then(|(_, record)| record.outcome())
-            .map(|(status, reason, heard)| (status.to_owned(), reason.map(str::to_owned), heard))
         else {
             return;
         };
         if let Some(row) = self.journal.find_mut(row_id) {
-            row.status = status;
-            row.reason = reason;
-            row.heard_chars = heard_chars;
+            row.status = status.to_owned();
+            row.reason = reason.map(str::to_owned);
         }
-        self.track_unheard(row_id);
     }
 
     /// Send reply `uid` to call `sid` as text. A call that is away gets nothing: when it comes back, what was
@@ -158,7 +226,7 @@ impl Inner {
         let Some(row) = self.journal.find(&record.row_id) else {
             return;
         };
-        let mut data = json!({"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":row.revision,
+        let mut data = json!({"session_id":sid,"utterance_id":uid,"revision":revision,"reply_revision":row.revision,"epoch":row.epoch,
             "thread_id":row.thread,"text":row.text,"language":row.language,"history_id":row.id});
         if record.is_replay() {
             data["replay"] = json!(true);
@@ -206,16 +274,15 @@ impl Inner {
     /// What a returning call never received stays written and is marked unheard: it is not played late. A reply
     /// published while it was away was never sent to it; `unreceived` are those sent whose frame never reached the
     /// page. One the page did receive may still be playing there, and its report counts.
-    pub(super) fn drop_unheard(&mut self, sid: &str, unreceived: &[String]) {
+    pub(super) fn drop_unheard(&mut self, sid: &str, _unreceived: &[String]) {
         let dropped: Vec<String> = self
             .utterances
             .iter()
-            .filter(|(uid, record)| {
+            .filter(|(_, record)| {
                 record
                     .clients
                     .get(sid)
-                    .is_some_and(|(_, status)| status == "queued")
-                    && (!record.sent.contains(sid) || unreceived.contains(uid))
+                    .is_some_and(|(_, status)| matches!(status.as_str(), "queued" | "playing"))
             })
             .map(|(uid, _)| uid.clone())
             .collect();

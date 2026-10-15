@@ -371,6 +371,7 @@ impl Core {
     /// A browser in a call: hello sent with this data (none when null), session assigned.
     pub async fn join(&self, token: &str, hello: Value) -> Browser {
         let mut browser = Browser::new(self.open_call(token).await);
+        browser.focus_lookup = Some((self.port, token.to_owned()));
         let hello = if hello.is_null() { json!({}) } else { hello };
         browser.send("voice-hello", hello).await;
         let session = browser.frame("voice-session").await;
@@ -383,6 +384,7 @@ impl Core {
     /// the last frame it handled. The session it lands on, resumed or new.
     pub async fn resume(&self, token: &str, session: &str, resume: &str, last_seq: u64) -> Browser {
         let mut browser = Browser::new(self.open_call(token).await);
+        browser.focus_lookup = Some((self.port, token.to_owned()));
         browser
             .send(
                 "voice-hello",
@@ -639,6 +641,7 @@ pub struct Browser {
     pub last_seq: u64,
     /// Fail on an `error` frame met while waiting for any other kind, instead of passing over it.
     pub no_errors: bool,
+    focus_lookup: Option<(u16, String)>,
 }
 
 impl Browser {
@@ -652,6 +655,7 @@ impl Browser {
             close_code: None,
             last_seq: 0,
             no_errors: false,
+            focus_lookup: None,
         }
     }
 
@@ -691,9 +695,21 @@ impl Browser {
 
     /// Starts turn `turn`: the revision the room gave it, from the started frame that names it.
     pub async fn start_turn(&mut self, turn: &str) -> u64 {
+        let (port, token) = self.focus_lookup.as_ref().expect("focus lookup");
+        let state = Http::new(
+            Target::Tcp(*port),
+            "GET",
+            &format!("/api/presentation?session_id={}", self.session),
+        )
+        .token(token)
+        .send()
+        .await
+        .json();
+        let target = &state["call"]["target"];
         self.report(
             "voice-user-turn",
-            json!({"phase": "started", "turn_id": turn}),
+            json!({"phase": "started", "turn_id": turn,
+                "thread_id": target["thread_id"], "binding_id": target["binding_id"]}),
         )
         .await;
         let started = self
@@ -717,6 +733,24 @@ impl Browser {
     pub async fn played(&mut self, utterance: &str) {
         self.playback(utterance, "playing").await;
         self.playback(utterance, "heard").await;
+        let history_id = format!("{}:voice:{utterance}", self.session);
+        self.hearing(&history_id, utterance, "heard", None).await;
+    }
+
+    /// The app's semantic acknowledgement, independent of the physical playback report.
+    pub async fn hearing(
+        &mut self,
+        history_id: &str,
+        utterance: &str,
+        outcome: &str,
+        heard_chars: Option<u64>,
+    ) {
+        let mut data = json!({"history_id":history_id,"utterance_id":utterance,
+            "outcome":outcome});
+        if let Some(extent) = heard_chars {
+            data["heard_chars"] = json!(extent);
+        }
+        self.report("reply-hearing", data).await;
     }
 
     /// The next event the core sends, or `None` once `within` passes or the socket closes.
@@ -1493,13 +1527,14 @@ pub async fn publish(
     binding: &str,
     session: &str,
     revision: u64,
+    epoch: u64,
     utterance: &str,
     text: &str,
 ) -> Value {
     peer.call(
         "speech.publish",
         json!({"event_id": format!("event-{utterance}"), "utterance_id": utterance, "binding_id": binding,
-            "session_id": session, "revision": revision, "text": text, "language": "en"}),
+            "session_id": session, "revision": revision, "epoch":epoch, "text": text, "language": "en"}),
     )
     .await
 }

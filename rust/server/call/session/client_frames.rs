@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::control::room::RoomError;
+use crate::control::room::{Continuation, RoomError};
 use crate::messages::{render, LocalizedMessage};
 use crate::server::call::admission::offered_language;
 use crate::server::call::client_msg_id;
@@ -30,6 +30,8 @@ impl Call {
             Some("voice-turn-trace") => trace_turn(&self.session, &data),
             Some("voice-user-turn") => self.once(&data, Self::user_turn).await,
             Some("voice-playback") => self.once(&data, Self::playback).await,
+            Some("reply-hearing") => self.once(&data, Self::reply_hearing).await,
+            Some("voice-speech") => self.once(&data, Self::speech).await,
             Some("voice-settings") => self.update_settings(&data).await,
             _ => {}
         }
@@ -64,25 +66,38 @@ impl Call {
         let id = client_msg_id(data);
         let turn_id = data["turn_id"].as_str().unwrap_or("");
         // The turn's boundary, as the call learns it: the revision the room gave the turn, and where its words go.
-        let started = |revision: &Value, thread: &Value| {
+        let started = |revision: &Value, epoch: &Value, thread: &Value| {
             json!({"type":"voice-user-turn","data":{"session_id":self.session,"phase":"started",
-                "turn_id":turn_id,"revision":revision,"thread_id":thread}})
+                "turn_id":turn_id,"revision":revision,"epoch":epoch,"thread_id":thread}})
         };
         let result = match data["phase"].as_str() {
-            Some("started") => room
-                .begin_turn(&self.session, turn_id)
-                .map(|turn| started(&json!(turn.revision), &json!(turn.thread_id))),
+            Some("started") => data["thread_id"]
+                .as_str()
+                .zip(data["binding_id"].as_str())
+                .ok_or_else(|| RoomError::new(400, "room.request_invalid"))
+                .and_then(|(thread, binding)| {
+                    room.begin_turn(&self.session, turn_id, thread, binding)
+                })
+                .map(|turn| {
+                    started(
+                        &json!(turn.revision),
+                        &json!(turn.epoch),
+                        &json!(turn.thread_id),
+                    )
+                }),
             // A turn spoken offline arrives finished: once taken, its boundary is said as a started turn's is.
             Some("finished") if data["offline"].as_bool() == Some(true) => room
-                .offline_input(
+                .offline_input_captured(
                     &self.session,
                     turn_id,
                     data["text"].as_str().unwrap_or(""),
                     data["started_at"].as_u64(),
+                    data["thread_id"].as_str().unwrap_or(""),
+                    data["binding_id"].as_str().unwrap_or(""),
                 )
                 .map(|taken| {
                     if taken["accepted"] == true {
-                        started(&taken["revision"], &taken["thread_id"])
+                        started(&taken["revision"], &taken["epoch"], &taken["thread_id"])
                     } else {
                         Value::Null
                     }
@@ -91,8 +106,18 @@ impl Call {
                 let text = (phase == "finished")
                     .then(|| data["text"].as_str())
                     .flatten();
-                room.finish_turn(&self.session, turn_id, text, &data["timings_ms"])
-                    .map(|_| Value::Null)
+                room.finish_turn(
+                    &self.session,
+                    turn_id,
+                    text,
+                    &data["timings_ms"],
+                    if data["merged"].as_bool() == Some(true) {
+                        Continuation::Merged
+                    } else {
+                        Continuation::Standalone
+                    },
+                )
+                .map(|_| Value::Null)
             }
             // A phase the room does not know is taken and changes nothing; a turn report without one is refused.
             Some(phase) if !phase.is_empty() => Ok(Value::Null),
@@ -105,7 +130,7 @@ impl Call {
         }
     }
 
-    /// What became of a reply on this call: the room keeps how far each one was heard.
+    /// Physical playback state and diagnostic extent; semantic hearing is reported separately.
     fn playback(&mut self, data: &Value) -> Vec<Value> {
         // How far it was heard is optional; one that is given must be a count of characters.
         let heard_chars = match data.get("heard_chars") {
@@ -116,13 +141,47 @@ impl Call {
                 .ok_or_else(|| RoomError::new(400, "room.receipt_invalid")),
         };
         let result = heard_chars.and_then(|heard_chars| {
-            self.state.room.playback(
+            self.state.room.playback_transport(
                 &self.session,
                 data["utterance_id"].as_str().unwrap_or(""),
                 data["status"].as_str().unwrap_or(""),
                 data["reason"].as_str(),
                 heard_chars,
                 &data["timings_ms"],
+            )
+        });
+        match result {
+            Ok(()) => Vec::new(),
+            Err(error) => vec![self.refusal(error.key, client_msg_id(data))],
+        }
+    }
+
+    fn speech(&mut self, data: &Value) -> Vec<Value> {
+        match self.state.room.set_speech(
+            &self.session,
+            data["on"].as_bool().unwrap_or(false),
+            data["reason"].as_str(),
+        ) {
+            Ok(_) => Vec::new(),
+            Err(error) => vec![self.refusal(error.key, client_msg_id(data))],
+        }
+    }
+
+    fn reply_hearing(&mut self, data: &Value) -> Vec<Value> {
+        let heard_chars = match data.get("heard_chars") {
+            None => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| RoomError::new(400, "room.receipt_invalid")),
+        };
+        let result = heard_chars.and_then(|heard_chars| {
+            self.state.room.reply_hearing(
+                &self.session,
+                data["history_id"].as_str().unwrap_or(""),
+                data["utterance_id"].as_str().unwrap_or(""),
+                data["outcome"].as_str().unwrap_or(""),
+                heard_chars,
             )
         });
         match result {

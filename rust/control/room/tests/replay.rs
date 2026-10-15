@@ -1,11 +1,12 @@
-//! Replays the person asks for: sent again as text, retired once they end, never touching the original's history.
+//! Replays the person asks for: sent again as text, with bounded late receipt IDs, never changing the original playback fate.
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
 use super::support::report;
+use super::support::BeginAtFocus;
 use crate::control::room::util::id;
 use crate::control::room::utterances::MAX_UTTERANCES;
-use crate::control::room::{ConnectorPeer, Room};
+use crate::control::room::{ConnectorPeer, Continuation, Room};
 use crate::storage::PrivateDir;
 
 /// A room with a binding on `replay-thread`, a call on it, and the history id of a reply that call heard.
@@ -40,7 +41,7 @@ fn heard_reply() -> (
         .as_u64()
         .unwrap();
     let original = room.publish(
-        &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,
+        &json!({"session_id":sid,"thread_id":"replay-thread","revision":revision,"epoch":0,
             "utterance_id":"original","text":"Original reply"}),
     );
     assert_eq!(original["status"], "queued");
@@ -66,7 +67,7 @@ fn kept(room: &Room, uid: &str) -> bool {
 }
 
 #[test]
-fn replays_that_ended_are_retired_and_the_original_stays() {
+fn finished_replays_keep_only_a_bounded_receipt_window_and_the_original_stays() {
     let (_directory, room, sid, mut received, history_id) = heard_reply();
     for index in 0..MAX_UTTERANCES + 1 {
         let uid = format!("again-{index}");
@@ -77,29 +78,45 @@ fn replays_that_ended_are_retired_and_the_original_stays() {
     }
     let inner = room.inner.lock().unwrap();
     assert_eq!(inner.utterances.replay_count(), 0);
+    assert_eq!(
+        inner
+            .utterances
+            .iter()
+            .filter(|(_, r)| r.is_replay())
+            .count(),
+        256
+    );
     assert!(inner.utterances.contains("original"));
     drop(inner);
     assert_eq!(status(&room, &history_id), "playback_finished");
 }
 
 #[test]
-fn replay_skips_close_and_leave_keep_original_history() {
+fn replay_stops_close_and_leave_keep_original_history() {
     let (_directory, room, sid, _received, history_id) = heard_reply();
-    room.replay_one(&sid, &history_id, "skipped-replay")
+    room.replay_one(&sid, &history_id, "stopped-replay")
         .unwrap();
     room.playback(
         &sid,
-        "skipped-replay",
+        "stopped-replay",
         "interrupted",
-        Some("user_skipped"),
+        None,
         None,
         &Value::Null,
     )
     .unwrap();
-    assert!(!kept(&room, "skipped-replay"));
+    assert!(kept(&room, "stopped-replay"));
     room.replay_one(&sid, &history_id, "turn-replay").unwrap();
-    room.begin_turn(&sid, "turn").unwrap();
+    room.begin_at_focus(&sid, "turn").unwrap();
     assert_eq!(status(&room, &history_id), "playback_finished");
+    assert_eq!(
+        room.replay_one(&sid, &history_id, "during-turn")
+            .unwrap_err()
+            .key,
+        "room.replay_unavailable"
+    );
+    room.finish_turn(&sid, "turn", None, &Value::Null, Continuation::Standalone)
+        .unwrap();
     let (other_events, _other_received) = mpsc::channel(8);
     let other = room
         .join("other-device".into(), "en".into(), other_events)
@@ -111,7 +128,7 @@ fn replay_skips_close_and_leave_keep_original_history() {
     assert!(!kept(&room, "leaving-replay"));
     room.replay_one(&sid, &history_id, "closed-replay").unwrap();
     room.close_channel("replay-thread").unwrap();
-    // Withdrawn from the call, which says it never played it: then it is gone.
+    // Withdrawn from the call, which says it never played it: its receipt identity remains until leave.
     assert!(kept(&room, "closed-replay"));
     room.playback(
         &sid,
@@ -122,8 +139,10 @@ fn replay_skips_close_and_leave_keep_original_history() {
         &Value::Null,
     )
     .unwrap();
-    assert!(!kept(&room, "closed-replay"));
+    assert!(kept(&room, "closed-replay"));
     assert_eq!(status(&room, &history_id), "playback_finished");
     room.leave(&sid);
+    assert!(!kept(&room, "stopped-replay"));
+    assert!(!kept(&room, "closed-replay"));
     assert!(kept(&room, "original"));
 }

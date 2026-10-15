@@ -168,7 +168,7 @@ async fn the_room_relays_requests_and_calls_and_the_link_follows_the_pairing() {
     let session = call_event(&mut link, "call", "voice-session", STEP).await;
     let sid = session["session_id"].clone();
     let started = json!({"type": "voice-user-turn", "data": {"session_id": sid, "client_msg_id": "turn-started",
-        "turn_id": "relayed", "phase": "started"}});
+        "turn_id": "relayed", "phase": "started", "thread_id": "", "binding_id": ""}});
     link.emit(
         "relay.data",
         json!({"channel": "call", "data": started.to_string()}),

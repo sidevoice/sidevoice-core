@@ -20,6 +20,59 @@ fn row<'a>(history: &'a [Value], id: &str) -> &'a Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn delayed_socket_start_after_http_focus_change_keeps_captured_conversation() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let (_peer_a, _) = connector_with_binding(&core, "captured-a", "captured-a").await;
+    let (_peer_b, _) = connector_with_binding(&core, "captured-b", "captured-b").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let a_focus = core.select(&token, &browser.session, "captured-a").await;
+    core.select(&token, &browser.session, "captured-b").await;
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase":"started","turn_id":"a-turn",
+        "thread_id":"captured-a","binding_id":a_focus}),
+        )
+        .await;
+    let started = browser.turn("started", STEP).await;
+    assert_eq!(started["thread_id"], "captured-a");
+    assert_eq!(started["epoch"], 1);
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase":"finished","turn_id":"a-turn",
+        "text":"A's delayed words","thread_id":"captured-a","binding_id":a_focus}),
+        )
+        .await;
+    let history = core.history(&token, "captured-a").await;
+    let spoken = history
+        .iter()
+        .find(|r| r["text"] == "A's delayed words")
+        .unwrap();
+    let id = spoken["id"].as_str().unwrap();
+    let resolved = core
+        .get(&format!(
+            "/api/presentation/history?thread_id=captured-a&resolve_id={id}&resolve_id=gone"
+        ))
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(resolved.status, 200);
+    assert_eq!(resolved.json()["resolved"][0]["id"], id);
+    assert_eq!(resolved.json()["missing_ids"], json!(["gone"]));
+    assert!(!core
+        .history(&token, "captured-b")
+        .await
+        .iter()
+        .any(|r| r["role"] == "user"));
+    assert_eq!(core.participant(&token, "captured-a").await["epoch"], 1);
+    assert_eq!(core.participant(&token, "captured-b").await["epoch"], 0);
+    browser.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
@@ -30,7 +83,7 @@ async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
         browser.welcome.get("sample_rate").is_none(),
         "no audio format"
     );
-    core.select(&token, &browser.session, THREAD).await;
+    let focus_binding = core.select(&token, &browser.session, THREAD).await;
 
     let revision = browser.say("Run the tests, please.").await;
     let delivery = accept_delivery(&mut peer).await;
@@ -58,6 +111,17 @@ async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
         (refusal["key"].as_str(), refusal["client_msg_id"].as_str()),
         (Some("room.input_ended"), Some(late.as_str()))
     );
+    // A new reliable frame ID cannot revive the same cancelled turn as offline speech.
+    let offline = browser
+        .report(
+            "voice-user-turn",
+            json!({"phase":"finished","turn_id":"cancelled","offline":true,
+                "thread_id":THREAD,"binding_id":focus_binding,"text":"Resurrected words"}),
+        )
+        .await;
+    let refusal = browser.frame("error").await;
+    assert_eq!(refusal["key"], "room.input_ended");
+    assert_eq!(refusal["client_msg_id"], offline);
     let history = core.history(&token, THREAD).await;
     let said: Vec<_> = history
         .iter()
@@ -78,23 +142,21 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
     let (mut peer, binding) = connector_with_binding(&core, "overlap", THREAD).await;
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
-    core.select(&token, &session, THREAD).await;
+    let focus = core.select(&token, &session, THREAD).await;
 
     let first = browser.start_turn("first").await;
     let second = browser.start_turn("second").await;
     assert!(second > first, "each turn its own boundary");
-    // A name the call already holds is not started again.
-    let again = browser
+    // A duplicate start returns the same boundary and cannot advance the epoch.
+    browser
         .report(
             "voice-user-turn",
-            json!({"phase": "started", "turn_id": "first"}),
+            json!({"phase": "started", "turn_id": "first", "thread_id": THREAD, "binding_id": focus}),
         )
         .await;
-    let refusal = browser.frame("error").await;
-    assert_eq!(
-        (refusal["key"].as_str(), refusal["client_msg_id"].as_str()),
-        (Some("room.request_invalid"), Some(again.as_str()))
-    );
+    let duplicate = browser.frame("voice-user-turn").await;
+    assert_eq!(duplicate["revision"], first);
+    assert_eq!(duplicate["epoch"], 1);
 
     // The first turn's words come after the second turn started: both reach the conversation, each with its turn.
     browser
@@ -123,15 +185,13 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
         &binding,
         &session,
         first,
+        1,
         "late",
         "An old answer.",
     )
     .await;
-    assert_eq!(
-        (late["status"].as_str(), late["reason"].as_str()),
-        (Some("text_only"), Some("newer_turn")),
-        "{late}"
-    );
+    assert_eq!(late["status"], "text_only", "{late}");
+    assert!(late.get("reason").is_none(), "{late}");
     let history = core.history(&token, THREAD).await;
     let first_row = row(&history, &format!("{session}:user-turn:first"));
     assert_eq!(first_row["text"], "First words");
@@ -167,6 +227,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
         &binding,
         &session,
         revision,
+        0,
         "cut",
         "A reply cut short.",
     )
@@ -175,7 +236,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
     let reply = browser.frame("voice-reply").await;
     assert_eq!(
         reply,
-        json!({"session_id": session, "utterance_id": "cut", "revision": revision, "reply_revision": revision,
+        json!({"session_id": session, "utterance_id": "cut", "revision": revision, "reply_revision": revision,"epoch":0,
             "thread_id": THREAD, "text": "A reply cut short.", "language": "en",
             "history_id": format!("{session}:voice:cut")})
     );
@@ -186,11 +247,15 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
             json!({"utterance_id": "cut", "status": "interrupted", "heard_chars": 7}),
         )
         .await;
+    browser
+        .hearing(&format!("{session}:voice:cut"), "cut", "partial", Some(7))
+        .await;
     publish(
         &mut peer,
         &binding,
         &session,
         revision,
+        0,
         "whole",
         "A reply heard whole.",
     )
@@ -202,7 +267,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
     let cut = row(&history, &format!("{session}:voice:cut"));
     assert_eq!(
         (&cut["status"], &cut["audio_reason"], &cut["heard_chars"]),
-        (&json!("interrupted"), &json!("user_interrupted"), &json!(7))
+        (&json!("interrupted"), &Value::Null, &json!(7))
     );
     assert_eq!(
         row(&history, &format!("{session}:voice:whole"))["status"],
@@ -312,6 +377,7 @@ async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part
         &binding,
         &session,
         revision,
+        0,
         "cut",
         "A reply cut short.",
     )
@@ -331,13 +397,16 @@ async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part
         )
         .await;
     browser
+        .hearing(&format!("{session}:voice:cut"), "cut", "partial", Some(7))
+        .await;
+    browser
         .none_of(&["error"], Duration::from_millis(300))
         .await;
     let history = core.history(&token, THREAD).await;
     let cut = row(&history, &format!("{session}:voice:cut"));
     assert_eq!(
         (&cut["status"], &cut["audio_reason"], &cut["heard_chars"]),
-        (&json!("interrupted"), &json!("user_interrupted"), &json!(7))
+        (&json!("interrupted"), &Value::Null, &json!(7))
     );
     browser.close().await;
 }
@@ -446,7 +515,8 @@ async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
     // An extra key next to `type` and `data`.
     browser.send_raw(Message::text(
         json!({"type": "voice-user-turn", "added_later": extra, "data": {"session_id": session,
-            "client_msg_id": "envelope", "phase": "started", "turn_id": "spoken", "future": extra}})
+            "client_msg_id": "envelope", "phase": "started", "turn_id": "spoken",
+            "thread_id": THREAD, "binding_id": focus, "future": extra}})
         .to_string(),
     ));
     browser
@@ -463,7 +533,16 @@ async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
     assert_eq!(accept_delivery(&mut peer).await["text"], "Spoken");
 
     let revision = core.revision(&token, &session).await;
-    publish(&mut peer, &binding, &session, revision, "reply", "A reply.").await;
+    publish(
+        &mut peer,
+        &binding,
+        &session,
+        revision,
+        revision.saturating_sub(1),
+        "reply",
+        "A reply.",
+    )
+    .await;
     browser.frame("voice-reply").await;
     for status in ["playing", "heard"] {
         browser

@@ -21,7 +21,8 @@ impl Room {
             return;
         };
         for (_, c) in inner.browsers.on_thread(&b.thread) {
-            let mut out = json!({"thread_id":b.thread,"working":working});
+            let mut out = json!({"thread_id":b.thread,"working":working,
+                "epoch":inner.conversations.epoch(&b.thread)});
             if let Some(obj) = out.as_object_mut() {
                 for key in ["turn_id", "turn_phase", "session_id", "revision"] {
                     if let Some(v) = data.get(key) {

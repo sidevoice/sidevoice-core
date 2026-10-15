@@ -5,6 +5,7 @@ use super::error::RoomError;
 use super::journal::{InputRef, Row};
 use super::latency::{latency_now_micros, LatencyEvent};
 use super::turns::{valid_turn_id, VoiceTurn};
+use super::util::valid_thread;
 use super::util::{id, millis, seconds};
 use super::{Inner, Room};
 
@@ -19,6 +20,7 @@ struct InputDraft<'a> {
     text: &'a str,
     session_id: &'a str,
     revision: u64,
+    epoch: u64,
     thread_id: &'a str,
     binding_id: &'a str,
     title: Option<String>,
@@ -55,6 +57,7 @@ impl Room {
         }
         words(text)?;
         let revision = c.revision;
+        let epoch = inner.conversations.epoch(thread);
         let language = c.language.clone();
         let title = c.target.as_ref().and_then(|t| t.title.clone());
         inner.queue_input(InputDraft {
@@ -62,6 +65,7 @@ impl Room {
             text,
             session_id: sid,
             revision,
+            epoch,
             thread_id: thread,
             binding_id: bid,
             title,
@@ -77,10 +81,9 @@ impl Room {
     pub fn queue_voice_input(&self, turn: &VoiceTurn, text: &str) -> Result<Value, RoomError> {
         self.inner.lock().expect("room lock").queue_turn(turn, text)
     }
-    /// Turn `turn_id`, spoken and transcribed while the call had no room, is its own input row, sent to the
-    /// conversation the call is on now. It takes the call's next revision, as a turn does when it starts: it is newer
-    /// than every turn before it, so a reply to one of those is superseded by it. The same turn sent again is taken
-    /// once.
+    /// Convenience entry for a caller that captures the selected target at this boundary.
+    /// The wire path uses `offline_input_captured` with the target captured when speech began.
+    #[cfg(test)]
     pub fn offline_input(
         &self,
         sid: &str,
@@ -88,39 +91,106 @@ impl Room {
         text: &str,
         time: Option<u64>,
     ) -> Result<Value, RoomError> {
+        let target = {
+            let inner = self.inner.lock().expect("room lock");
+            inner
+                .browsers
+                .get(sid)
+                .and_then(|browser| browser.bound_target())
+                .cloned()
+        };
+        let Some(target) = target else {
+            return Err(RoomError::new(409, "room.focus_changed"));
+        };
+        self.offline_input_captured(sid, turn_id, text, time, &target.thread, &target.binding_id)
+    }
+
+    /// Offline words carry the conversation captured when speech began, even if focus changed
+    /// before the room accepted them. The epoch is assigned once at acceptance.
+    pub fn offline_input_captured(
+        &self,
+        sid: &str,
+        turn_id: &str,
+        text: &str,
+        time: Option<u64>,
+        thread: &str,
+        binding: &str,
+    ) -> Result<Value, RoomError> {
         if !valid_turn_id(turn_id) {
             return Err(RoomError::new(400, "room.request_invalid"));
         }
+        if !valid_thread(thread) || binding.is_empty() {
+            return Err(RoomError::new(400, "room.thread_invalid"));
+        }
         words(text)?;
+        let open = {
+            let inner = self.inner.lock().expect("room lock");
+            inner
+                .browsers
+                .get(sid)
+                .and_then(|browser| browser.turns.iter().find(|turn| turn.turn_id == turn_id))
+                .cloned()
+        };
+        if let Some(open) = open {
+            if open.thread_id.as_deref() != Some(thread)
+                || open.binding_id.as_deref() != Some(binding)
+            {
+                return Err(RoomError::new(409, "room.message_conflict"));
+            }
+            return self.finish_turn(
+                sid,
+                turn_id,
+                Some(text),
+                &Value::Null,
+                super::Continuation::Standalone,
+            );
+        }
         let row_id = turn_row(sid, turn_id);
         let mut inner = self.inner.lock().expect("room lock");
         if let Some(row) = inner.journal.find(&row_id) {
-            return repeated(row, text, true);
+            return repeated(row, text, row.thread == thread);
+        }
+        if inner.conversations.prior(sid, turn_id).is_some() {
+            return Err(RoomError::new(409, "room.input_ended"));
+        }
+        if inner
+            .browsers
+            .get(sid)
+            .is_some_and(|browser| browser.turns.iter().any(|turn| turn.turn_id == turn_id))
+        {
+            return Err(RoomError::new(409, "room.input_ended"));
+        }
+        if !inner.conversations.can_begin(thread) {
+            return Err(RoomError::new(429, "room.input_backlog_full"));
         }
         let Some(browser) = inner.browsers.get_mut(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
         };
         let language = browser.language.clone();
-        let Some(target) = browser.bound_target().cloned() else {
-            return Ok(inner.not_sent(sid, row_id, 0, turn_id));
-        };
-        inner.room_for(text)?;
+        let title = inner
+            .bindings
+            .newest_active(thread)
+            .and_then(|binding| binding.title.clone());
+        inner
+            .room_for_bytes(text.len() + inner.unheard.next_batch_bytes(thread, &inner.journal))?;
         let browser = inner
             .browsers
             .get_mut(sid)
             .expect("the call, under the same lock");
         let revision = browser.next_revision();
         browser.turn_revision = revision;
-        let (thread, binding) = (target.thread.as_str(), target.binding_id.as_str());
+        let epoch = inner.open_speech_epoch(thread, sid, turn_id);
+        inner.conversations.finish(thread, sid, turn_id, epoch);
         let message_id = id();
         inner.queue_input(InputDraft {
             row_id,
             text,
             session_id: sid,
             revision,
+            epoch,
             thread_id: thread,
             binding_id: binding,
-            title: target.title.clone(),
+            title,
             language: &language,
             message_id: &message_id,
             turn_id: Some(turn_id),
@@ -150,13 +220,44 @@ fn words(text: &str) -> Result<(), RoomError> {
 /// the same conversation, a conflict otherwise.
 fn repeated(row: &Row, text: &str, same_thread: bool) -> Result<Value, RoomError> {
     if row.text == text && same_thread {
-        Ok(json!({"accepted":true,"id":row.id,"revision":row.revision,"thread_id":row.thread}))
+        Ok(
+            json!({"accepted":true,"id":row.id,"revision":row.revision,"epoch":row.epoch,"thread_id":row.thread}),
+        )
     } else {
         Err(RoomError::new(409, "room.message_conflict"))
     }
 }
 
 impl Inner {
+    /// Mark transcript arrival and keep the call's measured durations before queueing its words.
+    pub(super) fn record_transcript_latency(&mut self, turn: &VoiceTurn, timings: &Value) {
+        let Some(thread) = turn.thread_id.as_deref() else {
+            return;
+        };
+        self.mark_latency(
+            &turn.session_id,
+            thread,
+            turn.revision,
+            None,
+            LatencyEvent::Transcript,
+            latency_now_micros(),
+        );
+        if let Some(timings) = timings.as_object() {
+            for (name, milliseconds) in timings {
+                if let Some(milliseconds) = milliseconds.as_f64() {
+                    self.record_latency_duration(
+                        &turn.session_id,
+                        thread,
+                        turn.revision,
+                        None,
+                        name,
+                        milliseconds,
+                    );
+                }
+            }
+        }
+    }
+
     /// Commits turn `turn`'s words to the journal and its outbox; the turn must be one the call ended.
     pub(super) fn queue_turn(&mut self, turn: &VoiceTurn, text: &str) -> Result<Value, RoomError> {
         words(text)?;
@@ -184,6 +285,7 @@ impl Inner {
             text,
             session_id: &turn.session_id,
             revision: turn.revision,
+            epoch: turn.epoch,
             thread_id: thread,
             binding_id: bid,
             title: turn.title.clone(),
@@ -196,11 +298,20 @@ impl Inner {
     }
     fn queue_input(&mut self, draft: InputDraft<'_>) -> Result<Value, RoomError> {
         self.room_for(draft.text)?;
+        if draft.turn_id.is_some() {
+            self.room_for_bytes(
+                draft.text.len()
+                    + self
+                        .unheard
+                        .next_batch_bytes(draft.thread_id, &self.journal),
+            )?;
+        }
         let InputDraft {
             row_id,
             text,
             session_id,
             revision,
+            epoch,
             thread_id,
             binding_id,
             title,
@@ -211,10 +322,16 @@ impl Inner {
             time,
         } = draft;
         let mut payload = json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
-            "history_id":row_id,"revision":revision,"binding_id":binding_id,"title":title});
-        // The message takes with it what the person did not hear, so the agent is told once.
-        if let Some(unheard) = self.unheard.take(thread_id, &self.journal) {
-            payload["unheard"] = unheard;
+            "history_id":row_id,"revision":revision,"epoch":epoch,"channel":"voice","binding_id":binding_id,"title":title});
+        // Typed context does not consume a spoken turn's pending playback evidence.
+        if turn_id.is_some() {
+            self.unheard.resolve_words(thread_id);
+            if let Some(unheard) = self.unheard.take(thread_id, &self.journal) {
+                let kind = "reply_not_heard";
+                payload["notice"] =
+                    json!({"kind":kind,"instruction":super::notices::instruction(kind)});
+                payload["unheard"] = unheard;
+            }
         }
         let row = Row {
             id: row_id,
@@ -227,6 +344,7 @@ impl Inner {
             )),
             session: session_id.into(),
             revision,
+            epoch,
             turn_id: turn_id.map(str::to_owned),
             time: time.unwrap_or_else(millis),
             status: "pending".into(),
@@ -237,6 +355,14 @@ impl Inner {
         };
         let input = row.input_ref();
         self.append_row(row);
+        if turn_id.is_some() && self.unheard.has(thread_id) {
+            self.flush_all_unheard_notes(
+                thread_id,
+                session_id,
+                "reply_not_heard",
+                Some(message_id),
+            );
+        }
         self.mark_latency(
             session_id,
             thread_id,
@@ -246,13 +372,37 @@ impl Inner {
             latency_now_micros(),
         );
         self.browsers.input_receipt(&input, "pending");
-        Ok(json!({"accepted":true,"id":input.id,"revision":revision,"thread_id":thread_id}))
+        Ok(
+            json!({"accepted":true,"id":input.id,"revision":revision,"epoch":epoch,"thread_id":thread_id}),
+        )
     }
     /// Refuses `text` when the messages already waiting to reach their agents are as many, or as long, as the room
     /// keeps: a message is only taken when it can wait for its agent.
     pub(super) fn room_for(&self, text: &str) -> Result<(), RoomError> {
-        let (count, bytes) = self.journal.waiting_input();
-        if count >= MAX_WAITING_INPUT || bytes + text.len() > MAX_WAITING_BYTES {
+        self.room_for_bytes(text.len() + 1024)
+    }
+    pub(super) fn room_for_bytes(&self, bytes_needed: usize) -> Result<(), RoomError> {
+        self.room_for_bytes_with_turn_credit(bytes_needed, 0)
+    }
+    pub(super) fn room_for_bytes_with_turn_credit(
+        &self,
+        bytes_needed: usize,
+        turn_credit: usize,
+    ) -> Result<(), RoomError> {
+        let (journal_count, journal_bytes) = self.journal.waiting_input();
+        let reserved_turns = self.conversations.open_count().saturating_sub(turn_credit);
+        let count = journal_count + self.pending_notices.len() + reserved_turns;
+        let bytes = journal_bytes
+            + self
+                .pending_notices
+                .iter()
+                .map(|notice| notice.reserved_bytes())
+                .sum::<usize>()
+            + reserved_turns * 2048;
+        if !self.journal.can_append()
+            || count >= MAX_WAITING_INPUT
+            || bytes + bytes_needed > MAX_WAITING_BYTES
+        {
             return Err(RoomError::new(429, "room.input_backlog_full"));
         }
         Ok(())
@@ -264,6 +414,8 @@ impl Inner {
             id: row_id,
             thread: None,
             revision,
+            epoch: 0,
+            note: false,
             turn_id: Some(turn_id.to_owned()),
         };
         self.browsers.input_receipt(&input, "not_sent");

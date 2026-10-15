@@ -25,6 +25,9 @@ impl Room {
         if !inner.peers.contains(cid) {
             return Err(RoomError::new(409, "room.connector_disconnected"));
         }
+        if !inner.conversations.ensure(thread) {
+            return Err(RoomError::new(429, "room.input_backlog_full"));
+        }
         let requested = field(data, "binding_id");
         // A mode the room does not know registers as push, as one that names no mode does.
         let pull_input = field(data, "input_mode") == "pull";
@@ -46,7 +49,10 @@ impl Room {
                 && (!pull_input || row.pull_claimed_by.as_deref() != Some(bid.as_str()))
         });
         Ok(
-            json!({"client_ref": data.get("client_ref"), "binding_id": bid, "thread": actual_thread}),
+            json!({"client_ref": data.get("client_ref"), "binding_id": bid, "thread": actual_thread,
+                "epoch":inner.conversations.epoch(&actual_thread),
+                "initial_reply_context":{"session_id":format!("binding:{bid}"),"revision":0,
+                    "epoch":inner.conversations.epoch(&actual_thread),"thread_id":actual_thread}}),
         )
     }
     pub fn unregister(&self, cid: &str, bid: &str) {
