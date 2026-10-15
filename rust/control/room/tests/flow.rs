@@ -1842,7 +1842,9 @@ fn r6_old_miss_heard_on_other_device_resolves_after_leaving_recent_history() {
         .unwrap()
         .iter()
         .any(|row| row["id"] == history_id));
-    let resolved = c.room.history_resolving(Some("t"), &[history_id.clone()]);
+    let resolved = c
+        .room
+        .history_resolving(Some("t"), std::slice::from_ref(&history_id));
     assert_eq!(resolved["resolved"][0]["id"], history_id);
     assert_eq!(resolved["resolved"][0]["globally_heard"], true);
     assert_eq!(resolved["resolved"][0]["heard_chars"], 18);
