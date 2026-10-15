@@ -1,5 +1,7 @@
 //! Replies on their way to the calls listening: each is sent once to every call on its conversation, whose voice
 //! module decides whether and when it plays, and the journal row shows how far it got from what the calls report.
+use std::collections::HashSet;
+
 use serde_json::{json, Value};
 
 use super::error::RoomError;
@@ -166,6 +168,34 @@ impl Room {
 }
 
 impl Inner {
+    /// Withdraw queued, unrequested replies of older epochs on this conversation.
+    pub(super) fn withdraw_older_epoch_replies(&mut self, thread: &str, epoch: u64) {
+        let rows: HashSet<String> = self
+            .utterances
+            .iter()
+            .filter(|(_, record)| {
+                record.epoch < epoch
+                    && !record.requested
+                    && self
+                        .journal
+                        .find(&record.row_id)
+                        .is_some_and(|row| row.thread == thread)
+            })
+            .map(|(_, record)| record.row_id.clone())
+            .collect();
+        let sessions: HashSet<String> = self
+            .utterances
+            .iter()
+            .filter(|(_, record)| rows.contains(&record.row_id))
+            .flat_map(|(_, record)| record.clients.keys().cloned())
+            .collect();
+        for listener in sessions {
+            self.withdraw(&listener, "newer_turn", |record, (_, status)| {
+                status == "queued" && !record.requested && rows.contains(&record.row_id)
+            });
+        }
+    }
+
     /// Show physical playback state in history without inferring semantic hearing from it.
     pub(super) fn sync_row(&mut self, row_id: &str) {
         let Some((status, reason, _)) = self

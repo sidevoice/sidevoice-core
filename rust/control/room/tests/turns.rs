@@ -215,7 +215,7 @@ fn a_cancelled_turn_drops_its_words_and_leaves_the_others() {
     let (_directory, room, sid, _events) = room_with_call();
     let a = room.begin_at_focus(&sid, "a").unwrap();
     let b = room.begin_at_focus(&sid, "b").unwrap();
-    room.cancel_input(&sid, &a.turn_id, Continuation::Standalone)
+    room.cancel_turn(&sid, &a.turn_id, Continuation::Standalone)
         .unwrap();
     assert_eq!(
         room.finish_turn(

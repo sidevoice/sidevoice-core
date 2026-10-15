@@ -179,7 +179,7 @@ impl Room {
             .expect("the call, under the same lock");
         let revision = browser.next_revision();
         browser.turn_revision = revision;
-        let epoch = inner.advance_speech_epoch(thread, sid, turn_id);
+        let epoch = inner.open_speech_epoch(thread, sid, turn_id);
         inner.conversations.finish(thread, sid, turn_id, epoch);
         let message_id = id();
         inner.queue_input(InputDraft {
@@ -229,6 +229,35 @@ fn repeated(row: &Row, text: &str, same_thread: bool) -> Result<Value, RoomError
 }
 
 impl Inner {
+    /// Mark transcript arrival and keep the call's measured durations before queueing its words.
+    pub(super) fn record_transcript_latency(&mut self, turn: &VoiceTurn, timings: &Value) {
+        let Some(thread) = turn.thread_id.as_deref() else {
+            return;
+        };
+        self.mark_latency(
+            &turn.session_id,
+            thread,
+            turn.revision,
+            None,
+            LatencyEvent::Transcript,
+            latency_now_micros(),
+        );
+        if let Some(timings) = timings.as_object() {
+            for (name, milliseconds) in timings {
+                if let Some(milliseconds) = milliseconds.as_f64() {
+                    self.record_latency_duration(
+                        &turn.session_id,
+                        thread,
+                        turn.revision,
+                        None,
+                        name,
+                        milliseconds,
+                    );
+                }
+            }
+        }
+    }
+
     /// Commits turn `turn`'s words to the journal and its outbox; the turn must be one the call ended.
     pub(super) fn queue_turn(&mut self, turn: &VoiceTurn, text: &str) -> Result<Value, RoomError> {
         words(text)?;

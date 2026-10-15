@@ -1709,7 +1709,7 @@ fn review_cancelled_turn_cannot_return_as_offline_speech() {
     let focus = c.room.select(&c.sid, "t").unwrap();
     c.room.begin_at_focus(&c.sid, "cancelled").unwrap();
     c.room
-        .cancel_input(&c.sid, "cancelled", Continuation::Standalone)
+        .cancel_turn(&c.sid, "cancelled", Continuation::Standalone)
         .unwrap();
     assert!(c
         .room

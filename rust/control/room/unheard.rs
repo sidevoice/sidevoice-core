@@ -225,6 +225,15 @@ impl Unheard {
 }
 
 impl Inner {
+    /// Record an empty end before flushing any notice owed to the agent.
+    pub(super) fn settle_empty_turn(&mut self, thread: &str, session: &str, epoch: u64) {
+        self.conversations.record_empty(thread, epoch, session);
+        let obliged = self.unheard.finish_empty(thread, epoch);
+        if obliged || self.unheard.has(thread) {
+            self.flush_all_unheard_notes(thread, session, "turn_empty", None);
+        }
+    }
+
     /// Keep a reply's place on its conversation's list after its row changed.
     pub(super) fn track_unheard(&mut self, row_id: &str) {
         let Some(row) = self

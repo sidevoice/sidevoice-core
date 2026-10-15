@@ -2,6 +2,8 @@
 //! qualified spoken start changes the epoch shared by every device on a conversation.
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use super::Inner;
+
 #[derive(Default)]
 pub(super) struct Conversations {
     epochs: HashMap<String, u64>,
@@ -91,5 +93,16 @@ impl Conversations {
             .filter(|(candidate, newer, _)| candidate == thread && *newer > epoch)
             .min_by_key(|(_, newer, _)| *newer)
             .map(|(_, newer, session)| (*newer, session.clone()))
+    }
+}
+
+impl Inner {
+    /// Register a conversation-local speech boundary; playback withdrawal follows in `turn_flow`.
+    pub(super) fn advance_speech_epoch(&mut self, thread: &str, sid: &str, turn_id: &str) -> u64 {
+        assert!(
+            self.conversations.can_begin(thread),
+            "epoch context reserved before turn admission"
+        );
+        self.conversations.begin(thread, sid, turn_id)
     }
 }

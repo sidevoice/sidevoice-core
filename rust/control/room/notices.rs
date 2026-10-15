@@ -53,14 +53,6 @@ impl Inner {
         }
     }
 
-    pub(super) fn settle_empty_turn(&mut self, thread: &str, session: &str, epoch: u64) {
-        self.conversations.record_empty(thread, epoch, session);
-        let obliged = self.unheard.finish_empty(thread, epoch);
-        if obliged || self.unheard.has(thread) {
-            self.flush_all_unheard_notes(thread, session, "turn_empty", None);
-        }
-    }
-
     pub(super) fn flush_all_unheard_notes(
         &mut self,
         thread: &str,

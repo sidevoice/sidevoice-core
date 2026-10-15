@@ -62,7 +62,7 @@ pub(super) async fn cancel_input(
     }
     let result = state
         .room
-        .cancel_input(
+        .cancel_turn(
             sid,
             turn_id,
             if data["merged"].as_bool() == Some(true) {
