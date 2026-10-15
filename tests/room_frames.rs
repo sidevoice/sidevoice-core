@@ -190,11 +190,8 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
         "An old answer.",
     )
     .await;
-    assert_eq!(
-        (late["status"].as_str(), late["reason"].as_str()),
-        (Some("text_only"), Some("newer_turn")),
-        "{late}"
-    );
+    assert_eq!(late["status"], "text_only", "{late}");
+    assert!(late.get("reason").is_none(), "{late}");
     let history = core.history(&token, THREAD).await;
     let first_row = row(&history, &format!("{session}:user-turn:first"));
     assert_eq!(first_row["text"], "First words");
@@ -250,6 +247,9 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
             json!({"utterance_id": "cut", "status": "interrupted", "heard_chars": 7}),
         )
         .await;
+    browser
+        .hearing(&format!("{session}:voice:cut"), "cut", "partial", Some(7))
+        .await;
     publish(
         &mut peer,
         &binding,
@@ -267,7 +267,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
     let cut = row(&history, &format!("{session}:voice:cut"));
     assert_eq!(
         (&cut["status"], &cut["audio_reason"], &cut["heard_chars"]),
-        (&json!("interrupted"), &json!("user_interrupted"), &json!(7))
+        (&json!("interrupted"), &Value::Null, &json!(7))
     );
     assert_eq!(
         row(&history, &format!("{session}:voice:whole"))["status"],
@@ -399,13 +399,16 @@ async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part
         )
         .await;
     browser
+        .hearing(&format!("{session}:voice:cut"), "cut", "partial", Some(7))
+        .await;
+    browser
         .none_of(&["error"], Duration::from_millis(300))
         .await;
     let history = core.history(&token, THREAD).await;
     let cut = row(&history, &format!("{session}:voice:cut"));
     assert_eq!(
         (&cut["status"], &cut["audio_reason"], &cut["heard_chars"]),
-        (&json!("interrupted"), &json!("user_interrupted"), &json!(7))
+        (&json!("interrupted"), &Value::Null, &json!(7))
     );
     browser.close().await;
 }
