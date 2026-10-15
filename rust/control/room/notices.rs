@@ -26,6 +26,21 @@ impl PendingNotice {
     }
 }
 
+/// Corrections may only increase confirmed hearing, including after a frozen envelope or prior correction.
+fn hearing_advances(next: &Value, previous: &Value) -> bool {
+    let next_fate = next["fate"].as_str().unwrap_or("partial");
+    let previous_fate = previous["fate"].as_str().unwrap_or("partial");
+    if previous_fate == "skipped" || previous_fate == "heard" {
+        return previous_fate == "heard" && next_fate == "skipped";
+    }
+    if next_fate == "skipped" || next_fate == "heard" {
+        return true;
+    }
+    let earlier = previous["heard_chars"].as_u64();
+    let later = next["heard_chars"].as_u64();
+    later.is_some_and(|later| earlier.is_none_or(|earlier| later > earlier))
+}
+
 impl Inner {
     pub(super) fn empty_obligation(&mut self, thread: &str) {
         let epochs: Vec<u64> = self
@@ -208,6 +223,7 @@ impl Inner {
             if row.payload.is_none() {
                 continue;
             }
+            let row_message_id = row.message_id().to_owned();
             let payload = row.payload.as_mut().expect("checked");
             let Some(replies) = payload
                 .pointer("/unheard/replies")
@@ -220,11 +236,7 @@ impl Inner {
                 .filter_map(|reply| {
                     let id = reply["history_id"].as_str()?;
                     let fact = heard.get(id)?;
-                    if fact["fate"] == "partial"
-                        && fact["heard_chars"].as_u64().unwrap_or(0)
-                            <= reply["heard_chars"].as_u64().unwrap_or(0)
-                        && reply["heard_chars"].is_number()
-                    {
+                    if !hearing_advances(fact, reply) {
                         return None;
                     }
                     Some((id.to_owned(), fact.clone()))
@@ -259,12 +271,16 @@ impl Inner {
                 }
             } else if row.ever_exposed {
                 for (id, fact) in changed_hearing {
-                    if row.corrected_heard.get(&id) != Some(&fact) {
+                    let baseline = row
+                        .corrected_heard
+                        .get(&id)
+                        .or_else(|| replies.iter().find(|reply| reply["history_id"] == id));
+                    if baseline.is_none_or(|baseline| hearing_advances(&fact, baseline)) {
                         row.corrected_heard.insert(id, fact.clone());
                         corrections.push((
                             row.session.clone(),
                             row.epoch,
-                            row.message_id().to_owned(),
+                            row_message_id.clone(),
                             fact,
                         ));
                     }

@@ -64,7 +64,8 @@
     "kind": "reply_heard",
     "corrects_message_id": "ORIGINAL_MESSAGE_ID",
     "heard": [{"utterance_id": "REPLY_ID", "history_id": "HISTORY_ID", "fate": "partial", "heard_chars": 2}],
-    "original_message_id_and_payload_stay_unchanged_after_push_retry_or_pull_release": true
+    "original_message_id_and_payload_stay_unchanged_after_push_retry_or_pull_release": true,
+    "late_original_4_after_replay_8": {"history_heard_chars": 8, "additional_correction": false}
   },
   "turn_start": {"type": "voice-user-turn", "data": {"session_id": "SESSION", "client_msg_id": "START1", "phase": "started", "turn_id": "SOURCE_TURN", "thread_id": "CAPTURED_THREAD", "binding_id": "CAPTURED_FOCUS_BINDING"}, "meaning": "Start is pinned to this captured focus even after HTTP selects another focus; terminal cannot override it"},
   "history_resolution": {"request": "GET /api/presentation/history?thread_id=t&resolve_id=OLD_REPLY&resolve_id=EVICTED", "response_extra": {"resolved": [{"id": "OLD_REPLY", "globally_heard": true, "heard_chars": 4}], "missing_ids": ["EVICTED"]}, "meaning": "Explicit IDs are authoritative even when absent from recent messages"}

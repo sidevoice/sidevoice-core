@@ -1703,6 +1703,104 @@ fn review_claimed_unheard_notice_gets_correlated_heard_correction() {
 }
 
 #[test]
+fn r5_late_original_receipt_cannot_reverse_replay_partial_or_correction_in_push_or_pull() {
+    for pull in [false, true] {
+        for replay_elsewhere in [false, true] {
+            let c = Case::new(pull);
+            c.publish("original", 0, "abcdefghij");
+            c.report("original", "interrupted", Some("user_interrupted"), Some(2));
+            c.say("wait", Some("Wait"));
+            let initial = if pull {
+                c.pull()
+                    .into_iter()
+                    .find(|message| message["text"] == "Wait")
+                    .unwrap()
+            } else {
+                let work = c.room.pending_delivery();
+                assert_eq!(work.len(), 1);
+                let (bid, rid, peer, data) = &work[0];
+                c.room.settle_delivery(
+                    bid,
+                    rid,
+                    &peer.generation,
+                    Ok(json!({"status":"accepted"})),
+                );
+                data.clone()
+            };
+            assert_eq!(
+                initial["unheard"]["replies"][0]["heard_chars"], 2,
+                "pull={pull} elsewhere={replay_elsewhere}: {initial}"
+            );
+            let original_id = initial["message_id"].clone();
+            let history_id = c.room.history(Some("t"))["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["role"] == "assistant")
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let mut other_events = None;
+            let other = if replay_elsewhere {
+                let (sender, events) = mpsc::channel(64);
+                other_events = Some(events);
+                let sid = c.room.join("other".into(), "en".into(), sender).unwrap();
+                c.room.select(&sid, "t").unwrap();
+                sid
+            } else {
+                c.sid.clone()
+            };
+            let _keep_other_channel_open = &other_events;
+            c.room
+                .replay_one(&other, &history_id, "replay-eight")
+                .unwrap();
+            c.room
+                .playback(
+                    &other,
+                    "replay-eight",
+                    "interrupted",
+                    Some("user_interrupted"),
+                    Some(8),
+                    &Value::Null,
+                )
+                .unwrap();
+            let correction = c
+                .notes()
+                .into_iter()
+                .find(|note| note["notice"]["kind"] == "reply_heard")
+                .unwrap();
+            assert_eq!(correction["notice"]["corrects_message_id"], original_id);
+            assert_eq!(correction["notice"]["heard"][0]["fate"], "partial");
+            assert_eq!(correction["notice"]["heard"][0]["heard_chars"], 8);
+            c.report("original", "interrupted", Some("user_interrupted"), Some(4));
+            let rows = c.room.history(Some("t"));
+            let row = rows["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == history_id)
+                .unwrap();
+            assert_eq!(
+                row["heard_chars"], 8,
+                "pull={pull} elsewhere={replay_elsewhere}"
+            );
+            let corrections: Vec<_> = c
+                .notes()
+                .into_iter()
+                .filter(|note| note["notice"]["kind"] == "reply_heard")
+                .collect();
+            assert_eq!(
+                corrections.len(),
+                1,
+                "pull={pull} elsewhere={replay_elsewhere}"
+            );
+            assert_eq!(corrections[0]["notice"]["heard"][0]["heard_chars"], 8);
+        }
+    }
+}
+
+#[test]
 fn review_finished_merged_transcript_keeps_its_words_with_another_turn_open() {
     let c = Case::new(true);
     c.room.begin_turn(&c.sid, "first").unwrap();

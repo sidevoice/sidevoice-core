@@ -225,7 +225,12 @@ impl Inner {
         if let Some(row) = self.journal.find_mut(row_id) {
             row.status = status;
             row.reason = reason;
-            row.heard_chars = heard_chars;
+            // Original-device reports can arrive after a manual replay on another handle.
+            // The journal carries the aggregate confirmed prefix, not just the original's prefix.
+            row.heard_chars = match (row.heard_chars, heard_chars) {
+                (Some(previous), Some(original)) => Some(previous.max(original)),
+                (previous, original) => previous.or(original),
+            };
             row.globally_heard |= matches!(row.status.as_str(), "playback_finished" | "skipped");
         }
         self.track_unheard(row_id);
