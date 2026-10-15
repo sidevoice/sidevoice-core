@@ -111,9 +111,11 @@ fn a_spoken_boundary_stales_old_context_but_accepts_fresh_context() {
         .finish_turn(&sid, "turn", Some("New context"), &Value::Null)
         .unwrap();
     let stale = f.publish("stale", &sid, "thread-a", revision, 0);
+    assert_eq!(stale["status"], "text_only");
+    assert!(stale.get("reason").is_none());
     assert_eq!(
-        (stale["status"].as_str(), stale["reason"].as_str()),
-        (Some("text_only"), Some("newer_turn"))
+        f.room.history(Some("thread-a"))["messages"][1]["audio_reason"],
+        "newer_turn"
     );
     assert_eq!(
         f.publish("fresh", &sid, "thread-a", turn.revision, turn.epoch)["status"],
@@ -165,7 +167,8 @@ fn focus_and_session_switches_cannot_rewrite_a_reply_epoch() {
         .finish_turn(&second, "turn", Some("Later"), &Value::Null)
         .unwrap();
     let stale = f.publish("stale", &first, "thread-a", revision, 0);
-    assert_eq!(stale["reason"], "newer_turn");
+    assert_eq!(stale["status"], "text_only");
+    assert!(stale.get("reason").is_none());
     assert_eq!(turn.epoch, 1);
 }
 
@@ -178,7 +181,11 @@ fn no_listener_is_history_only_and_future_context_is_refused() {
         .unwrap();
     let muted = f.publish("muted", &sid, "thread-a", revision, 0);
     assert_eq!(muted["status"], "text_only");
-    assert_eq!(muted["reason"], "agents_muted");
+    assert!(muted.get("reason").is_none());
+    assert_eq!(
+        f.room.history(Some("thread-a"))["messages"][0]["audio_reason"],
+        "agents_muted"
+    );
     let future = f.publish("future", &sid, "thread-a", revision, 1);
     assert_eq!(future["status"], "rejected");
 }

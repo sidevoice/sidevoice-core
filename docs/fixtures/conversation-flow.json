@@ -116,6 +116,23 @@
         "status": "failed",
         "audio_reason": "playback_failed"
       }
+    },
+    {
+      "voice": {
+        "status": "heard-up-to",
+        "heard_chars": 2,
+        "reason": {
+          "reason": "cancelled"
+        }
+      },
+      "core": {
+        "status": "interrupted",
+        "heard_chars": 2
+      },
+      "history": {
+        "status": "interrupted",
+        "audio_reason": null
+      }
     }
   ],
   "turns": [

@@ -56,12 +56,12 @@ fn what_a_call_reports_is_what_the_reply_row_shows() {
         (
             "cut",
             &[("playing", None, None), ("interrupted", None, Some(12))],
-            ("interrupted", Some("user_interrupted"), Some(12)),
+            ("interrupted", None, Some(12)),
         ),
         (
             "dropped",
             &[("unplayed", None, None)],
-            ("interrupted", Some("newer_turn"), Some(0)),
+            ("interrupted", None, Some(0)),
         ),
         (
             "away",
@@ -127,11 +127,7 @@ fn an_unknown_playback_status_changes_nothing_and_an_unknown_reason_is_read_as_n
     .unwrap();
     assert_eq!(
         row(&room, &format!("{sid}:voice:r")),
-        (
-            "interrupted".into(),
-            Some("user_interrupted".into()),
-            Some(4)
-        )
+        ("interrupted".into(), None, Some(4))
     );
 }
 

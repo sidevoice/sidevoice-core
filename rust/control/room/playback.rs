@@ -89,8 +89,7 @@ impl Room {
             End {
                 reason: match status {
                     "heard" | "playing" => None,
-                    "interrupted" => Some(reason.unwrap_or("user_interrupted").into()),
-                    "unplayed" => Some(reason.unwrap_or("newer_turn").into()),
+                    "interrupted" | "unplayed" => reason.map(str::to_owned),
                     "failed" => Some("playback_failed".into()),
                     _ => None,
                 },
@@ -150,7 +149,7 @@ impl Room {
         };
         if let Some((history_id, length)) = target {
             let outcome = match (status, reason, heard_chars) {
-                ("heard", _, _) | (_, Some("user_skipped"), _) => Some(("heard", None)),
+                ("heard", _, _) => Some(("heard", None)),
                 ("interrupted" | "failed", _, Some(extent)) if extent >= length => {
                     Some(("heard", None))
                 }

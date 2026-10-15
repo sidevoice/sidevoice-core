@@ -112,10 +112,7 @@ fn a_reply_spoken_over_is_cut_and_the_next_message_tells_the_agent() {
     room.playback(&sid, "r1", "interrupted", None, Some(9), &Value::Null)
         .unwrap();
     say(&room, &sid, "And the tests?");
-    assert_eq!(
-        status(&room, &sid, "r1"),
-        ("interrupted".into(), Some("user_interrupted".into()))
-    );
+    assert_eq!(status(&room, &sid, "r1"), ("interrupted".into(), None));
     let message = only(deliveries(&room, "voice"));
     assert_eq!(message["text"], "And the tests?");
     assert_eq!(message["unheard"]["count"], 1);
@@ -138,10 +135,7 @@ fn replies_the_call_drops_for_a_newer_turn_are_never_played() {
     reply(&room, &sid, "t", "r2", "Second.", asked);
     for uid in ["r1", "r2"] {
         report(&room, &sid, uid, "unplayed");
-        assert_eq!(
-            status(&room, &sid, uid),
-            ("interrupted".into(), Some("newer_turn".into()))
-        );
+        assert_eq!(status(&room, &sid, uid), ("interrupted".into(), None));
     }
     say(&room, &sid, "Wait, something else.");
     let message = only(deliveries(&room, "voice"));
@@ -392,7 +386,7 @@ fn a_reply_cut_on_one_call_and_failed_on_another_is_told_as_cut_in_either_order(
         }
         assert_eq!(
             status(&room, &a, "r1"),
-            ("interrupted".into(), Some("user_interrupted".into())),
+            ("interrupted".into(), None),
             "cut first: {cut_first}"
         );
         say(&room, &a, "Go on.");

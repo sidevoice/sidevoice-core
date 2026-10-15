@@ -450,7 +450,7 @@ impl Inner {
 pub(super) fn instruction(kind: &str) -> &'static str {
     match kind {
         "turn_empty" => "The person said nothing. Resend what you meant if it still matters.",
-        "user_returned" => "The person is back. These replies were not heard. Send a fresh response if still relevant.",
+        "user_returned" => "The person is back. Use the confirmed hearing extents and respond again if still relevant.",
         "reply_heard" => "This reply was heard after the earlier notice. Do not resend it solely because of that notice.",
         _ => "Use the confirmed hearing extent and current context; respond again if still relevant.",
     }

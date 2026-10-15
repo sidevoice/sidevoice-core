@@ -38,10 +38,13 @@ async fn uncertain_speech_recovery_over_rpc_saves_without_audio_and_recovers_pri
         "epoch":0,"text":"Lost request"});
     let recovered = peer.call("speech.recover", missing.clone()).await;
     assert_eq!(recovered["status"], "text_only");
-    assert_eq!(recovered["reason"], "connector_disconnected");
+    assert!(recovered.get("reason").is_none());
     assert_eq!(recovered["text_saved"], true);
     assert_eq!(recovered["event_id"], "lost-event");
     assert_eq!(peer.call("speech.recover", missing).await, recovered);
+    browser
+        .hearing("old-session:voice:lost", "lost", "heard", None)
+        .await;
     assert_eq!(
         core.history(&token, THREAD)
             .await
@@ -261,7 +264,15 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
     browser
         .report(
             "voice-playback",
-            json!({"utterance_id": "queued-3", "status": "interrupted", "reason": "user_skipped"}),
+            json!({"utterance_id": "queued-3", "status": "interrupted"}),
+        )
+        .await;
+    browser
+        .hearing(
+            &format!("{session}:voice:queued-3"),
+            "queued-3",
+            "heard",
+            None,
         )
         .await;
     let history = core.history(&token, THREAD).await;
@@ -273,9 +284,15 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
     let statuses = &assistant_statuses[assistant_statuses.len() - 2..];
     assert_eq!(
         statuses,
-        [json!("playback_finished"), json!("skipped")],
+        [json!("playback_finished"), json!("interrupted")],
         "{history:?}"
     );
+    assert!(history
+        .iter()
+        .filter(|row| row["role"] == "assistant")
+        .rev()
+        .take(2)
+        .all(|row| row["hearing"] == "heard"));
 
     // A browser that comes to the conversation is not played what it never heard on it.
     let mut returning = core.join(&token, Value::Null).await;
@@ -298,10 +315,13 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
     assert_eq!(browser.frame("voice-reply").await["utterance_id"], "both");
     assert_eq!(second.frame("voice-reply").await["utterance_id"], "both");
     browser.playback("both", "heard").await;
+    browser
+        .hearing(&format!("{session}:voice:both"), "both", "heard", None)
+        .await;
     second
         .report(
             "voice-playback",
-            json!({"utterance_id": "both", "status": "interrupted", "reason": "user_skipped"}),
+            json!({"utterance_id": "both", "status": "interrupted"}),
         )
         .await;
     let history = core.history(&token, THREAD).await;
@@ -626,7 +646,7 @@ async fn a_v3_connector_speaks_json_rpc_on_the_local_socket_only() {
         )
         .await;
     assert_eq!(stale["result"]["status"], "text_only", "{stale}");
-    assert_eq!(stale["result"]["reason"], "newer_turn", "{stale}");
+    assert!(stale["result"].get("reason").is_none(), "{stale}");
     let reply = rpc
         .request(
             "speech.publish",

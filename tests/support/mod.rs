@@ -733,6 +733,24 @@ impl Browser {
     pub async fn played(&mut self, utterance: &str) {
         self.playback(utterance, "playing").await;
         self.playback(utterance, "heard").await;
+        let history_id = format!("{}:voice:{utterance}", self.session);
+        self.hearing(&history_id, utterance, "heard", None).await;
+    }
+
+    /// The app's semantic acknowledgement, independent of the physical playback report.
+    pub async fn hearing(
+        &mut self,
+        history_id: &str,
+        utterance: &str,
+        outcome: &str,
+        heard_chars: Option<u64>,
+    ) {
+        let mut data = json!({"history_id":history_id,"utterance_id":utterance,
+            "outcome":outcome});
+        if let Some(extent) = heard_chars {
+            data["heard_chars"] = json!(extent);
+        }
+        self.report("reply-hearing", data).await;
     }
 
     /// The next event the core sends, or `None` once `within` passes or the socket closes.
