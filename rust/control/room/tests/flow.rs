@@ -1176,6 +1176,45 @@ fn review_return_before_terminal_receipt_still_schedules_notice() {
 }
 
 #[test]
+fn t06a_mute_cut_reason_follows_playback_receipt_in_either_frame_order() {
+    for receipt_before_mute in [false, true] {
+        let c = Case::new(true);
+        assert_eq!(c.publish("playing", 0, "Mute stops me")["status"], "queued");
+        c.report("playing", "playing", None, None);
+        if receipt_before_mute {
+            c.report("playing", "interrupted", Some("agents_muted"), Some(2));
+        }
+        c.room
+            .set_speech(&c.sid, false, Some("agents_muted"))
+            .unwrap();
+        if !receipt_before_mute {
+            c.report("playing", "interrupted", Some("agents_muted"), Some(2));
+        }
+        let rows = c.room.history(Some("t"));
+        let row = &rows["messages"][0];
+        assert_eq!(row["status"], "interrupted");
+        assert_eq!(row["audio_reason"], "agents_muted");
+        assert_eq!(row["heard_chars"], 2);
+        let second = c.publish("later", 0, "Written while muted");
+        assert_eq!(second["status"], "text_only");
+        assert_eq!(second["reason"], "agents_muted");
+    }
+
+    // The lab's bad reason is reproducible only when the client sends that reason.
+    let c = Case::new(true);
+    c.publish("playing", 0, "Mute stops me");
+    c.report("playing", "playing", None, None);
+    c.room
+        .set_speech(&c.sid, false, Some("agents_muted"))
+        .unwrap();
+    c.report("playing", "interrupted", Some("user_interrupted"), Some(2));
+    let rows = c.room.history(Some("t"));
+    let row = &rows["messages"][0];
+    assert_eq!(row["audio_reason"], "user_interrupted");
+    assert_eq!(row["heard_chars"], 2);
+}
+
+#[test]
 fn review_skip_after_core_disconnect_settlement_still_counts_heard() {
     let c = Case::new(true);
     c.publish("r", 0, "Skipped just before socket loss");
