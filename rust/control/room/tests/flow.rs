@@ -52,6 +52,17 @@ impl Case {
             .playback(&self.sid, uid, status, reason, heard, &Value::Null)
             .unwrap();
     }
+    fn hearing(&self, uid: &str, outcome: &str, heard_chars: Option<u64>) {
+        self.room
+            .reply_hearing(
+                &self.sid,
+                &format!("{}:voice:{uid}", self.sid),
+                uid,
+                outcome,
+                heard_chars,
+            )
+            .unwrap();
+    }
     fn say(&self, id: &str, text: Option<&str>) -> u64 {
         let turn = self.room.begin_turn(&self.sid, id).unwrap();
         self.room
@@ -93,6 +104,52 @@ impl Case {
             .as_array()
             .unwrap()
             .clone()
+    }
+}
+
+#[test]
+fn semantic_hearing_is_independent_of_audio_cause_and_missing_receipt() {
+    let c = Case::new(true);
+    c.publish("r", 0, "é🐙ab");
+    c.room
+        .playback_transport(
+            &c.sid,
+            "r",
+            "interrupted",
+            Some("agents_muted"),
+            Some(2),
+            &Value::Null,
+        )
+        .unwrap();
+    let row = &c.room.history(Some("t"))["messages"][0];
+    assert_eq!(row["audio_reason"], "agents_muted");
+    assert_eq!(row["hearing"], Value::Null);
+    assert_eq!(row["hearing_unconfirmed"], true);
+    assert_eq!(row["heard_chars"], Value::Null);
+    c.hearing("r", "partial", Some(2));
+    let row = &c.room.history(Some("t"))["messages"][0];
+    assert_eq!(row["hearing"], "partial");
+    assert_eq!(row["heard_chars"], 2);
+    assert_eq!(row["hearing_unconfirmed"], false);
+}
+
+#[test]
+fn text_only_reply_can_be_acknowledged_as_read_or_not_heard() {
+    for outcome in ["heard", "not_heard"] {
+        let c = Case::new(true);
+        c.room
+            .set_speech(&c.sid, false, Some("agents_muted"))
+            .unwrap();
+        assert_eq!(c.publish("r", 0, "Written reply")["status"], "text_only");
+        assert_eq!(
+            c.room.history(Some("t"))["messages"][0]["hearing"],
+            Value::Null
+        );
+        c.hearing("r", outcome, None);
+        let row = &c.room.history(Some("t"))["messages"][0];
+        assert_eq!(row["hearing"], outcome);
+        assert_eq!(row["globally_heard"], outcome == "heard");
+        assert_eq!(row["heard_chars"], if outcome == "heard" { 13 } else { 0 });
     }
 }
 
@@ -172,6 +229,16 @@ fn missed_note_with_late_other_device(pull: bool) -> (Case, String) {
     let other = c.room.join("other".into(), "en".into(), sender).unwrap();
     c.room.select(&other, "t").unwrap();
     c.publish("r", 0, "Missed answer");
+    c.hearing("r", "not_heard", None);
+    c.room
+        .reply_hearing(
+            &other,
+            &format!("{}:voice:r", c.sid),
+            "r",
+            "not_heard",
+            None,
+        )
+        .unwrap();
     c.room.park(&c.sid, true);
     c.room.park(&other, true);
     c.room.resume(&c.sid, &[]);
@@ -225,13 +292,13 @@ fn f4_lost_push_ack_keeps_exposed_notice_frozen_and_sends_hearing_correction() {
 }
 
 #[test]
-fn f4_released_pull_claim_keeps_original_payload_and_corrects_partial_full_and_skip() {
+fn f4_released_pull_claim_keeps_original_payload_and_corrects_partial_or_full() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../docs/fixtures/conversation-flow.json"
     ))
     .unwrap();
     assert_eq!(fixture["notice_correction"]["kind"], "reply_heard");
-    for outcome in ["partial", "heard", "skipped"] {
+    for outcome in ["partial", "heard"] {
         let (c, other) = missed_note_with_late_other_device(true);
         let first = c.pull();
         assert_eq!(first.len(), 1);
@@ -258,17 +325,7 @@ fn f4_released_pull_claim_keeps_original_payload_and_corrects_partial_full_and_s
                 .room
                 .playback(&other, "r", "heard", None, None, &Value::Null)
                 .unwrap(),
-            _ => c
-                .room
-                .playback(
-                    &other,
-                    "r",
-                    "unplayed",
-                    Some("user_skipped"),
-                    None,
-                    &Value::Null,
-                )
-                .unwrap(),
+            _ => unreachable!(),
         }
         assert_eq!(c.notes()[0], original_payload, "{outcome}");
         let messages = c.pull();
@@ -310,15 +367,15 @@ fn f2_original_reply_final_receipt_after_park_resume_updates_global_hearing() {
 }
 
 #[test]
-fn f2_manual_replay_late_receipts_after_park_resume_reconcile_original_and_notices() {
+fn f2_manual_replay_late_semantic_receipts_after_park_resume_reconcile_original_and_notices() {
     for (status, reason, extent, fate) in [
         ("heard", None, None, "heard"),
         ("interrupted", Some("user_interrupted"), Some(3), "partial"),
-        ("unplayed", Some("user_skipped"), None, "skipped"),
     ] {
         let c = Case::new(true);
         c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
         c.publish("original", 0, "Replay me");
+        c.hearing("original", "not_heard", None);
         c.room.set_speech(&c.sid, true, None).unwrap();
         c.room
             .inner
@@ -397,11 +454,11 @@ fn t01_playing_reply_cut_carries_full_unicode_evidence_with_the_words() {
     c.report("r", "interrupted", Some("user_interrupted"), Some(2));
     assert_eq!(c.say("turn", Some("Wait")), 1);
     let payload = c.input("Wait");
-    assert_eq!(payload["notice"]["kind"], "reply_interrupted");
+    assert_eq!(payload["notice"]["kind"], "reply_not_heard");
     let reply = &payload["unheard"]["replies"][0];
     assert_eq!(
         (&reply["text"], &reply["heard_chars"], &reply["fate"]),
-        (&json!("é🐙 rest"), &json!(2), &json!("interrupted"))
+        (&json!("é🐙 rest"), &json!(2), &json!("partial"))
     );
 }
 
@@ -418,9 +475,12 @@ fn t02a_accepted_before_start_is_withdrawn_and_attached_to_words() {
         .finish_turn(&c.sid, "turn", Some("Actually"), &Value::Null)
         .unwrap();
     assert_eq!(
-        c.input("Actually")["unheard"]["replies"][0]["reason"],
-        "newer_turn"
+        c.input("Actually")["unheard"]["replies"][0]["fate"],
+        "not_heard"
     );
+    assert!(c.input("Actually")["unheard"]["replies"][0]
+        .get("reason")
+        .is_none());
     assert!(c.frames("voice-reply").is_empty());
 }
 
@@ -480,11 +540,14 @@ fn t03_late_old_epoch_reply_stays_written_and_notifies_without_another_turn() {
     let mut c = Case::new(false);
     c.say("new", Some("New question"));
     let answer = c.publish("late", 0, "Old answer");
+    assert_eq!(answer["status"], "text_only");
+    assert!(answer.get("reason").is_none());
     assert_eq!(
-        (&answer["status"], &answer["reason"]),
-        (&json!("text_only"), &json!("newer_turn"))
+        c.room.history(Some("t"))["messages"][1]["audio_reason"],
+        "newer_turn"
     );
     assert!(c.frames("voice-reply").is_empty());
+    c.hearing("late", "not_heard", None);
     assert_eq!(c.notes()[0]["unheard"]["replies"][0]["text"], "Old answer");
 }
 
@@ -577,11 +640,12 @@ fn output_off_case(reason: &str) {
     c.report("playing", "interrupted", Some(reason), Some(3));
     let answer = c.publish("later", 0, "Not sounded");
     assert_eq!(answer["status"], "text_only");
-    assert_eq!(answer["reason"], reason);
+    assert!(answer.get("reason").is_none());
     c.room.set_speech(&c.sid, true, None).unwrap();
     assert!(c.frames("voice-reply").is_empty());
     let history = c.room.history(Some("t"));
     assert_eq!(history["messages"][0]["heard_chars"], 3);
+    assert_eq!(history["messages"][1]["audio_reason"], reason);
     assert_eq!(history["messages"][1]["globally_heard"], false);
 }
 
@@ -616,6 +680,7 @@ fn t06d_return_with_misses_creates_one_notice_after_grace_for_pull() {
     let c = Case::new(true);
     c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
     c.publish("missed", 0, "A missed update");
+    c.hearing("missed", "not_heard", None);
     c.room.set_speech(&c.sid, true, None).unwrap();
     assert!(c.notes().is_empty());
     c.room
@@ -741,19 +806,21 @@ fn t11_threads_sessions_and_duplicate_starts_keep_separate_epochs() {
 }
 
 #[test]
-fn t12_skip_is_heard_by_choice_and_does_not_stale_the_next_reply() {
+fn t12_local_skip_can_report_ordinary_full_hearing_without_staling_next_reply() {
     let mut c = Case::new(true);
     c.publish("first", 0, "Skip this");
     c.publish("next", 0, "Play this");
     c.frames("voice-reply");
-    c.report("first", "interrupted", Some("user_skipped"), Some(2));
+    c.room
+        .playback_transport(&c.sid, "first", "interrupted", None, Some(2), &Value::Null)
+        .unwrap();
+    c.hearing("first", "heard", None);
     let history = c.room.history(Some("t"));
-    assert_eq!(history["messages"][0]["status"], "skipped");
+    assert_eq!(history["messages"][0]["status"], "interrupted");
+    assert_eq!(history["messages"][0]["hearing"], "heard");
     assert_eq!(history["messages"][0]["globally_heard"], true);
     assert_eq!(history["messages"][1]["status"], "queued");
-    assert_eq!(c.notes()[0]["notice"]["kind"], "reply_skipped");
-    assert!(c.notes()[0].get("unheard").is_none());
-    assert_eq!(c.pull()[0]["notice"]["skipped"][0]["text"], "Skip this");
+    assert!(c.notes().is_empty());
 }
 
 #[test]
@@ -828,10 +895,8 @@ fn t07_connector_held_publication_is_explicit_history_only_after_reconnect() {
     let mut request = json!({"session_id":c.sid,"thread_id":"t","revision":c.revision(),
         "epoch":0,"utterance_id":"held","text":"Held across disconnect","history_only":true});
     let first = c.room.publish(&request);
-    assert_eq!(
-        (&first["status"], &first["reason"]),
-        (&json!("text_only"), &json!("connector_disconnected"))
-    );
+    assert_eq!(first["status"], "text_only");
+    assert!(first.get("reason").is_none());
     request["history_only"] = json!(false);
     assert_eq!(c.room.publish(&request)["error"], "room.speech_conflict");
     assert!(c.frames("voice-reply").is_empty());
@@ -924,7 +989,7 @@ fn t02a_late_receipt_after_the_spoken_message_becomes_a_correlated_followup() {
     c.report("r", "unplayed", Some("newer_turn"), None);
     let notes = c.notes();
     assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0]["notice"]["kind"], "reply_not_played");
+    assert_eq!(notes[0]["notice"]["kind"], "reply_not_heard");
     assert_eq!(
         notes[0]["notice"]["related_message_id"],
         c.input("New words")["message_id"]
@@ -976,6 +1041,7 @@ fn t16_full_evidence_is_batched_eight_at_a_time_without_truncating_replies() {
     for n in 0..9 {
         let text = format!("{n}{}TAIL", "é".repeat(300));
         assert_eq!(c.publish(&format!("r{n}"), 0, &text)["status"], "text_only");
+        c.hearing(&format!("r{n}"), "not_heard", None);
     }
     c.room.set_speech(&c.sid, true, None).unwrap();
     c.room
@@ -1197,7 +1263,7 @@ fn t06a_mute_cut_reason_follows_playback_receipt_in_either_frame_order() {
         assert_eq!(row["heard_chars"], 2);
         let second = c.publish("later", 0, "Written while muted");
         assert_eq!(second["status"], "text_only");
-        assert_eq!(second["reason"], "agents_muted");
+        assert!(second.get("reason").is_none());
     }
 
     // The lab's bad reason is reproducible only when the client sends that reason.
@@ -1215,17 +1281,20 @@ fn t06a_mute_cut_reason_follows_playback_receipt_in_either_frame_order() {
 }
 
 #[test]
-fn review_skip_after_core_disconnect_settlement_still_counts_heard() {
+fn review_full_hearing_after_core_disconnect_settlement_still_counts() {
     let c = Case::new(true);
     c.publish("r", 0, "Skipped just before socket loss");
     c.room.park(&c.sid, true);
     c.room.resume(&c.sid, &[]);
-    c.report("r", "interrupted", Some("user_skipped"), Some(2));
+    c.room
+        .playback_transport(&c.sid, "r", "interrupted", None, Some(2), &Value::Null)
+        .unwrap();
+    c.hearing("r", "heard", None);
     assert_eq!(
         c.room.history(Some("t"))["messages"][0]["globally_heard"],
         true
     );
-    assert_eq!(c.notes()[0]["notice"]["kind"], "reply_skipped");
+    assert!(c.notes().is_empty());
 }
 
 #[test]
@@ -1276,7 +1345,7 @@ fn review_manual_replay_partial_extent_updates_history() {
 }
 
 #[test]
-fn review_manual_replay_skip_queues_skipped_notice() {
+fn review_manual_replay_full_ack_is_ordinary_hearing_without_skip_notice() {
     let c = Case::new(true);
     c.publish("r", 0, "Replay and skip");
     c.report("r", "heard", None, None);
@@ -1288,8 +1357,19 @@ fn review_manual_replay_skip_queues_skipped_notice() {
             "replay",
         )
         .unwrap();
-    c.report("replay", "interrupted", Some("user_skipped"), Some(1));
-    assert_eq!(c.notes().len(), 1);
+    c.room
+        .playback_transport(&c.sid, "replay", "interrupted", None, Some(1), &Value::Null)
+        .unwrap();
+    c.room
+        .reply_hearing(
+            &c.sid,
+            history["messages"][0]["id"].as_str().unwrap(),
+            "replay",
+            "heard",
+            None,
+        )
+        .unwrap();
+    assert!(c.notes().is_empty());
 }
 
 #[test]
@@ -1297,6 +1377,7 @@ fn review_full_journal_with_one_old_miss_still_accepts_current_work() {
     let mut c = Case::new(false);
     c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
     c.publish("old-miss", 0, "One old unheard reply");
+    c.hearing("old-miss", "not_heard", None);
     c.room.set_speech(&c.sid, true, None).unwrap();
     // The ordinary notice was acknowledged; the original remains unheard by the person.
     c.room
@@ -1386,6 +1467,7 @@ fn review_return_notice_uses_remaining_eligible_device() {
     let c = Case::new(true);
     c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
     c.publish("r", 0, "Missed");
+    c.hearing("r", "not_heard", None);
     c.room.set_speech(&c.sid, true, None).unwrap();
     let (sender, _events) = mpsc::channel(64);
     let other = c.room.join("other".into(), "en".into(), sender).unwrap();
@@ -1445,21 +1527,12 @@ fn agent_view(message: &Value) -> Value {
         .flatten()
         .map(|reply| {
             json!({"utterance_id":reply["utterance_id"],"text":reply["text"],"fate":reply["fate"],
-            "reason":reply["reason"],"cut":reply["cut"],"heard_chars":reply["heard_chars"]})
-        })
-        .collect();
-    let skipped: Vec<Value> = message["notice"]["skipped"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|reply| {
-            json!({"text":reply["text"],"fate":reply["fate"],"reason":reply["reason"],
             "heard_chars":reply["heard_chars"]})
         })
         .collect();
     json!({"channel":message["channel"],"text":message["text"],"epoch":message["epoch"],
         "kind":message["notice"]["kind"],"instruction":message["notice"]["instruction"],
-        "count":message["unheard"]["count"],"replies":replies,"skipped":skipped})
+        "count":message["unheard"]["count"],"replies":replies})
 }
 
 fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
@@ -1511,6 +1584,7 @@ fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
         "return" => {
             c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
             c.publish("r", 0, "Missed reply");
+            c.hearing("r", "not_heard", None);
             c.room.set_speech(&c.sid, true, None).unwrap();
             c.room
                 .inner
@@ -1521,18 +1595,16 @@ fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
                 .unwrap()
                 .due = 0;
         }
-        "skip" => {
-            c.publish("r", 0, "Skip reply");
-            c.report("r", "interrupted", Some("user_skipped"), Some(1));
-        }
         "stale" => {
             c.say("turn", Some("New words"));
             c.publish("r", 0, "Old answer");
+            c.hearing("r", "not_heard", None);
         }
         "full_evidence" => {
             c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
             for n in 0..9 {
                 c.publish(&format!("r{n}"), 0, &format!("{n}{}TAIL", "é".repeat(300)));
+                c.hearing(&format!("r{n}"), "not_heard", None);
             }
             c.room.set_speech(&c.sid, true, None).unwrap();
             c.room
@@ -1594,7 +1666,6 @@ fn t16_push_pull_notice_parity_matrix() {
         "unplayed_empty_late",
         "refused_empty",
         "return",
-        "skip",
         "stale",
         "full_evidence",
     ] {
@@ -1716,6 +1787,16 @@ fn review_claimed_unheard_notice_gets_correlated_heard_correction() {
     let other = c.room.join("other".into(), "en".into(), sender).unwrap();
     c.room.select(&other, "t").unwrap();
     c.publish("r", 0, "Heard on second device");
+    c.hearing("r", "not_heard", None);
+    c.room
+        .reply_hearing(
+            &other,
+            &format!("{}:voice:r", c.sid),
+            "r",
+            "not_heard",
+            None,
+        )
+        .unwrap();
     c.room.park(&c.sid, true);
     c.room.park(&other, true);
     c.room.resume(&c.sid, &[]);
@@ -1924,18 +2005,45 @@ fn t16_shared_voice_to_core_protocol_fixtures_have_the_documented_fates() {
         let c = Case::new(true);
         c.publish("r", 0, fixture["text"].as_str().unwrap());
         let receipt = &mapping["core"];
-        c.report(
-            "r",
-            receipt["status"].as_str().unwrap(),
-            receipt["reason"].as_str(),
-            receipt["heard_chars"].as_u64(),
-        );
+        c.room
+            .playback_transport(
+                &c.sid,
+                "r",
+                receipt["status"].as_str().unwrap(),
+                receipt["reason"].as_str(),
+                receipt["heard_chars"].as_u64(),
+                &Value::Null,
+            )
+            .unwrap();
         let row = &c.room.history(Some("t"))["messages"][0];
-        for field in ["status", "audio_reason", "heard_chars", "globally_heard"] {
+        for field in ["status", "audio_reason"] {
             assert_eq!(
                 row[field], mapping["history"][field],
                 "fixture {index} {field}"
             );
+        }
+        assert_eq!(row["hearing"], Value::Null, "fixture {index} hearing");
+    }
+    for mapping in fixture["hearing"].as_array().unwrap() {
+        let c = Case::new(true);
+        if mapping["publication_status"] == "text_only" {
+            c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+        }
+        c.publish("r", 0, fixture["text"].as_str().unwrap());
+        let data = &mapping["frame"]["data"];
+        c.hearing(
+            "r",
+            data["outcome"].as_str().unwrap(),
+            data["heard_chars"].as_u64(),
+        );
+        let row = &c.room.history(Some("t"))["messages"][0];
+        for field in [
+            "hearing",
+            "heard_chars",
+            "globally_heard",
+            "hearing_unconfirmed",
+        ] {
+            assert_eq!(row[field], mapping["history"][field], "{field}");
         }
     }
     let turns = fixture["turns"].as_array().unwrap();
@@ -1991,35 +2099,34 @@ fn t16_unacknowledged_notice_crosses_pull_push_handover_with_one_message_id() {
 }
 
 #[test]
-fn review_skip_receipt_spellings_and_disconnect_orders_agree() {
+fn review_full_ack_after_local_stop_and_disconnect_orders_agree() {
     for status in ["interrupted", "unplayed"] {
         for before_disconnect in [false, true] {
             let c = Case::new(true);
             c.publish("r", 0, "Skip me");
             if before_disconnect {
-                c.report("r", status, Some("user_skipped"), Some(0));
+                c.room
+                    .playback_transport(&c.sid, "r", status, None, Some(0), &Value::Null)
+                    .unwrap();
+                c.hearing("r", "heard", None);
             }
             c.room.park(&c.sid, true);
             c.room.resume(&c.sid, &[]);
             if !before_disconnect {
-                c.report("r", status, Some("user_skipped"), Some(0));
+                c.room
+                    .playback_transport(&c.sid, "r", status, None, Some(0), &Value::Null)
+                    .unwrap();
+                c.hearing("r", "heard", None);
             }
-            c.report("r", status, Some("user_skipped"), Some(0));
+            c.hearing("r", "heard", None);
             assert_eq!(
                 c.room.history(Some("t"))["messages"][0]["globally_heard"],
                 true
             );
-            let skipped: Vec<_> = c
-                .notes()
-                .into_iter()
-                .filter(|note| note["notice"]["kind"] == "reply_skipped")
-                .collect();
-            assert_eq!(
-                skipped.len(),
-                1,
+            assert!(
+                c.notes().is_empty(),
                 "{status} before_disconnect={before_disconnect}"
             );
-            assert_eq!(skipped[0]["notice"]["skipped"][0]["heard_chars"], 7);
         }
     }
 }
@@ -2055,10 +2162,11 @@ fn review_replay_partial_extent_follows_words_or_empty_terminal() {
 }
 
 #[test]
-fn review_claimed_notice_gets_skip_and_replay_corrections() {
+fn review_claimed_notice_gets_full_hearing_and_replay_corrections() {
     for replay in [false, true] {
         let c = Case::new(true);
         c.publish("r", 0, "Reply");
+        c.hearing("r", "not_heard", None);
         c.room.park(&c.sid, true);
         c.room.resume(&c.sid, &[]);
         c.room
@@ -2078,7 +2186,7 @@ fn review_claimed_notice_gets_skip_and_replay_corrections() {
             c.room.replay_one(&c.sid, &history_id, "replay").unwrap();
             c.report("replay", "heard", None, None);
         } else {
-            c.report("r", "unplayed", Some("user_skipped"), None);
+            c.hearing("r", "heard", None);
         }
         let messages = c.pull();
         let correction = messages
@@ -2086,10 +2194,7 @@ fn review_claimed_notice_gets_skip_and_replay_corrections() {
             .find(|message| message["notice"]["kind"] == "reply_heard")
             .unwrap();
         assert_eq!(correction["notice"]["corrects_message_id"], prior);
-        assert_eq!(
-            correction["notice"]["heard"][0]["fate"],
-            if replay { "heard" } else { "skipped" }
-        );
+        assert_eq!(correction["notice"]["heard"][0]["fate"], "heard");
     }
 }
 
@@ -2168,6 +2273,7 @@ fn review_offline_epoch_withdraws_second_device_and_correlates_its_late_receipt(
     assert!(std::iter::from_fn(|| other_events.try_recv().ok())
         .any(|frame| frame["type"] == "voice-reply-withdrawn"));
     c.room.park(&c.sid, true);
+    c.hearing("r", "not_heard", None);
     c.room
         .playback(
             &other,
@@ -2180,7 +2286,7 @@ fn review_offline_epoch_withdraws_second_device_and_correlates_its_late_receipt(
         .unwrap();
     let messages = c.pull();
     assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1]["notice"]["kind"], "reply_not_played");
+    assert_eq!(messages[1]["notice"]["kind"], "reply_not_heard");
     assert_eq!(
         messages[1]["notice"]["related_message_id"],
         messages[0]["message_id"]

@@ -47,7 +47,7 @@ fn room_on_thread() -> (tempfile::TempDir, Room) {
 fn what_a_call_reports_is_what_the_reply_row_shows() {
     let (_directory, room) = room_on_thread();
     let (sid, _events) = join(&room, "thread");
-    let cases: [(&str, &[Report], Report); 6] = [
+    let cases: [(&str, &[Report], Report); 5] = [
         (
             "heard",
             &[("playing", None, None), ("heard", None, None)],
@@ -59,27 +59,19 @@ fn what_a_call_reports_is_what_the_reply_row_shows() {
             ("interrupted", Some("user_interrupted"), Some(12)),
         ),
         (
-            "skipped",
-            &[
-                ("playing", None, None),
-                ("interrupted", Some("user_skipped"), Some(3)),
-            ],
-            ("skipped", Some("user_skipped"), Some(29)),
-        ),
-        (
             "dropped",
             &[("unplayed", None, None)],
-            ("interrupted", Some("newer_turn"), None),
+            ("interrupted", Some("newer_turn"), Some(0)),
         ),
         (
             "away",
             &[("unplayed", Some("unheard"), None)],
-            ("interrupted", Some("unheard"), None),
+            ("interrupted", Some("unheard"), Some(0)),
         ),
         (
             "broken",
             &[("playing", None, None), ("failed", None, None)],
-            ("failed", Some("playback_failed"), None),
+            ("failed", Some("playback_failed"), Some(0)),
         ),
     ];
     for (uid, reports, (status, reason, heard)) in cases {

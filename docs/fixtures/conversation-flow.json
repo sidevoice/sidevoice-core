@@ -199,7 +199,6 @@
     ],
     "missing_first_admission": {
       "status": "text_only",
-      "reason": "connector_disconnected",
       "text_saved": true
     },
     "known_admission": "return original disposition",

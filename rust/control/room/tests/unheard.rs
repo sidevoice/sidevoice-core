@@ -52,6 +52,11 @@ fn status(room: &Room, sid: &str, uid: &str) -> (String, Option<String>) {
     (row.status.clone(), row.reason.clone())
 }
 
+fn confirm_not_heard(room: &Room, sid: &str, uid: &str) {
+    room.reply_hearing(sid, &format!("{sid}:voice:{uid}"), uid, "not_heard", None)
+        .unwrap();
+}
+
 /// What the message the person said as `text` tells its agent they did not hear.
 fn told(room: &Room, text: &str) -> Option<Value> {
     let inner = room.inner.lock().unwrap();
@@ -169,6 +174,7 @@ fn a_reply_to_a_turn_the_person_already_followed_is_not_spoken() {
         status(&room, &sid, "late"),
         ("text_only".into(), Some("newer_turn".into()))
     );
+    confirm_not_heard(&room, &sid, "late");
     let note = room
         .inner
         .lock()
@@ -202,6 +208,9 @@ fn what_was_published_while_away_becomes_a_bounded_note_on_return() {
         );
     }
     room.select(&sid, "t").unwrap();
+    for n in 0..5 {
+        confirm_not_heard(&room, &sid, &format!("p{n}"));
+    }
     // Not before the person has had a moment to speak first.
     assert!(deliveries(&room, "note").is_empty());
     room.inner
@@ -242,6 +251,7 @@ fn a_note_not_taken_is_sent_again_with_the_same_list() {
     let (sid, _received) = call(&room, "elsewhere");
     reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
     room.select(&sid, "t").unwrap();
+    confirm_not_heard(&room, &sid, "p");
     room.inner
         .lock()
         .unwrap()
@@ -269,6 +279,7 @@ fn a_message_before_the_note_is_due_takes_the_list_and_the_note_is_dropped() {
     let (sid, _received) = call(&room, "elsewhere");
     reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
     room.select(&sid, "t").unwrap();
+    confirm_not_heard(&room, &sid, "p");
     say(&room, &sid, "Hi.");
     let message = only(deliveries(&room, "voice"));
     assert_eq!(message["unheard"]["count"], 1);
@@ -430,7 +441,7 @@ fn a_reply_played_through_on_one_call_is_heard_whatever_another_call_did() {
 }
 
 #[test]
-fn a_reply_that_cannot_be_handed_to_a_full_call_is_unheard_and_told() {
+fn a_reply_that_cannot_be_handed_to_a_full_call_stays_unconfirmed() {
     let (_directory, room, _, _) = room_on("t");
     let (events, _received) = mpsc::channel(1);
     let sid = room
@@ -453,10 +464,10 @@ fn a_reply_that_cannot_be_handed_to_a_full_call_is_unheard_and_told() {
         ("interrupted".into(), Some("unheard".into()))
     );
     say(&room, &sid, "Anything?");
-    assert_eq!(
-        told(&room, "Anything?").unwrap()["replies"][0]["text"],
-        "The build is green."
-    );
+    assert_eq!(told(&room, "Anything?"), None);
+    let history = room.history(Some("t"));
+    assert_eq!(history["messages"][0]["hearing"], Value::Null);
+    assert_eq!(history["messages"][0]["hearing_unconfirmed"], true);
 }
 
 #[test]
@@ -471,11 +482,11 @@ fn how_far_a_reply_was_heard_cannot_pass_its_end_in_characters() {
         .unwrap_err();
     assert_eq!(refused.key, "room.receipt_invalid");
     assert_eq!(status(&room, &sid, "r1").0, "playing", "nothing changed");
-    cut(&room, &sid, "r1", Some(5));
+    cut(&room, &sid, "r1", Some(4));
     say(&room, &sid, "Again?");
     assert_eq!(
         told(&room, "Again?").unwrap()["replies"][0]["heard_chars"],
-        5
+        4
     );
 }
 
@@ -487,6 +498,7 @@ fn a_note_cut_off_by_its_connector_leaving_is_sent_again_with_the_same_list() {
         let (sid, _received) = call(&room, "elsewhere");
         reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
         room.select(&sid, "t").unwrap();
+        confirm_not_heard(&room, &sid, "p");
         room.inner
             .lock()
             .unwrap()
@@ -532,7 +544,8 @@ fn a_reply_never_sent_to_a_call_can_still_be_replayed_on_request() {
     say(&room, &sid, "First.");
     say(&room, &sid, "Second.");
     let late = reply(&room, &sid, "t", "late", "An old answer.", asked);
-    assert_eq!(late["reason"], "newer_turn");
+    assert_eq!(late["status"], "text_only");
+    assert!(late.get("reason").is_none());
     let history_id = format!("{sid}:voice:late");
     room.replay_one(&sid, &history_id, "again").unwrap();
     assert_eq!(
@@ -563,7 +576,12 @@ fn a_reply_never_sent_to_a_call_can_still_be_replayed_on_request() {
         "No room to speak.",
         revision(&room, &sid),
     );
-    assert_eq!(full["reason"], "queue_full");
+    assert_eq!(full["status"], "text_only");
+    assert!(full.get("reason").is_none());
+    assert_eq!(
+        room.history(Some("t"))["messages"][0]["audio_reason"],
+        "queue_full"
+    );
     room.replay_one(&sid, &format!("{sid}:voice:full"), "again")
         .unwrap();
     assert_eq!(

@@ -197,13 +197,8 @@ impl Room {
             })
             .unwrap_or_else(|| default_title(thread, asker.map_or("en", |b| b.language.as_str())));
         let row_id = format!("{sid}:voice:{uid}");
-        let disposition = if let Some(ref reason) = reason {
-            json!({"status":status,"utterance_id":uid,"session_id":sid,"revision":revision,
-                "epoch":epoch,"text_saved":true,"reason":reason})
-        } else {
-            json!({"status":status,"utterance_id":uid,"session_id":sid,"revision":revision,
-                "epoch":epoch,"text_saved":true})
-        };
+        let disposition = json!({"status":status,"utterance_id":uid,"session_id":sid,"revision":revision,
+            "epoch":epoch,"text_saved":true});
         inner.append_row(Row {
             id: row_id.clone(),
             thread: thread.into(),

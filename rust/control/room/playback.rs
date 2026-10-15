@@ -24,7 +24,7 @@ const REASONS: [&str; 9] = [
 
 impl Room {
     /// Physical playback and diagnostic stop cause. Semantic hearing arrives in reply-hearing.
-    pub fn playback(
+    pub fn playback_transport(
         &self,
         sid: &str,
         uid: &str,
@@ -121,6 +121,47 @@ impl Room {
         inner.utterances.retire_finished_replays();
         drop(guard);
         self.latency_browser(sid, uid, timings);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Room {
+    /// Test fixture app policy: translate a physical report to a separate semantic receipt.
+    /// Production clients send reply-hearing themselves and may choose a different policy.
+    pub fn playback(
+        &self,
+        sid: &str,
+        uid: &str,
+        status: &str,
+        reason: Option<&str>,
+        heard_chars: Option<u64>,
+        timings: &Value,
+    ) -> Result<(), RoomError> {
+        self.playback_transport(sid, uid, status, reason, heard_chars, timings)?;
+        let target = {
+            let inner = self.inner.lock().expect("room lock");
+            inner.utterances.get(uid).and_then(|record| {
+                inner
+                    .journal
+                    .find(&record.row_id)
+                    .map(|row| (row.id.clone(), row.text.chars().count() as u64))
+            })
+        };
+        if let Some((history_id, length)) = target {
+            let outcome = match (status, reason, heard_chars) {
+                ("heard", _, _) | (_, Some("user_skipped"), _) => Some(("heard", None)),
+                ("interrupted" | "failed", _, Some(extent)) if extent >= length => {
+                    Some(("heard", None))
+                }
+                ("interrupted" | "failed", _, Some(extent)) => Some(("partial", Some(extent))),
+                ("interrupted" | "unplayed" | "failed", _, _) => Some(("not_heard", None)),
+                _ => None,
+            };
+            if let Some((outcome, extent)) = outcome {
+                self.reply_hearing(sid, &history_id, uid, outcome, extent)?;
+            }
+        }
         Ok(())
     }
 }

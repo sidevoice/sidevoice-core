@@ -94,6 +94,8 @@ fn explicit_history_resolution_reports_old_heard_row_and_missing_identity() {
             text: "old missed reply".into(),
             status: "interrupted".into(),
             reason: Some("user_interrupted".into()),
+            hearing: Some("not_heard".into()),
+            heard_chars: Some(0),
             ..Row::default()
         });
         for n in 0..1001 {
@@ -115,6 +117,7 @@ fn explicit_history_resolution_reports_old_heard_row_and_missing_identity() {
         let mut inner = room.inner.lock().unwrap();
         let row = inner.journal.find_mut("older-miss").unwrap();
         row.globally_heard = true;
+        row.hearing = Some("heard".into());
         row.heard_chars = Some(16);
     }
     let ordinary = room.history(Some("x"));
@@ -211,7 +214,8 @@ fn an_offline_message_is_newer_than_the_turn_before_it() {
     );
     let late = publish(&room, &sid, "to-live", live.revision);
     assert_eq!(late["status"], "text_only");
-    assert_eq!(late["reason"], "newer_turn");
+    assert_eq!(late["status"], "text_only");
+    assert!(late.get("reason").is_none());
 }
 
 #[test]
@@ -230,7 +234,8 @@ fn of_two_offline_messages_a_late_reply_to_the_first_is_not_spoken() {
     );
     let late = publish(&room, &sid, "to-first", first);
     assert_eq!(late["status"], "text_only");
-    assert_eq!(late["reason"], "newer_turn");
+    assert_eq!(late["status"], "text_only");
+    assert!(late.get("reason").is_none());
 }
 
 #[test]

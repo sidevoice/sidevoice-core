@@ -137,7 +137,7 @@ impl Call {
                 .ok_or_else(|| RoomError::new(400, "room.receipt_invalid")),
         };
         let result = heard_chars.and_then(|heard_chars| {
-            self.state.room.playback(
+            self.state.room.playback_transport(
                 &self.session,
                 data["utterance_id"].as_str().unwrap_or(""),
                 data["status"].as_str().unwrap_or(""),

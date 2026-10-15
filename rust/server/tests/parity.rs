@@ -216,7 +216,8 @@ async fn resumed_hello_applies_output_off_before_new_publication() {
         &json!({"session_id":sid,"thread_id":"t","revision":revision,
         "epoch":0,"utterance_id":"off-after-resume","text":"Do not play"}),
     );
-    assert_eq!(result["reason"], "voice_off");
+    assert_eq!(result["status"], "text_only");
+    assert!(result.get("reason").is_none());
 }
 
 #[tokio::test]

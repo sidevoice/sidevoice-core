@@ -91,20 +91,20 @@ fn finished_replays_keep_only_a_bounded_receipt_window_and_the_original_stays() 
 }
 
 #[test]
-fn replay_skips_close_and_leave_keep_original_history() {
+fn replay_stops_close_and_leave_keep_original_history() {
     let (_directory, room, sid, _received, history_id) = heard_reply();
-    room.replay_one(&sid, &history_id, "skipped-replay")
+    room.replay_one(&sid, &history_id, "stopped-replay")
         .unwrap();
     room.playback(
         &sid,
-        "skipped-replay",
+        "stopped-replay",
         "interrupted",
-        Some("user_skipped"),
+        None,
         None,
         &Value::Null,
     )
     .unwrap();
-    assert!(kept(&room, "skipped-replay"));
+    assert!(kept(&room, "stopped-replay"));
     room.replay_one(&sid, &history_id, "turn-replay").unwrap();
     room.begin_turn(&sid, "turn").unwrap();
     assert_eq!(status(&room, &history_id), "playback_finished");
@@ -140,7 +140,7 @@ fn replay_skips_close_and_leave_keep_original_history() {
     assert!(kept(&room, "closed-replay"));
     assert_eq!(status(&room, &history_id), "playback_finished");
     room.leave(&sid);
-    assert!(!kept(&room, "skipped-replay"));
+    assert!(!kept(&room, "stopped-replay"));
     assert!(!kept(&room, "closed-replay"));
     assert!(kept(&room, "original"));
 }
