@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0](https://github.com/sidevoice/sidevoice-core/compare/v0.3.0...v0.4.0) (2026-10-15)
+
+
+### Features
+
+* **runtime:** the core's default port is 10829 ([#116](https://github.com/sidevoice/sidevoice-core/issues/116)) ([6e17338](https://github.com/sidevoice/sidevoice-core/commit/6e17338f55f11d0276f03eb3025bf4880e4f0344))
+* **server:** forward an agent health check to the connector ([#107](https://github.com/sidevoice/sidevoice-core/issues/107)) ([f7f8d8e](https://github.com/sidevoice/sidevoice-core/commit/f7f8d8e28734d86d9a1160e5be2ef6723c9a534e))
+* **server:** rename a paired device (PATCH /api/device/devices/{id}) ([#106](https://github.com/sidevoice/sidevoice-core/issues/106)) ([df591fa](https://github.com/sidevoice/sidevoice-core/commit/df591fa6a5301ca6591a43c423a7548563cf7475))
+* **server:** report the machine's Sidevoice version to paired devices (GET /api/host/status) ([#105](https://github.com/sidevoice/sidevoice-core/issues/105)) ([79e36b0](https://github.com/sidevoice/sidevoice-core/commit/79e36b02492a3d7799eb87d6743cda9b52578593))
+* **turns:** implement conversation epochs and semantic hearing ([#120](https://github.com/sidevoice/sidevoice-core/issues/120)) ([e81cc67](https://github.com/sidevoice/sidevoice-core/commit/e81cc67602fe6f99bc26f05bfb859ba9b1b6c82c))
+
+
+### Bug Fixes
+
+* **control:** every wire reader ignores unknown fields and enum values ([#113](https://github.com/sidevoice/sidevoice-core/issues/113)) ([6037be7](https://github.com/sidevoice/sidevoice-core/commit/6037be7469dcf64c43f5710cc1812e9bf8d51d8f))
+* **copy:** stop saying room/sala to the user ([#117](https://github.com/sidevoice/sidevoice-core/issues/117)) ([def2bc3](https://github.com/sidevoice/sidevoice-core/commit/def2bc390cec683d27e3a6f69ebfb05b3a83e95b))
+* **i18n:** the core speaks English only ([#123](https://github.com/sidevoice/sidevoice-core/issues/123)) ([bebfec5](https://github.com/sidevoice/sidevoice-core/commit/bebfec52f81d18381f84b43df078ea223482fb26))
+
 ## [0.3.0](https://github.com/sidevoice/sidevoice-core/compare/v0.2.1...v0.3.0) (2026-10-10)
 
 
