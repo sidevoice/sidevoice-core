@@ -24,12 +24,6 @@ struct Missed {
     heard_chars: Option<usize>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct EvidenceVersion {
-    fate: String,
-    heard_chars: Option<usize>,
-}
-
 #[derive(Default)]
 struct Pending {
     /// Inserted when each reply becomes unheard; publication order is recovered from the journal.
@@ -44,30 +38,19 @@ pub(super) struct Note {
 #[derive(Default)]
 pub(super) struct Unheard {
     by_thread: HashMap<String, Pending>,
-    queued_versions: HashMap<String, EvidenceVersion>,
+    queued_rows: HashSet<String>,
     notes: HashMap<String, Note>,
     empty_obligations: HashSet<(String, u64)>,
 }
 
 impl Unheard {
-    pub(super) fn already_queued(
-        &self,
-        row_id: &str,
-        fate: &str,
-        heard_chars: Option<usize>,
-    ) -> bool {
-        self.queued_versions.get(row_id).is_some_and(|queued| {
-            queued
-                == &EvidenceVersion {
-                    fate: fate.to_owned(),
-                    heard_chars,
-                }
-        })
+    pub(super) fn has_queued(&self, row_id: &str) -> bool {
+        self.queued_rows.contains(row_id)
     }
 
     pub(super) fn forget_rows(&mut self, rows: &[String]) {
         for id in rows {
-            self.queued_versions.remove(id);
+            self.queued_rows.remove(id);
         }
         for pending in self.by_thread.values_mut() {
             pending.rows.retain(|missed| !rows.contains(&missed.row_id));
@@ -130,15 +113,7 @@ impl Unheard {
             return None;
         }
         for missed in &batch {
-            if let Some(row) = journal.find(&missed.row_id) {
-                self.queued_versions.insert(
-                    missed.row_id.clone(),
-                    EvidenceVersion {
-                        fate: row.hearing.clone().unwrap_or_default(),
-                        heard_chars: missed.heard_chars,
-                    },
-                );
-            }
+            self.queued_rows.insert(missed.row_id.clone());
         }
         let rows: Vec<_> = batch
             .iter()
@@ -265,13 +240,7 @@ impl Inner {
             let heard_chars = row
                 .heard_chars
                 .and_then(|heard| usize::try_from(heard).ok());
-            if !(verdict && {
-                self.unheard.already_queued(
-                    row_id,
-                    row.hearing.as_deref().unwrap_or_default(),
-                    heard_chars,
-                )
-            }) {
+            if !verdict || !self.unheard.has_queued(row_id) {
                 self.unheard.update(&thread, row_id, verdict, heard_chars);
             }
         }

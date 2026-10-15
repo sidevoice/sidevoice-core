@@ -154,6 +154,116 @@ fn text_only_reply_can_be_acknowledged_as_read_or_not_heard() {
 }
 
 #[test]
+fn unconfirmed_history_is_bounded_without_fabricating_not_heard_evidence() {
+    let c = Case::new(true);
+    {
+        let mut inner = c.room.inner.lock().unwrap();
+        for n in 0..2001 {
+            inner.append_row(crate::control::room::journal::Row {
+                id: format!("unconfirmed-{n}"),
+                thread: "t".into(),
+                role: "assistant",
+                text: "Written reply".into(),
+                status: "text_only".into(),
+                hearing_unconfirmed: true,
+                ..Default::default()
+            });
+        }
+    }
+    let old_id = "unconfirmed-0".to_owned();
+    let resolved = c
+        .room
+        .history_resolving(Some("t"), std::slice::from_ref(&old_id));
+    assert_eq!(resolved["missing_ids"], json!([old_id]));
+    assert!(!c.room.inner.lock().unwrap().unheard.has("t"));
+    assert!(c.notes().is_empty());
+    assert_eq!(c.publish("fresh", 0, "Fresh answer")["status"], "queued");
+}
+
+#[test]
+fn semantic_hearing_uses_cross_device_max_and_monotonic_corrections() {
+    let c = Case::new(true);
+    let (sender, _events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    c.publish("r", 0, "é🐙ab");
+    let id = format!("{}:voice:r", c.sid);
+    c.hearing("r", "not_heard", None);
+    c.room
+        .reply_hearing(&other, &id, "r", "not_heard", None)
+        .unwrap();
+    c.say("next", Some("Wait"));
+    let original = c.pull()[0].clone();
+    let reply = &original["unheard"]["replies"][0];
+    assert_eq!(reply["fate"], "not_heard");
+    assert_eq!(reply["heard_chars"], 0);
+    assert!(reply.get("reason").is_none());
+    assert!(reply.get("cut").is_none());
+    c.room
+        .reply_hearing(&other, &id, "r", "partial", Some(2))
+        .unwrap();
+    let first = c.pull();
+    assert_eq!(first[0], original);
+    assert_eq!(first[1]["notice"]["heard"][0]["fate"], "partial");
+    assert_eq!(first[1]["notice"]["heard"][0]["heard_chars"], 2);
+    c.hearing("r", "partial", Some(1));
+    assert_eq!(c.pull().len(), 2, "a smaller prefix adds no correction");
+    c.room
+        .reply_hearing(&other, &id, "r", "heard", None)
+        .unwrap();
+    let final_messages = c.pull();
+    assert_eq!(final_messages[2]["notice"]["heard"][0]["fate"], "heard");
+    assert_eq!(final_messages[2]["notice"]["heard"][0]["heard_chars"], 4);
+    c.hearing("r", "not_heard", None);
+    assert_eq!(c.pull().len(), 3, "late weaker evidence cannot regress");
+    let row = &c.room.history(Some("t"))["messages"][0];
+    assert_eq!(row["hearing"], "heard");
+    assert_eq!(row["heard_chars"], 4);
+}
+
+#[test]
+fn semantic_hearing_requires_matching_identity_and_valid_extent() {
+    let c = Case::new(true);
+    c.publish("r", 0, "é🐙ab");
+    let id = format!("{}:voice:r", c.sid);
+    for (history_id, uid, outcome, extent, key) in [
+        (id.as_str(), "wrong", "heard", None, "room.stale_utterance"),
+        (id.as_str(), "r", "partial", None, "room.receipt_invalid"),
+        (id.as_str(), "r", "partial", Some(4), "room.receipt_invalid"),
+        (
+            id.as_str(),
+            "r",
+            "not_heard",
+            Some(0),
+            "room.receipt_invalid",
+        ),
+        (id.as_str(), "r", "unknown", None, "room.receipt_invalid"),
+    ] {
+        assert_eq!(
+            c.room
+                .reply_hearing(&c.sid, history_id, uid, outcome, extent)
+                .unwrap_err()
+                .key,
+            key
+        );
+    }
+    let (sender, _) = mpsc::channel(64);
+    let foreign = c.room.join("foreign".into(), "en".into(), sender).unwrap();
+    c.room.select(&foreign, "other").unwrap();
+    assert_eq!(
+        c.room
+            .reply_hearing(&foreign, &id, "r", "heard", None)
+            .unwrap_err()
+            .key,
+        "room.stale_utterance"
+    );
+    assert_eq!(
+        c.room.history(Some("t"))["messages"][0]["hearing"],
+        Value::Null
+    );
+}
+
+#[test]
 fn f1_uncertain_publication_recovers_without_late_first_audio_and_fresh_reply_plays() {
     let mut c = Case::new(true);
     let fixture: Value = serde_json::from_str(include_str!(

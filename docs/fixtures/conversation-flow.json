@@ -219,7 +219,8 @@
     "late_original_4_after_replay_8": {
       "history_heard_chars": 8,
       "additional_correction": false
-    }
+    },
+    "after_first_exposure_same_reply_only_corrects_prior_envelope": true
   },
   "turn_start": {
     "type": "voice-user-turn",
@@ -336,6 +337,7 @@
       "hearing_unconfirmed": true
     },
     "agent_evidence": null,
-    "meaning": "No terminal semantic receipt; no confirmed not_heard fact"
+    "meaning": "No terminal semantic receipt; no confirmed not_heard fact",
+    "bounded_eviction": "stale identity after journal eviction; never converted to not_heard"
   }
 }

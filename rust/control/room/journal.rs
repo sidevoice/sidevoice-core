@@ -126,7 +126,6 @@ fn protected(row: &Row) -> bool {
         || (row.status == "delivered" && row.pull_claimed_by.is_some())
         || (row.role == "assistant"
             && (matches!(row.status.as_str(), "queued" | "playing")
-                || row.hearing_unconfirmed
                 || matches!(row.hearing.as_deref(), Some("partial" | "not_heard"))))
 }
 impl Journal {
