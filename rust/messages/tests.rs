@@ -1,25 +1,46 @@
 use super::template::interpolate;
-use super::{bundle, render, ui_locale, LocalizedMessage};
+use super::{bundle, offered, render, ui_locale, LocalizedMessage, BUNDLES, FALLBACK};
 use serde_json::{json, Map, Value};
 
 #[test]
-fn locale_uses_the_supported_primary_subtag_and_english_fallback() {
-    assert_eq!(ui_locale("es-ES"), "es");
-    assert_eq!(ui_locale("es_MX"), "es");
-    assert_eq!(ui_locale("fr-FR"), "en");
-    assert_eq!(ui_locale(""), "en");
+fn english_is_the_only_bundle_and_every_language_tag_falls_back_to_it() {
+    assert_eq!(FALLBACK, "en");
+    assert_eq!(BUNDLES.map(|(locale, _)| locale), ["en"]);
+    for tag in [
+        "en",
+        "en-GB",
+        "EN_us",
+        "en_US.UTF-8",
+        "es-ES",
+        "es_MX",
+        "fr-FR",
+        "",
+    ] {
+        assert_eq!(ui_locale(tag), "en", "{tag}");
+    }
+}
+
+#[test]
+fn a_page_names_a_registered_language_exactly() {
+    assert_eq!(offered("en"), Some("en"));
+    for language in ["es", "fr", "EN", "en-US", ""] {
+        assert_eq!(offered(language), None, "{language}");
+    }
 }
 
 #[test]
 fn render_substitutes_named_parameters_and_falls_back_to_english() {
     let message = LocalizedMessage::new("room.conversation_title").with_param("id", json!("7"));
-    assert_eq!(render(&message, "es-MX"), "Conversación 7");
+    assert_eq!(render(&message, "es-MX"), "Conversation 7");
 
     let fallback = LocalizedMessage::new("device.unpaired");
     assert_eq!(
         render(&fallback, "fr"),
         "This device is not paired with the core."
     );
+
+    let unknown = LocalizedMessage::new("not.a.key");
+    assert_eq!(render(&unknown, "en"), "not.a.key");
 }
 
 #[test]
@@ -56,7 +77,7 @@ fn english_templates_keep_their_wording() {
         ),
         (
             "settings.ui_language_invalid",
-            "Input should be 'es' or 'en'",
+            "The interface language is not valid.",
         ),
         ("room.receipt_invalid", "Invalid playback state."),
         ("room.text_too_long", "The message is too long."),
@@ -105,23 +126,26 @@ fn placeholders(template: &str) -> Vec<&str> {
     found
 }
 
+/// A bundle registered later must say every English key, with the same placeholders, and nothing else.
 #[test]
-fn spanish_says_every_english_key_with_the_same_placeholders() {
-    let english = bundle("en").as_object().unwrap();
-    let spanish = bundle("es").as_object().unwrap();
-    for (key, template) in english {
-        let local = spanish.get(key).and_then(Value::as_str);
-        assert!(local.is_some(), "es.json lacks {key}");
-        assert_eq!(
-            placeholders(local.unwrap()),
-            placeholders(template.as_str().unwrap()),
-            "{key}"
+fn every_bundle_says_every_english_key_with_the_same_placeholders() {
+    let english = bundle(FALLBACK).as_object().unwrap();
+    for (locale, _) in BUNDLES {
+        let local = bundle(locale).as_object().unwrap();
+        for (key, template) in english {
+            let text = local.get(key).and_then(Value::as_str);
+            assert!(text.is_some(), "{locale} lacks {key}");
+            assert_eq!(
+                placeholders(text.unwrap()),
+                placeholders(template.as_str().unwrap()),
+                "{locale} {key}"
+            );
+        }
+        assert!(
+            local.keys().all(|key| english.contains_key(key)),
+            "{locale} has keys en.json does not"
         );
     }
-    assert!(
-        spanish.keys().all(|key| english.contains_key(key)),
-        "es.json has keys en.json does not"
-    );
 }
 
 #[test]
@@ -139,15 +163,12 @@ fn keys_the_server_emits_have_english_text() {
 
 #[test]
 fn no_bundle_tells_the_person_about_a_room() {
-    for locale in ["en", "es"] {
+    for (locale, _) in BUNDLES {
         for (key, template) in bundle(locale).as_object().unwrap() {
             let text = template.as_str().unwrap().replace("--room-credential", "");
-            let says_room = text.split(|c: char| !c.is_alphanumeric()).any(|word| {
-                matches!(
-                    word.to_lowercase().as_str(),
-                    "room" | "rooms" | "sala" | "salas"
-                )
-            });
+            let says_room = text
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| matches!(word.to_lowercase().as_str(), "room" | "rooms"));
             assert!(!says_room, "{locale} {key}: {text}");
         }
     }
