@@ -1,7 +1,7 @@
 //! The in-memory conversation journal: its rows in order, their bound, and the state of the
 //! user input waiting in it.
+use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
@@ -54,7 +54,8 @@ pub(super) struct Row {
     pub(super) attempts: usize,
     pub(super) next_attempt: u64,
     pub(super) pull_claimed_by: Option<String>,
-    pub(super) corrected_heard: HashSet<String>,
+    pub(super) ever_exposed: bool,
+    pub(super) corrected_heard: HashMap<String, Value>,
     pub(super) notice_salvaged: bool,
 }
 impl Row {
@@ -164,11 +165,17 @@ impl Journal {
     pub(super) fn has_thread(&self, thread: &str) -> bool {
         self.rows.iter().any(|r| r.thread == thread)
     }
-    pub(super) fn assistant_heard_facts(&self, thread: &str) -> HashMap<String, Value> {
-        self.rows.iter().filter(|r| r.thread == thread && r.role == "assistant" && r.globally_heard)
-            .map(|r| (r.id.clone(), json!({"utterance_id":r.id.rsplit_once(":voice:").map(|(_, id)| id).unwrap_or(""),
-                "history_id":r.id,"fate":if r.status=="skipped" {"skipped"} else {"heard"},
-                "heard_chars":r.text.chars().count()}))).collect()
+    pub(super) fn assistant_hearing_facts(&self, thread: &str) -> HashMap<String, Value> {
+        self.rows.iter().filter(|r| r.thread == thread && r.role == "assistant")
+            .filter_map(|r| {
+                let (fate, heard) = if r.globally_heard {
+                    (if r.status == "skipped" {"skipped"} else {"heard"}, Some(r.text.chars().count() as u64))
+                } else {
+                    ("partial", r.heard_chars)
+                };
+                heard.map(|heard_chars| (r.id.clone(), json!({"utterance_id":r.id.rsplit_once(":voice:").map(|(_, id)| id).unwrap_or(""),
+                    "history_id":r.id,"fate":fate,"heard_chars":heard_chars})))
+            }).collect()
     }
     pub(super) fn unheard_summary(&self, thread: &str) -> Option<(usize, u64)> {
         let rows: Vec<_> = self

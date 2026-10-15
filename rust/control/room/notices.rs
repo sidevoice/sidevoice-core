@@ -202,7 +202,7 @@ impl Inner {
     /// A notice that has not been offered to the agent may be rewritten when another
     /// device confirms hearing. Claimed or dispatched messages remain frozen.
     pub(super) fn reconcile_unclaimed(&mut self, thread: &str) {
-        let heard = self.journal.assistant_heard_facts(thread);
+        let heard = self.journal.assistant_hearing_facts(thread);
         let mut corrections = Vec::new();
         for row in self.journal.input_mut(thread) {
             if row.payload.is_none() {
@@ -215,22 +215,37 @@ impl Inner {
             else {
                 continue;
             };
-            let newly_heard: Vec<_> = replies
+            let changed_hearing: Vec<_> = replies
                 .iter()
                 .filter_map(|reply| {
                     let id = reply["history_id"].as_str()?;
-                    heard.get(id).map(|fact| (id.to_owned(), fact.clone()))
+                    let fact = heard.get(id)?;
+                    if fact["fate"] == "partial"
+                        && fact["heard_chars"].as_u64().unwrap_or(0)
+                            <= reply["heard_chars"].as_u64().unwrap_or(0)
+                        && reply["heard_chars"].is_number()
+                    {
+                        return None;
+                    }
+                    Some((id.to_owned(), fact.clone()))
                 })
                 .collect();
-            if row.status == "pending" {
+            if row.status == "pending" && !row.ever_exposed {
                 let replies = payload
                     .pointer_mut("/unheard/replies")
                     .and_then(Value::as_array_mut)
                     .expect("checked");
-                replies.retain(|reply| {
-                    !reply["history_id"]
-                        .as_str()
-                        .is_some_and(|id| heard.contains_key(id))
+                replies.retain_mut(|reply| {
+                    let Some(fact) = reply["history_id"].as_str().and_then(|id| heard.get(id))
+                    else {
+                        return true;
+                    };
+                    if fact["fate"] == "partial" {
+                        reply["heard_chars"] = fact["heard_chars"].clone();
+                        true
+                    } else {
+                        false
+                    }
                 });
                 let count = replies.len();
                 payload["unheard"]["count"] = json!(count);
@@ -242,9 +257,10 @@ impl Inner {
                         payload.as_object_mut().unwrap().remove("notice");
                     }
                 }
-            } else if matches!(row.status.as_str(), "sending" | "delivered" | "read") {
-                for (id, fact) in newly_heard {
-                    if row.corrected_heard.insert(id) {
+            } else if row.ever_exposed {
+                for (id, fact) in changed_hearing {
+                    if row.corrected_heard.get(&id) != Some(&fact) {
+                        row.corrected_heard.insert(id, fact.clone());
                         corrections.push((
                             row.session.clone(),
                             row.epoch,
@@ -287,9 +303,17 @@ impl Inner {
         }
         let message_id = format!("note:{}", id());
         let revision = self.browsers.get(session).map_or(0, |b| b.revision);
+        let instruction = if correction["heard"]
+            .as_array()
+            .is_some_and(|heard| heard.iter().any(|fact| fact["fate"] == "partial"))
+        {
+            "A later receipt confirmed more of this reply was heard. Use the updated prefix; the remaining text may still need a fresh response."
+        } else {
+            instruction("reply_heard")
+        };
         let payload = json!({"thread_id":thread,"channel":"note","text":"", "message_id":message_id,
             "history_id":message_id,"session_id":session,"revision":revision,"epoch":epoch,
-            "notice":{"kind":"reply_heard","instruction":instruction("reply_heard"),
+            "notice":{"kind":"reply_heard","instruction":instruction,
                 "corrects_message_id":correction["corrects_message_id"],"heard":correction["heard"]}});
         self.append_row(Row {
             id: message_id,

@@ -81,6 +81,7 @@ impl Room {
             if let Some(notice) = payload.get("notice") {
                 data["notice"] = notice.clone();
             }
+            row.ever_exposed = true;
             row.status = "sending".into();
             inner.inflight.start(&binding.id, &row.id);
             work.push((binding.id.clone(), row.id.clone(), peer, data));

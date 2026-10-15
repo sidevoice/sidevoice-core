@@ -160,6 +160,7 @@ impl Inner {
                         message["notice"] = notice.clone();
                     }
                     page.messages.push(message);
+                    row.ever_exposed = true;
                     if row.status == "pending" {
                         row.status = "delivered".into();
                         row.pull_claimed_by = Some(bid.to_owned());

@@ -59,5 +59,11 @@
     "missing_first_admission": {"status": "text_only", "reason": "connector_disconnected", "text_saved": true},
     "known_admission": "return original disposition",
     "known_refusal": "return original terminal refusal"
+  },
+  "notice_correction": {
+    "kind": "reply_heard",
+    "corrects_message_id": "ORIGINAL_MESSAGE_ID",
+    "heard": [{"utterance_id": "REPLY_ID", "history_id": "HISTORY_ID", "fate": "partial", "heard_chars": 2}],
+    "original_message_id_and_payload_stay_unchanged_after_push_retry_or_pull_release": true
   }
 }

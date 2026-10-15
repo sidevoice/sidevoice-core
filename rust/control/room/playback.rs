@@ -213,11 +213,7 @@ impl Inner {
             row.globally_heard |= matches!(row.status.as_str(), "playback_finished" | "skipped");
         }
         self.track_unheard(row_id);
-        if self
-            .journal
-            .find(row_id)
-            .is_some_and(|row| row.globally_heard)
-        {
+        if self.journal.find(row_id).is_some() {
             let thread = self.journal.find(row_id).unwrap().thread.clone();
             self.reconcile_unclaimed(&thread);
         }

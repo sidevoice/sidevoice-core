@@ -151,6 +151,137 @@ fn f1_recovery_returns_original_saved_or_refused_disposition() {
     );
 }
 
+fn missed_note_with_late_other_device(pull: bool) -> (Case, String) {
+    let c = Case::new(pull);
+    let (sender, _events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    c.publish("r", 0, "Missed answer");
+    c.room.park(&c.sid, true);
+    c.room.park(&other, true);
+    c.room.resume(&c.sid, &[]);
+    c.room
+        .inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due = 0;
+    (c, other)
+}
+
+#[test]
+fn f4_lost_push_ack_keeps_exposed_notice_frozen_and_sends_hearing_correction() {
+    let (c, other) = missed_note_with_late_other_device(false);
+    let first = c.room.pending_delivery();
+    assert_eq!(first.len(), 1);
+    let (bid, rid, peer, offered) = &first[0];
+    let first_id = offered["message_id"].clone();
+    let first_payload = c.notes()[0].clone();
+    c.room
+        .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"failed"})));
+    assert_eq!(
+        c.room
+            .inner
+            .lock()
+            .unwrap()
+            .journal
+            .find(rid)
+            .unwrap()
+            .status,
+        "pending"
+    );
+    c.room
+        .playback(&other, "r", "heard", None, None, &Value::Null)
+        .unwrap();
+    let notes = c.notes();
+    assert_eq!(notes[0], first_payload);
+    assert_eq!(notes[1]["notice"]["kind"], "reply_heard");
+    assert_eq!(notes[1]["notice"]["corrects_message_id"], first_id);
+    assert_eq!(notes[1]["notice"]["heard"][0]["fate"], "heard");
+    {
+        let mut inner = c.room.inner.lock().unwrap();
+        inner.journal.find_mut(rid).unwrap().next_attempt = 0;
+    }
+    let retry = c.room.pending_delivery();
+    assert_eq!(retry[0].3["message_id"], first_id);
+    assert_eq!(retry[0].3["unheard"], offered["unheard"]);
+}
+
+#[test]
+fn f4_released_pull_claim_keeps_original_payload_and_corrects_partial_full_and_skip() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../docs/fixtures/conversation-flow.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture["notice_correction"]["kind"], "reply_heard");
+    for outcome in ["partial", "heard", "skipped"] {
+        let (c, other) = missed_note_with_late_other_device(true);
+        let first = c.pull();
+        assert_eq!(first.len(), 1);
+        let original = first[0].clone();
+        let original_payload = c.notes()[0].clone();
+        c.room
+            .inner
+            .lock()
+            .unwrap()
+            .release_pull_claims(|row| row.pull_claimed_by.as_deref() == Some(c.bid.as_str()));
+        match outcome {
+            "partial" => c
+                .room
+                .playback(
+                    &other,
+                    "r",
+                    "interrupted",
+                    Some("user_interrupted"),
+                    Some(2),
+                    &Value::Null,
+                )
+                .unwrap(),
+            "heard" => c
+                .room
+                .playback(&other, "r", "heard", None, None, &Value::Null)
+                .unwrap(),
+            _ => c
+                .room
+                .playback(
+                    &other,
+                    "r",
+                    "unplayed",
+                    Some("user_skipped"),
+                    None,
+                    &Value::Null,
+                )
+                .unwrap(),
+        }
+        assert_eq!(c.notes()[0], original_payload, "{outcome}");
+        let messages = c.pull();
+        assert_eq!(messages[0], original, "{outcome}");
+        let correction = messages
+            .iter()
+            .find(|m| m["notice"]["kind"] == "reply_heard")
+            .unwrap();
+        assert_eq!(
+            correction["notice"]["corrects_message_id"],
+            original["message_id"]
+        );
+        assert_eq!(correction["notice"]["heard"][0]["fate"], outcome);
+        if outcome == "partial" {
+            assert_eq!(correction["notice"]["heard"][0]["heard_chars"], 2);
+            c.room
+                .playback(&other, "r", "heard", None, None, &Value::Null)
+                .unwrap();
+            let after_full = c.pull();
+            assert!(after_full.iter().any(|m| {
+                m["notice"]["corrects_message_id"] == original["message_id"]
+                    && m["notice"]["heard"][0]["fate"] == "heard"
+            }));
+            assert_eq!(c.notes()[0], original_payload);
+        }
+    }
+}
+
 #[test]
 fn t01_playing_reply_cut_carries_full_unicode_evidence_with_the_words() {
     let c = Case::new(false);
