@@ -106,7 +106,7 @@ rust/              the core: one crate, the binary sidevoice-core-rust
   runtime/         process configuration, launch handshake, listeners, shutdown
   server/          the device and connector surfaces (HTTP, WebSocket, Socket.IO) and the calls they carry
   control/         conversations, devices and pairing, latency, telemetry
-  messages/        the per-language message bundles
+  messages/        the message bundles: English only, one file per language
   storage/         private files and process locks
 tests/             integration tests
 xtask/             build tooling: release archives, manifest, compatibility (`cargo xtask`)

@@ -317,23 +317,22 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
     browser.close().await;
 }
 
+/// Refusals carry their stable key, for the page to word, and the core's English text.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_client_message_without_an_id_is_refused_in_the_call_s_language() {
+async fn a_client_message_without_an_id_is_refused_with_its_key_and_english_text() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, json!({"ui_language": 42})).await;
     // A language that is not text: refused with its key, and the call goes on.
+    let invalid = browser.frame("error").await;
     assert_eq!(
-        browser.frame("error").await["key"],
-        "settings.ui_language_invalid"
-    );
-    browser
-        .send(
-            "voice-settings",
-            json!({"session_id": browser.session, "ui_language": "es"}),
+        (invalid["key"].as_str(), invalid["message"].as_str()),
+        (
+            Some("settings.ui_language_invalid"),
+            Some("The interface language is not valid.")
         )
-        .await;
+    );
     browser
         .send(
             "voice-user-turn",
@@ -342,13 +341,12 @@ async fn a_client_message_without_an_id_is_refused_in_the_call_s_language() {
         .await;
     let refusal = browser.frame("error").await;
     assert_eq!(refusal["key"], "room.request_invalid");
-    assert_eq!(refusal["message"], "La solicitud a la sala no es válida.");
+    assert_eq!(refusal["message"], "Invalid request.");
     browser
         .none_of(&["voice-user-turn"], Duration::from_millis(300))
         .await;
     browser.close().await;
 }
-
 /// The protocol only grows (#112): a newer page may name a turn phase, a playback status or a reason this core does
 /// not know. Each report is acknowledged and refused by nobody; the unknown part changes nothing, the known part
 /// counts.
@@ -413,14 +411,15 @@ async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part
     browser.close().await;
 }
 
-/// An interface language this core does not offer (a newer page may offer more) is no error: a hello goes on in the
-/// machine's language, and a settings change keeps the call's current one.
+/// An interface language this core does not offer is no error: the page offers more languages than the core, which
+/// speaks English only. A hello goes on in the machine's language, and a settings change keeps the call's
+/// current one.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interface_language_the_core_does_not_offer_falls_back_without_an_error() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
-    let mut browser = core.join(&token, json!({"ui_language": "fr"})).await;
+    let mut browser = core.join(&token, json!({"ui_language": "es"})).await;
     browser.no_errors = true;
     browser
         .none_of(&["error"], Duration::from_millis(300))
@@ -436,7 +435,7 @@ async fn an_interface_language_the_core_does_not_offer_falls_back_without_an_err
     browser
         .none_of(&["error"], Duration::from_millis(300))
         .await;
-    // Still Spanish: a refusal comes in the language the call kept.
+    // Still English: a refusal comes in the language the call kept.
     browser.no_errors = false;
     browser
         .send(
@@ -446,7 +445,7 @@ async fn an_interface_language_the_core_does_not_offer_falls_back_without_an_err
         .await;
     let refusal = browser.frame("error").await;
     assert_eq!(refusal["key"], "room.request_invalid");
-    assert_eq!(refusal["message"], "La solicitud a la sala no es válida.");
+    assert_eq!(refusal["message"], "Invalid request.");
     browser.close().await;
 }
 

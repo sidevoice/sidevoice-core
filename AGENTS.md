@@ -11,6 +11,8 @@ Rules for any coding agent (and person) working in this repository.
   output meant for people). Adding a text means adding its key to the English bundle; other languages may lag.
 - Language defaults: the device's system language when we support it, otherwise English. Never Spanish, or any
   other language, as a hard-coded default.
+- The core speaks English only: its one bundle is `rust/messages/en.json`. A language is added as another bundle file
+  and its row in `BUNDLES` (`rust/messages.rs`).
 - What reaches the agent (MCP instructions, tool results, the `[Sidevoice]` trailer) is English; it is not UI.
 
 ## Before changing things

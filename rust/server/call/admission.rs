@@ -7,7 +7,7 @@ use axum::extract::ws::{Message, WebSocket};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::messages::{render, ui_locale, LocalizedMessage};
+use crate::messages::{offered, render, ui_locale, LocalizedMessage};
 use crate::server::AppState;
 
 use super::registration::CallRegistration;
@@ -99,8 +99,9 @@ pub(super) async fn admit(
     })
 }
 
-/// The interface language a hello asks for: `en` or `es`. Without one, or with one the core does not offer, the
-/// machine's; one that is not text is refused with its key, and the call goes on in the machine's.
+/// The interface language a hello asks for, when the core has a message bundle for it. Without one, or with one the
+/// core does not offer, the machine's; one that is not text is refused with its key, and the call goes on in the
+/// machine's.
 pub(super) fn hello_language(asked: Option<&Value>) -> (String, Option<&'static str>) {
     let fallback = || ui_locale(&crate::runtime::system_language()).to_owned();
     match offered_language(asked) {
@@ -115,9 +116,7 @@ pub(super) fn hello_language(asked: Option<&Value>) -> (String, Option<&'static 
 pub(super) fn offered_language(asked: Option<&Value>) -> Result<Option<String>, &'static str> {
     match asked {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(language)) => {
-            Ok(matches!(language.as_str(), "en" | "es").then(|| language.clone()))
-        }
+        Some(Value::String(language)) => Ok(offered(language).map(str::to_owned)),
         Some(_) => Err("settings.ui_language_invalid"),
     }
 }
