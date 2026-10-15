@@ -1647,6 +1647,7 @@ fn agent_view(message: &Value) -> Value {
 
 fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
     let c = Case::new(pull);
+    let mut previously_offered = Vec::new();
     match scenario {
         "cut_words" => {
             c.publish("r", 0, "é🐙 rest");
@@ -1726,6 +1727,27 @@ fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
                 .unwrap()
                 .due = 0;
         }
+        "heard_correction" => {
+            c.publish("r", 0, "Reply");
+            c.hearing("r", "not_heard", None);
+            c.say("turn", Some("Wait"));
+            if pull {
+                let first = c.pull();
+                assert_eq!(first.len(), 1);
+            } else {
+                let work = c.room.pending_delivery();
+                assert_eq!(work.len(), 1);
+                let (bid, rid, peer, data) = &work[0];
+                previously_offered.push(data.clone());
+                c.room.settle_delivery(
+                    bid,
+                    rid,
+                    &peer.generation,
+                    Ok(json!({"status":"accepted"})),
+                );
+            }
+            c.hearing("r", "heard", None);
+        }
         _ => panic!("unknown matrix scenario"),
     }
     let messages: Vec<Value> = if pull {
@@ -1737,7 +1759,7 @@ fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
         );
         first
     } else {
-        let mut messages = Vec::new();
+        let mut messages = previously_offered;
         loop {
             let work = c.room.pending_delivery();
             if work.is_empty() {
@@ -1778,6 +1800,7 @@ fn t16_push_pull_notice_parity_matrix() {
         "return",
         "stale",
         "full_evidence",
+        "heard_correction",
     ] {
         assert_eq!(
             matrix_messages(false, scenario),
