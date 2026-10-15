@@ -28,14 +28,18 @@ pub(super) async fn dispatch(
     }
     match method.as_str() {
         "binding.register" => Ok(register_binding(room, &link.cid, &params)),
-        "speech.publish" => {
+        "speech.publish" | "speech.recover" => {
             if ["event_id", "utterance_id"].iter().any(|key| {
                 let s = field(&params, key);
                 s.is_empty() || s.len() > MAX_SPEECH_ID
             }) {
                 return Err((-32602, "speech.publish requires bounded identifiers"));
             }
-            let result = room.connector_speech(&link.cid, &params);
+            let result = if method == "speech.recover" {
+                room.recover_speech(&link.cid, &params)
+            } else {
+                room.connector_speech(&link.cid, &params)
+            };
             Ok(echo_ids(result, &params, &["event_id", "utterance_id"]))
         }
         "input.pull" => room

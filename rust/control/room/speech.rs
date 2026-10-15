@@ -10,6 +10,32 @@ const SPEECH_LANGUAGES: [&str; 6] = ["es", "en", "fr", "it", "pt", "hi"];
 
 impl Room {
     pub fn publish(&self, p: &Value) -> Value {
+        self.publish_with_policy(p, false)
+    }
+
+    /// Resolve an uncertain publication without allowing its first admission to speak late.
+    pub fn recover_speech(&self, cid: &str, p: &Value) -> Value {
+        let bid = field(p, "recovery_binding_id");
+        let original_bid = field(p, "binding_id");
+        let thread = {
+            let inner = self.inner.lock().expect("room lock");
+            let Some(binding) = inner.bindings.live_of(cid, bid) else {
+                return json!({"status":"unknown_binding","event_id":p.get("event_id"),
+                    "utterance_id":p.get("utterance_id")});
+            };
+            if inner.bindings.get(original_bid).is_some_and(|original| {
+                original.thread != binding.thread || original.connector != cid
+            }) {
+                return rejected("room.speech_context_invalid");
+            }
+            binding.thread.clone()
+        };
+        let mut speech = p.clone();
+        speech["thread_id"] = json!(thread);
+        self.publish_with_policy(&speech, true)
+    }
+
+    fn publish_with_policy(&self, p: &Value, no_late_first_admission: bool) -> Value {
         let thread = field(p, "thread_id");
         let uid = field(p, "utterance_id");
         let text = field(p, "text");
@@ -70,7 +96,7 @@ impl Room {
                 .bindings
                 .get(bid)
                 .is_some_and(|binding| binding.thread == thread && binding.active);
-        if !inner.browsers.is_recent(sid) && !initial {
+        if !no_late_first_admission && !inner.browsers.is_recent(sid) && !initial {
             let disposition = rejected("room.speech_context_invalid");
             inner.remember_refusal(uid, fingerprint, disposition.clone());
             return disposition;
@@ -81,7 +107,7 @@ impl Room {
             return disposition;
         }
         // An open turn is a terminal refusal. Remember it through retries after that turn closes.
-        if inner.conversations.is_open(thread) {
+        if !no_late_first_admission && inner.conversations.is_open(thread) {
             let disposition = json!({"status":"rejected","terminal":true,"reason":"user_speaking",
                 "error":"room.user_speaking","instruction":"The person is speaking; this will not play. Wait for their message."});
             inner.remember_refusal(uid, fingerprint, disposition.clone());
@@ -89,7 +115,7 @@ impl Room {
             return disposition;
         }
         let current = inner.conversations.epoch(thread);
-        if epoch > current {
+        if !no_late_first_admission && epoch > current {
             let disposition = rejected("room.speech_context_invalid");
             inner.remember_refusal(uid, fingerprint, disposition.clone());
             return disposition;
@@ -111,7 +137,9 @@ impl Room {
                 .is_some_and(|browser| browser.parked.is_none() && browser.speech_on)
         });
         let capacity = inner.utterances.original_count() >= MAX_UTTERANCES;
-        let reason = if epoch < current {
+        let reason = if no_late_first_admission {
+            Some("connector_disconnected".to_owned())
+        } else if epoch < current {
             Some("newer_turn".to_owned())
         } else if p.get("history_only").and_then(Value::as_bool) == Some(true) {
             Some("connector_disconnected".to_owned())

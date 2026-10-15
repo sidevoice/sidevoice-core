@@ -97,6 +97,61 @@ impl Case {
 }
 
 #[test]
+fn f1_uncertain_publication_recovers_without_late_first_audio_and_fresh_reply_plays() {
+    let mut c = Case::new(true);
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../docs/fixtures/conversation-flow.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture["speech_recovery"]["method"], "speech.recover");
+    let original = json!({"event_id":"event-a","utterance_id":"a","binding_id":c.bid,
+        "session_id":"lost-session","revision":3,"epoch":0,"text":"Older answer","history_only":false});
+    let mut recovery = original.clone();
+    recovery["recovery_binding_id"] = json!(c.bid);
+    let saved = c.room.recover_speech("connector", &recovery);
+    for key in ["status", "reason", "text_saved"] {
+        assert_eq!(
+            saved[key],
+            fixture["speech_recovery"]["missing_first_admission"][key]
+        );
+    }
+    assert_eq!(c.room.recover_speech("connector", &recovery), saved);
+    assert_eq!(c.room.connector_speech("connector", &original), saved);
+    assert!(c.frames("voice-reply").is_empty());
+    let mut changed = recovery.clone();
+    changed["history_only"] = json!(true);
+    assert_eq!(
+        c.room.recover_speech("connector", &changed)["error"],
+        "room.speech_conflict"
+    );
+    c.say("next", Some("Fresh question"));
+    assert_eq!(c.publish("b", 1, "Fresh answer")["status"], "queued");
+    assert_eq!(c.frames("voice-reply").len(), 1);
+}
+
+#[test]
+fn f1_recovery_returns_original_saved_or_refused_disposition() {
+    let c = Case::new(true);
+    let mut saved_request = json!({"event_id":"event-saved","utterance_id":"saved",
+        "binding_id":c.bid,"session_id":c.sid,"revision":c.revision(),"epoch":0,
+        "text":"Already admitted","history_only":false});
+    let admitted = c.room.connector_speech("connector", &saved_request);
+    saved_request["recovery_binding_id"] = json!(c.bid);
+    assert_eq!(c.room.recover_speech("connector", &saved_request), admitted);
+    let turn = c.room.begin_turn(&c.sid, "open").unwrap();
+    let mut refused_request = json!({"event_id":"event-refused","utterance_id":"refused",
+        "binding_id":c.bid,"session_id":c.sid,"revision":c.revision(),"epoch":turn.epoch,
+        "text":"During speech","history_only":false});
+    let refused = c.room.connector_speech("connector", &refused_request);
+    assert_eq!(refused["error"], "room.user_speaking");
+    refused_request["recovery_binding_id"] = json!(c.bid);
+    assert_eq!(
+        c.room.recover_speech("connector", &refused_request),
+        refused
+    );
+}
+
+#[test]
 fn t01_playing_reply_cut_carries_full_unicode_evidence_with_the_words() {
     let c = Case::new(false);
     assert_eq!(c.publish("r", 0, "é🐙 rest")["status"], "queued");

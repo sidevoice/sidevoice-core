@@ -51,5 +51,13 @@
     {"voice": {"phase": "cancelled", "turn_id": "earlier", "merged": true}, "core": {"type": "voice-user-turn", "data": {"session_id": "SESSION", "client_msg_id": "C1", "phase": "cancelled", "turn_id": "earlier", "merged": true}}, "meaning": "transfer empty obligation to continuing turn"},
     {"voice": {"phase": "finished", "turn_id": "later", "text": "Merged words", "merged": true}, "core": {"type": "voice-user-turn", "data": {"session_id": "SESSION", "client_msg_id": "C2", "phase": "finished", "turn_id": "later", "text": "Merged words", "merged": true}}, "meaning": "transcript already includes earlier turn"},
     {"voice": {"phase": "finished", "turn_id": "offline", "text": "Offline words", "merged": false}, "core": {"type": "voice-user-turn", "data": {"session_id": "SESSION", "client_msg_id": "C3", "phase": "finished", "turn_id": "offline", "text": "Offline words", "offline": true, "thread_id": "t", "binding_id": "FOCUS_BINDING", "started_at": 1792000000000}}, "meaning": "accept once at captured focus and assign one epoch"}
-  ]
+  ],
+  "speech_recovery": {
+    "method": "speech.recover",
+    "request_extra": {"recovery_binding_id": "CURRENT_BINDING"},
+    "same_original_fields": ["event_id", "utterance_id", "binding_id", "session_id", "revision", "epoch", "text", "language", "history_only"],
+    "missing_first_admission": {"status": "text_only", "reason": "connector_disconnected", "text_saved": true},
+    "known_admission": "return original disposition",
+    "known_refusal": "return original terminal refusal"
+  }
 }

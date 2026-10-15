@@ -14,6 +14,57 @@ use tokio_tungstenite::tungstenite::Message;
 const THREAD: &str = "typed-thread";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn uncertain_speech_recovery_over_rpc_saves_without_audio_and_recovers_prior_answer() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    let (mut peer, binding) = connector_with_binding(&core, "recovery", THREAD).await;
+    core.select(&token, &session, THREAD).await;
+    let revision = core.revision(&token, &session).await;
+
+    let admitted = json!({"event_id":"known-event","utterance_id":"known","binding_id":binding,
+        "session_id":session,"revision":revision,"epoch":0,"text":"Known reply"});
+    let original = peer.call("speech.publish", admitted.clone()).await;
+    assert_eq!(original["status"], "queued");
+    assert_eq!(browser.frame("voice-reply").await["utterance_id"], "known");
+    let mut recover_known = admitted;
+    recover_known["recovery_binding_id"] = json!(binding);
+    assert_eq!(peer.call("speech.recover", recover_known).await, original);
+
+    let missing = json!({"event_id":"lost-event","utterance_id":"lost","binding_id":binding,
+        "recovery_binding_id":binding,"session_id":"old-session","revision":revision,
+        "epoch":0,"text":"Lost request"});
+    let recovered = peer.call("speech.recover", missing.clone()).await;
+    assert_eq!(recovered["status"], "text_only");
+    assert_eq!(recovered["reason"], "connector_disconnected");
+    assert_eq!(recovered["text_saved"], true);
+    assert_eq!(recovered["event_id"], "lost-event");
+    assert_eq!(peer.call("speech.recover", missing).await, recovered);
+    assert_eq!(
+        core.history(&token, THREAD)
+            .await
+            .iter()
+            .filter(|r| r["role"] == "assistant")
+            .count(),
+        2
+    );
+
+    browser.start_turn("fresh-turn").await;
+    browser
+        .report(
+            "voice-user-turn",
+            json!({"phase":"finished","turn_id":"fresh-turn","text":"Next"}),
+        )
+        .await;
+    let fresh = peer.call("speech.publish", json!({"event_id":"fresh-event","utterance_id":"fresh",
+        "binding_id":binding,"session_id":session,"revision":revision,"epoch":1,"text":"Fresh reply"})).await;
+    assert_eq!(fresh["status"], "queued", "{fresh}");
+    assert_eq!(browser.frame("voice-reply").await["utterance_id"], "fresh");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn open_turn_refusal_keeps_rpc_identity_and_empty_notice_reaches_pull() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();
