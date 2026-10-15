@@ -30,6 +30,7 @@ mod connections;
 mod declaration;
 mod error;
 mod focus;
+mod hearing;
 mod input;
 mod latency;
 mod notices;

@@ -10,7 +10,6 @@ pub(super) struct PendingNotice {
     session: String,
     kind: String,
     related: Option<String>,
-    skipped: Option<Value>,
     epoch: u64,
     correction: Option<Value>,
     replacement: Option<Value>,
@@ -18,9 +17,8 @@ pub(super) struct PendingNotice {
 impl PendingNotice {
     pub(super) fn reserved_bytes(&self) -> usize {
         2048 + self
-            .skipped
+            .correction
             .as_ref()
-            .or(self.correction.as_ref())
             .or(self.replacement.as_ref())
             .map_or(0, |value| value.to_string().len())
     }
@@ -30,10 +28,13 @@ impl PendingNotice {
 fn hearing_advances(next: &Value, previous: &Value) -> bool {
     let next_fate = next["fate"].as_str().unwrap_or("partial");
     let previous_fate = previous["fate"].as_str().unwrap_or("partial");
-    if previous_fate == "skipped" || previous_fate == "heard" {
-        return previous_fate == "heard" && next_fate == "skipped";
+    if previous_fate == "heard" {
+        return false;
     }
-    if next_fate == "skipped" || next_fate == "heard" {
+    if next_fate == "heard" {
+        return true;
+    }
+    if next_fate == "partial" && previous_fate == "not_heard" {
         return true;
     }
     let earlier = previous["heard_chars"].as_u64();
@@ -80,7 +81,6 @@ impl Inner {
                     session,
                     kind,
                     related_message_id,
-                    None,
                     self.conversations.epoch(thread),
                 );
             }
@@ -96,7 +96,6 @@ impl Inner {
                         session,
                         kind,
                         related_message_id,
-                        None,
                         self.conversations.epoch(thread),
                     );
                 }
@@ -115,7 +114,7 @@ impl Inner {
         related_message_id: Option<&str>,
     ) {
         let has_evidence = self.unheard.has(thread);
-        if !has_evidence && kind != "turn_empty" && kind != "reply_skipped" {
+        if !has_evidence && kind != "turn_empty" {
             return;
         }
         if self
@@ -186,11 +185,7 @@ impl Inner {
             let Some(note) = self.pending_notices.pop_front() else {
                 break;
             };
-            if let Some(skipped) = note.skipped.clone() {
-                if !self.queue_skip_payload(&note.thread, &note.session, note.epoch, skipped) {
-                    self.pending_notices.push_back(note);
-                }
-            } else if let Some(correction) = note.correction.clone() {
+            if let Some(correction) = note.correction.clone() {
                 if !self.queue_heard_correction(&note.thread, &note.session, note.epoch, correction)
                 {
                     self.pending_notices.push_back(note);
@@ -254,6 +249,7 @@ impl Inner {
                     };
                     if fact["fate"] == "partial" {
                         reply["heard_chars"] = fact["heard_chars"].clone();
+                        reply["fate"] = fact["fate"].clone();
                         true
                     } else {
                         false
@@ -295,7 +291,6 @@ impl Inner {
                     session,
                     kind: "reply_heard".into(),
                     related: Some(prior),
-                    skipped: None,
                     epoch,
                     correction: Some(correction),
                     replacement: None,
@@ -384,7 +379,6 @@ impl Inner {
                 session,
                 kind: "salvaged".into(),
                 related: Some(related),
-                skipped: None,
                 epoch,
                 correction: None,
                 replacement: Some(replacement),
@@ -425,69 +419,12 @@ impl Inner {
         true
     }
 
-    pub(super) fn queue_skip_note(&mut self, row_id: &str, session: &str) {
-        let Some(row) = self.journal.find(row_id) else {
-            return;
-        };
-        let thread = row.thread.clone();
-        let epoch = row.epoch;
-        let skipped = json!({"utterance_id":row.id.rsplit_once(":voice:").map(|(_, id)| id).unwrap_or(""),
-            "history_id":row.id,"session_id":row.session,"revision":row.revision,
-            "epoch":epoch,"text":row.text,"fate":"skipped",
-            "reason":"user_skipped","heard_chars":row.text.chars().count()});
-        if !self.queue_skip_payload(&thread, session, epoch, skipped.clone()) {
-            self.remember_pending(
-                &thread,
-                session,
-                "reply_skipped",
-                None,
-                Some(skipped),
-                epoch,
-            );
-        }
-    }
-
-    fn queue_skip_payload(
-        &mut self,
-        thread: &str,
-        session: &str,
-        epoch: u64,
-        skipped: Value,
-    ) -> bool {
-        let bytes = skipped.to_string().len() + 2048;
-        if self.room_for_bytes(bytes).is_err() {
-            return false;
-        }
-        let message_id = format!("note:{}", id());
-        let revision = self.browsers.get(session).map_or(0, |b| b.revision);
-        let payload = json!({"thread_id":thread,"channel":"note","text":"",
-            "message_id":message_id,"history_id":message_id,"session_id":session,
-            "revision":revision,"epoch":epoch,
-            "notice":{"kind":"reply_skipped","instruction":instruction("reply_skipped"),"skipped":[skipped]}});
-        self.append_row(Row {
-            id: message_id,
-            thread: thread.into(),
-            role: "note",
-            text: String::new(),
-            session: session.into(),
-            revision,
-            epoch,
-            time: millis(),
-            status: "pending".into(),
-            queued_at: seconds(),
-            payload: Some(payload),
-            ..Row::default()
-        });
-        true
-    }
-
     fn remember_pending(
         &mut self,
         thread: &str,
         session: &str,
         kind: &str,
         related: Option<&str>,
-        skipped: Option<Value>,
         epoch: u64,
     ) {
         if self.pending_notices.iter().any(|pending| {
@@ -495,7 +432,6 @@ impl Inner {
                 && pending.session == session
                 && pending.kind == kind
                 && pending.related.as_deref() == related
-                && (skipped.is_none() || pending.skipped == skipped)
         }) {
             return;
         }
@@ -504,7 +440,6 @@ impl Inner {
             session: session.into(),
             kind: kind.into(),
             related: related.map(str::to_owned),
-            skipped,
             epoch,
             correction: None,
             replacement: None,
@@ -516,9 +451,7 @@ pub(super) fn instruction(kind: &str) -> &'static str {
     match kind {
         "turn_empty" => "The person said nothing. Resend what you meant if it still matters.",
         "user_returned" => "The person is back. These replies were not heard. Send a fresh response if still relevant.",
-        "reply_skipped" => "The person chose to skip this reply. Do not repeat it just because it was skipped.",
         "reply_heard" => "This reply was heard after the earlier notice. Do not resend it solely because of that notice.",
-        "reply_interrupted" => "The reply was interrupted. Use the heard extent and respond to the person's current message.",
-        _ => "This reply was not played. Use the current context and resend what still matters.",
+        _ => "Use the confirmed hearing extent and current context; respond again if still relevant.",
     }
 }

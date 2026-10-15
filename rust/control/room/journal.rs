@@ -1,7 +1,6 @@
 //! The in-memory conversation journal: its rows in order, their bound, and the state of the
 //! user input waiting in it.
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{json, Value};
 
@@ -43,8 +42,11 @@ pub(super) struct Row {
     /// For a reply cut while it played: how many characters of it the person heard, as the call reported.
     pub(super) heard_chars: Option<u64>,
     pub(super) globally_heard: bool,
-    /// Manual replay Skip does not rewrite the original playback status.
-    pub(super) globally_skipped: bool,
+    /// Semantic hearing is independent of the audio status and its diagnostic reason.
+    pub(super) hearing: Option<String>,
+    pub(super) hearing_unconfirmed: bool,
+    pub(super) hearing_reports: HashMap<String, (String, u64)>,
+    pub(super) hearing_expected: HashSet<String>,
     pub(super) language: Option<String>,
     pub(super) offline: Option<Value>,
     pub(super) payload: Option<Value>,
@@ -65,7 +67,8 @@ impl Row {
         json!({"seq": self.seq, "id": self.id, "thread": self.thread, "role": self.role,
         "text": self.text, "name": self.name, "session": self.session, "revision": self.revision, "epoch": self.epoch,
         "time": self.time, "status": self.status, "audio_reason": self.reason, "heard_chars": self.heard_chars,
-        "globally_heard":self.globally_heard,"replayable":self.role=="assistant",
+        "globally_heard":self.globally_heard,"hearing":self.hearing,
+        "hearing_unconfirmed":self.hearing_unconfirmed,"replayable":self.role=="assistant",
         "offline": self.offline})
     }
     fn is_input(&self) -> bool {
@@ -123,8 +126,8 @@ fn protected(row: &Row) -> bool {
         || (row.status == "delivered" && row.pull_claimed_by.is_some())
         || (row.role == "assistant"
             && (matches!(row.status.as_str(), "queued" | "playing")
-                || (!row.globally_heard
-                    && super::unheard::unheard(&row.status, row.reason.as_deref()).is_some())))
+                || row.hearing_unconfirmed
+                || matches!(row.hearing.as_deref(), Some("partial" | "not_heard"))))
 }
 impl Journal {
     pub(super) fn can_append(&self) -> bool {
@@ -170,11 +173,8 @@ impl Journal {
     pub(super) fn assistant_hearing_facts(&self, thread: &str) -> HashMap<String, Value> {
         self.rows.iter().filter(|r| r.thread == thread && r.role == "assistant")
             .filter_map(|r| {
-                let (fate, heard) = if r.globally_heard {
-                    (if r.status == "skipped" || r.globally_skipped {"skipped"} else {"heard"}, Some(r.text.chars().count() as u64))
-                } else {
-                    ("partial", r.heard_chars)
-                };
+                let fate = r.hearing.as_deref()?;
+                let heard = r.heard_chars;
                 heard.map(|heard_chars| (r.id.clone(), json!({"utterance_id":r.id.rsplit_once(":voice:").map(|(_, id)| id).unwrap_or(""),
                     "history_id":r.id,"fate":fate,"heard_chars":heard_chars})))
             }).collect()
@@ -186,8 +186,7 @@ impl Journal {
             .filter(|row| {
                 row.role == "assistant"
                     && row.thread == thread
-                    && !row.globally_heard
-                    && super::unheard::unheard(&row.status, row.reason.as_deref()).is_some()
+                    && matches!(row.hearing.as_deref(), Some("partial" | "not_heard"))
             })
             .collect();
         Some((rows.len(), rows.first()?.time))
@@ -318,8 +317,7 @@ impl Room {
             .filter(|(index, row)| {
                 *index >= recent
                     || (row.role == "assistant"
-                        && !row.globally_heard
-                        && super::unheard::unheard(&row.status, row.reason.as_deref()).is_some())
+                        && matches!(row.hearing.as_deref(), Some("partial" | "not_heard")))
             })
             .map(|(_, row)| row.view())
             .collect();

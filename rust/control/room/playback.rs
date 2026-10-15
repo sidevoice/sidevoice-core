@@ -10,10 +10,9 @@ use super::{Inner, Room};
 /// What a call may report about a reply it was sent.
 const REPORTS: [&str; 5] = ["playing", "heard", "interrupted", "unplayed", "failed"];
 /// Why a reply stopped short, as a call may say.
-const REASONS: [&str; 10] = [
+const REASONS: [&str; 9] = [
     "user_interrupted",
     "newer_turn",
-    "user_skipped",
     "focus_changed",
     "call_ended",
     "unheard",
@@ -24,10 +23,7 @@ const REASONS: [&str; 10] = [
 ];
 
 impl Room {
-    /// Call `sid` reports what became of reply `uid` there: it started playing, was heard to the end, was cut
-    /// (with how many of its characters were heard), was never played, or failed. A report on a reply that
-    /// already ended is taken without changing it. A report with no status is refused; one whose status the room
-    /// does not know is taken and changes nothing, and a reason it does not know is read as none.
+    /// Physical playback and diagnostic stop cause. Semantic hearing arrives in reply-hearing.
     pub fn playback(
         &self,
         sid: &str,
@@ -53,7 +49,6 @@ impl Room {
         let Some(record) = inner.utterances.get(uid) else {
             return Err(stale());
         };
-        // How far a reply was heard is counted in its characters (Unicode scalar values), and cannot pass its end.
         let length = inner
             .journal
             .find(&record.row_id)
@@ -61,102 +56,54 @@ impl Room {
         if heard_chars.is_some_and(|heard| length.is_some_and(|length| heard > length)) {
             return Err(RoomError::new(400, "room.receipt_invalid"));
         }
-        let Some(record) = inner.utterances.get_mut(uid) else {
-            return Err(stale());
-        };
-        let Some(entry) = record.clients.get_mut(sid) else {
-            return Err(stale());
+        let record = inner.utterances.get_mut(uid).ok_or_else(stale)?;
+        let entry = record.clients.get_mut(sid).ok_or_else(stale)?;
+        let next = match status {
+            "heard" => "playback_finished",
+            "interrupted" | "unplayed" => "interrupted",
+            "failed" => "failed",
+            _ => "playing",
         };
         if !matches!(entry.1.as_str(), "queued" | "playing") {
-            if entry.1 == "interrupted"
-                && (matches!(status, "heard" | "interrupted") || reason == Some("user_skipped"))
-            {
+            // A delayed physical receipt may improve history diagnostics, never semantic hearing.
+            if entry.1 == "interrupted" && matches!(status, "heard" | "interrupted") {
+                if status == "heard" {
+                    entry.1 = next.into();
+                }
                 if let Some(end) = record.ends.get_mut(sid) {
-                    let prior = end.heard_chars.unwrap_or(0);
-                    if reason == Some("user_skipped") {
-                        entry.1 = "skipped".into();
-                        end.heard_chars = length;
-                        end.reason = Some("user_skipped".into());
-                        record.heard.insert(sid.to_owned());
-                    } else if status == "heard" {
-                        entry.1 = "playback_finished".into();
-                        end.heard_chars = length;
-                        end.reason = None;
-                        record.heard.insert(sid.to_owned());
-                    } else if heard_chars.is_some_and(|heard| heard > prior) {
-                        end.heard_chars = heard_chars;
-                    }
+                    end.heard_chars = match (end.heard_chars, heard_chars) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    };
+                }
+                if !record.is_replay() {
                     let row_id = record.row_id.clone();
-                    let replay_of = record.replay_of.clone();
-                    let next = entry.1.clone();
-                    let extent = end.heard_chars;
-                    if let Some(original) = replay_of {
-                        inner.apply_replay_receipt(&original, sid, &row_id, &next, extent);
-                    } else {
-                        inner.sync_row(&row_id);
-                        if reason == Some("user_skipped") {
-                            inner.queue_skip_note(&row_id, sid);
-                        }
-                    }
+                    inner.sync_row(&row_id);
                 }
             }
             return Ok(());
         }
-        let (next, reason) = match status {
-            "heard" => ("playback_finished", None),
-            "interrupted" | "unplayed" if reason == Some("user_skipped") => {
-                ("skipped", Some("user_skipped"))
-            }
-            "interrupted" => ("interrupted", Some(reason.unwrap_or("user_interrupted"))),
-            "unplayed" => ("interrupted", Some(reason.unwrap_or("newer_turn"))),
-            "failed" => ("failed", Some("playback_failed")),
-            _ => ("playing", None),
-        };
-        entry.1 = next.to_owned();
+        entry.1 = next.into();
         record.ends.insert(
             sid.to_owned(),
             End {
-                reason: reason.map(str::to_owned),
-                heard_chars: if matches!(next, "playback_finished" | "skipped") {
+                reason: match status {
+                    "heard" | "playing" => None,
+                    "interrupted" => Some(reason.unwrap_or("user_interrupted").into()),
+                    "unplayed" => Some(reason.unwrap_or("newer_turn").into()),
+                    "failed" => Some("playback_failed".into()),
+                    _ => None,
+                },
+                heard_chars: if status == "heard" {
                     length
                 } else {
-                    heard_chars.filter(|_| matches!(status, "interrupted" | "failed"))
+                    heard_chars
                 },
             },
         );
-        // A reply played to the end, or cut while it played, was heard by this call: a catch-up of it is not
-        // offered again.
-        if matches!(next, "playback_finished" | "skipped") {
-            record.heard.insert(sid.to_owned());
-        }
-        let catch_up_of = record.replay_of.clone();
         let row_id = record.row_id.clone();
-        let original_row = (!record.is_replay()).then(|| row_id.clone());
-        if let Some(row_id) = &original_row {
-            inner.sync_row(row_id);
-            if next == "skipped" {
-                inner.queue_skip_note(row_id, sid);
-            }
-            if matches!(next, "playback_finished" | "skipped") {
-                let listeners: Vec<String> = inner
-                    .utterances
-                    .get(uid)
-                    .into_iter()
-                    .flat_map(|record| record.clients.iter())
-                    .filter(|(listener, (_, status))| {
-                        listener.as_str() != sid && status == "queued"
-                    })
-                    .map(|(listener, _)| listener.clone())
-                    .collect();
-                for listener in listeners {
-                    inner.withdraw(&listener, "heard_elsewhere", |record, (_, status)| {
-                        record.row_id == *row_id && status == "queued"
-                    });
-                }
-            }
-        }
-        if let Some(original) = catch_up_of {
-            inner.apply_replay_receipt(&original, sid, &row_id, next, heard_chars);
+        if !record.is_replay() {
+            inner.sync_row(&row_id);
         }
         inner.latency.set_reply_status(sid, uid, next);
         if status == "playing" {
@@ -179,97 +126,18 @@ impl Room {
 }
 
 impl Inner {
-    /// A replay reports hearing against its original row, even after park terminalized the handle.
-    fn apply_replay_receipt(
-        &mut self,
-        original: &str,
-        sid: &str,
-        row_id: &str,
-        next: &str,
-        heard_chars: Option<u64>,
-    ) {
-        self.utterances.replay_heard(original, sid, next);
-        let Some(thread) = self.journal.find(row_id).map(|row| row.thread.clone()) else {
-            return;
-        };
-        if matches!(next, "playback_finished" | "skipped") {
-            if let Some(row) = self.journal.find_mut(row_id) {
-                row.globally_heard = true;
-                row.globally_skipped = next == "skipped";
-                row.heard_chars = Some(row.text.chars().count() as u64);
-            }
-            self.unheard.update(&thread, row_id, None, None);
-            self.reconcile_unclaimed(&thread);
-        } else if let Some(heard) = heard_chars {
-            if let Some(row) = self.journal.find_mut(row_id) {
-                row.heard_chars = Some(row.heard_chars.unwrap_or(0).max(heard));
-            }
-            self.track_unheard(row_id);
-            self.reconcile_unclaimed(&thread);
-        }
-        if next == "skipped" {
-            self.queue_skip_note(row_id, sid);
-        }
-    }
-
-    /// Show on a reply's journal row what the calls it was sent to did with it (`UtteranceRecord::outcome`).
+    /// Show physical playback state in history without inferring semantic hearing from it.
     pub(super) fn sync_row(&mut self, row_id: &str) {
-        let Some((status, reason, heard_chars)) = self
+        let Some((status, reason, _)) = self
             .utterances
             .original_of_row(row_id)
             .and_then(|(_, record)| record.outcome())
-            .map(|(status, reason, heard)| (status.to_owned(), reason.map(str::to_owned), heard))
         else {
             return;
         };
         if let Some(row) = self.journal.find_mut(row_id) {
-            row.status = status;
-            row.reason = reason;
-            // Original-device reports can arrive after a manual replay on another handle.
-            // The journal carries the aggregate confirmed prefix, not just the original's prefix.
-            row.heard_chars = match (row.heard_chars, heard_chars) {
-                (Some(previous), Some(original)) => Some(previous.max(original)),
-                (previous, original) => previous.or(original),
-            };
-            row.globally_heard |= matches!(row.status.as_str(), "playback_finished" | "skipped");
-        }
-        self.track_unheard(row_id);
-        if self.journal.find(row_id).is_some() {
-            let thread = self.journal.find(row_id).unwrap().thread.clone();
-            self.reconcile_unclaimed(&thread);
-        }
-        if let Some(row) = self.journal.find(row_id) {
-            let thread = row.thread.clone();
-            let session = row.session.clone();
-            let epoch = row.epoch;
-            if matches!(row.status.as_str(), "interrupted" | "failed")
-                && !self.conversations.is_open(&thread)
-            {
-                let message = self.journal.newer_spoken_message(&thread, epoch);
-                let empty = self.conversations.empty_after(&thread, epoch);
-                let kind = if row.reason.as_deref() == Some("user_interrupted") {
-                    "reply_interrupted"
-                } else {
-                    "reply_not_played"
-                };
-                match (message, empty) {
-                    (Some((word_epoch, message_id)), Some((empty_epoch, _)))
-                        if word_epoch <= empty_epoch =>
-                    {
-                        self.flush_all_unheard_notes(&thread, &session, kind, Some(&message_id));
-                    }
-                    (_, Some((_, empty_session))) => {
-                        self.flush_all_unheard_notes(&thread, &empty_session, kind, None);
-                    }
-                    (Some((_, message_id)), None) => {
-                        self.flush_all_unheard_notes(&thread, &session, kind, Some(&message_id));
-                    }
-                    (None, None) if self.conversations.epoch(&thread) > epoch => {
-                        self.flush_all_unheard_notes(&thread, &session, kind, None);
-                    }
-                    (None, None) => {}
-                }
-            }
+            row.status = status.to_owned();
+            row.reason = reason.map(str::to_owned);
         }
     }
 

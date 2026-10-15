@@ -30,6 +30,7 @@ impl Call {
             Some("voice-turn-trace") => trace_turn(&self.session, &data),
             Some("voice-user-turn") => self.once(&data, Self::user_turn).await,
             Some("voice-playback") => self.once(&data, Self::playback).await,
+            Some("reply-hearing") => self.once(&data, Self::reply_hearing).await,
             Some("voice-speech") => self.once(&data, Self::speech).await,
             Some("voice-settings") => self.update_settings(&data).await,
             _ => {}
@@ -158,6 +159,29 @@ impl Call {
             data["reason"].as_str(),
         ) {
             Ok(_) => Vec::new(),
+            Err(error) => vec![self.refusal(error.key, client_msg_id(data))],
+        }
+    }
+
+    fn reply_hearing(&mut self, data: &Value) -> Vec<Value> {
+        let heard_chars = match data.get("heard_chars") {
+            None => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| RoomError::new(400, "room.receipt_invalid")),
+        };
+        let result = heard_chars.and_then(|heard_chars| {
+            self.state.room.reply_hearing(
+                &self.session,
+                data["history_id"].as_str().unwrap_or(""),
+                data["utterance_id"].as_str().unwrap_or(""),
+                data["outcome"].as_str().unwrap_or(""),
+                heard_chars,
+            )
+        });
+        match result {
+            Ok(()) => Vec::new(),
             Err(error) => vec![self.refusal(error.key, client_msg_id(data))],
         }
     }

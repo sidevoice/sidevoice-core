@@ -292,14 +292,7 @@ impl Inner {
         if turn_id.is_some() {
             self.unheard.resolve_words(thread_id);
             if let Some(unheard) = self.unheard.take(thread_id, &self.journal) {
-                let kind = if unheard["replies"]
-                    .as_array()
-                    .is_some_and(|replies| replies.iter().any(|reply| reply["cut"] == true))
-                {
-                    "reply_interrupted"
-                } else {
-                    "reply_not_played"
-                };
+                let kind = "reply_not_heard";
                 payload["notice"] =
                     json!({"kind":kind,"instruction":super::notices::instruction(kind)});
                 payload["unheard"] = unheard;
@@ -331,7 +324,7 @@ impl Inner {
             self.flush_all_unheard_notes(
                 thread_id,
                 session_id,
-                "reply_not_played",
+                "reply_not_heard",
                 Some(message_id),
             );
         }

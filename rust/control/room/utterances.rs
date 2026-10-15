@@ -27,8 +27,6 @@ pub(super) struct UtteranceRecord {
     pub(super) parked: bool,
     /// For a replay: the utterance it repeats, by id; one never sent to a call has no record of its own.
     pub(super) replay_of: Option<String>,
-    /// Calls that heard this reply through or explicitly skipped it.
-    pub(super) heard: HashSet<String>,
     /// Calls it was sent to. A call that was away when it was published never got it.
     pub(super) sent: HashSet<String>,
     /// A repetition the person asked for from the bubble, not a catch-up.
@@ -46,8 +44,7 @@ impl UtteranceRecord {
             .max_by_key(|status| status_rank(status))
     }
     /// What the reply's journal row shows: the furthest status any call reached, with the reason and the heard extent
-    /// of the calls that ended there. A cut while it played (`user_interrupted`) is the reason told first, since its
-    /// start was heard; the furthest any of those calls heard is how far it was heard.
+    /// of the calls that ended there. This is audio history only.
     pub(super) fn outcome(&self) -> Option<(&str, Option<&str>, Option<u64>)> {
         let best = self.best_status()?;
         let ends: Vec<&End> = self
@@ -56,10 +53,7 @@ impl UtteranceRecord {
             .filter(|(_, (_, status))| status == best)
             .filter_map(|(sid, _)| self.ends.get(sid))
             .collect();
-        let reason = ends
-            .iter()
-            .filter_map(|end| end.reason.as_deref())
-            .min_by_key(|reason| (*reason != "user_interrupted", *reason));
+        let reason = ends.iter().filter_map(|end| end.reason.as_deref()).min();
         let heard_chars = self.ends.values().filter_map(|end| end.heard_chars).max();
         Some((best, reason, heard_chars))
     }
@@ -68,7 +62,7 @@ impl UtteranceRecord {
         self.clients.values().all(|(_, status)| {
             matches!(
                 status.as_str(),
-                "failed" | "playback_finished" | "interrupted" | "skipped"
+                "failed" | "playback_finished" | "interrupted"
             )
         })
     }
@@ -81,7 +75,6 @@ fn status_rank(status: &str) -> u8 {
         "queued" => 4,
         "playing" => 7,
         "playback_finished" => 9,
-        "skipped" => 8,
         _ => 0,
     }
 }
@@ -172,15 +165,6 @@ impl Utterances {
             }
         }
         rows
-    }
-    /// A catch-up that actually sounded for `sid` says so on the reply it repeated, so the next
-    /// return does not offer it again. One that never started playing says nothing.
-    pub(super) fn replay_heard(&mut self, original: &str, sid: &str, next: &str) {
-        if next == "playback_finished" || next == "skipped" {
-            if let Some(record) = self.by_id.get_mut(original) {
-                record.heard.insert(sid.to_owned());
-            }
-        }
     }
     /// Forget the utterances spoken from journal rows that were dropped.
     pub(super) fn forget_rows(&mut self, row_ids: &[String]) {

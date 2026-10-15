@@ -216,6 +216,8 @@ impl Room {
             time: millis(),
             status: status.into(),
             reason: reason.clone(),
+            hearing_unconfirmed: true,
+            hearing_expected: audience.iter().cloned().collect(),
             language: language.map(str::to_owned),
             queued_at: seconds(),
             publication: Some(disposition.clone()),
@@ -225,7 +227,6 @@ impl Room {
         if reason.is_none() {
             inner.speak(uid, row_id, &audience, thread, revision, epoch);
         } else {
-            inner.track_unheard(&row_id);
             if !capacity {
                 inner.utterances.insert(
                     uid,
@@ -237,9 +238,7 @@ impl Room {
                     },
                 );
             }
-            if reason.as_deref() == Some("newer_turn") {
-                inner.flush_all_unheard_notes(thread, sid, "reply_not_played", None);
-            }
+            // An audio admission decision does not establish a hearing outcome.
         }
         inner.remember_refusal(uid, fingerprint, disposition.clone());
         disposition

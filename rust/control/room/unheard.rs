@@ -1,14 +1,5 @@
-//! What the person did not hear, per conversation, until the agent is told.
-//!
-//! A reply counts as unheard when it ends without being played to the person:
-//! - cut while it played, because the person spoke over it (`user_interrupted`): the whole reply
-//!   counts, flagged `cut` (its start was heard), with `heard_chars` when the call said how far
-//!   playback got;
-//! - dropped before it played: superseded by a newer message (`newer_turn`), not received by a call
-//!   that dropped or whose channel was full (`unheard`), stopped by a change of conversation or the end of the call
-//!   (`focus_changed`, `call_ended`, `session_changed`), refused for a full queue or failed on the
-//!   page (`queue_full`, `playback_failed`);
-//! - published with nobody listening on its conversation (`text_only`).
+//! Confirmed partial and not-heard replies, per conversation, until the agent is told.
+//! Physical playback status and stop cause do not decide semantic hearing.
 //!
 //! Nothing here is ever played. Full reply evidence goes to the agent in batches with the
 //! ending spoken message or through ordinary note rows after [`NOTE_GRACE_SECONDS`].
@@ -27,48 +18,15 @@ const KEPT_PER_THREAD: usize = 2048;
 /// How long a person who came back may stay silent before the agent is sent a note.
 pub(super) const NOTE_GRACE_SECONDS: u64 = 5;
 
-/// The reasons a reply that was not played to the end ends unheard with.
-const UNHEARD_REASONS: [&str; 14] = [
-    "user_interrupted",
-    "newer_turn",
-    "unheard",
-    "focus_changed",
-    "call_ended",
-    "session_changed",
-    "queue_full",
-    "playback_failed",
-    "agents_muted",
-    "voice_off",
-    "connector_disconnected",
-    "no_audience",
-    "disconnected",
-    "inactive_conversation",
-];
-
-/// Whether a reply row with this status and reason was not heard; `Some(cut)` if so.
-pub(super) fn unheard(status: &str, reason: Option<&str>) -> Option<bool> {
-    match status {
-        "text_only" => Some(false),
-        "interrupted" | "failed" => reason
-            .filter(|reason| UNHEARD_REASONS.contains(reason))
-            .map(|reason| reason == "user_interrupted"),
-        _ => None,
-    }
-}
-
-/// One unheard reply: its row, whether it was cut while playing, and how many of its characters
-/// were heard first, when known.
+/// One confirmed miss and its maximum heard prefix.
 struct Missed {
     row_id: String,
-    cut: bool,
     heard_chars: Option<usize>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 struct EvidenceVersion {
     fate: String,
-    reason: Option<String>,
-    cut: bool,
     heard_chars: Option<usize>,
 }
 
@@ -96,16 +54,12 @@ impl Unheard {
         &self,
         row_id: &str,
         fate: &str,
-        reason: Option<&str>,
-        cut: bool,
         heard_chars: Option<usize>,
     ) -> bool {
         self.queued_versions.get(row_id).is_some_and(|queued| {
             queued
                 == &EvidenceVersion {
                     fate: fate.to_owned(),
-                    reason: reason.map(str::to_owned),
-                    cut,
                     heard_chars,
                 }
         })
@@ -120,20 +74,18 @@ impl Unheard {
         }
         self.by_thread.retain(|_, pending| !pending.rows.is_empty());
     }
-    /// A reply on `thread` ended unheard (`Some(cut)`, with `heard_chars` when known) or was
-    /// heard (`None`).
+    /// A confirmed miss is present when `unheard` is true; false removes it.
     pub(super) fn update(
         &mut self,
         thread: &str,
         row_id: &str,
-        unheard: Option<bool>,
+        unheard: bool,
         heard_chars: Option<usize>,
     ) {
         match unheard {
-            Some(cut) => {
+            true => {
                 let pending = self.by_thread.entry(thread.to_owned()).or_default();
                 if let Some(entry) = pending.rows.iter_mut().find(|m| m.row_id == row_id) {
-                    entry.cut |= cut;
                     entry.heard_chars = match (entry.heard_chars, heard_chars) {
                         (Some(a), Some(b)) => Some(a.max(b)),
                         (a, b) => a.or(b),
@@ -142,13 +94,12 @@ impl Unheard {
                 }
                 pending.rows.push_back(Missed {
                     row_id: row_id.to_owned(),
-                    cut,
                     heard_chars,
                 });
                 // Admission is bounded by the journal/utterance limits. Never discard evidence.
                 debug_assert!(pending.rows.len() <= KEPT_PER_THREAD);
             }
-            None => {
+            false => {
                 if let Some(pending) = self.by_thread.get_mut(thread) {
                     pending.rows.retain(|m| m.row_id != row_id);
                     if pending.rows.is_empty() {
@@ -183,9 +134,7 @@ impl Unheard {
                 self.queued_versions.insert(
                     missed.row_id.clone(),
                     EvidenceVersion {
-                        fate: row.status.clone(),
-                        reason: row.reason.clone(),
-                        cut: missed.cut,
+                        fate: row.hearing.clone().unwrap_or_default(),
                         heard_chars: missed.heard_chars,
                     },
                 );
@@ -200,8 +149,8 @@ impl Unheard {
             .map(|(row, missed)| {
                 let mut reply = json!({"utterance_id":row.id.rsplit_once(":voice:").map(|(_, id)| id).unwrap_or(""),
                     "history_id":row.id,"session_id":row.session,"revision":row.revision,
-                    "epoch":row.epoch,"text":row.text,"fate":row.status,
-                    "reason":row.reason,"cut":missed.cut,"heard_chars":Value::Null});
+                    "epoch":row.epoch,"text":row.text,"fate":row.hearing,
+                    "heard_chars":Value::Null});
                 if let Some(heard) = missed.heard_chars {
                     reply["heard_chars"] = json!(heard);
                 }
@@ -310,25 +259,16 @@ impl Inner {
         else {
             return;
         };
-        let verdict = if row.globally_heard {
-            None
-        } else {
-            unheard(&row.status, row.reason.as_deref())
-        };
-        if row.globally_heard
-            || verdict.is_some()
-            || matches!(row.status.as_str(), "playback_finished" | "skipped")
-        {
+        let verdict = matches!(row.hearing.as_deref(), Some("partial" | "not_heard"));
+        if row.hearing.is_some() {
             let thread = row.thread.clone();
             let heard_chars = row
                 .heard_chars
                 .and_then(|heard| usize::try_from(heard).ok());
-            if !verdict.is_some_and(|cut| {
+            if !(verdict && {
                 self.unheard.already_queued(
                     row_id,
-                    &row.status,
-                    row.reason.as_deref(),
-                    cut,
+                    row.hearing.as_deref().unwrap_or_default(),
                     heard_chars,
                 )
             }) {

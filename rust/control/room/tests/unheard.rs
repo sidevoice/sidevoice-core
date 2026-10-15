@@ -4,7 +4,6 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::support::{pull_room, report, say};
-use crate::control::room::unheard::unheard;
 use crate::control::room::{ConnectorPeer, Room};
 
 /// A room with one push binding on `thread`: the room, its binding and the connector's generation.
@@ -76,27 +75,20 @@ fn deliveries(room: &Room, channel: &str) -> Vec<Value> {
 
 #[test]
 fn what_counts_as_unheard() {
-    assert_eq!(unheard("text_only", None), Some(false));
-    assert_eq!(unheard("interrupted", Some("user_interrupted")), Some(true));
-    for reason in [
-        "newer_turn",
-        "unheard",
-        "focus_changed",
-        "call_ended",
-        "session_changed",
-    ] {
-        assert_eq!(
-            unheard("interrupted", Some(reason)),
-            Some(false),
-            "{reason}"
-        );
-    }
-    assert_eq!(unheard("failed", Some("playback_failed")), Some(false));
-    // Skipped on purpose, or perhaps played: not reported.
-    assert_eq!(unheard("interrupted", Some("user_skipped")), None);
-    assert_eq!(unheard("failed", Some("unconfirmed")), None);
-    assert_eq!(unheard("playback_finished", None), None);
-    assert_eq!(unheard("queued", None), None);
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _) = call(&room, "t");
+    reply(&room, &sid, "t", "r", "Reply", revision(&room, &sid));
+    let id = format!("{sid}:voice:r");
+    assert_eq!(
+        room.history(Some("t"))["messages"][0]["hearing"],
+        Value::Null
+    );
+    room.reply_hearing(&sid, &id, "r", "not_heard", None)
+        .unwrap();
+    assert_eq!(
+        room.history(Some("t"))["messages"][0]["hearing"],
+        "not_heard"
+    );
 }
 
 #[test]
