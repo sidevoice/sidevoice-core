@@ -1,4 +1,4 @@
-//! Replays the person asks for: sent again as text, retired once they end, never touching the original's history.
+//! Replays the person asks for: sent again as text, with bounded late receipt IDs, never changing the original playback fate.
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
@@ -66,7 +66,7 @@ fn kept(room: &Room, uid: &str) -> bool {
 }
 
 #[test]
-fn replays_that_ended_are_retired_and_the_original_stays() {
+fn finished_replays_keep_only_a_bounded_receipt_window_and_the_original_stays() {
     let (_directory, room, sid, mut received, history_id) = heard_reply();
     for index in 0..MAX_UTTERANCES + 1 {
         let uid = format!("again-{index}");
@@ -77,6 +77,14 @@ fn replays_that_ended_are_retired_and_the_original_stays() {
     }
     let inner = room.inner.lock().unwrap();
     assert_eq!(inner.utterances.replay_count(), 0);
+    assert_eq!(
+        inner
+            .utterances
+            .iter()
+            .filter(|(_, r)| r.is_replay())
+            .count(),
+        256
+    );
     assert!(inner.utterances.contains("original"));
     drop(inner);
     assert_eq!(status(&room, &history_id), "playback_finished");
@@ -96,7 +104,7 @@ fn replay_skips_close_and_leave_keep_original_history() {
         &Value::Null,
     )
     .unwrap();
-    assert!(!kept(&room, "skipped-replay"));
+    assert!(kept(&room, "skipped-replay"));
     room.replay_one(&sid, &history_id, "turn-replay").unwrap();
     room.begin_turn(&sid, "turn").unwrap();
     assert_eq!(status(&room, &history_id), "playback_finished");
@@ -118,7 +126,7 @@ fn replay_skips_close_and_leave_keep_original_history() {
     assert!(!kept(&room, "leaving-replay"));
     room.replay_one(&sid, &history_id, "closed-replay").unwrap();
     room.close_channel("replay-thread").unwrap();
-    // Withdrawn from the call, which says it never played it: then it is gone.
+    // Withdrawn from the call, which says it never played it: its receipt identity remains until leave.
     assert!(kept(&room, "closed-replay"));
     room.playback(
         &sid,
@@ -129,8 +137,10 @@ fn replay_skips_close_and_leave_keep_original_history() {
         &Value::Null,
     )
     .unwrap();
-    assert!(!kept(&room, "closed-replay"));
+    assert!(kept(&room, "closed-replay"));
     assert_eq!(status(&room, &history_id), "playback_finished");
     room.leave(&sid);
+    assert!(!kept(&room, "skipped-replay"));
+    assert!(!kept(&room, "closed-replay"));
     assert!(kept(&room, "original"));
 }
