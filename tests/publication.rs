@@ -1,6 +1,8 @@
 //! Speech admission at the room boundary. These cases exercise the public Room API.
 use serde_json::{json, Value};
-use sidevoice_core::control::room::{ConnectorPeer, PeerRequest, Room};
+use sidevoice_core::control::room::{
+    ConnectorPeer, Continuation, PeerRequest, Room, RoomError, VoiceTurn,
+};
 use sidevoice_core::storage::PrivateDir;
 use tokio::sync::{mpsc, watch};
 
@@ -10,6 +12,23 @@ struct Fixture {
     _requests: mpsc::Receiver<PeerRequest>,
     _stop: watch::Receiver<bool>,
     events: Vec<mpsc::Receiver<Value>>,
+}
+
+trait BeginAtFocus {
+    fn begin_at_focus(&self, sid: &str, turn_id: &str) -> Result<VoiceTurn, RoomError>;
+}
+
+impl BeginAtFocus for Room {
+    fn begin_at_focus(&self, sid: &str, turn_id: &str) -> Result<VoiceTurn, RoomError> {
+        let snapshot = self.snapshot(Some(sid));
+        let binding = &snapshot["binding"];
+        self.begin_turn(
+            sid,
+            turn_id,
+            binding["thread_id"].as_str().unwrap_or(""),
+            binding["binding_id"].as_str().unwrap_or(""),
+        )
+    }
 }
 
 impl Fixture {
@@ -84,12 +103,12 @@ fn current_epoch_replies_are_all_accepted_in_order() {
 fn an_open_turn_refuses_immediately_and_retry_keeps_the_refusal() {
     let mut f = Fixture::new();
     let (sid, _) = f.listener("thread-a");
-    let turn = f.room.begin_turn(&sid, "turn").unwrap();
+    let turn = f.room.begin_at_focus(&sid, "turn").unwrap();
     let first = f.publish("refused", &sid, "thread-a", turn.revision, turn.epoch);
     assert_eq!(first["status"], "rejected");
     assert_eq!(first["reason"], "user_speaking");
     f.room
-        .finish_turn(&sid, "turn", None, &Value::Null)
+        .finish_turn(&sid, "turn", None, &Value::Null, Continuation::Standalone)
         .unwrap();
     assert_eq!(
         f.publish("refused", &sid, "thread-a", turn.revision, turn.epoch),
@@ -106,9 +125,15 @@ fn an_open_turn_refuses_immediately_and_retry_keeps_the_refusal() {
 fn a_spoken_boundary_stales_old_context_but_accepts_fresh_context() {
     let mut f = Fixture::new();
     let (sid, revision) = f.listener("thread-a");
-    let turn = f.room.begin_turn(&sid, "turn").unwrap();
+    let turn = f.room.begin_at_focus(&sid, "turn").unwrap();
     f.room
-        .finish_turn(&sid, "turn", Some("New context"), &Value::Null)
+        .finish_turn(
+            &sid,
+            "turn",
+            Some("New context"),
+            &Value::Null,
+            Continuation::Standalone,
+        )
         .unwrap();
     let stale = f.publish("stale", &sid, "thread-a", revision, 0);
     assert_eq!(stale["status"], "text_only");
@@ -162,9 +187,15 @@ fn focus_and_session_switches_cannot_rewrite_a_reply_epoch() {
         f.publish("same-epoch", &first, "thread-a", revision, 0)["status"],
         "queued"
     );
-    let turn = f.room.begin_turn(&second, "turn").unwrap();
+    let turn = f.room.begin_at_focus(&second, "turn").unwrap();
     f.room
-        .finish_turn(&second, "turn", Some("Later"), &Value::Null)
+        .finish_turn(
+            &second,
+            "turn",
+            Some("Later"),
+            &Value::Null,
+            Continuation::Standalone,
+        )
         .unwrap();
     let stale = f.publish("stale", &first, "thread-a", revision, 0);
     assert_eq!(stale["status"], "text_only");

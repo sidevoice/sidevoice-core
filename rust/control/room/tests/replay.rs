@@ -3,9 +3,10 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
 use super::support::report;
+use super::support::BeginAtFocus;
 use crate::control::room::util::id;
 use crate::control::room::utterances::MAX_UTTERANCES;
-use crate::control::room::{ConnectorPeer, Room};
+use crate::control::room::{ConnectorPeer, Continuation, Room};
 use crate::storage::PrivateDir;
 
 /// A room with a binding on `replay-thread`, a call on it, and the history id of a reply that call heard.
@@ -106,7 +107,7 @@ fn replay_stops_close_and_leave_keep_original_history() {
     .unwrap();
     assert!(kept(&room, "stopped-replay"));
     room.replay_one(&sid, &history_id, "turn-replay").unwrap();
-    room.begin_turn(&sid, "turn").unwrap();
+    room.begin_at_focus(&sid, "turn").unwrap();
     assert_eq!(status(&room, &history_id), "playback_finished");
     assert_eq!(
         room.replay_one(&sid, &history_id, "during-turn")
@@ -114,7 +115,8 @@ fn replay_stops_close_and_leave_keep_original_history() {
             .key,
         "room.replay_unavailable"
     );
-    room.finish_turn(&sid, "turn", None, &Value::Null).unwrap();
+    room.finish_turn(&sid, "turn", None, &Value::Null, Continuation::Standalone)
+        .unwrap();
     let (other_events, _other_received) = mpsc::channel(8);
     let other = room
         .join("other-device".into(), "en".into(), other_events)

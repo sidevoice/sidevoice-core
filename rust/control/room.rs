@@ -51,7 +51,7 @@ mod util;
 pub use error::RoomError;
 pub use latency::{latency_now_micros, LatencyDuration, LatencyEvent, LatencyMark, LatencyReply};
 pub use peers::{ConnectorPeer, PeerError, PeerRequest};
-pub use turns::VoiceTurn;
+pub use turns::{Continuation, VoiceTurn};
 
 use bindings::Bindings;
 use browsers::Browsers;

@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::control::room::RoomError;
+use crate::control::room::{Continuation, RoomError};
 use crate::messages::{render, LocalizedMessage};
 use crate::server::call::admission::offered_language;
 use crate::server::call::client_msg_id;
@@ -76,7 +76,7 @@ impl Call {
                 .zip(data["binding_id"].as_str())
                 .ok_or_else(|| RoomError::new(400, "room.request_invalid"))
                 .and_then(|(thread, binding)| {
-                    room.begin_turn_captured(&self.session, turn_id, thread, binding)
+                    room.begin_turn(&self.session, turn_id, thread, binding)
                 })
                 .map(|turn| {
                     started(
@@ -106,12 +106,16 @@ impl Call {
                 let text = (phase == "finished")
                     .then(|| data["text"].as_str())
                     .flatten();
-                room.finish_turn_merged(
+                room.finish_turn(
                     &self.session,
                     turn_id,
                     text,
                     &data["timings_ms"],
-                    data["merged"].as_bool() == Some(true),
+                    if data["merged"].as_bool() == Some(true) {
+                        Continuation::Merged
+                    } else {
+                        Continuation::Standalone
+                    },
                 )
                 .map(|_| Value::Null)
             }

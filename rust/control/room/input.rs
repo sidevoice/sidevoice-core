@@ -137,7 +137,13 @@ impl Room {
             {
                 return Err(RoomError::new(409, "room.message_conflict"));
             }
-            return self.finish_turn(sid, turn_id, Some(text), &Value::Null);
+            return self.finish_turn(
+                sid,
+                turn_id,
+                Some(text),
+                &Value::Null,
+                super::Continuation::Standalone,
+            );
         }
         let row_id = turn_row(sid, turn_id);
         let mut inner = self.inner.lock().expect("room lock");

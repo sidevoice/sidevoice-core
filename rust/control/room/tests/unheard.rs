@@ -3,8 +3,9 @@
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use super::support::BeginAtFocus;
 use super::support::{pull_room, report, say};
-use crate::control::room::{ConnectorPeer, Room};
+use crate::control::room::{ConnectorPeer, Continuation, Room};
 
 /// A room with one push binding on `thread`: the room, its binding and the connector's generation.
 fn room_on(thread: &str) -> (tempfile::TempDir, Room, String, String) {
@@ -650,7 +651,7 @@ fn a_new_turn_withdraws_the_replies_sent_before_it_that_have_not_started() {
         .unwrap();
     withdrawn(&mut received);
 
-    room.begin_turn(&sid, "next").unwrap();
+    room.begin_at_focus(&sid, "next").unwrap();
     // Only the one not started: the one playing is the call's to cut, and a replay the person asked for stays.
     assert_eq!(
         withdrawn(&mut received),
@@ -675,8 +676,14 @@ fn a_new_turn_withdraws_the_replies_sent_before_it_that_have_not_started() {
         status(&room, &sid, "waiting"),
         ("interrupted".into(), Some("newer_turn".into()))
     );
-    room.finish_turn(&sid, "next", Some("Go on."), &Value::Null)
-        .unwrap();
+    room.finish_turn(
+        &sid,
+        "next",
+        Some("Go on."),
+        &Value::Null,
+        Continuation::Standalone,
+    )
+    .unwrap();
     assert_eq!(
         told(&room, "Go on.").unwrap()["replies"][0]["text"],
         "Not started yet."
@@ -760,7 +767,7 @@ fn a_reply_the_call_cannot_be_told_to_drop_ends_unheard_in_the_room() {
         revision(&room, &sid),
     );
     while events.try_send(json!({"type":"filler"})).is_ok() {}
-    room.begin_turn(&sid, "next").unwrap();
+    room.begin_at_focus(&sid, "next").unwrap();
     assert_eq!(
         status(&room, &sid, "sent"),
         ("interrupted".into(), Some("newer_turn".into()))

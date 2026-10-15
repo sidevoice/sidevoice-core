@@ -3,7 +3,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
 use crate::control::room::util::id;
-use crate::control::room::{ConnectorPeer, Room, RoomError};
+use crate::control::room::{ConnectorPeer, Continuation, Room, RoomError, VoiceTurn};
 use crate::storage::PrivateDir;
 
 pub(super) fn pull_room(connectors: &[&str]) -> (tempfile::TempDir, Room, Vec<String>) {
@@ -27,13 +27,37 @@ pub(super) fn pull_room(connectors: &[&str]) -> (tempfile::TempDir, Room, Vec<St
     (directory, room, generations)
 }
 
+/// Supply the focus identity captured at the start of each test turn.
+pub(super) trait BeginAtFocus {
+    fn begin_at_focus(&self, sid: &str, turn_id: &str) -> Result<VoiceTurn, RoomError>;
+}
+
+impl BeginAtFocus for Room {
+    fn begin_at_focus(&self, sid: &str, turn_id: &str) -> Result<VoiceTurn, RoomError> {
+        let snapshot = self.snapshot(Some(sid));
+        let binding = &snapshot["binding"];
+        self.begin_turn(
+            sid,
+            turn_id,
+            binding["thread_id"].as_str().unwrap_or(""),
+            binding["binding_id"].as_str().unwrap_or(""),
+        )
+    }
+}
+
 /// The person says `text` in call `sid`: a turn starts and ends with those words, as the call's voice module reports.
 pub(super) fn say(room: &Room, sid: &str, text: &str) {
     let turn = room
-        .begin_turn(sid, &crate::control::room::util::id())
+        .begin_at_focus(sid, &crate::control::room::util::id())
         .unwrap();
-    room.finish_turn(sid, &turn.turn_id, Some(text), &Value::Null)
-        .unwrap();
+    room.finish_turn(
+        sid,
+        &turn.turn_id,
+        Some(text),
+        &Value::Null,
+        Continuation::Standalone,
+    )
+    .unwrap();
 }
 
 /// Call `sid` reports what became of reply `uid`.

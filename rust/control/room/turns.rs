@@ -31,6 +31,13 @@ pub struct VoiceTurn {
     pub(super) cancelled: bool,
 }
 
+/// Whether this terminal report continues into a merged turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Continuation {
+    Standalone,
+    Merged,
+}
+
 /// Whether `turn_id` can name a turn: 1 to [`MAX_TURN_ID`] bytes.
 pub(super) fn valid_turn_id(turn_id: &str) -> bool {
     !turn_id.is_empty() && turn_id.len() <= MAX_TURN_ID
@@ -41,12 +48,7 @@ impl Room {
     /// go to. A turn the call already holds is not started again. The replies the call was sent before it and has not
     /// started playing answer an older turn: they are withdrawn (`newer_turn`). One playing is the call's to cut, and
     /// a replay the person asked for is never stale.
-    pub fn begin_turn(&self, sid: &str, turn_id: &str) -> Result<VoiceTurn, RoomError> {
-        self.begin_turn_at(sid, turn_id, None)
-    }
-
-    /// Begin a wire turn at the captured focus, even if HTTP focus selection has since changed.
-    pub fn begin_turn_captured(
+    pub fn begin_turn(
         &self,
         sid: &str,
         turn_id: &str,
@@ -56,15 +58,6 @@ impl Room {
         if binding_id.is_empty() && !thread_id.is_empty() {
             return Err(RoomError::new(400, "room.request_invalid"));
         }
-        self.begin_turn_at(sid, turn_id, Some((thread_id, binding_id)))
-    }
-
-    fn begin_turn_at(
-        &self,
-        sid: &str,
-        turn_id: &str,
-        captured: Option<(&str, &str)>,
-    ) -> Result<VoiceTurn, RoomError> {
         if !valid_turn_id(turn_id) {
             return Err(RoomError::new(400, "room.request_invalid"));
         }
@@ -73,10 +66,9 @@ impl Room {
             return Err(RoomError::new(409, "room.browser_absent"));
         };
         if let Some(turn) = c.turns.iter().find(|turn| turn.turn_id == turn_id) {
-            if captured.is_some_and(|(thread, binding)| {
-                turn.thread_id.as_deref().unwrap_or("") != thread
-                    || turn.binding_id.as_deref() != Some(binding)
-            }) {
+            if turn.thread_id.as_deref().unwrap_or("") != thread_id
+                || turn.binding_id.as_deref() != Some(binding_id)
+            {
                 return Err(RoomError::new(409, "room.message_conflict"));
             }
             return Ok(turn.clone());
@@ -84,8 +76,8 @@ impl Room {
         if inner.conversations.prior(sid, turn_id).is_some() {
             return Err(RoomError::new(409, "room.input_ended"));
         }
-        let bound = match captured {
-            Some(("", ""))
+        let bound = match (thread_id, binding_id) {
+            ("", "")
                 if inner
                     .browsers
                     .get(sid)
@@ -93,7 +85,7 @@ impl Room {
             {
                 None
             }
-            Some((thread, binding)) => Some(
+            (thread, binding) => Some(
                 inner
                     .browsers
                     .get(sid)
@@ -101,11 +93,6 @@ impl Room {
                     .ok_or_else(|| RoomError::new(409, "room.focus_changed"))?
                     .clone(),
             ),
-            None => inner
-                .browsers
-                .get(sid)
-                .and_then(|browser| browser.bound_target())
-                .cloned(),
         };
         if let Some(thread) = bound
             .as_ref()
@@ -160,17 +147,7 @@ impl Room {
         turn_id: &str,
         text: Option<&str>,
         timings: &Value,
-    ) -> Result<Value, RoomError> {
-        self.finish_turn_merged(sid, turn_id, text, timings, false)
-    }
-
-    pub fn finish_turn_merged(
-        &self,
-        sid: &str,
-        turn_id: &str,
-        text: Option<&str>,
-        timings: &Value,
-        merged: bool,
+        continuation: Continuation,
     ) -> Result<Value, RoomError> {
         if text.is_some_and(|text| text.len() > MAX_INPUT_BYTES) {
             return Err(RoomError::new(413, "room.text_too_long"));
@@ -205,7 +182,7 @@ impl Room {
         let turn = browser.turns.remove(index).expect("the turn found");
         // A finished merged transcript already includes earlier turns. Only an empty
         // merged cancellation transfers its obligation to a later open turn.
-        let continuing = if merged && text.is_none() {
+        let continuing = if continuation == Continuation::Merged && text.is_none() {
             browser
                 .turns
                 .iter()
@@ -270,15 +247,11 @@ impl Room {
 
     /// The person cancelled turn `turn_id`, from the page, while speaking it or before its words came: its words,
     /// when they come, are dropped.
-    pub fn cancel_input(&self, sid: &str, turn_id: &str) -> Result<Value, RoomError> {
-        self.cancel_input_merged(sid, turn_id, false)
-    }
-
-    pub fn cancel_input_merged(
+    pub fn cancel_input(
         &self,
         sid: &str,
         turn_id: &str,
-        merged: bool,
+        continuation: Continuation,
     ) -> Result<Value, RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
         let Some(browser) = inner.browsers.get_mut(sid) else {
@@ -292,7 +265,7 @@ impl Room {
             return Err(RoomError::new(409, "room.input_ended"));
         };
         let turn = browser.turns.remove(index).expect("turn found");
-        let continuing = if merged {
+        let continuing = if continuation == Continuation::Merged {
             browser
                 .turns
                 .iter()
