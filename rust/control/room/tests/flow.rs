@@ -1796,6 +1796,19 @@ fn r5_late_original_receipt_cannot_reverse_replay_partial_or_correction_in_push_
                 "pull={pull} elsewhere={replay_elsewhere}"
             );
             assert_eq!(corrections[0]["notice"]["heard"][0]["heard_chars"], 8);
+            // A smaller fact must not contradict an already exposed correction.
+            {
+                let mut inner = c.room.inner.lock().unwrap();
+                inner.journal.find_mut(&history_id).unwrap().heard_chars = Some(4);
+                inner.reconcile_unclaimed("t");
+            }
+            assert_eq!(
+                c.notes()
+                    .iter()
+                    .filter(|note| note["notice"]["kind"] == "reply_heard")
+                    .count(),
+                1
+            );
         }
     }
 }
