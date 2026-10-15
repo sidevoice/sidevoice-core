@@ -42,7 +42,7 @@ Accepted diagnostic `voice-playback.reason` values are `user_interrupted`, `newe
 | Voice event or handle outcome | `voice-playback` to core | Context |
 | --- | --- | --- |
 | `playing` event | `status: "playing"` | Send when sound starts. |
-| `heard` | `status: "heard"` | Full hearing. |
+| `heard` | `status: "heard"` | Physical playback completed; the app still sends its semantic `reply-hearing` decision. |
 | `heard-up-to`, `barge-in` | `status: "interrupted", reason: "user_interrupted", heard_chars` | The person qualified a turn while sound was playing. |
 | `not-played`, `barge-in` | `status: "unplayed", reason: "newer_turn"` | Accepted reply never sounded before the qualified turn. |
 | `heard-up-to` or `not-played`, `cancelled` | `status: "interrupted"` or `"unplayed"`; diagnostic reason when available | The app separately chooses its `reply-hearing.outcome`; cancellation itself does not determine hearing. |

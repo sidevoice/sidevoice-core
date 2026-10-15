@@ -137,11 +137,17 @@ impl Room {
                 .is_some_and(|browser| browser.parked.is_none() && browser.speech_on)
         });
         let capacity = inner.utterances.original_count() >= MAX_UTTERANCES;
+        let history_only = p.get("history_only").and_then(Value::as_bool) == Some(true);
+        let text_only = no_late_first_admission
+            || epoch < current
+            || history_only
+            || capacity
+            || audience.is_empty();
         let reason = if no_late_first_admission {
             Some("connector_disconnected".to_owned())
         } else if epoch < current {
             Some("newer_turn".to_owned())
-        } else if p.get("history_only").and_then(Value::as_bool) == Some(true) {
+        } else if history_only {
             Some("connector_disconnected".to_owned())
         } else if capacity {
             Some("queue_full".to_owned())
@@ -176,11 +182,7 @@ impl Room {
         } else {
             None
         };
-        let status = if reason.is_some() {
-            "text_only"
-        } else {
-            "queued"
-        };
+        let status = if text_only { "text_only" } else { "queued" };
         let language = p
             .get("language")
             .and_then(Value::as_str)
@@ -219,7 +221,7 @@ impl Room {
             publication_context: Some(fingerprint.clone()),
             ..Row::default()
         });
-        if reason.is_none() {
+        if !text_only {
             inner.speak(uid, row_id, &audience, thread, revision, epoch);
         } else {
             if !capacity {

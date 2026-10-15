@@ -33,7 +33,7 @@ impl Room {
         let Some(browser) = inner.browsers.get_mut(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
         };
-        let changed = browser.speech_on != on || browser.speech_reason.as_deref() != reason;
+        let changed = browser.speech_on != on;
         browser.speech_on = on;
         browser.speech_reason = if on { None } else { reason.map(str::to_owned) };
         if changed && !on {
@@ -98,9 +98,8 @@ impl Room {
             inner.drop_unheard(sid, &[]);
         }
     }
-    /// The page is back: what was published while it was away, and a reply handed to it that never
-    /// arrived, are marked unheard instead of played, and its agent is told. Under one lock with the call's return:
-    /// a reply published meanwhile is either marked unheard here or sent to the page that is back.
+    /// The page is back. Suppress old audio under one lock with the call's return;
+    /// only a later app acknowledgement establishes semantic hearing.
     pub fn resume(&self, sid: &str, unreceived: &[String]) {
         let mut inner = self.inner.lock().expect("room lock");
         inner.drop_unheard(sid, unreceived);

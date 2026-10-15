@@ -126,7 +126,7 @@ impl Call {
         }
     }
 
-    /// What became of a reply on this call: the room keeps how far each one was heard.
+    /// Physical playback state and diagnostic extent; semantic hearing is reported separately.
     fn playback(&mut self, data: &Value) -> Vec<Value> {
         // How far it was heard is optional; one that is given must be a count of characters.
         let heard_chars = match data.get("heard_chars") {
