@@ -106,8 +106,21 @@ fn f1_uncertain_publication_recovers_without_late_first_audio_and_fresh_reply_pl
     assert_eq!(fixture["speech_recovery"]["method"], "speech.recover");
     let original = json!({"event_id":"event-a","utterance_id":"a","binding_id":c.bid,
         "session_id":"lost-session","revision":3,"epoch":0,"text":"Older answer","history_only":false});
+    c.room.unregister("connector", &c.bid);
+    let current_binding = c
+        .room
+        .register(
+            "connector",
+            &json!({"thread":"t","harness":"codex",
+        "input_mode":"pull"}),
+        )
+        .unwrap()["binding_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(current_binding, c.bid);
     let mut recovery = original.clone();
-    recovery["recovery_binding_id"] = json!(c.bid);
+    recovery["recovery_binding_id"] = json!(current_binding);
     let saved = c.room.recover_speech("connector", &recovery);
     for key in ["status", "reason", "text_saved"] {
         assert_eq!(
@@ -116,7 +129,9 @@ fn f1_uncertain_publication_recovers_without_late_first_audio_and_fresh_reply_pl
         );
     }
     assert_eq!(c.room.recover_speech("connector", &recovery), saved);
-    assert_eq!(c.room.connector_speech("connector", &original), saved);
+    let mut original_with_thread = original.clone();
+    original_with_thread["thread_id"] = json!("t");
+    assert_eq!(c.room.publish(&original_with_thread), saved);
     assert!(c.frames("voice-reply").is_empty());
     let mut changed = recovery.clone();
     changed["history_only"] = json!(true);
