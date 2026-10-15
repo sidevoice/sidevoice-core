@@ -250,19 +250,19 @@ impl Inner {
                     if fact["fate"] == "partial" {
                         reply["heard_chars"] = fact["heard_chars"].clone();
                         reply["fate"] = fact["fate"].clone();
-                        true
-                    } else {
-                        false
                     }
+                    fact["fate"] != "heard"
                 });
                 let count = replies.len();
                 payload["unheard"]["count"] = json!(count);
                 if count == 0 {
                     payload.as_object_mut().unwrap().remove("unheard");
-                    if row.role == "note" {
-                        row.status = "not_sent".into();
-                    } else {
-                        payload.as_object_mut().unwrap().remove("notice");
+                    if payload["notice"]["kind"] != "turn_empty" {
+                        if row.role == "note" {
+                            row.status = "not_sent".into();
+                        } else {
+                            payload.as_object_mut().unwrap().remove("notice");
+                        }
                     }
                 }
             } else if row.ever_exposed {

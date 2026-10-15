@@ -2471,3 +2471,142 @@ fn review_refusal_obligation_survives_both_turn_orders_and_devices() {
         }
     }
 }
+
+fn acknowledge_one_untold_input(c: &Case, pull: bool) -> Value {
+    if pull {
+        let messages = c.pull();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        let delivered = messages[0].clone();
+        let ack = c
+            .room
+            .pull_input(
+                "connector",
+                &json!({"binding_id":c.bid,"operation":"get",
+                    "ack_ids":[delivered["message_id"]]}),
+            )
+            .unwrap();
+        assert_eq!(ack["acknowledged"], 1);
+        assert!(c.pull().is_empty());
+        delivered
+    } else {
+        let work = c.room.pending_delivery();
+        assert_eq!(work.len(), 1);
+        let (bid, rid, peer, delivered) = &work[0];
+        c.room
+            .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"accepted"})));
+        assert!(c.room.pending_delivery().is_empty());
+        delivered.clone()
+    }
+}
+
+#[test]
+fn h1_unrelated_late_receipt_keeps_untold_not_heard_context_in_words_and_note() {
+    for pull in [false, true] {
+        for standalone_note in [false, true] {
+            let c = Case::new(pull);
+            let (sender, _events) = mpsc::channel(64);
+            let second = c.room.join("other".into(), "en".into(), sender).unwrap();
+            c.room.select(&second, "t").unwrap();
+            c.publish("a", 0, "A was not heard");
+            c.publish("b", 0, "B was heard later");
+            c.hearing("a", "not_heard", None);
+            c.room
+                .reply_hearing(
+                    &second,
+                    &format!("{}:voice:a", c.sid),
+                    "a",
+                    "not_heard",
+                    None,
+                )
+                .unwrap();
+            if standalone_note {
+                c.room.park(&c.sid, true);
+                c.room.resume(&c.sid, &[]);
+                let mut inner = c.room.inner.lock().unwrap();
+                inner.unheard.note_mut("t").unwrap().due = 0;
+                inner.materialize_due_notes();
+                assert_eq!(inner.journal.waiting_input().0, 1);
+            } else {
+                c.say("turn", Some("Wait"));
+            }
+            c.room
+                .reply_hearing(&second, &format!("{}:voice:b", c.sid), "b", "heard", None)
+                .unwrap();
+            let delivered = acknowledge_one_untold_input(&c, pull);
+            assert_eq!(delivered["text"], if standalone_note { "" } else { "Wait" });
+            assert_eq!(delivered["unheard"]["count"], 1);
+            assert_eq!(
+                delivered["unheard"]["replies"][0]["text"],
+                "A was not heard"
+            );
+            assert_eq!(delivered["unheard"]["replies"][0]["fate"], "not_heard");
+            assert_eq!(
+                c.room.history(Some("t"))["messages"][0]["hearing"],
+                "not_heard"
+            );
+        }
+    }
+}
+
+#[test]
+fn h5_full_receipt_removes_miss_but_keeps_unexposed_empty_refusal_obligation() {
+    for pull in [false, true] {
+        let c = Case::new(pull);
+        let (sender, _events) = mpsc::channel(64);
+        let second = c.room.join("other".into(), "en".into(), sender).unwrap();
+        c.room.select(&second, "t").unwrap();
+        c.publish("a", 0, "Earlier reply");
+        c.hearing("a", "partial", Some(2));
+        let turn = c.room.begin_turn(&c.sid, "turn").unwrap();
+        assert_eq!(
+            c.publish("refused", turn.epoch, "Await words")["reason"],
+            "user_speaking"
+        );
+        c.room
+            .finish_turn(&c.sid, "turn", None, &Value::Null)
+            .unwrap();
+        let before = c.notes();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0]["notice"]["kind"], "turn_empty");
+        assert_eq!(before[0]["unheard"]["replies"][0]["fate"], "partial");
+        c.room
+            .reply_hearing(&second, &format!("{}:voice:a", c.sid), "a", "heard", None)
+            .unwrap();
+        let delivered = acknowledge_one_untold_input(&c, pull);
+        assert_eq!(delivered["message_id"], before[0]["message_id"]);
+        assert_eq!(delivered["notice"]["kind"], "turn_empty");
+        assert!(delivered.get("unheard").is_none());
+
+        let miss_only = Case::new(pull);
+        let (sender, _events) = mpsc::channel(64);
+        let second = miss_only
+            .room
+            .join("other".into(), "en".into(), sender)
+            .unwrap();
+        miss_only.room.select(&second, "t").unwrap();
+        miss_only.publish("a", 0, "Ordinary miss");
+        miss_only.hearing("a", "partial", Some(2));
+        miss_only.room.park(&miss_only.sid, true);
+        miss_only.room.resume(&miss_only.sid, &[]);
+        {
+            let mut inner = miss_only.room.inner.lock().unwrap();
+            inner.unheard.note_mut("t").unwrap().due = 0;
+            inner.materialize_due_notes();
+        }
+        miss_only
+            .room
+            .reply_hearing(
+                &second,
+                &format!("{}:voice:a", miss_only.sid),
+                "a",
+                "heard",
+                None,
+            )
+            .unwrap();
+        if pull {
+            assert!(miss_only.pull().is_empty());
+        } else {
+            assert!(miss_only.room.pending_delivery().is_empty());
+        }
+    }
+}

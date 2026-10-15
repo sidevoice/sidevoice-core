@@ -221,6 +221,20 @@
     "known_admission": "return original disposition",
     "known_refusal": "return original terminal refusal"
   },
+  "pending_reconciliation": {
+    "unrelated_full_receipt": {
+      "previously_queued_reply": {"fate": "not_heard", "heard_chars": 0, "text": "A was not heard"},
+      "after": {"fate": "not_heard", "heard_chars": 0, "text": "A was not heard"},
+      "meaning": "A later receipt for another reply cannot delete this untold context"
+    },
+    "empty_turn_after_full_receipt": {
+      "before": {"notice": {"kind": "turn_empty"}, "unheard": {"count": 1}},
+      "after": {"notice": {"kind": "turn_empty"}},
+      "same_message_id": true,
+      "meaning": "Remove satisfied reply evidence but keep the no-words obligation"
+    },
+    "ordinary_miss_after_full_receipt": {"delivered": false}
+  },
   "notice_correction": {
     "kind": "reply_heard",
     "corrects_message_id": "ORIGINAL_MESSAGE_ID",
