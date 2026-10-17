@@ -51,9 +51,9 @@ fn safe_urls_are_https_or_loopback_http() {
 
 #[test]
 fn host_name_drops_port_and_brackets() {
-    assert_eq!(host_name("[::1]:10829"), "::1");
-    assert_eq!(host_name("Example.COM:80"), "example.com");
-    assert_eq!(host_name("localhost"), "localhost");
+    assert_eq!(host_name("[::1]:10829"), Some("::1".into()));
+    assert_eq!(host_name("Example.COM:80"), Some("example.com".into()));
+    assert_eq!(host_name("localhost"), Some("localhost".into()));
 }
 
 #[test]
@@ -61,6 +61,67 @@ fn loopback_hosts_are_allowed_and_missing_host_is_not() {
     assert!(host_allowed(&headers(&[(header::HOST, "localhost:10829")])));
     assert!(host_allowed(&headers(&[(header::HOST, "[::1]:10829")])));
     assert!(!host_allowed(&HeaderMap::new()));
+}
+
+#[test]
+fn numeric_network_hosts_are_allowed_without_trusting_dns_names() {
+    for host in [
+        "192.168.1.4:10829",
+        "10.0.0.42:10829",
+        "[fd12::5]:10829",
+        "203.0.113.7:443",
+    ] {
+        assert!(host_allowed(&headers(&[(header::HOST, host)])), "{host}");
+    }
+    for host in [
+        "machine.local:10829",
+        "attacker.example:10829",
+        "999.1.1.1:10829",
+    ] {
+        assert!(!host_allowed(&headers(&[(header::HOST, host)])), "{host}");
+    }
+}
+
+#[test]
+fn malformed_host_headers_are_not_allowed() {
+    for host in [
+        "[fd12::5]junk",
+        "[fd12::5]:bad",
+        "[fd12::5]:99999",
+        "fd12::5",
+        "192.168.1.4:bad",
+        "192.168.1.4:99999",
+        "192.168.1.4:0",
+        "192.168.1.4:+80",
+        "192.168.1.4/path",
+        "192.168.1.4@attacker.example",
+        "[fd12::5%eth0]",
+        "[fd12::5]:+80",
+    ] {
+        assert!(!host_allowed(&headers(&[(header::HOST, host)])), "{host}");
+    }
+}
+
+#[test]
+fn explicit_host_allowlist_disables_automatic_numeric_hosts() {
+    assert!(host_allowed_by_policy(
+        "trusted.example",
+        Some("trusted.example"),
+        "",
+        ""
+    ));
+    assert!(!host_allowed_by_policy(
+        "192.168.1.4",
+        Some("trusted.example"),
+        "",
+        ""
+    ));
+    assert!(!host_allowed_by_policy("192.168.1.4", Some(""), "", ""));
+    assert!(host_allowed_by_policy("192.168.1.4", None, "", ""));
+    assert!(
+        host_allowed_by_policy("shell.example", Some(""), "https://shell.example", ""),
+        "configured Origin hosts remain a separate existing grant"
+    );
 }
 
 #[test]

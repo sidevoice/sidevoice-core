@@ -4,8 +4,10 @@
 //! socket in a 0700 directory, leaves when nothing uses it, and — when it cannot start — says
 //! why in `core-failure.json` and by its exit status what the service manager should do.
 
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -193,6 +195,59 @@ fn via_socket(socket: &Path, method: &str, path: &str) -> (u16, Value) {
 fn over_tcp(port: u64, method: &str, path: &str) -> (u16, Value) {
     let stream = std::net::TcpStream::connect(("127.0.0.1", port as u16)).unwrap();
     exchange(stream, method, path, &format!("127.0.0.1:{port}"))
+}
+
+#[test]
+fn network_bind_accepts_ip_hosts_unless_an_administrator_set_a_host_allowlist() {
+    for (allowed_hosts, expected) in [
+        (None, 200),
+        (Some(OsString::from("")), 421),
+        (Some(OsString::from("trusted.example")), 421),
+        (Some(OsString::from_vec(vec![0xff])), 421),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("core");
+        let mut command = Command::new(CORE);
+        command
+            .args([
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "0",
+                "--data-dir",
+                data.to_str().unwrap(),
+                "--idle-exit",
+                "0",
+            ])
+            .env_remove("SIDEVOICE_ALLOWED_ORIGINS")
+            .env_remove("VOICE_PUBLIC_ORIGIN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if let Some(list) = &allowed_hosts {
+            command.env("SIDEVOICE_ALLOWED_HOSTS", list);
+        } else {
+            command.env_remove("SIDEVOICE_ALLOWED_HOSTS");
+        }
+        let mut core = Core {
+            child: command.spawn().unwrap(),
+        };
+        let port = wait_ready(&data)["port"].as_u64().unwrap();
+        let request = |host: &str, path: &str| {
+            let stream = std::net::TcpStream::connect(("127.0.0.1", port as u16)).unwrap();
+            exchange(stream, "GET", path, host).0
+        };
+        assert_eq!(request("192.168.1.4:10829", "/api/rendezvous"), expected);
+        assert_eq!(request("[fd12::5]junk", "/api/rendezvous"), 421);
+        if allowed_hosts.is_none() {
+            assert_eq!(request("192.168.1.4:10829", "/api/device/devices"), 401);
+            assert_eq!(request("192.168.1.4:10829", "/api/local/health"), 404);
+        } else if allowed_hosts.as_deref() == Some(OsStr::new("trusted.example")) {
+            assert_eq!(request("trusted.example:10829", "/api/rendezvous"), 200);
+        }
+        core.signal(libc::SIGTERM);
+        assert!(core.wait(20).success());
+    }
 }
 
 const LOCAL_PATHS: [(&str, &str); 4] = [

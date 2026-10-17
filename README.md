@@ -75,7 +75,7 @@ Its data — paired devices, the machine's identity key, the conversation journa
 |---|---|
 | `SIDEVOICE_PUBLIC_URLS` | Comma-separated addresses where devices can reach this machine directly; they go into pairing codes. Each must be `https://` (see Security). |
 | `SIDEVOICE_TRUSTED_CLUSTER_HOSTS` | Hosts that may receive credentials over plain HTTP. Empty by default (see Security). |
-| `SIDEVOICE_ALLOWED_HOSTS`, `SIDEVOICE_ALLOWED_ORIGINS` | Host names and page origins to answer besides loopback, for a machine you made reachable. |
+| `SIDEVOICE_ALLOWED_HOSTS`, `SIDEVOICE_ALLOWED_ORIGINS` | Without an explicit Host list, numeric IP addresses are accepted in `Host` for direct network access; DNS names still need an allowed Host or Origin. Setting `SIDEVOICE_ALLOWED_HOSTS` disables automatic numeric-IP acceptance, including when set to an empty value. Allowed Origins also grant their own Host names. |
 | `SIDEVOICE_CORE_HOST`, `SIDEVOICE_CORE_PORT` | Where to listen (default `127.0.0.1:10829`). |
 
 ## Security
@@ -86,8 +86,11 @@ Its data — paired devices, the machine's identity key, the conversation journa
 - **Discovery** (`GET /api/rendezvous`, `GET /api/device/identity`) answers without a token and says only what
   pairing needs: that this is a Sidevoice machine, its fingerprint and public key, and a signature over the
   caller's nonce. The machine's name is given only to a paired device.
-- **Transport.** A pairing secret, device token or connector credential travels only over HTTPS, except to loopback
-  and to the hosts in `SIDEVOICE_TRUSTED_CLUSTER_HOSTS`. An entry starting with a dot is a suffix
+- **Transport.** The core serves plain HTTP on its listen address. The web client normally sends pairing secrets
+  and device tokens only over HTTPS or loopback; the native app can also send them to a private LAN address after
+  explicit unencrypted-connection consent. Anyone able to read that LAN traffic can read those credentials. Public
+  access needs a trusted HTTPS/WSS endpoint. Core-advertised URLs and connector credentials use HTTPS, loopback,
+  or hosts in `SIDEVOICE_TRUSTED_CLUSTER_HOSTS`. An entry starting with a dot is a suffix
   (`.svc.cluster.local`); any other entry is one exact host. Listing a host there states that the network to it is
   yours (a Kubernetes cluster's pod network, say): whoever can read that network can read those credentials.
 - **Relays are trusted.** A relay between a device and this machine terminates TLS on both sides: it sees the pairing
