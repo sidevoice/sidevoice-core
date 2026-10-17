@@ -1,6 +1,6 @@
-# Sidevoice voice-message contract — reviewed
+# Sidevoice voice-message contract — reviewed baseline, result timing reopened
 
-**Status:** Reviewed contract for implementation and validation, 2026-10-17. This document describes intended, unshipped behavior; it does not claim code or runtime tests exist. Implementation and release remain separately gated. Tracking: [Core #126](https://github.com/sidevoice/sidevoice-core/issues/126) and [Connector #155](https://github.com/sidevoice/sidevoice-connector/issues/155). Baselines: [Connector 1725ad7](https://github.com/sidevoice/sidevoice-connector/tree/1725ad7) and [Core 9e513f2](https://github.com/sidevoice/sidevoice-core/tree/9e513f2).
+**Status:** Sections 1–5 derive from the independently reviewed baseline, but this amended revision has not been independently re-reviewed. The newly requested Option B in §6 is documented for discussion, not chosen; tool-result timing needs the operator's clarification before the full contract is frozen. No runtime tests or code authorization. Tracking: [Core #126](https://github.com/sidevoice/sidevoice-core/issues/126) and [Connector #155](https://github.com/sidevoice/sidevoice-connector/issues/155). Baselines: [Connector 1725ad7](https://github.com/sidevoice/sidevoice-connector/tree/1725ad7) and [Core 9e513f2](https://github.com/sidevoice/sidevoice-core/tree/9e513f2). This describes intended, unshipped behavior.
 
 ## 1. Scope and invariant
 
@@ -119,8 +119,8 @@ text, language, binding, and original context; Connector and Core return the sam
 Reusing either ID for different content/context returns `identity_conflict`. The connector's existing same-key retry and Core
 fingerprint protections must remain. Connector scopes the request to its owned binding; IDs are not access credentials.
 
-On first admission, Core atomically validates arguments, ownership, context, capacity, and turn state; then stores the immutable
-original and returns promptly, including while the person speaks:
+In the reviewed **Option A admission baseline**, Core atomically validates arguments, ownership, context, capacity, and turn
+state; then stores the immutable original and returns promptly, including while the person speaks:
 
 ```json
 {"status":"accepted","utterance_id":"u-19","event_id":"e-19",
@@ -129,7 +129,7 @@ original and returns promptly, including while the person speaks:
 
 `playback` is `pending` (accepted but blocked by an open spoken turn), `queued` (eligible and scheduled, not yet heard), or
 `text_only` (retained as text under the existing no-listener or `focus_changed` baseline, not scheduled). All are distinct from `playing`,
-`completed`, and confirmed hearing receipts. No accepted result says “played” or “heard.” A rejected call returns
+`completed`, and confirmed hearing receipts. No accepted/queued result is `OK`, “played,” or “heard.” A rejected call returns
 `{"status":"rejected","reason":…}` and was not stored/scheduled. Reasons are `invalid_request`, `binding_inactive`, `context_stale`,
 `identity_conflict`, or `capacity_full`; `context_stale` means Core cannot prove a current or legitimate pre-turn/empty-turn
 lineage, not merely that a spoken turn incremented the browser revision. A transport timeout is **indeterminate**, so retry with the
@@ -213,12 +213,15 @@ For a shared replay to several listeners, `resume` uses
 the sentence boundary at or before the **minimum confirmed prefix of every target**; this may repeat text for D1 so that D2 misses
 none. Unknown target hearing falls back to that target's last confirmed prefix (zero if none). Return `{"status":"already_heard"}`
 only if **all** targets are confirmed complete, never because one device or a room aggregate reached the end. `restart` starts at
-zero even when fully heard. A missing/expired original returns `{"status":"unavailable"}`. A stale/currently unsafe authorization
+zero even when fully heard. A missing/expired original returns explicit failure `{"status":"failed","reason":"unavailable"}`;
+not found or unable to reproduce is never silent success. A stale/currently unsafe authorization
 returns `{"status":"rejected","reason":"context_stale"|"binding_inactive"|"no_listener"|"capacity_full"}`. `no_listener` means text
 may still be available but there is no eligible playback target; it must not be reported as missing content. Successful
 authorization returns
-`{"status":"accepted","utterance_id":"u-19","replay_id":"r-6","attempt_id":"a-2","playback":"queued"|"pending"}`; accepted still
-does not mean heard.
+`{"status":"accepted","utterance_id":"u-19","replay_id":"r-6","attempt_id":"a-2","playback":"queued"|"pending"}` in Option A;
+accepted still does not mean started, completed, or heard. If an accepted attempt later cannot play, Core records a
+correlated terminal failure rather than reporting success; how the agent receives that later result is part of §6's
+unsettled timing contract.
 
 Retrying the same `replay_id` with identical original/mode/context returns the same outcome and cannot create another playback;
 changing its fingerprint returns `identity_conflict`. A deliberate new replay uses a new `replay_id` and attempt linked to the
@@ -263,6 +266,39 @@ B's unplayed status. Also test A-specific focus-return note and explicit replay,
 and several ordered speech publications. Record failures by model/harness; no fixed pass rate or claim of deterministic model
 obedience is assumed before tests. A scripted fake agent validates plumbing but not a real host's instruction exposure or model
 decisions.
+
+## 6. Playback-anchored tool result (Option B — alternative, not selected)
+
+Sections 3–4 describe **Option A**: `voice_say` or `voice_replay` returns promptly after validated admission, with a truthful
+`accepted`/`pending`/`queued`/`text_only` result; a later playback outcome is separate. The operator has asked us to document
+**Option B**, in which the tool call waits for a factual playback milestone. This is distinct from the older proposal to wait for
+the *person's spoken turn* to settle before accepting speech. Option B is not adopted by this draft; in particular, a pending
+publication while the person speaks cannot be reported as `OK` merely because Core accepted it.
+
+There are two possible wait boundaries, still requiring the operator's choice:
+
+- **Start boundary:** wait until the target app confirms that sound actually began, then return `started` (or `OK` defined
+  strictly as started). If the attempt cannot start, return an explicit `not_started`/`failed` result and reason. This says
+  nothing about later completion or hearing.
+- **Terminal boundary:** wait for the attempt's terminal playback outcome and report `completed`, `partial`, `cancelled`,
+  `not_started`, or `failed`, linked to the original and attempt IDs. Any confirmed hearing extent is per target listener;
+  missing receipts remain `unknown`. Device completion does not prove human comprehension. A completion result cannot promise
+  that no new user turn will start immediately afterward.
+
+Under either boundary, missing/expired originals, stale authorization, loss of focus/listener, or inability to reproduce must
+produce explicit failure rather than a success-shaped response. A pre-admission rejection remains a rejection. An admitted
+attempt whose outcome is still pending at a bounded deadline must return an **indeterminate timeout**, not `OK` or fabricated
+`completed`; same-key retries must not start a duplicate attempt. MCP cancellation, leave, focus switch, and host tool deadlines
+need explicit bounded handling. Neither Core's room lock nor the connector's serial admission path may be held while awaiting
+playback. Such a call may block this model's next serial step; it need not block independent app/Core work, other workers, or a
+host's own user input, but those concurrency properties must be verified per harness.
+
+After any factual `started` or `completed` result, the person may begin speaking. The app still captures the acoustic-start
+snapshot and the next **ordinary words event** reports the correct played/partial/not-played evidence under §2. The tool result
+never embeds those new user words or substitutes for that event. A later interruption or receipt may refine physical hearing;
+it must not retroactively turn admission into hearing or misbind assent to a later unplayed question. Validation must compare
+Option A with both B boundaries on overlap, cancellation, focus/leave, timeout, idempotent retry, and real-harness model latency
+and action traces before replacing the reviewed result timing. No implementation or runtime validation of Option B is claimed.
 
 ## Deferred follow-ups
 
