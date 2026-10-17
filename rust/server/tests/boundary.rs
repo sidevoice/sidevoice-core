@@ -568,6 +568,122 @@ async fn a_code_is_redeemed_once() {
     assert!(again["detail"].is_string());
 }
 
+#[tokio::test]
+async fn a_lan_ip_host_keeps_pairing_origin_token_and_local_path_guards() {
+    let node = Node::new();
+    let code = node.state.issue_code();
+    let secret = code["payload"]["secret"].as_str().unwrap();
+    let host = "192.168.1.4:10829";
+    let (status, _, _) = send(
+        &node.tcp(),
+        "GET",
+        "/api/device/devices",
+        &[("host", host)],
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "numeric Host does not bypass bearer auth"
+    );
+
+    let pair = json!({"secret": secret, "name": "LAN device"});
+    let (status, _, _) = send(
+        &node.tcp(),
+        "POST",
+        "/api/device/pair",
+        &[("host", host), ("origin", "https://attacker.example")],
+        Some(pair.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "foreign Origin cannot redeem a code"
+    );
+    let (status, _, redeemed) = send(
+        &node.tcp(),
+        "POST",
+        "/api/device/pair",
+        &[("host", host), ("origin", APP)],
+        Some(pair.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{redeemed}");
+    let token = bearer(redeemed["token"].as_str().unwrap());
+    let (status, _, _) = send(
+        &node.tcp(),
+        "POST",
+        "/api/device/pair",
+        &[("host", host), ("origin", APP)],
+        Some(pair),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the pairing secret is one-time"
+    );
+
+    let (status, _, _) = send(
+        &node.tcp(),
+        "GET",
+        "/api/device/devices",
+        &[("host", host), ("origin", APP), ("authorization", &token)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(
+        &node.tcp(),
+        "GET",
+        "/api/device/devices",
+        &[
+            ("host", host),
+            ("origin", "https://attacker.example"),
+            ("authorization", &token),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "foreign Origin remains refused after pairing"
+    );
+    let (status, _, _) = send(
+        &node.tcp(),
+        "GET",
+        "/api/device/devices",
+        &[
+            ("host", "[fd12::5]junk"),
+            ("origin", APP),
+            ("authorization", &token),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::MISDIRECTED_REQUEST,
+        "malformed Host is refused first"
+    );
+    let (status, _, _) = send(
+        &node.tcp(),
+        "GET",
+        "/api/local/health",
+        &[("host", host)],
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "socket-only routes stay private"
+    );
+}
+
 #[test]
 fn a_code_says_where_the_node_answers() {
     let node = Node::new();

@@ -1,5 +1,7 @@
 //! Which URLs, paths, origins and hosts the node trusts, from its environment.
 
+use std::net::IpAddr;
+
 use axum::http::{header, HeaderMap};
 use percent_encoding::percent_decode_str;
 use url::Url;
@@ -135,19 +137,41 @@ pub(super) fn host_allowed(headers: &HeaderMap) -> bool {
     else {
         return false;
     };
-    let host = host_name(value);
+    let Some(host) = host_name(value) else {
+        return false;
+    };
     if matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") {
         return true;
     }
-    if std::env::var("SIDEVOICE_ALLOWED_HOSTS")
+    let allowed_hosts = match std::env::var("SIDEVOICE_ALLOWED_HOSTS") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        // A configured value that cannot be read must not turn into the permissive default.
+        Err(std::env::VarError::NotUnicode(_)) => Some(String::new()),
+    };
+    let configured = std::env::var("SIDEVOICE_ALLOWED_ORIGINS").unwrap_or_default();
+    let public_origin = std::env::var("VOICE_PUBLIC_ORIGIN").unwrap_or_default();
+    host_allowed_by_policy(&host, allowed_hosts.as_deref(), &configured, &public_origin)
+}
+
+fn host_allowed_by_policy(
+    host: &str,
+    allowed_hosts: Option<&str>,
+    configured: &str,
+    public_origin: &str,
+) -> bool {
+    if allowed_hosts
         .unwrap_or_default()
         .split(',')
-        .any(|item| item.trim().eq_ignore_ascii_case(&host))
+        .any(|item| !item.trim().is_empty() && item.trim().eq_ignore_ascii_case(host))
     {
         return true;
     }
-    let configured = std::env::var("SIDEVOICE_ALLOWED_ORIGINS").unwrap_or_default();
-    let public_origin = std::env::var("VOICE_PUBLIC_ORIGIN").unwrap_or_default();
+    // An absent allowlist lets a directly addressed IP reach a node bound to the network.
+    // Once an administrator sets the allowlist (even to an empty value), it stays restrictive.
+    if allowed_hosts.is_none() && host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
     configured
         .split(',')
         .chain(public_origin.split(','))
@@ -155,22 +179,41 @@ pub(super) fn host_allowed(headers: &HeaderMap) -> bool {
             Url::parse(origin.trim())
                 .ok()
                 .and_then(|url| url.host_str().map(str::to_owned))
-                .is_some_and(|name| name.eq_ignore_ascii_case(&host))
+                .is_some_and(|name| name.eq_ignore_ascii_case(host))
         })
 }
 
-/// The lowercase host of a `Host` header value, without port or IPv6 brackets.
-fn host_name(value: &str) -> String {
-    if value.starts_with('[') {
-        value
-            .split(']')
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('[')
+/// The lowercase host of a complete, valid `Host` header, without port or IPv6 brackets.
+fn host_name(value: &str) -> Option<String> {
+    let (host, port) = if let Some(bracketed) = value.strip_prefix('[') {
+        let (host, suffix) = bracketed.split_once(']')?;
+        host.parse::<std::net::Ipv6Addr>().ok()?;
+        (host, suffix)
     } else {
-        value.split(':').next().unwrap_or("")
+        match value.split_once(':') {
+            Some((host, _)) => (host, &value[host.len()..]),
+            None => (value, ""),
+        }
+    };
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+        || (!value.starts_with('[') && host.contains(':'))
+    {
+        return None;
     }
-    .to_ascii_lowercase()
+    if !port.is_empty() {
+        let digits = port.strip_prefix(':')?;
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let number = digits.parse::<u16>().ok()?;
+        if number == 0 {
+            return None;
+        }
+    }
+    Some(host.to_ascii_lowercase())
 }
 
 #[cfg(test)]
