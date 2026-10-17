@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/sidevoice/sidevoice-core/compare/v0.4.0...v0.4.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **server:** accept direct numeric-IP LAN hosts ([#128](https://github.com/sidevoice/sidevoice-core/issues/128)) ([c6bbd79](https://github.com/sidevoice/sidevoice-core/commit/c6bbd79e449f0ff58f882821be77d6bed4386c37))
+
 ## [0.4.0](https://github.com/sidevoice/sidevoice-core/compare/v0.3.0...v0.4.0) (2026-10-15)
 
 
