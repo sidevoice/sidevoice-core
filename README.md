@@ -66,6 +66,11 @@ Compatibility with the latest published connector and web client is `cargo xtask
 The conversation epoch, speech admission, playback fate and common push/pull notice contract is in
 [`docs/conversation-flow.md`](docs/conversation-flow.md).
 
+The reviewed [voice-message contract](docs/voice-message-contract.md) defines the intended push-phase message,
+playback and recovery behavior. It is an implementation target, not a statement of shipped behavior; track the work in
+[core#126](https://github.com/sidevoice/sidevoice-core/issues/126) and
+[connector#155](https://github.com/sidevoice/sidevoice-connector/issues/155).
+
 ## Configuration
 
 Its data — paired devices, the machine's identity key, the conversation journal — lives in
