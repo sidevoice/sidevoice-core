@@ -35,8 +35,9 @@ impl Room {
         });
         if let Some((bid, _)) = binding.as_ref() {
             if let Some(b) = inner.bindings.get_mut(bid) {
-                b.end();
+                b.close_from_room();
             }
+            inner.contract_binding_lost(bid);
             inner.inflight.finish(bid);
         }
         for input in inner.journal.cancel_unsent(thread, "channel_closed") {
@@ -44,6 +45,7 @@ impl Room {
             inner.salvage_input_notice(&input.id);
         }
         for sid in inner.browsers.ids_on_thread(thread) {
+            inner.contract_focus_lost(&sid);
             if let Some(browser) = inner.browsers.get_mut(&sid) {
                 browser.refocus(Target::none());
             }

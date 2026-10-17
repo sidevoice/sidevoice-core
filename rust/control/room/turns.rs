@@ -23,6 +23,11 @@ pub struct VoiceTurn {
     pub(super) language: String,
     /// The person cancelled it: its words, when they come, are dropped.
     pub(super) cancelled: bool,
+    /// Immutable app evidence captured at local acoustic onset.
+    pub(super) playback_at_turn_start: Value,
+    /// App-certified absence of playback at that onset, supplied on terminal report.
+    pub(super) not_played_at_turn_start: Value,
+    pub(super) not_played_at_turn_start_truncated: bool,
 }
 
 /// Whether this terminal report continues into a merged turn.
@@ -52,10 +57,21 @@ impl Room {
         thread_id: &str,
         binding_id: &str,
     ) -> Result<VoiceTurn, RoomError> {
+        self.begin_turn_with_snapshot(sid, turn_id, thread_id, binding_id, &Value::Null)
+    }
+
+    pub fn begin_turn_with_snapshot(
+        &self,
+        sid: &str,
+        turn_id: &str,
+        thread_id: &str,
+        binding_id: &str,
+        snapshot: &Value,
+    ) -> Result<VoiceTurn, RoomError> {
         self.inner
             .lock()
             .expect("room lock")
-            .begin_spoken_turn(sid, turn_id, thread_id, binding_id)
+            .begin_spoken_turn(sid, turn_id, thread_id, binding_id, snapshot)
     }
 
     /// Finish a turn with its transcript, or with none when it was empty or cancelled.
@@ -67,12 +83,42 @@ impl Room {
         timings: &Value,
         continuation: Continuation,
     ) -> Result<Value, RoomError> {
+        self.finish_turn_with_evidence(
+            sid,
+            turn_id,
+            text,
+            timings,
+            continuation,
+            &Value::Null,
+            &Value::Null,
+            false,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "browser turn frame fields stay explicit at the boundary"
+    )]
+    pub fn finish_turn_with_evidence(
+        &self,
+        sid: &str,
+        turn_id: &str,
+        text: Option<&str>,
+        timings: &Value,
+        continuation: Continuation,
+        snapshot: &Value,
+        not_played: &Value,
+        truncated: bool,
+    ) -> Result<Value, RoomError> {
         self.inner.lock().expect("room lock").finish_spoken_turn(
             sid,
             turn_id,
             text,
             timings,
             continuation,
+            snapshot,
+            not_played,
+            truncated,
         )
     }
 
@@ -168,6 +214,9 @@ impl Inner {
             title: bound.as_ref().and_then(|target| target.title.clone()),
             language: browser.language.clone(),
             cancelled: false,
+            playback_at_turn_start: Value::Null,
+            not_played_at_turn_start: Value::Null,
+            not_played_at_turn_start_truncated: false,
         }))
     }
 

@@ -1,6 +1,6 @@
 //! Browser sessions: joining and leaving the room, admission, parking and the call's language.
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::browsers::Browser;
 use super::error::RoomError;
@@ -19,6 +19,16 @@ fn max_browsers() -> usize {
 }
 
 impl Room {
+    /// A safety-critical room fence that could not enter the bounded browser queue retires
+    /// the socket instead of letting its already offered audio start without that fence.
+    pub(crate) fn browser_abort_watch(&self, sid: &str) -> Option<watch::Receiver<bool>> {
+        self.inner
+            .lock()
+            .expect("room lock")
+            .browsers
+            .get(sid)
+            .map(Browser::abort_watch)
+    }
     /// Device output eligibility. Microphone mute is independent of this state.
     pub fn set_speech(
         &self,
@@ -37,9 +47,11 @@ impl Room {
         browser.speech_on = on;
         browser.speech_reason = if on { None } else { reason.map(str::to_owned) };
         if changed && !on {
+            inner.contract_focus_lost(sid);
             inner.withdraw(sid, reason.unwrap_or("voice_off"), |_, _| true);
         } else if changed && on {
             inner.offer_note(sid);
+            inner.contract_offer_return_note(sid);
         }
         Ok(json!({"on":on,"reason":if on {None} else {reason}}))
     }
@@ -75,6 +87,7 @@ impl Room {
                 inner.settle_empty_turn(thread, sid, turn.epoch);
             }
         }
+        inner.contract_focus_lost(sid);
         inner.browsers.leave(sid);
         inner.interrupt_client(sid, "call_ended");
         if let Some(telemetry) = super::telemetry::shared() {
@@ -95,6 +108,7 @@ impl Room {
             _ => {}
         }
         if parked {
+            inner.contract_focus_lost(sid);
             inner.drop_unheard(sid, &[]);
         }
     }
@@ -107,6 +121,7 @@ impl Room {
         if let Some(browser) = inner.browsers.get_mut(sid) {
             browser.parked = None;
         }
+        inner.contract_offer_return_note(sid);
     }
     pub fn owns_session(&self, sid: &str, device: &str) -> bool {
         self.inner

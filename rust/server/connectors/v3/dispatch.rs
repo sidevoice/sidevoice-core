@@ -35,12 +35,28 @@ pub(super) async fn dispatch(
             }) {
                 return Err((-32602, "speech.publish requires bounded identifiers"));
             }
-            let result = if method == "speech.recover" {
+            let result = if params["voice_contract"] == 1 {
+                room.contract_publish(&link.cid, &params, method == "speech.recover")
+            } else if method == "speech.recover" {
                 room.recover_speech(&link.cid, &params)
             } else {
                 room.connector_speech(&link.cid, &params)
             };
-            Ok(echo_ids(result, &params, &["event_id", "utterance_id"]))
+            let mut result = echo_ids(result, &params, &["event_id", "utterance_id"]);
+            if params["voice_contract"] == 1 {
+                result["voice_contract"] = serde_json::json!(1);
+            }
+            Ok(result)
+        }
+        "speech.get_reply" => {
+            let mut result = room.contract_get_reply(&link.cid, &params);
+            result["voice_contract"] = serde_json::json!(1);
+            Ok(result)
+        }
+        "speech.replay" => {
+            let mut result = room.contract_replay(&link.cid, &params);
+            result["voice_contract"] = serde_json::json!(1);
+            Ok(result)
         }
         "input.pull" => room
             .pull_input(&link.cid, &params)

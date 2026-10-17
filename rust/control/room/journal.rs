@@ -120,15 +120,29 @@ pub(super) struct InputRef {
 pub(super) struct Journal {
     rows: VecDeque<Row>,
     seq: u64,
+    seen_input_threads: HashSet<String>,
 }
 fn protected(row: &Row) -> bool {
     matches!(row.status.as_str(), "pending" | "sending")
         || (row.status == "delivered" && row.pull_claimed_by.is_some())
         || (row.role == "assistant"
             && (matches!(row.status.as_str(), "queued" | "playing")
-                || matches!(row.hearing.as_deref(), Some("partial" | "not_heard"))))
+                || (row
+                    .publication
+                    .as_ref()
+                    .is_none_or(|result| result["voice_contract"] != 1)
+                    && matches!(row.hearing.as_deref(), Some("partial" | "not_heard")))))
 }
 impl Journal {
+    pub(super) fn has_seen_input(&self, thread: &str) -> bool {
+        self.seen_input_threads.contains(thread)
+    }
+    pub(super) fn latest_context(&self, thread: &str) -> Option<&Row> {
+        self.rows
+            .iter()
+            .rev()
+            .find(|row| row.thread == thread && row.is_input())
+    }
     pub(super) fn can_append(&self) -> bool {
         self.rows.len() < MAX_HISTORY || self.rows.iter().any(|row| !protected(row))
     }
@@ -141,6 +155,9 @@ impl Journal {
         );
         self.seq += 1;
         row.seq = self.seq;
+        if row.is_input() {
+            self.seen_input_threads.insert(row.thread.clone());
+        }
         self.rows.push_back(row);
         let mut dropped = Vec::new();
         while self.rows.len() > MAX_HISTORY {

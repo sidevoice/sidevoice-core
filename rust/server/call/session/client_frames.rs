@@ -76,7 +76,13 @@ impl Call {
                 .zip(data["binding_id"].as_str())
                 .ok_or_else(|| RoomError::new(400, "room.request_invalid"))
                 .and_then(|(thread, binding)| {
-                    room.begin_turn(&self.session, turn_id, thread, binding)
+                    room.begin_turn_with_snapshot(
+                        &self.session,
+                        turn_id,
+                        thread,
+                        binding,
+                        &data["playback_at_turn_start"],
+                    )
                 })
                 .map(|turn| {
                     started(
@@ -87,13 +93,18 @@ impl Call {
                 }),
             // A turn spoken offline arrives finished: once taken, its boundary is said as a started turn's is.
             Some("finished") if data["offline"].as_bool() == Some(true) => room
-                .offline_input_captured(
+                .offline_input_captured_with_evidence(
                     &self.session,
                     turn_id,
                     data["text"].as_str().unwrap_or(""),
                     data["started_at"].as_u64(),
                     data["thread_id"].as_str().unwrap_or(""),
                     data["binding_id"].as_str().unwrap_or(""),
+                    &data["playback_at_turn_start"],
+                    &data["not_played_at_turn_start"],
+                    data["not_played_at_turn_start_truncated"]
+                        .as_bool()
+                        .unwrap_or(false),
                 )
                 .map(|taken| {
                     if taken["accepted"] == true {
@@ -106,7 +117,7 @@ impl Call {
                 let text = (phase == "finished")
                     .then(|| data["text"].as_str())
                     .flatten();
-                room.finish_turn(
+                room.finish_turn_with_evidence(
                     &self.session,
                     turn_id,
                     text,
@@ -116,6 +127,11 @@ impl Call {
                     } else {
                         Continuation::Standalone
                     },
+                    &data["playback_at_turn_start"],
+                    &data["not_played_at_turn_start"],
+                    data["not_played_at_turn_start_truncated"]
+                        .as_bool()
+                        .unwrap_or(false),
                 )
                 .map(|_| Value::Null)
             }
@@ -141,6 +157,17 @@ impl Call {
                 .ok_or_else(|| RoomError::new(400, "room.receipt_invalid")),
         };
         let result = heard_chars.and_then(|heard_chars| {
+            if let Some(attempt_id) = data["attempt_id"].as_str() {
+                return self.state.room.contract_playback(
+                    &self.session,
+                    data["utterance_id"].as_str().unwrap_or(""),
+                    attempt_id,
+                    data["status"].as_str().unwrap_or(""),
+                    data["hearing"].as_str(),
+                    heard_chars,
+                    data["reason"].as_str(),
+                );
+            }
             self.state.room.playback_transport(
                 &self.session,
                 data["utterance_id"].as_str().unwrap_or(""),

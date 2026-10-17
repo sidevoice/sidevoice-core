@@ -10,11 +10,14 @@ pub(super) struct Binding {
     pub(super) id: String,
     pub(super) connector: String,
     pub(super) thread: String,
+    pub(super) client_ref: String,
     pub(super) harness: String,
     pub(super) title: Option<String>,
     pub(super) created: u64,
     pub(super) active: bool,
     pub(super) live: bool,
+    /// A room-side channel close is durable for this Core incarnation. Transport loss is not.
+    pub(super) room_closed: bool,
     pub(super) inbound: Option<Value>,
     pub(super) capabilities: Value,
     pub(super) engine: Option<Value>,
@@ -27,11 +30,13 @@ impl Binding {
             id: id.into(),
             connector: connector.into(),
             thread: thread.into(),
+            client_ref: String::new(),
             harness: String::new(),
             title: None,
             created: seconds(),
             active: true,
             live: true,
+            room_closed: false,
             inbound: None,
             capabilities: Value::Null,
             engine: None,
@@ -42,7 +47,10 @@ impl Binding {
     /// Take a fresh registration: the binding is active and live again, and what the connector
     /// declared replaces what it declared before, except that an absent title, inbound report
     /// or engine keeps the previous one.
-    pub(super) fn renew(&mut self, declared: Declaration, pull_input: bool) {
+    pub(super) fn renew(&mut self, declared: Declaration, pull_input: bool, client_ref: &str) {
+        if !client_ref.is_empty() {
+            self.client_ref = client_ref.into();
+        }
         self.harness = declared.harness;
         self.active = true;
         self.live = true;
@@ -62,6 +70,10 @@ impl Binding {
     pub(super) fn end(&mut self) {
         self.active = false;
         self.live = false;
+    }
+    pub(super) fn close_from_room(&mut self) {
+        self.end();
+        self.room_closed = true;
     }
     pub(super) fn view(&self) -> Value {
         json!({"id": self.id, "connector": self.connector, "thread": self.thread,

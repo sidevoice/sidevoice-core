@@ -30,6 +30,9 @@ struct InputDraft<'a> {
     turn_id: Option<&'a str>,
     offline: Option<&'a str>,
     time: Option<u64>,
+    playback_at_turn_start: Option<Value>,
+    not_played_at_turn_start: Option<Value>,
+    not_played_at_turn_start_truncated: bool,
 }
 
 impl Room {
@@ -74,6 +77,9 @@ impl Room {
             turn_id: None,
             offline: None,
             time: None,
+            playback_at_turn_start: None,
+            not_played_at_turn_start: None,
+            not_played_at_turn_start_truncated: false,
         })
     }
     /// Commit a completed transcript to the same memory journal/outbox as typed input.
@@ -116,6 +122,35 @@ impl Room {
         thread: &str,
         binding: &str,
     ) -> Result<Value, RoomError> {
+        self.offline_input_captured_with_evidence(
+            sid,
+            turn_id,
+            text,
+            time,
+            thread,
+            binding,
+            &Value::Null,
+            &Value::Null,
+            false,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "offline turn and onset evidence are captured together"
+    )]
+    pub fn offline_input_captured_with_evidence(
+        &self,
+        sid: &str,
+        turn_id: &str,
+        text: &str,
+        time: Option<u64>,
+        thread: &str,
+        binding: &str,
+        snapshot: &Value,
+        not_played: &Value,
+        truncated: bool,
+    ) -> Result<Value, RoomError> {
         if !valid_turn_id(turn_id) {
             return Err(RoomError::new(400, "room.request_invalid"));
         }
@@ -137,12 +172,15 @@ impl Room {
             {
                 return Err(RoomError::new(409, "room.message_conflict"));
             }
-            return self.finish_turn(
+            return self.finish_turn_with_evidence(
                 sid,
                 turn_id,
                 Some(text),
                 &Value::Null,
                 super::Continuation::Standalone,
+                snapshot,
+                not_played,
+                truncated,
             );
         }
         let row_id = turn_row(sid, turn_id);
@@ -181,7 +219,9 @@ impl Room {
         browser.turn_revision = revision;
         let epoch = inner.open_speech_epoch(thread, sid, turn_id);
         inner.conversations.finish(thread, sid, turn_id, epoch);
+        inner.revoke_pending_contract(thread, "new_words");
         let message_id = id();
+        let (certified, clipped) = super::voice_contract::validated_not_played(not_played);
         inner.queue_input(InputDraft {
             row_id,
             text,
@@ -196,6 +236,9 @@ impl Room {
             turn_id: Some(turn_id),
             offline: Some("offline"),
             time,
+            playback_at_turn_start: Some(super::voice_contract::validated_snapshot(snapshot)),
+            not_played_at_turn_start: Some(certified),
+            not_played_at_turn_start_truncated: truncated || clipped,
         })
     }
 }
@@ -294,6 +337,9 @@ impl Inner {
             turn_id: Some(&turn.turn_id),
             offline: None,
             time: None,
+            playback_at_turn_start: Some(turn.playback_at_turn_start.clone()),
+            not_played_at_turn_start: Some(turn.not_played_at_turn_start.clone()),
+            not_played_at_turn_start_truncated: turn.not_played_at_turn_start_truncated,
         })
     }
     fn queue_input(&mut self, draft: InputDraft<'_>) -> Result<Value, RoomError> {
@@ -320,9 +366,28 @@ impl Inner {
             turn_id,
             offline,
             time,
+            playback_at_turn_start,
+            not_played_at_turn_start,
+            not_played_at_turn_start_truncated,
         } = draft;
+        if turn_id.is_none() {
+            self.revoke_pending_contract(thread_id, "new_words");
+            self.revoke_queued_contract(thread_id, "new_words");
+        }
         let mut payload = json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
-            "history_id":row_id,"revision":revision,"epoch":epoch,"channel":"voice","binding_id":binding_id,"title":title});
+            "history_id":row_id,"revision":revision,"epoch":epoch,"channel":"voice","binding_id":binding_id,"title":title,
+            "origin":if turn_id.is_some() {"spoken_room"} else {"typed_room"}});
+        if let Some(snapshot) = playback_at_turn_start {
+            payload["playback_at_turn_start"] =
+                self.verified_snapshot(thread_id, session_id, &snapshot);
+        }
+        if let Some(not_played) = not_played_at_turn_start {
+            payload["not_played_at_turn_start"] =
+                self.verified_not_played(thread_id, session_id, &not_played);
+            payload["not_played_at_turn_start_truncated"] =
+                json!(not_played_at_turn_start_truncated);
+        }
+        self.contract_input_facts(thread_id, &mut payload);
         // Typed context does not consume a spoken turn's pending playback evidence.
         if turn_id.is_some() {
             self.unheard.resolve_words(thread_id);
@@ -398,7 +463,7 @@ impl Inner {
                 .iter()
                 .map(|notice| notice.reserved_bytes())
                 .sum::<usize>()
-            + reserved_turns * 2048;
+            + reserved_turns * (MAX_INPUT_BYTES + 1024);
         if !self.journal.can_append()
             || count >= MAX_WAITING_INPUT
             || bytes + bytes_needed > MAX_WAITING_BYTES

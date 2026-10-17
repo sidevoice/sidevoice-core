@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::journal::InputRef;
 use super::turns::VoiceTurn;
@@ -41,6 +41,7 @@ pub(super) struct Browser {
     pub(super) device: String,
     pub(super) language: String,
     sender: mpsc::Sender<Value>,
+    abort: watch::Sender<bool>,
     pub(super) target: Option<Target>,
     recent_targets: VecDeque<Target>,
     pub(super) revision: u64,
@@ -59,10 +60,12 @@ pub(super) struct Browser {
 }
 impl Browser {
     pub(super) fn new(device: String, language: String, sender: mpsc::Sender<Value>) -> Self {
+        let (abort, _) = watch::channel(false);
         Self {
             device,
             language,
             sender,
+            abort,
             target: None,
             recent_targets: VecDeque::new(),
             revision: 0,
@@ -83,6 +86,16 @@ impl Browser {
     /// Send an event the browser may miss without harm.
     pub(super) fn notify(&self, event: Value) {
         self.offer(event);
+    }
+    /// A safety-critical event cannot be silently lost behind a full socket queue. If it
+    /// cannot be queued, retire this call; the page's disconnect path cancels pending sound.
+    pub(super) fn critical(&self, event: Value) {
+        if !self.offer(event) {
+            self.abort.send_replace(true);
+        }
+    }
+    pub(super) fn abort_watch(&self) -> watch::Receiver<bool> {
+        self.abort.subscribe()
     }
     /// Start a new revision: what the call is sent from now on belongs to it.
     pub(super) fn next_revision(&mut self) -> u64 {

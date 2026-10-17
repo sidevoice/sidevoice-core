@@ -14,6 +14,112 @@ use tokio_tungstenite::tungstenite::Message;
 const THREAD: &str = "typed-thread";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn offline_room_close_refuses_cached_binding_on_connector_reconnect() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut peer = Rpc::hello(&core).await;
+    let registration = json!({"thread":"closed-thread","harness":"fixture",
+        "client_ref":"closed-conversation","input_mode":"pull","voice_contract":1});
+    let bound = peer.call("binding.register", registration.clone()).await;
+    assert_eq!(bound["voice_contract"], 1);
+    let bid = bound["binding_id"].as_str().unwrap().to_owned();
+    let instance = bound["voice_contract_instance"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut browser = core.join(&token, Value::Null).await;
+    let sid = browser.session.clone();
+    core.select(&token, &sid, "closed-thread").await;
+    let original = json!({"voice_contract":1,"voice_contract_instance":instance,
+        "binding_id":bid,"event_id":"e-offline-close","utterance_id":"u-offline-close",
+        "text":"Queued before channel close"});
+    let accepted = peer.call("speech.publish", original.clone()).await;
+    assert_eq!(accepted["status"], "accepted", "{accepted}");
+    assert_eq!(
+        browser.frame("voice-reply").await["attempt_id"],
+        accepted["attempt_id"]
+    );
+
+    peer.disconnect();
+    eventually(STEP, "the connector to go offline", || {
+        let core = &core;
+        let token = &token;
+        async move {
+            let listing = core.get("/api/connectors").token(token).send().await.json();
+            listing["connectors"]
+                .as_array()?
+                .iter()
+                .find(|row| row["id"] == core.connector_id())
+                .and_then(|row| (row["connected"] == false).then_some(()))
+        }
+    })
+    .await;
+    let close = core
+        .post(
+            "/api/presentation/close",
+            json!({"thread_id":"closed-thread"}),
+        )
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(close.status, 200, "{close:?}");
+    assert_eq!(close.json()["binding_id"], bid);
+    assert!(core
+        .get(&format!("/api/presentation?session_id={sid}"))
+        .token(&token)
+        .send()
+        .await
+        .json()["binding"]
+        .is_null());
+    let mut back = Rpc::hello(&core).await;
+    let mut cached = registration.clone();
+    cached["binding_id"] = json!(bid);
+    assert_eq!(
+        back.call("binding.register", cached).await,
+        json!({"status":"closed","reason":"binding_closed","binding_id":bid,
+            "voice_contract":1})
+    );
+    assert_eq!(
+        back.call("speech.recover", original.clone()).await["reason"],
+        "binding_inactive"
+    );
+    let fresh = back.call("binding.register", registration).await;
+    assert_ne!(fresh["binding_id"], bid);
+    let replacement = fresh["binding_id"].as_str().unwrap();
+    let mut recover = original.clone();
+    recover["recovery_binding_id"] = json!(replacement);
+    assert_eq!(
+        back.call("speech.recover", recover).await["reason"],
+        "binding_inactive"
+    );
+    assert_eq!(
+        back.call(
+            "speech.get_reply",
+            json!({"voice_contract":1,
+        "voice_contract_instance":instance,"binding_id":bid,
+        "recovery_binding_id":replacement,"utterance_id":"u-offline-close"})
+        )
+        .await["status"],
+        "unavailable"
+    );
+    assert_eq!(
+        back.call(
+            "speech.replay",
+            json!({"voice_contract":1,
+        "voice_contract_instance":instance,"binding_id":bid,
+        "recovery_binding_id":replacement,"replay_id":"replay-after-close",
+        "utterance_id":"u-offline-close","mode":"resume"})
+        )
+        .await["reason"],
+        "binding_inactive"
+    );
+    browser
+        .none_of(&["voice-reply"], Duration::from_millis(200))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn uncertain_speech_recovery_over_rpc_saves_without_audio_and_recovers_prior_answer() {
     let root = tempfile::tempdir().unwrap();
     let core = Launch::new(root.path().join("core")).start();

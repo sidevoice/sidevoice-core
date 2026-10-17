@@ -23,6 +23,7 @@ mod latency_log;
 mod peers;
 mod unheard;
 mod utterances;
+mod voice_contract;
 
 // The room's operations, by concern.
 mod channel;
@@ -66,6 +67,7 @@ use notices::PendingNotice;
 use peers::Peers;
 use unheard::Unheard;
 use utterances::Utterances;
+use voice_contract::VoiceContract;
 
 struct Inner {
     credentials: Credentials,
@@ -75,6 +77,7 @@ struct Inner {
     conversations: Conversations,
     journal: Journal,
     utterances: Utterances,
+    voice_contract: VoiceContract,
     unheard: Unheard,
     inflight: Inflight,
     latency: LatencyLog,
@@ -104,6 +107,7 @@ impl Room {
                 conversations: Conversations::default(),
                 journal: Journal::default(),
                 utterances: Utterances::default(),
+                voice_contract: VoiceContract::default(),
                 unheard: Unheard::default(),
                 inflight: Inflight::default(),
                 latency: LatencyLog::new(telemetry::shared()),

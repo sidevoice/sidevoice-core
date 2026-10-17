@@ -81,6 +81,19 @@ impl Room {
             if let Some(notice) = payload.get("notice") {
                 data["notice"] = notice.clone();
             }
+            for key in [
+                "origin",
+                "event",
+                "playback_at_turn_start",
+                "not_played_at_turn_start",
+                "not_played_at_turn_start_truncated",
+                "hearing_changes",
+                "playback_outcomes",
+            ] {
+                if let Some(value) = payload.get(key) {
+                    data[key] = value.clone();
+                }
+            }
             row.ever_exposed = true;
             row.status = "sending".into();
             inner.inflight.start(&binding.id, &row.id);

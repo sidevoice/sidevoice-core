@@ -82,6 +82,7 @@ impl Inner {
                 .is_some_and(|claim| ids.contains(claim))
         });
         for bid in ids {
+            self.contract_binding_lost(bid);
             if let Some(row_id) = self.inflight.finish(bid) {
                 if let Some(row) = self.journal.find_mut(&row_id) {
                     row.requeue();

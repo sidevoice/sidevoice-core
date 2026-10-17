@@ -40,9 +40,11 @@ impl Room {
         };
         let view = target.view();
         client.refocus(target);
+        inner.contract_focus_lost(sid);
         inner.withdraw(sid, "focus_changed", |_, _| true);
         inner.report_working(sid);
         inner.offer_note(sid);
+        inner.contract_offer_return_note(sid);
         Ok(json!({"status":"activated","binding":view,"epoch":inner.conversations.epoch(thread)}))
     }
     /// Focus a call that just joined on the conversation its hello names, honoured only while
@@ -69,6 +71,7 @@ impl Room {
         });
         inner.report_working(sid);
         inner.offer_note(sid);
+        inner.contract_offer_return_note(sid);
         true
     }
     pub fn deselect(&self, sid: &str, bid: &str) -> Result<Value, RoomError> {
@@ -82,6 +85,7 @@ impl Room {
         let target = Target::none();
         let view = target.view();
         c.refocus(target);
+        inner.contract_focus_lost(sid);
         inner.withdraw(sid, "focus_changed", |_, _| true);
         Ok(json!({"status":"activated","binding":view,"epoch":0}))
     }

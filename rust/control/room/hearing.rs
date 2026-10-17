@@ -51,6 +51,10 @@ impl Room {
             _ => return Err(invalid()),
         };
         let row = inner.journal.find_mut(history_id).ok_or_else(stale)?;
+        let contract_reply = row
+            .publication
+            .as_ref()
+            .is_some_and(|result| result["voice_contract"] == 1);
         let previous = row.hearing_reports.get(sid).cloned();
         let stronger = previous
             .as_ref()
@@ -93,6 +97,11 @@ impl Room {
             .to_owned(),
         );
         row.heard_chars = Some(if row.globally_heard { length } else { maximum });
+        if contract_reply {
+            // Physical contract receipts own recovery and replay decisions. This older semantic
+            // projection remains available in history without generating a second recovery note.
+            return Ok(());
+        }
         if row.globally_heard {
             inner.unheard.update(&thread, history_id, false, None);
             let listeners: Vec<String> = inner

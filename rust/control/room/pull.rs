@@ -159,6 +159,19 @@ impl Inner {
                     if let Some(notice) = payload.get("notice") {
                         message["notice"] = notice.clone();
                     }
+                    for key in [
+                        "origin",
+                        "event",
+                        "playback_at_turn_start",
+                        "not_played_at_turn_start",
+                        "not_played_at_turn_start_truncated",
+                        "hearing_changes",
+                        "playback_outcomes",
+                    ] {
+                        if let Some(value) = payload.get(key) {
+                            message[key] = value.clone();
+                        }
+                    }
                     page.messages.push(message);
                     row.ever_exposed = true;
                     if row.status == "pending" {

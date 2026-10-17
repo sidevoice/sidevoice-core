@@ -1,12 +1,13 @@
 //! A running call: the loop between the device socket and the room, until either side ends it. A socket that goes
 //! without a hang-up parks the call for its page to come back on another one.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::runtime::API;
 use crate::server::AppState;
@@ -24,6 +25,8 @@ const MAX_CLIENT_TEXT: usize = 1024 * 1024;
 const IDLE_WAKE: Duration = Duration::from_secs(3600);
 /// The close code a page hangs up with; any other end of the socket parks the call.
 const HANG_UP: u16 = 1000;
+const CRITICAL_WITHDRAWAL_LOST: u16 = 4410;
+const ABORT_CLOSE_WAIT: Duration = Duration::from_millis(100);
 
 enum Flow {
     Continue,
@@ -124,6 +127,26 @@ async fn next_message(socket: &mut Option<WebSocket>) -> Option<Result<Message, 
     }
 }
 
+/// Any socket send after admission must yield to a critical room abort, including Pong and
+/// close frames. The abort path gives its own close frame a bounded chance to reach the page.
+async fn abortable_wire_send<F: Future>(
+    abort: &mut watch::Receiver<bool>,
+    send: F,
+) -> Option<F::Output> {
+    if *abort.borrow_and_update() {
+        return None;
+    }
+    tokio::select! {
+        biased;
+        _ = abort.changed() => None,
+        result = send => Some(result),
+    }
+}
+
+async fn bounded_abort_close<F: Future>(send: F) -> Option<F::Output> {
+    tokio::time::timeout(ABORT_CLOSE_WAIT, send).await.ok()
+}
+
 struct Call {
     state: Arc<AppState>,
     /// The page's socket; none while the call is parked.
@@ -135,6 +158,7 @@ struct Call {
     language: String,
     session: String,
     output: mpsc::Receiver<Value>,
+    abort: watch::Receiver<bool>,
     /// What the hello got wrong, sent right after the session.
     problems: Vec<Value>,
     /// The browser keepalive, and when anything last arrived on the socket.
@@ -171,6 +195,10 @@ impl Call {
         let mut beats = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         beats.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let token = new_token();
+        let abort = state
+            .room
+            .browser_abort_watch(&session)
+            .expect("admitted browser");
         let (attach, reattach) = mpsc::channel(1);
         state.resumable.open(&session, &device, &token, attach);
         Self {
@@ -182,6 +210,7 @@ impl Call {
             language,
             session,
             output,
+            abort,
             problems,
             keepalive,
             last_frame: tokio::time::Instant::now(),
@@ -246,12 +275,32 @@ impl Call {
     }
 
     async fn deliver(&mut self, text: String) {
+        self.send_wire(Message::Text(text.into())).await;
+    }
+
+    async fn send_wire(&mut self, message: Message) {
         let Some(socket) = self.socket.as_mut() else {
             return;
         };
-        if socket.send(Message::Text(text.into())).await.is_err() {
-            self.park();
+        let mut abort = self.abort.clone();
+        let result = abortable_wire_send(&mut abort, socket.send(message)).await;
+        match result {
+            None => self.force_abort_socket().await,
+            Some(Err(_)) => self.park(),
+            Some(Ok(())) => {}
         }
+    }
+
+    /// A critical withdrawal could not enter the room's outbound queue. Retire this session
+    /// even when its socket is slow, so an old queued reply cannot remain eligible on reconnect.
+    async fn force_abort_socket(&mut self) {
+        if let Some(socket) = self.socket.as_mut() {
+            let _ = bounded_abort_close(
+                socket.send(close(CRITICAL_WITHDRAWAL_LOST, "critical_withdrawal_lost")),
+            )
+            .await;
+        }
+        self.socket = None;
     }
 
     /// The socket is gone without a hang-up: the call keeps running for its page to come back.
@@ -315,14 +364,24 @@ impl Call {
 
     async fn serve(&mut self) {
         loop {
+            let mut abort = self.abort.clone();
+            let already_aborted = *abort.borrow_and_update();
+            if already_aborted {
+                self.force_abort_socket().await;
+                break;
+            }
             let parked_until = self
                 .parked_until
                 .unwrap_or_else(|| tokio::time::Instant::now() + IDLE_WAKE);
             let flow = tokio::select! {
+                biased;
+                _ = abort.changed() => {
+                    self.force_abort_socket().await;
+                    Flow::Stop
+                }
                 _ = self.registration.changed() => {
-                    if let Some(socket) = self.socket.as_mut() {
-                        let _ = socket.send(close(UNPAIRED, &self.close_reason)).await;
-                    }
+                    let closing = close(UNPAIRED, &self.close_reason);
+                    self.send_wire(closing).await;
                     Flow::Stop
                 }
                 // Nobody came back in time: the call ends as if its socket had just closed.
@@ -373,9 +432,7 @@ impl Call {
             Some(Ok(Message::Close(Some(frame)))) if frame.code == HANG_UP => return Flow::Stop,
             None | Some(Err(_)) | Some(Ok(Message::Close(_))) => self.park(),
             Some(Ok(Message::Ping(bytes))) => {
-                if let Some(socket) = self.socket.as_mut() {
-                    let _ = socket.send(Message::Pong(bytes)).await;
-                }
+                self.send_wire(Message::Pong(bytes)).await;
             }
             Some(Ok(Message::Text(raw))) if raw.len() <= MAX_CLIENT_TEXT => {
                 self.on_client_text(&raw).await;
@@ -393,5 +450,36 @@ impl Call {
             let _ = attach.answer.send(Err((attach.socket, "unknown")));
         }
         self.state.room.leave(&self.session);
+    }
+}
+
+#[cfg(test)]
+mod abort_tests {
+    use super::{abortable_wire_send, bounded_abort_close};
+
+    #[tokio::test]
+    async fn blocked_wire_send_yields_to_critical_abort() {
+        let (abort, mut watch) = tokio::sync::watch::channel(false);
+        let blocked = tokio::spawn(async move {
+            abortable_wire_send(&mut watch, std::future::pending::<()>()).await
+        });
+        tokio::task::yield_now().await;
+        abort.send_replace(true);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), blocked)
+            .await
+            .expect("blocked wire send did not retire")
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn blocked_critical_close_has_a_finite_wait() {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            bounded_abort_close(std::future::pending::<()>()),
+        )
+        .await
+        .expect("blocked close did not retire");
+        assert!(result.is_none());
     }
 }

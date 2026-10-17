@@ -14,6 +14,7 @@ impl Inner {
         turn_id: &str,
         thread_id: &str,
         binding_id: &str,
+        snapshot: &Value,
     ) -> Result<VoiceTurn, RoomError> {
         let mut turn = match self.prepare_begin(sid, turn_id, thread_id, binding_id)? {
             PreparedTurn::Existing(turn) => return Ok(turn),
@@ -22,6 +23,7 @@ impl Inner {
         if let Some(thread) = turn.thread_id.as_deref() {
             turn.epoch = self.open_speech_epoch(thread, sid, turn_id);
         }
+        turn.playback_at_turn_start = super::voice_contract::validated_snapshot(snapshot);
         self.retain_started(turn.clone());
         Ok(turn)
     }
@@ -30,9 +32,14 @@ impl Inner {
     pub(super) fn open_speech_epoch(&mut self, thread: &str, sid: &str, turn_id: &str) -> u64 {
         let epoch = self.advance_speech_epoch(thread, sid, turn_id);
         self.withdraw_older_epoch_replies(thread, epoch);
+        self.contract_turn_open(thread, epoch);
         epoch
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "turn completion carries immutable onset evidence"
+    )]
     pub(super) fn finish_spoken_turn(
         &mut self,
         sid: &str,
@@ -40,6 +47,9 @@ impl Inner {
         text: Option<&str>,
         timings: &Value,
         continuation: Continuation,
+        snapshot: &Value,
+        not_played: &Value,
+        truncated: bool,
     ) -> Result<Value, RoomError> {
         if text.is_some_and(|text| text.len() > MAX_INPUT_BYTES) {
             return Err(RoomError::new(413, "room.text_too_long"));
@@ -67,13 +77,20 @@ impl Inner {
         } else {
             Continuation::Standalone
         };
-        let (turn, continuing) = self.take_finished(sid, turn_id, effective)?;
+        let (mut turn, continuing) = self.take_finished(sid, turn_id, effective)?;
+        if turn.playback_at_turn_start.is_null() {
+            turn.playback_at_turn_start = super::voice_contract::validated_snapshot(snapshot);
+        }
+        let (certified, clipped) = super::voice_contract::validated_not_played(not_played);
+        turn.not_played_at_turn_start = certified;
+        turn.not_played_at_turn_start_truncated = truncated || clipped;
         if let Some(thread) = turn.thread_id.as_deref() {
             self.conversations.finish(thread, sid, turn_id, turn.epoch);
         }
         self.finish_browser_turn(sid, &turn);
         let revision = turn.revision;
         if let (Some(thread), Some(next)) = (turn.thread_id.as_deref(), continuing) {
+            self.conversations.record_empty(thread, turn.epoch, sid);
             self.unheard.transfer_empty(thread, turn.epoch, next);
             return Ok(
                 json!({"accepted":false,"revision":revision,"epoch":turn.epoch,"merged":true}),
@@ -82,16 +99,21 @@ impl Inner {
         let Some(text) = text else {
             if let Some(thread) = turn.thread_id.as_deref() {
                 self.settle_empty_turn(thread, sid, turn.epoch);
+                self.dispatch_pending_contract(thread);
             }
             return Ok(json!({"accepted":false,"revision":revision,"epoch":turn.epoch}));
         };
         if turn.cancelled {
             if let Some(thread) = turn.thread_id.as_deref() {
                 self.settle_empty_turn(thread, sid, turn.epoch);
+                self.dispatch_pending_contract(thread);
             }
             return Ok(json!({"accepted":false,"revision":revision,"epoch":turn.epoch}));
         }
         self.record_transcript_latency(&turn, timings);
+        if let Some(thread) = turn.thread_id.as_deref() {
+            self.revoke_pending_contract(thread, "new_words");
+        }
         self.queue_turn(&turn, text)
     }
 
@@ -106,9 +128,11 @@ impl Inner {
         if let Some(thread) = turn.thread_id.as_deref() {
             self.conversations.finish(thread, sid, turn_id, turn.epoch);
             if let Some(next) = continuing {
+                self.conversations.record_empty(thread, turn.epoch, sid);
                 self.unheard.transfer_empty(thread, turn.epoch, next);
             } else {
                 self.settle_empty_turn(thread, sid, turn.epoch);
+                self.dispatch_pending_contract(thread);
             }
         }
         Ok(json!({"status":"cancelled"}))
