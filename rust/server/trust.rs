@@ -154,6 +154,24 @@ pub(super) fn host_allowed(headers: &HeaderMap) -> bool {
     host_allowed_by_policy(&host, allowed_hosts.as_deref(), &configured, &public_origin)
 }
 
+/// A numeric LAN address belongs in a pairing code only when the same Host would be accepted by the TCP guard.
+/// In particular, an explicit administrator allowlist remains restrictive.
+pub(super) fn advertised_ip_allowed(ip: IpAddr) -> bool {
+    let allowed_hosts = match std::env::var("SIDEVOICE_ALLOWED_HOSTS") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => Some(String::new()),
+    };
+    let configured = std::env::var("SIDEVOICE_ALLOWED_ORIGINS").unwrap_or_default();
+    let public_origin = std::env::var("VOICE_PUBLIC_ORIGIN").unwrap_or_default();
+    host_allowed_by_policy(
+        &ip.to_string(),
+        allowed_hosts.as_deref(),
+        &configured,
+        &public_origin,
+    )
+}
+
 fn host_allowed_by_policy(
     host: &str,
     allowed_hosts: Option<&str>,

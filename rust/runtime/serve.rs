@@ -50,6 +50,7 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         stored.registry,
         config.launch_id.clone(),
         machine_host,
+        config.host.clone(),
         port,
         stored.room.clone(),
         rendezvous.clone(),
