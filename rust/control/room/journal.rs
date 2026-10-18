@@ -166,9 +166,6 @@ impl Journal {
     pub(super) fn find_mut(&mut self, id: &str) -> Option<&mut Row> {
         self.rows.iter_mut().find(|r| r.id == id)
     }
-    pub(super) fn has_thread(&self, thread: &str) -> bool {
-        self.rows.iter().any(|r| r.thread == thread)
-    }
     pub(super) fn assistant_hearing_facts(&self, thread: &str) -> HashMap<String, Value> {
         self.rows.iter().filter(|r| r.thread == thread && r.role == "assistant")
             .filter_map(|r| {

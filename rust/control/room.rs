@@ -4,7 +4,7 @@
 //! keeps its collections private; the room's operations are split across the submodules below
 //! by concern and reach the state only through those types.
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::Mutex;
 
@@ -69,6 +69,8 @@ use utterances::Utterances;
 
 struct Inner {
     credentials: Credentials,
+    /// A voluntary Sidevoice leave survives Core restart; a missing connector never adds a thread here.
+    closed_threads: HashSet<String>,
     peers: Peers,
     bindings: Bindings,
     browsers: Browsers,
@@ -94,10 +96,20 @@ impl Room {
             .read_json("room-state.json")?
             .unwrap_or_else(|| serde_json::json!({"connectors": {}}));
         let credentials = Credentials::from_state(&state);
+        let closed_threads = state
+            .get("closed_threads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|thread| util::valid_thread(thread))
+            .map(str::to_owned)
+            .collect();
         Ok(Self {
             dir,
             inner: Mutex::new(Inner {
                 credentials,
+                closed_threads,
                 peers: Peers::default(),
                 bindings: Bindings::default(),
                 browsers: Browsers::default(),
@@ -114,8 +126,12 @@ impl Room {
             }),
         })
     }
-    fn save(&self, credentials: &Credentials) -> io::Result<()> {
-        self.dir.write_json("room-state.json", &credentials.state())
+    fn save(&self, credentials: &Credentials, closed_threads: &HashSet<String>) -> io::Result<()> {
+        let mut state = credentials.state();
+        let mut closed: Vec<_> = closed_threads.iter().cloned().collect();
+        closed.sort();
+        state["closed_threads"] = serde_json::json!(closed);
+        self.dir.write_json("room-state.json", &state)
     }
 }
 

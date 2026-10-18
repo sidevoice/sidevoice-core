@@ -99,12 +99,31 @@ impl Notification {
             .find(|notification| notification.method() == method)
     }
 
-    fn apply(self, room: &Room, cid: &str, params: &Value) {
+    fn apply(
+        self,
+        room: &Room,
+        cid: &str,
+        params: &Value,
+    ) -> Result<(), crate::control::room::RoomError> {
         match self {
-            Self::Unregister => room.unregister(cid, field(params, "binding_id")),
-            Self::Working => room.working(cid, params),
-            Self::Engine => room.engine(cid, params),
-            Self::Read => room.read(cid, params),
+            Self::Unregister => room.unregister_with_thread(
+                cid,
+                field(params, "binding_id"),
+                field(params, "thread"),
+                params.get("leave") == Some(&Value::Bool(true)),
+            ),
+            Self::Working => {
+                room.working(cid, params);
+                Ok(())
+            }
+            Self::Engine => {
+                room.engine(cid, params);
+                Ok(())
+            }
+            Self::Read => {
+                room.read(cid, params);
+                Ok(())
+            }
         }
     }
 }

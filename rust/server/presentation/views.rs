@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::http::{header, HeaderMap, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::server::refusal::{refuse, require_origin, Handled};
 use crate::server::request::query;
@@ -33,7 +33,11 @@ pub(super) async fn admission(
 }
 
 pub(super) async fn participants(State(state): State<Arc<AppState>>, uri: Uri) -> Json<Value> {
-    Json(json!({"participants":state.room.participants(query(&uri,"session_id").as_deref())}))
+    Json(
+        state
+            .room
+            .participant_inventory(query(&uri, "session_id").as_deref()),
+    )
 }
 
 pub(super) async fn history(

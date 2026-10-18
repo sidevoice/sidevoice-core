@@ -53,7 +53,7 @@ pub(super) async fn close(
         .room
         .close_channel(data["thread_id"].as_str().unwrap_or(""))
         .map_err(|error| room_refusal(error, &headers))?;
-    if let Some((peer, params)) = notify {
+    for (peer, params) in notify {
         let _ = peer.send("binding.close", params).await;
     }
     Ok(Json(result).into_response())
