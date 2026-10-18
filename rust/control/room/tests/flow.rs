@@ -2806,3 +2806,49 @@ fn h5_full_receipt_removes_miss_but_keeps_unexposed_empty_refusal_obligation() {
         }
     }
 }
+
+/// Say "hello" and let it wait past the delivery deadline, as for an agent that never fetches it.
+fn expire_input(c: &Case) {
+    let mut inner = c.room.inner.lock().unwrap();
+    for row in inner.journal.input_mut("t") {
+        row.queued_at = 0;
+    }
+    drop(inner);
+    c.room.pending_delivery();
+}
+
+#[test]
+fn input_past_the_deadline_is_not_sent_and_the_agent_speaks_again() {
+    let c = Case::new(true);
+    let epoch = c.say("turn", Some("hello"));
+    assert_eq!(c.publish("early", 0, "Too soon")["status"], "text_only");
+    expire_input(&c);
+    assert_eq!(
+        c.room.history(Some("t"))["messages"][0]["status"],
+        "not_sent"
+    );
+    let answer = c.publish("late", 0, "Still here");
+    assert_ne!(answer["status"], "text_only", "{answer}");
+    assert_eq!(answer["epoch"], epoch);
+}
+
+#[test]
+fn input_delivered_within_the_deadline_keeps_the_newer_turn_gate() {
+    let c = Case::new(true);
+    c.say("turn", Some("hello"));
+    assert_eq!(c.pull().len(), 1);
+    expire_input(&c);
+    assert_eq!(c.publish("old", 0, "Old answer")["status"], "text_only");
+}
+
+#[test]
+fn a_late_pull_of_expired_input_delivers_nothing() {
+    let c = Case::new(true);
+    c.say("turn", Some("hello"));
+    expire_input(&c);
+    assert!(c.pull().is_empty());
+    assert_eq!(
+        c.room.history(Some("t"))["messages"][0]["status"],
+        "not_sent"
+    );
+}
