@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/sidevoice/sidevoice-core/compare/v0.4.1...v0.4.2) (2026-10-18)
+
+
+### Bug Fixes
+
+* **server:** advertise private machine addresses in pairing codes ([#131](https://github.com/sidevoice/sidevoice-core/issues/131)) ([5420448](https://github.com/sidevoice/sidevoice-core/commit/54204484d1796abdae2b1105420e9db32f05eb85))
+
 ## [0.4.1](https://github.com/sidevoice/sidevoice-core/compare/v0.4.0...v0.4.1) (2026-10-17)
 
 
