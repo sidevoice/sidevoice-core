@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/sidevoice/sidevoice-core/compare/v0.4.2...v0.4.3) (2026-10-18)
+
+
+### Bug Fixes
+
+* **room:** persist explicit conversation leaves across restarts ([#133](https://github.com/sidevoice/sidevoice-core/issues/133)) ([40621b8](https://github.com/sidevoice/sidevoice-core/commit/40621b8cc2c8824c443ce53a0402074d3f653198))
+
 ## [0.4.2](https://github.com/sidevoice/sidevoice-core/compare/v0.4.1...v0.4.2) (2026-10-18)
 
 
