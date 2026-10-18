@@ -61,9 +61,9 @@ struct Page {
 
 impl Room {
     /// Read the existing in-memory journal for one live binding. A fetched message is
-    /// claimed by that binding and returned again on every later fetch until the caller
-    /// acknowledges its ID; the claim is released if the binding stops being the thread's live
-    /// binding. Acknowledgement is idempotent: an ID this binding does not hold is ignored.
+    /// claimed by that binding and returned again on later fetches until acknowledged. A new
+    /// live binding can take over the claim, without making it eligible for injection.
+    /// Acknowledgement is idempotent: an ID this binding does not hold is ignored.
     pub fn pull_input(&self, cid: &str, data: &Value) -> Result<Value, RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
         inner.materialize_due_notes();
