@@ -32,6 +32,7 @@ pub(in crate::server) fn app_state(dir: &PrivateDir, room: Arc<Room>, host: &str
         registry,
         "fixture".to_owned(),
         host.to_owned(),
+        "127.0.0.1".to_owned(),
         10829,
         room,
         relay,
