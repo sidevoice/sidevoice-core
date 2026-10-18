@@ -93,6 +93,11 @@ apply. The Core's standalone bind default remains loopback.
 - **Discovery** (`GET /api/rendezvous`, `GET /api/device/identity`) answers without a token and says only what
   pairing needs: that this is a Sidevoice machine, its fingerprint and public key, and a signature over the
   caller's nonce. The machine's name is given only to a paired device.
+- **Network limits.** In each 60-second window the TCP listener allows 10 failed pairing attempts per peer IP and
+  40 globally, or 60 failed authentication attempts per peer IP and 300 globally. Further attempts receive 429
+  with `Retry-After`. It serves at most 256 concurrent HTTP or WebSocket connections. The peer is the direct TCP
+  address (the proxy's address behind a proxy); forwarded headers are ignored. The local Unix socket has no such
+  limits.
 - **Transport.** The core serves plain HTTP on its listen address. The web client normally sends pairing secrets
   and device tokens only over HTTPS or loopback; the native app can also send them to a private LAN address after
   explicit unencrypted-connection consent. Anyone able to read that LAN traffic can read those credentials. Public

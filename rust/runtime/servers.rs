@@ -6,12 +6,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::serve::ListenerExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::failure::StartFailure;
+use super::limited_listener::LimitedListener;
 use crate::server::{self, AppState};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
@@ -34,9 +36,13 @@ impl Servers {
         let local_app = server::router(state, true);
         let tcp_receiver = receiver.clone();
         let tcp = tokio::spawn(async move {
-            axum::serve(tcp, tcp_app)
-                .with_graceful_shutdown(wait_stop(tcp_receiver))
-                .await
+            // TapIo preserves Axum's SocketAddr connect-info adapter for this custom listener.
+            axum::serve(
+                LimitedListener::new(tcp).tap_io(|_| {}),
+                tcp_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(wait_stop(tcp_receiver))
+            .await
         });
         let local = tokio::spawn(async move {
             axum::serve(local, local_app)

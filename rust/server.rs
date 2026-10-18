@@ -17,6 +17,7 @@ mod connector_routes;
 mod connectors;
 mod device_address;
 mod guard;
+mod limits;
 mod node;
 mod pairing;
 mod presentation;
@@ -40,6 +41,7 @@ pub struct AppState {
     pub rendezvous: Arc<rendezvous::Rendezvous>,
     pub identity: NodeIdentity,
     registry: Mutex<DeviceRegistry>,
+    limits: limits::Limits,
     calls: call::CallRegistry,
     /// Every live call a page may come back to, and the client messages already taken.
     resumable: call::ResumableCalls,
@@ -75,6 +77,7 @@ impl AppState {
             rendezvous,
             identity,
             registry: Mutex::new(registry),
+            limits: limits::Limits::default(),
             calls: call::CallRegistry::default(),
             resumable: call::ResumableCalls::default(),
             seen: call::SeenMessages::default(),
