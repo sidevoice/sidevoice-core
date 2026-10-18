@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5](https://github.com/sidevoice/sidevoice-core/compare/v0.4.4...v0.4.5) (2026-10-18)
+
+
+### Bug Fixes
+
+* **room:** unsent input gives up after 10 s and stops blocking agent speech ([#140](https://github.com/sidevoice/sidevoice-core/issues/140)) ([c49e68f](https://github.com/sidevoice/sidevoice-core/commit/c49e68f5be578c0d706a8cc2811f59dfe2ae4158))
+
 ## [0.4.4](https://github.com/sidevoice/sidevoice-core/compare/v0.4.3...v0.4.4) (2026-10-18)
 
 
