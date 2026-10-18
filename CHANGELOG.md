@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.4](https://github.com/sidevoice/sidevoice-core/compare/v0.4.3...v0.4.4) (2026-10-18)
+
+
+### Bug Fixes
+
+* **ci:** fetch glibc floor image from AlmaLinux Quay ([#136](https://github.com/sidevoice/sidevoice-core/issues/136)) ([71def51](https://github.com/sidevoice/sidevoice-core/commit/71def510a803bb0ec51930f3b188a55815c9b5b1)), closes [#135](https://github.com/sidevoice/sidevoice-core/issues/135)
+
 ## [0.4.3](https://github.com/sidevoice/sidevoice-core/compare/v0.4.2...v0.4.3) (2026-10-18)
 
 
