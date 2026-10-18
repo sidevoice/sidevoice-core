@@ -12,6 +12,7 @@
   "request.origin_invalid": "The request origin is not allowed.",
   "request.host_invalid": "The request host is not allowed.",
   "request.not_found": "The requested resource was not found.",
+  "request.rate_limited": "Too many attempts. Try again shortly.",
   "identity.unsafe-directory": "The identity directory is unsafe.",
   "identity.unreadable": "The machine identity could not be read.",
   "bind.core-running": "Another core process is already running.",
