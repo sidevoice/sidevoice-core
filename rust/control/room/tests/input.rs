@@ -22,12 +22,12 @@ fn completed_voice_turn_uses_captured_focus_and_shared_outbox() {
     );
     room.register(
         "connector",
-        &json!({"thread":"old-thread","harness":"codex"}),
+        &json!({"thread":"old-thread","harness":"codex","capabilities":{"deliver":"supported"}}),
     )
     .unwrap();
     room.register(
         "connector",
-        &json!({"thread":"new-thread","harness":"codex"}),
+        &json!({"thread":"new-thread","harness":"codex","capabilities":{"deliver":"supported"}}),
     )
     .unwrap();
     let (events, _received) = mpsc::channel(8);

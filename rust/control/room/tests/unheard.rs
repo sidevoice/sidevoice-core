@@ -11,7 +11,10 @@ use crate::control::room::{ConnectorPeer, Continuation, Room};
 fn room_on(thread: &str) -> (tempfile::TempDir, Room, String, String) {
     let (directory, room, generations) = pull_room(&["connector"]);
     let bid = room
-        .register("connector", &json!({"thread":thread,"harness":"claude"}))
+        .register(
+            "connector",
+            &json!({"thread":thread,"harness":"claude","capabilities":{"deliver":"supported"}}),
+        )
         .unwrap()["binding_id"]
         .as_str()
         .unwrap()
@@ -515,8 +518,11 @@ fn a_note_cut_off_by_its_connector_leaving_is_sent_again_with_the_same_list() {
                 stop,
             },
         );
-        room.register("connector", &json!({"thread":"t","harness":"claude"}))
-            .unwrap();
+        room.register(
+            "connector",
+            &json!({"thread":"t","harness":"claude","capabilities":{"deliver":"supported"}}),
+        )
+        .unwrap();
         let (_, again_id, _, again) = only(room.pending_delivery());
         assert_eq!(again_id, note_id, "dropped first: {dropped_first}");
         assert_eq!(again["unheard"], first["unheard"]);

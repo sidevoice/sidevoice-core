@@ -20,7 +20,7 @@ impl Case {
             .register(
                 "connector",
                 &json!({"thread":"t","harness":"codex",
-            "input_mode":if pull {"pull"} else {"push"}}),
+            "capabilities":{"deliver":if pull {"unsupported"} else {"supported"}}}),
             )
             .unwrap()["binding_id"]
             .as_str()
@@ -388,7 +388,7 @@ fn f1_uncertain_publication_recovers_without_late_first_audio_and_fresh_reply_pl
         .register(
             "connector",
             &json!({"thread":"t","harness":"codex",
-        "input_mode":"pull"}),
+        "capabilities":{"deliver":"unsupported"}}),
         )
         .unwrap()["binding_id"]
         .as_str()
@@ -511,7 +511,7 @@ fn f4_lost_push_ack_keeps_exposed_notice_frozen_and_sends_hearing_correction() {
 }
 
 #[test]
-fn f4_released_pull_claim_keeps_original_payload_and_corrects_partial_or_full() {
+fn f4_held_pull_claim_keeps_original_payload_and_corrects_partial_or_full() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../docs/fixtures/conversation-flow.json"
     ))
@@ -523,11 +523,6 @@ fn f4_released_pull_claim_keeps_original_payload_and_corrects_partial_or_full() 
         assert_eq!(first.len(), 1);
         let original = first[0].clone();
         let original_payload = c.notes()[0].clone();
-        c.room
-            .inner
-            .lock()
-            .unwrap()
-            .release_pull_claims(|row| row.pull_claimed_by.as_deref() == Some(c.bid.as_str()));
         match outcome {
             "partial" => c
                 .room
@@ -1235,7 +1230,7 @@ fn t16_unacked_note_survives_pull_binding_replacement_with_the_same_id() {
         .register(
             "connector",
             &json!({"thread":"t","harness":"codex",
-        "input_mode":"pull","binding_id":"replacement"}),
+        "capabilities":{"deliver":"unsupported"},"binding_id":"replacement"}),
         )
         .unwrap();
     let bid = replacement["binding_id"].as_str().unwrap();
@@ -2075,7 +2070,7 @@ fn review_channel_close_salvages_pending_attached_evidence_for_next_binding() {
         .room
         .register(
             "connector",
-            &json!({"thread":"t","harness":"codex","input_mode":"pull"}),
+            &json!({"thread":"t","harness":"codex","capabilities":{"deliver":"unsupported"}}),
         )
         .unwrap();
     let messages = c
@@ -2391,22 +2386,16 @@ fn t16_unacknowledged_notice_crosses_pull_push_handover_with_one_message_id() {
         .room
         .register(
             "connector",
-            &json!({"thread":"t","harness":"codex","input_mode":"push"}),
+            &json!({"thread":"t","harness":"codex","capabilities":{"deliver":"supported"}}),
         )
         .unwrap();
-    let due = c.room.pending_delivery();
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].3["message_id"], id);
-    assert_eq!(due[0].3["notice"], claimed[0]["notice"]);
-    let (bid, rid, peer, _) = &due[0];
-    assert_eq!(push["binding_id"], *bid);
-    c.room
-        .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"failed"})));
+    assert_eq!(push["binding_id"], c.bid);
+    assert!(c.room.pending_delivery().is_empty());
     let pull = c
         .room
         .register(
             "connector",
-            &json!({"thread":"t","harness":"codex","input_mode":"pull"}),
+            &json!({"thread":"t","harness":"codex","capabilities":{"deliver":"unsupported"}}),
         )
         .unwrap();
     let fetched = c
@@ -2545,7 +2534,7 @@ fn review_claim_released_after_ttl_keeps_attached_evidence_and_id() {
         .register(
             "connector",
             &json!({"thread":"t","harness":"codex",
-        "input_mode":"pull","binding_id":"replacement"}),
+        "capabilities":{"deliver":"unsupported"},"binding_id":"replacement"}),
         )
         .unwrap();
     let fetched = c

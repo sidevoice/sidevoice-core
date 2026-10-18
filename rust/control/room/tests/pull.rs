@@ -10,7 +10,7 @@ fn pull_reads_only_its_live_binding_and_keeps_messages_until_ack() {
     let joined = room
         .register(
             "pull-owner",
-            &json!({"thread":"pull-thread","harness":"codex","input_mode":"pull"}),
+            &json!({"thread":"pull-thread","harness":"codex","capabilities":{"deliver":"unsupported"}}),
         )
         .unwrap();
     let bid = joined["binding_id"].as_str().unwrap().to_owned();
@@ -166,7 +166,7 @@ fn pull_pages_without_silent_loss() {
     let bid = room
         .register(
             "pull-owner",
-            &json!({"thread":"pull-thread","harness":"codex","input_mode":"pull"}),
+            &json!({"thread":"pull-thread","harness":"codex","capabilities":{"deliver":"unsupported"}}),
         )
         .unwrap()["binding_id"]
         .as_str()
@@ -209,10 +209,13 @@ fn pull_pages_without_silent_loss() {
 }
 
 #[test]
-fn pull_claims_return_to_push_when_the_pull_binding_goes_away() {
+fn pull_claims_transfer_to_get_messages_without_injection_when_binding_goes_away() {
     let (_directory, room, generations) = pull_room(&["pusher", "puller"]);
     let push_bid = room
-        .register("pusher", &json!({"thread":"shared","harness":"claude"}))
+        .register(
+            "pusher",
+            &json!({"thread":"shared","harness":"claude","capabilities":{"deliver":"supported"}}),
+        )
         .unwrap()["binding_id"]
         .as_str()
         .unwrap()
@@ -231,7 +234,7 @@ fn pull_claims_return_to_push_when_the_pull_binding_goes_away() {
     let pull_bid = room
         .register(
             "puller",
-            &json!({"thread":"shared","harness":"codex","input_mode":"pull"}),
+            &json!({"thread":"shared","harness":"codex","capabilities":{"deliver":"unsupported"}}),
         )
         .unwrap()["binding_id"]
         .as_str()
@@ -257,25 +260,28 @@ fn pull_claims_return_to_push_when_the_pull_binding_goes_away() {
     .unwrap();
     assert_eq!(got["messages"][0]["text"], "held");
 
-    // The pull connector drops: its unacknowledged message returns to the push binding.
+    // The fetcher's connector drops: the claim is never injected by the older binding.
     room.detach("puller", &generations[1]);
-    let delivery = room.pending_delivery();
-    assert_eq!(delivery.len(), 1);
-    assert_eq!(delivery[0].0, push_bid);
-    assert_eq!(delivery[0].3["text"], "held");
+    assert!(room.pending_delivery().is_empty());
+    let recovered = pull(
+        &room,
+        "pusher",
+        json!({"binding_id":push_bid,"operation":"get"}),
+    )
+    .unwrap();
     assert_eq!(
-        delivery[0].3["message_id"],
+        recovered["messages"][0]["message_id"],
         got["messages"][0]["message_id"]
     );
 }
 
 #[test]
-fn re_registering_as_push_releases_pull_claims_once() {
+fn enabling_injection_does_not_reinject_a_claimed_message() {
     let (_directory, room, _) = pull_room(&["connector"]);
     let joined = |mode: &str| {
         room.register(
             "connector",
-            &json!({"thread":"switch","harness":"codex","input_mode":mode}),
+            &json!({"thread":"switch","harness":"codex","capabilities":{"deliver":if mode == "pull" {"unsupported"} else {"supported"}}}),
         )
         .unwrap()["binding_id"]
             .as_str()
@@ -293,7 +299,7 @@ fn re_registering_as_push_releases_pull_claims_once() {
         json!({"binding_id":bid,"operation":"get"}),
     )
     .unwrap();
-    // Re-registering in pull mode keeps the claim; the message is not pushed.
+    // Re-registering without injection keeps the claim.
     assert_eq!(joined("pull"), bid);
     assert!(room.pending_delivery().is_empty());
     assert_eq!(
@@ -305,16 +311,16 @@ fn re_registering_as_push_releases_pull_claims_once() {
         .unwrap()["count"],
         1
     );
-    // Switching the same binding to push hands the unacknowledged message to push, once.
+    // A claim survives a capability change and must never be injected afterwards.
     assert_eq!(joined("push"), bid);
-    assert!(pull(
-        &room,
-        "connector",
-        json!({"binding_id":bid,"operation":"check"})
-    )
-    .is_err());
-    let delivery = room.pending_delivery();
-    assert_eq!(delivery.len(), 1);
-    assert_eq!(delivery[0].3["text"], "switching");
+    assert_eq!(
+        pull(
+            &room,
+            "connector",
+            json!({"binding_id":bid,"operation":"check"})
+        )
+        .unwrap()["count"],
+        1
+    );
     assert!(room.pending_delivery().is_empty());
 }

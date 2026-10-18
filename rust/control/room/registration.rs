@@ -53,8 +53,6 @@ impl Room {
             inner.closed_threads.insert(thread.to_owned());
             return Err(RoomError::new(500, "room.state_save_failed"));
         }
-        // A mode the room does not know registers as push, as one that names no mode does.
-        let pull_input = field(data, "input_mode") == "pull";
         let bid = match inner.bindings.get(requested) {
             Some(existing) if existing.connector != cid => {
                 return Err(RoomError::new(409, "room.binding_foreign"));
@@ -66,12 +64,8 @@ impl Room {
                 .map_or_else(id, |b| b.id.clone()),
         };
         let binding = inner.bindings.get_or_create(&bid, cid, thread);
-        binding.renew(Declaration::parse(data), pull_input);
+        binding.renew(Declaration::parse(data));
         let actual_thread = binding.thread.clone();
-        inner.release_pull_claims(|row| {
-            row.thread == actual_thread
-                && (!pull_input || row.pull_claimed_by.as_deref() != Some(bid.as_str()))
-        });
         Ok(
             json!({"client_ref": data.get("client_ref"), "binding_id": bid, "thread": actual_thread,
                 "epoch":inner.conversations.epoch(&actual_thread),
@@ -121,7 +115,6 @@ impl Room {
         }
         if let Some(binding) = inner.bindings.get_mut(bid).filter(|b| b.connector == cid) {
             binding.end();
-            inner.release_pull_claims(|row| row.pull_claimed_by.as_deref() == Some(bid));
         }
         if save_failed {
             Err(RoomError::new(500, "room.state_save_failed"))

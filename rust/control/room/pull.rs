@@ -1,4 +1,4 @@
-//! Pull delivery: a pull binding reading the journal directly, with claims held until acknowledged.
+//! Safeguard delivery: a binding reads uninjected journal input, with claims held until acknowledged.
 use serde_json::{json, Value};
 
 use super::error::RoomError;
@@ -60,17 +60,19 @@ struct Page {
 }
 
 impl Room {
-    /// Read the existing in-memory journal for one live pull binding. A fetched message is
+    /// Read the existing in-memory journal for one live binding. A fetched message is
     /// claimed by that binding and returned again on every later fetch until the caller
     /// acknowledges its ID; the claim is released if the binding stops being the thread's live
-    /// pull binding. Acknowledgement is idempotent: an ID this binding does not hold is ignored.
+    /// binding. Acknowledgement is idempotent: an ID this binding does not hold is ignored.
     pub fn pull_input(&self, cid: &str, data: &Value) -> Result<Value, RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
         inner.materialize_due_notes();
         let bid = field(data, "binding_id");
-        let Some(binding) = inner.bindings.get(bid).filter(|binding| {
-            binding.connector == cid && binding.active && binding.live && binding.pull_input
-        }) else {
+        let Some(binding) = inner
+            .bindings
+            .get(bid)
+            .filter(|binding| binding.connector == cid && binding.active && binding.live)
+        else {
             return Err(RoomError::new(403, "room.pull_binding_invalid"));
         };
         let thread = binding.thread.clone();
@@ -84,6 +86,7 @@ impl Room {
             return Err(RoomError::new(409, "room.pull_binding_superseded"));
         }
         let request = PullRequest::parse(data)?;
+        inner.journal.transfer_claims(&thread, bid);
         let acknowledged = inner.acknowledge_pull(bid, &thread, &request.ack_ids);
         let page = inner.fetch_pull(bid, &thread, &request);
         let cursor = page
@@ -134,7 +137,7 @@ impl Inner {
     /// page after the cursor, claiming what it returns for the first time.
     fn fetch_pull(&mut self, bid: &str, thread: &str, request: &PullRequest<'_>) -> Page {
         // Undelivered input expires as it does for push; a claimed row stays until it is
-        // acknowledged, released or trimmed from the bounded journal.
+        // acknowledged or trimmed from the bounded journal.
         let now = seconds();
         let mut page = Page::default();
         let mut claimed = Vec::new();
@@ -189,13 +192,5 @@ impl Inner {
             );
         }
         page
-    }
-    /// Return fetched but unacknowledged pull input to the queue, so that the thread's next
-    /// delivery binding (pull or push) receives it rather than leaving it claimed by a binding
-    /// that can no longer read it. The same message ID may therefore be fetched again.
-    pub(super) fn release_pull_claims(&mut self, released: impl Fn(&Row) -> bool) {
-        for input in self.journal.release_claims(released) {
-            self.browsers.input_receipt(&input, "pending");
-        }
     }
 }

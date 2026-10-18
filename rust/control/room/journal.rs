@@ -283,19 +283,14 @@ impl Journal {
         row.pull_claimed_by = None;
         Some(row.input_ref())
     }
-    /// Return to the queue the pull input `released` selects among that fetched but not yet
-    /// acknowledged.
-    pub(super) fn release_claims(&mut self, released: impl Fn(&Row) -> bool) -> Vec<InputRef> {
-        self.rows
-            .iter_mut()
+    /// A replacement binding may fetch an unacknowledged claim, but it must never inject it.
+    pub(super) fn transfer_claims(&mut self, thread: &str, bid: &str) {
+        for row in self
+            .input_mut(thread)
             .filter(|row| row.status == "delivered" && row.pull_claimed_by.is_some())
-            .filter(|row| released(row))
-            .map(|row| {
-                row.requeue();
-                row.pull_claimed_by = None;
-                row.input_ref()
-            })
-            .collect()
+        {
+            row.pull_claimed_by = Some(bid.to_owned());
+        }
     }
 }
 

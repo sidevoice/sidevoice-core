@@ -79,7 +79,7 @@ async fn open_turn_refusal_keeps_rpc_identity_and_empty_notice_reaches_pull() {
         .call(
             "binding.register",
             json!({"client_ref":"pull-turn","harness":"fixture","thread":"turn-thread",
-                "input_mode":"pull"}),
+                "capabilities":{"deliver":"unsupported"}}),
         )
         .await;
     let binding = registered["binding_id"].as_str().unwrap();
@@ -781,8 +781,8 @@ async fn a_delivery_answer_with_keys_the_core_does_not_read_still_settles_it() {
     assert_eq!(browser.receipt("delivered").await["history_id"], sent["id"]);
 }
 
-/// A registration from a newer connector, with an input mode, capabilities, a route and fields this core does not
-/// know: it binds, as push, and the capabilities it does not know are left out.
+/// A registration from a newer connector, with capabilities, a route and fields this core does not
+/// know: it binds, and the capabilities it does not know are left out.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_registration_with_values_the_core_does_not_know_binds_as_push() {
     let root = tempfile::tempdir().unwrap();
@@ -792,7 +792,6 @@ async fn a_registration_with_values_the_core_does_not_know_binds_as_push() {
     let session = browser.session.clone();
     let mut peer = Rpc::hello(&core).await;
     let mut registration = registration("future", THREAD);
-    registration["input_mode"] = json!("stream");
     registration["route"] = json!("future-route");
     registration["capabilities"] =
         json!({"deliver": "supported", "working": "partially", "teleport": "supported"});
@@ -817,10 +816,8 @@ async fn a_registration_with_values_the_core_does_not_know_binds_as_push() {
     assert_eq!(view["capabilities"]["deliver"], "supported");
     assert_eq!(view["capabilities"]["working"], "unknown");
     assert!(view["capabilities"].get("teleport").is_none(), "{view}");
-    assert_eq!(
-        (&view["input_mode"], &view["route"]),
-        (&json!("push"), &Value::Null)
-    );
+    assert!(view.get("input_mode").is_none());
+    assert_eq!(view["route"], Value::Null);
 
     let focus = core.select(&token, &session, THREAD).await;
     core.text(&token, (&session, THREAD, &focus), "Pushed", &message_id())
@@ -941,7 +938,7 @@ async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
     let pulled = peer
         .call(
             "binding.register",
-            json!({"thread": "pull-thread", "harness": "fixture", "input_mode": "pull", "added_later": extra}),
+            json!({"thread": "pull-thread", "harness": "fixture", "capabilities":{"deliver":"unsupported"}, "added_later": extra}),
         )
         .await;
     let checked = peer

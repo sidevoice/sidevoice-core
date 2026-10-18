@@ -53,15 +53,6 @@ impl Room {
             {
                 continue;
             }
-            // A pull binding consumes the room journal directly. Falling back to an older
-            // push binding here would deliver the same words twice.
-            if inner
-                .bindings
-                .delivery_target(&row.thread)
-                .is_some_and(|b| b.pull_input)
-            {
-                continue;
-            }
             let Some(binding) = inner
                 .bindings
                 .push_target(&row.thread, |bid| inner.inflight.is_busy(bid))

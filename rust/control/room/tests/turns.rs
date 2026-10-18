@@ -11,8 +11,11 @@ use crate::control::room::{Continuation, Room};
 fn room_with_call() -> (tempfile::TempDir, Room, String, mpsc::Receiver<Value>) {
     let (directory, room, _) = pull_room(&["connector"]);
     for thread in ["x", "y"] {
-        room.register("connector", &json!({"thread":thread,"harness":"claude"}))
-            .unwrap();
+        room.register(
+            "connector",
+            &json!({"thread":thread,"harness":"claude","capabilities":{"deliver":"supported"}}),
+        )
+        .unwrap();
     }
     let (events, received) = mpsc::channel(256);
     let sid = room.join("device".into(), "en".into(), events).unwrap();
