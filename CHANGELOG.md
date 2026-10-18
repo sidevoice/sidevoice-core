@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.6](https://github.com/sidevoice/sidevoice-core/compare/v0.4.5...v0.4.6) (2026-10-18)
+
+
+### Bug Fixes
+
+* **server:** limit pairing and unauthenticated network attempts ([#145](https://github.com/sidevoice/sidevoice-core/issues/145)) ([04b6c10](https://github.com/sidevoice/sidevoice-core/commit/04b6c109816cbb755f78bd190900f348cd8fa4c3)), closes [#144](https://github.com/sidevoice/sidevoice-core/issues/144)
+
 ## [0.4.5](https://github.com/sidevoice/sidevoice-core/compare/v0.4.4...v0.4.5) (2026-10-18)
 
 
