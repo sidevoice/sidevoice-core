@@ -23,8 +23,16 @@ pub(super) async fn dispatch(
         return Err((-32001, "room.connector_disconnected"));
     }
     if let Some(notification) = Notification::parse(&method) {
-        notification.apply(room, &link.cid, &params);
-        return Ok(Value::Null);
+        notification
+            .apply(room, &link.cid, &params)
+            .map_err(|error| (-(error.status as i64), error.key))?;
+        return Ok(
+            if method == "binding.unregister" && params["leave"] == true {
+                serde_json::json!({"left":true})
+            } else {
+                Value::Null
+            },
+        );
     }
     match method.as_str() {
         "binding.register" => Ok(register_binding(room, &link.cid, &params)),

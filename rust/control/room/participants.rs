@@ -7,14 +7,18 @@ use super::Room;
 
 impl Room {
     pub fn participants(&self, session: Option<&str>) -> Value {
+        self.participant_inventory(session)["participants"].clone()
+    }
+    /// Rows and deliberate closures are one snapshot. Missing rows alone never prove a leave.
+    pub fn participant_inventory(&self, session: Option<&str>) -> Value {
         let inner = self.inner.lock().expect("room lock");
         let current = session.and_then(|sid| inner.browsers.get(sid));
         let selected = current
             .and_then(|b| b.target.as_ref())
             .map(|t| t.thread.as_str());
         let language = current.map_or("en", |b| b.language.as_str());
-        json!(inner.bindings.active().map(|b| {
-            let host=inner.credentials.get(&b.connector).and_then(|c| c.get("host"));
+        let participants = inner.bindings.active().map(|b| {
+            let host = inner.credentials.get(&b.connector).and_then(|c| c.get("host"));
             json!({"thread_id":b.thread,"title":b.title.clone().unwrap_or_else(||default_title(&b.thread,language)),
                 "harness":b.harness,"available":b.live,"machine":{"id":b.connector,"host":host},
                 "capabilities":b.capabilities,"engine":b.engine,"route":b.route,
@@ -23,7 +27,10 @@ impl Room {
                 "unheard":inner.journal.unheard_summary(&b.thread)
                     .map_or(Value::Null, |(count,since)| json!({"count":count,"since":since})),
                 "working":inner.bindings.working(&b.thread)})
-        }).collect::<Vec<_>>())
+        }).collect::<Vec<_>>();
+        let mut closed_threads: Vec<_> = inner.closed_threads.iter().cloned().collect();
+        closed_threads.sort();
+        json!({"participants":participants,"closed_threads":closed_threads})
     }
 }
 

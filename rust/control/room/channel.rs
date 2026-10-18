@@ -12,28 +12,40 @@ impl Room {
     pub fn close_channel(
         &self,
         thread: &str,
-    ) -> Result<(Value, Option<(ConnectorPeer, Value)>), RoomError> {
+    ) -> Result<(Value, Vec<(ConnectorPeer, Value)>), RoomError> {
         if !valid_thread(thread) {
             return Err(RoomError::new(400, "room.thread_invalid"));
         }
         let mut guard = self.inner.lock().expect("room lock");
         let inner = &mut *guard;
-        let binding = inner
+        let bindings: Vec<_> = inner
             .bindings
-            .newest_active(thread)
-            .map(|b| (b.id.clone(), b.connector.clone()));
-        if binding.is_none() && !inner.journal.has_thread(thread) {
-            return Err(RoomError::new(409, "room.conversation_missing"));
+            .active()
+            .filter(|b| b.thread == thread)
+            .map(|b| (b.id.clone(), b.connector.clone()))
+            .collect();
+        // A person's remembered card can be closed while its machine has no loaded binding after a restart.
+        // Persist that intent before acknowledging the close; old binding replay must not undo it.
+        if inner.closed_threads.insert(thread.to_owned())
+            && self
+                .save(&inner.credentials, &inner.closed_threads)
+                .is_err()
+        {
+            inner.closed_threads.remove(thread);
+            return Err(RoomError::new(500, "room.state_save_failed"));
         }
-        let notify = binding.as_ref().and_then(|(bid, cid)| {
-            inner.peers.get(cid).cloned().map(|peer| {
-                (
-                    peer,
-                    json!({"binding_id":bid,"thread":thread,"reason":"closed_from_room"}),
-                )
+        let notify = bindings
+            .iter()
+            .filter_map(|(bid, cid)| {
+                inner.peers.get(cid).cloned().map(|peer| {
+                    (
+                        peer,
+                        json!({"binding_id":bid,"thread":thread,"reason":"closed_from_room"}),
+                    )
+                })
             })
-        });
-        if let Some((bid, _)) = binding.as_ref() {
+            .collect();
+        for (bid, _) in &bindings {
             if let Some(b) = inner.bindings.get_mut(bid) {
                 b.end();
             }
@@ -49,7 +61,7 @@ impl Room {
             }
             inner.withdraw(&sid, "focus_changed", |_, _| true);
         }
-        let binding_id = binding.map(|(bid, _)| bid);
+        let binding_id = bindings.first().map(|(bid, _)| bid.clone());
         Ok((json!({"status":"closed","binding_id":binding_id}), notify))
     }
 }

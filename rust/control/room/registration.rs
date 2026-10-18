@@ -29,6 +29,30 @@ impl Room {
             return Err(RoomError::new(429, "room.input_backlog_full"));
         }
         let requested = field(data, "binding_id");
+        if let Some(existing) = inner
+            .bindings
+            .get(requested)
+            .filter(|_| !requested.is_empty())
+        {
+            if existing.connector != cid {
+                return Err(RoomError::new(409, "room.binding_foreign"));
+            }
+            if existing.thread != thread {
+                return Err(RoomError::new(409, "room.binding_thread_mismatch"));
+            }
+        }
+        if !requested.is_empty() && inner.closed_threads.contains(thread) {
+            return Err(RoomError::new(409, "room.binding_closed"));
+        }
+        if requested.is_empty()
+            && inner.closed_threads.remove(thread)
+            && self
+                .save(&inner.credentials, &inner.closed_threads)
+                .is_err()
+        {
+            inner.closed_threads.insert(thread.to_owned());
+            return Err(RoomError::new(500, "room.state_save_failed"));
+        }
         // A mode the room does not know registers as push, as one that names no mode does.
         let pull_input = field(data, "input_mode") == "pull";
         let bid = match inner.bindings.get(requested) {
@@ -56,10 +80,53 @@ impl Room {
         )
     }
     pub fn unregister(&self, cid: &str, bid: &str) {
+        let _ = self.unregister_with_thread(cid, bid, "", false);
+    }
+    /// `leave` names a deliberate agent-side exit. A reset or lost transport may unregister a binding without
+    /// retiring the conversation; an offline leave can name its thread after Core has restarted.
+    pub fn unregister_with_thread(
+        &self,
+        cid: &str,
+        bid: &str,
+        declared_thread: &str,
+        leave: bool,
+    ) -> Result<(), RoomError> {
         let mut inner = self.inner.lock().expect("room lock");
+        let binding = inner.bindings.get(bid);
+        if binding.is_some_and(|binding| binding.connector != cid) {
+            return Err(RoomError::new(409, "room.binding_foreign"));
+        }
+        let owned = binding.is_some();
+        let thread = binding
+            .map(|binding| binding.thread.clone())
+            .or_else(|| valid_thread(declared_thread).then(|| declared_thread.to_owned()));
+        if leave && thread.is_none() {
+            return Err(RoomError::new(400, "room.thread_invalid"));
+        }
+        let mut save_failed = false;
+        if leave {
+            if let Some(thread) = thread.as_deref() {
+                let other = inner
+                    .bindings
+                    .active()
+                    .any(|b| b.thread == thread && (!owned || b.id != bid));
+                if !other && inner.closed_threads.insert(thread.to_owned()) {
+                    // This is a one-way connector notification. Keep the room closed in memory even if its
+                    // private write fails; the Connector's durable leave is replayed on its next Core link.
+                    save_failed = self
+                        .save(&inner.credentials, &inner.closed_threads)
+                        .is_err();
+                }
+            }
+        }
         if let Some(binding) = inner.bindings.get_mut(bid).filter(|b| b.connector == cid) {
             binding.end();
             inner.release_pull_claims(|row| row.pull_claimed_by.as_deref() == Some(bid));
+        }
+        if save_failed {
+            Err(RoomError::new(500, "room.state_save_failed"))
+        } else {
+            Ok(())
         }
     }
 }

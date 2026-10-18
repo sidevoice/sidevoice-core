@@ -23,7 +23,7 @@ impl Room {
             }
         }
         let (cid, token) = inner.credentials.issue(None);
-        self.save(&inner.credentials)?;
+        self.save(&inner.credentials, &inner.closed_threads)?;
         self.dir.write_json(
             "connector-credential.json",
             &json!({"connector_id": cid, "token": token}),
@@ -36,7 +36,7 @@ impl Room {
             return false;
         }
         inner.credentials.touch(cid, identity);
-        self.save(&inner.credentials).is_ok()
+        self.save(&inner.credentials, &inner.closed_threads).is_ok()
     }
     pub fn pairing_code(&self) -> String {
         let code = self
@@ -57,7 +57,7 @@ impl Room {
             return Ok(None);
         }
         let issued = inner.credentials.issue(Some(identity));
-        self.save(&inner.credentials)?;
+        self.save(&inner.credentials, &inner.closed_threads)?;
         Ok(Some(issued))
     }
     pub fn paired_connectors(&self) -> Value {
