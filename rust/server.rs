@@ -15,6 +15,7 @@ use crate::storage::PrivateDir;
 mod call;
 mod connector_routes;
 mod connectors;
+mod device_address;
 mod guard;
 mod node;
 mod pairing;
@@ -45,6 +46,7 @@ pub struct AppState {
     seen: call::SeenMessages,
     launch_id: String,
     host: String,
+    bind_host: String,
     port: u16,
 }
 
@@ -62,6 +64,7 @@ impl AppState {
         registry: DeviceRegistry,
         launch_id: String,
         host: String,
+        bind_host: String,
         port: u16,
         room: Arc<Room>,
         rendezvous: Arc<rendezvous::Rendezvous>,
@@ -77,12 +80,15 @@ impl AppState {
             seen: call::SeenMessages::default(),
             launch_id,
             host,
+            bind_host,
             port,
         }
     }
 
     pub fn issue_code(&self) -> Value {
-        let mut urls = vec![format!("http://127.0.0.1:{}", self.port)];
+        let private_urls = device_address::code_urls(&self.bind_host, self.port);
+        // Keep configured public routes ahead of the discovered LAN routes: older clients read at most eight URLs.
+        let mut urls = vec![private_urls[0].clone()];
         for value in std::env::var("SIDEVOICE_PUBLIC_URLS")
             .unwrap_or_default()
             .split(',')
@@ -90,6 +96,11 @@ impl AppState {
             let value = value.trim().trim_end_matches('/');
             if !value.is_empty() && safe_url(value) && !urls.iter().any(|url| url == value) {
                 urls.push(value.to_owned());
+            }
+        }
+        for url in private_urls.into_iter().skip(1) {
+            if !urls.contains(&url) {
+                urls.push(url);
             }
         }
         let mut code = self.registry.lock().expect("registry lock").issue_code(

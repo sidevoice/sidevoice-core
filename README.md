@@ -73,10 +73,17 @@ Its data — paired devices, the machine's identity key, the conversation journa
 
 | Variable | What it does |
 |---|---|
-| `SIDEVOICE_PUBLIC_URLS` | Comma-separated addresses where devices can reach this machine directly; they go into pairing codes. Each must be `https://` (see Security). |
+| `SIDEVOICE_PUBLIC_URLS` | Comma-separated additional addresses where devices can reach this machine directly; they go into pairing codes. Each must be `https://` (see Security). When bound to a network interface, the Core also includes its private IP addresses and actual port for native LAN pairing. |
 | `SIDEVOICE_TRUSTED_CLUSTER_HOSTS` | Hosts that may receive credentials over plain HTTP. Empty by default (see Security). |
 | `SIDEVOICE_ALLOWED_HOSTS`, `SIDEVOICE_ALLOWED_ORIGINS` | Without an explicit Host list, numeric IP addresses are accepted in `Host` for direct network access; DNS names still need an allowed Host or Origin. Setting `SIDEVOICE_ALLOWED_HOSTS` disables automatic numeric-IP acceptance, including when set to an empty value. Allowed Origins also grant their own Host names. |
 | `SIDEVOICE_CORE_HOST`, `SIDEVOICE_CORE_PORT` | Where to listen (default `127.0.0.1:10829`). |
+
+The Connector binds the Core to all IPv4 interfaces by default. Its pairing code lists up to seven private IP
+addresses on active interfaces (or the explicitly bound private IP), with the actual listening port. The desktop app
+can use one of these for direct LAN pairing after the person's private HTTP consent. A configured
+`SIDEVOICE_ALLOWED_HOSTS` still restricts the advertised addresses to those its Host policy accepts. The list is a
+local hint, not a proof that another device can route to an address; firewall, network and browser policy still
+apply. The Core's standalone bind default remains loopback.
 
 ## Security
 
