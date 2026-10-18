@@ -8,8 +8,10 @@ use super::util::field;
 use super::{Inner, Room};
 
 const MAX_HISTORY: usize = 2000;
-/// How long input waits for a conversation that is not there, unless `VOICE_INPUT_TTL_SECONDS` says.
-const INPUT_TTL: u64 = 600;
+/// How long input may wait to reach its agent before it is marked not sent, unless
+/// `VOICE_INPUT_TTL_SECONDS` says. A message nobody picks up must not hold the conversation:
+/// see `Journal::abandoned_since`.
+pub(super) const DELIVERY_DEADLINE_SECS: u64 = 10;
 
 fn input_ttl() -> u64 {
     static TTL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -20,7 +22,7 @@ pub(super) fn parse_input_ttl(value: Option<&str>) -> u64 {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .and_then(|v| v.parse().ok())
-        .unwrap_or(INPUT_TTL)
+        .unwrap_or(DELIVERY_DEADLINE_SECS)
 }
 
 #[derive(Default)]
@@ -197,6 +199,20 @@ impl Journal {
                     && row.epoch > epoch
             })
             .map(|row| (row.epoch, row.message_id().to_owned()))
+    }
+    /// Whether every spoken turn after `epoch`, up to `current`, ended as a message that was never
+    /// sent (expired or withdrawn). The agent cannot have seen those turns, so its reply to the
+    /// last message it did get is not for an older turn. A turn that left no row stays newer.
+    pub(super) fn abandoned_since(&self, thread: &str, epoch: u64, current: u64) -> bool {
+        (epoch + 1..=current).all(|e| {
+            self.rows.iter().any(|row| {
+                row.role == "user"
+                    && row.thread == thread
+                    && row.turn_id.is_some()
+                    && row.epoch == e
+                    && row.status == "not_sent"
+            })
+        })
     }
     /// A thread's input rows, oldest first.
     pub(super) fn input_mut<'a>(
