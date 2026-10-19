@@ -2064,6 +2064,44 @@ fn review_terminal_push_outcomes_salvage_attached_evidence() {
 }
 
 #[test]
+fn a_note_answered_unknown_is_given_up_after_a_few_attempts() {
+    let c = Case::new(false);
+    c.publish("r", 0, "Reply evidence");
+    c.report("r", "interrupted", Some("user_interrupted"), Some(2));
+    c.say("turn", Some("Wait"));
+    let (bid, rid, peer, _) = c.room.pending_delivery().remove(0);
+    c.room.settle_delivery(
+        &bid,
+        &rid,
+        &peer.generation,
+        Ok(json!({"status":"unsupported"})),
+    );
+    let mut note_id = String::new();
+    let mut sent = 0;
+    loop {
+        for row in c.room.inner.lock().unwrap().journal.unresolved_input() {
+            row.next_attempt = 0;
+        }
+        let Some((bid, rid, peer, data)) = c.room.pending_delivery().pop() else {
+            break;
+        };
+        assert_eq!(data["channel"], "note");
+        sent += 1;
+        assert!(sent < 20, "note resent without bound");
+        note_id = rid.clone();
+        c.room.settle_delivery(
+            &bid,
+            &rid,
+            &peer.generation,
+            Ok(json!({"status":"unknown"})),
+        );
+    }
+    assert!(sent > 1);
+    let inner = c.room.inner.lock().unwrap();
+    assert_eq!(inner.journal.find(&note_id).unwrap().status, "unconfirmed");
+}
+
+#[test]
 fn review_channel_close_salvages_pending_attached_evidence_for_next_binding() {
     let c = Case::new(true);
     c.publish("r", 0, "Reply evidence");
