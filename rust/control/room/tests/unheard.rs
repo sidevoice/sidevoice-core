@@ -773,3 +773,67 @@ fn a_reply_the_call_cannot_be_told_to_drop_ends_unheard_in_the_room() {
         ("interrupted".into(), Some("newer_turn".into()))
     );
 }
+
+fn call_of(room: &Room, device: &str, thread: &str) -> String {
+    let (events, _received) = mpsc::channel(256);
+    let sid = room.join(device.into(), "en".into(), events).unwrap();
+    room.select(&sid, thread).unwrap();
+    sid
+}
+
+#[test]
+fn a_reply_the_app_held_across_a_lost_session_is_confirmed_by_the_same_devices_new_one() {
+    let (_directory, room, _, _) = room_on("t");
+    let (first, _) = call(&room, "t");
+    reply(&room, &first, "t", "r", "Reply", revision(&room, &first));
+    // The room lost the call's session; the app, still in the call, plays what it held on a new one.
+    room.leave(&first);
+    let second = call_of(&room, "device", "t");
+    room.playback(&second, "r", "heard", None, None, &json!({}))
+        .unwrap();
+    assert_eq!(room.history(Some("t"))["messages"][0]["hearing"], "heard");
+    assert!(!room.inner.lock().unwrap().unheard.has("t"));
+}
+
+#[test]
+fn a_miss_confirmed_by_the_new_session_of_the_same_device_is_told_on_return() {
+    let (_directory, room, _, _) = room_on("t");
+    let (first, _) = call(&room, "t");
+    reply(&room, &first, "t", "r", "Reply", revision(&room, &first));
+    room.leave(&first);
+    let second = call_of(&room, "device", "t");
+    confirm_not_heard_of(&room, &second, &first, "r");
+    assert_eq!(
+        room.history(Some("t"))["messages"][0]["hearing"],
+        "not_heard"
+    );
+    assert!(room.inner.lock().unwrap().unheard.has("t"));
+}
+
+#[test]
+fn another_device_does_not_stand_in_for_a_lost_session() {
+    let (_directory, room, _, _) = room_on("t");
+    let (first, _) = call(&room, "t");
+    reply(&room, &first, "t", "r", "Reply", revision(&room, &first));
+    room.leave(&first);
+    let other = call_of(&room, "other-device", "t");
+    assert!(room
+        .playback(&other, "r", "heard", None, None, &json!({}))
+        .is_err());
+    confirm_not_heard_of(&room, &other, &first, "r");
+    assert_eq!(
+        room.history(Some("t"))["messages"][0]["hearing"],
+        Value::Null
+    );
+}
+
+fn confirm_not_heard_of(room: &Room, sid: &str, publisher: &str, uid: &str) {
+    room.reply_hearing(
+        sid,
+        &format!("{publisher}:voice:{uid}"),
+        uid,
+        "not_heard",
+        None,
+    )
+    .unwrap();
+}
