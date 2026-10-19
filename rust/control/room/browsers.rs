@@ -172,6 +172,12 @@ impl Browsers {
     pub(super) fn ids_on_thread(&self, thread: &str) -> Vec<String> {
         self.on_thread(thread).map(|(sid, _)| sid.clone()).collect()
     }
+    /// A call on `thread` that can hear it now: connected, with speech on.
+    pub(super) fn listener_on(&self, thread: &str) -> Option<String> {
+        self.on_thread(thread)
+            .find(|(_, browser)| browser.parked.is_none() && browser.speech_on)
+            .map(|(sid, _)| sid.clone())
+    }
     /// Tell the call that sent an input row what became of it.
     pub(super) fn input_receipt(&self, input: &InputRef, status: &str) {
         if input.note {
