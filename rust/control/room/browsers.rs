@@ -121,19 +121,21 @@ impl Browser {
 #[derive(Default)]
 pub(super) struct Browsers {
     calls: HashMap<String, Browser>,
-    recent: VecDeque<String>,
+    /// Recent session ids, each with the device it belonged to.
+    recent: VecDeque<(String, String)>,
 }
 impl Browsers {
     /// A call joins. The oldest calls that already ended make room in the recent sessions: a call still in the room
     /// is never forgotten there.
     pub(super) fn join(&mut self, sid: &str, browser: Browser) {
+        self.recent
+            .push_back((sid.to_owned(), browser.device.clone()));
         self.calls.insert(sid.to_owned(), browser);
-        self.recent.push_back(sid.to_owned());
         while self.recent.len() > RECENT_SESSIONS {
             let Some(ended) = self
                 .recent
                 .iter()
-                .position(|recent| !self.calls.contains_key(recent))
+                .position(|(recent, _)| !self.calls.contains_key(recent))
             else {
                 break;
             };
@@ -160,7 +162,34 @@ impl Browsers {
     }
     /// Whether `sid` is one of the recent sessions, ended or not.
     pub(super) fn is_recent(&self, sid: &str) -> bool {
-        self.recent.iter().any(|s| s == sid)
+        self.recent.iter().any(|(recent, _)| recent == sid)
+    }
+    /// Those of `sessions` that were earlier calls of `sid`'s own device and no longer hold it: ended, or parked
+    /// while `sid` took over. What the device reports now stands for what they were sent: the person never left
+    /// the app's call, only the session the room kept for it changed.
+    pub(super) fn earlier_calls_of<'a>(
+        &self,
+        sid: &str,
+        sessions: impl IntoIterator<Item = &'a String>,
+    ) -> Vec<String> {
+        let Some(device) = self.calls.get(sid).map(|call| &call.device) else {
+            return Vec::new();
+        };
+        sessions
+            .into_iter()
+            .filter(|other| other.as_str() != sid)
+            .filter(|other| {
+                self.recent
+                    .iter()
+                    .any(|(recent, owner)| recent == *other && owner == device)
+            })
+            .filter(|other| {
+                self.calls
+                    .get(*other)
+                    .is_none_or(|call| call.parked.is_some())
+            })
+            .cloned()
+            .collect()
     }
     /// The calls focused on `thread`.
     pub(super) fn on_thread<'a>(
