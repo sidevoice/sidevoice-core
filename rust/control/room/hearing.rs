@@ -112,7 +112,9 @@ impl Room {
             inner.track_unheard(history_id);
         }
         inner.reconcile_unclaimed(&thread);
-        if !inner.conversations.is_open(&thread) {
+        // With nobody in the call, what was missed waits for the person: telling the agent now
+        // only invites a reply into the void. Their return sends it as one `user_returned` note.
+        if !inner.conversations.is_open(&thread) && inner.browsers.listener_on(&thread).is_some() {
             let message = inner.journal.newer_spoken_message(&thread, epoch);
             let empty = inner.conversations.empty_after(&thread, epoch);
             match (message, empty) {

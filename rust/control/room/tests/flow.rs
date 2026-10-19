@@ -943,6 +943,67 @@ fn t06d_return_with_misses_creates_one_notice_after_grace_for_pull() {
     );
 }
 
+/// sidevoice-core#153: a late receipt for an old-epoch reply (here one published before the
+/// person's last words, as a binding's initial reply context is) arrives while nobody is in the
+/// call. Its notice must not sweep the replies missed since into the void: they wait and are
+/// told once, as the return notice, when the person is back.
+#[test]
+fn t06f_misses_while_away_wait_for_the_return_even_after_a_late_old_epoch_receipt() {
+    let c = Case::new(true);
+    c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+    c.publish("old", 0, "Said before the last words");
+    c.hearing("old", "not_heard", None);
+    c.room.set_speech(&c.sid, true, None).unwrap();
+    c.say("words", Some("Last words"));
+    assert_eq!(
+        c.input("Last words")["unheard"]["replies"][0]["text"],
+        "Said before the last words"
+    );
+    c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+    assert_eq!(
+        c.publish("missed", 1, "Missed while away")["status"],
+        "text_only"
+    );
+    c.hearing("missed", "not_heard", None);
+    let (sender, _events) = mpsc::channel(64);
+    let reader = c.room.join("reader".into(), "en".into(), sender).unwrap();
+    c.room
+        .reply_hearing(
+            &reader,
+            &format!("{}:voice:old", c.sid),
+            "old",
+            "not_heard",
+            None,
+        )
+        .unwrap();
+    assert!(
+        c.notes().is_empty(),
+        "nobody is in the call: what was missed waits for the person to come back"
+    );
+    c.room.set_speech(&c.sid, true, None).unwrap();
+    c.room
+        .inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due = 0;
+    let notes: Vec<_> = c
+        .pull()
+        .into_iter()
+        .filter(|message| message["channel"] == "note")
+        .collect();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["notice"]["kind"], "user_returned");
+    assert_eq!(notes[0]["session_id"], c.sid.as_str());
+    assert_eq!(notes[0]["unheard"]["count"], 1);
+    assert_eq!(
+        notes[0]["unheard"]["replies"][0]["text"],
+        "Missed while away"
+    );
+}
+
 #[test]
 fn t06e_return_without_misses_or_after_global_hearing_has_no_notice() {
     let c = Case::new(true);
