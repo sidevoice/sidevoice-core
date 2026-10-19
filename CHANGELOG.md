@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.7](https://github.com/sidevoice/sidevoice-core/compare/v0.4.6...v0.4.7) (2026-10-19)
+
+
+### Bug Fixes
+
+* **push:** stop resending unconfirmed notes after 5 attempts ([#148](https://github.com/sidevoice/sidevoice-core/issues/148)) ([faff8b1](https://github.com/sidevoice/sidevoice-core/commit/faff8b132ccc82dca0d677167cc51a5a2d119988))
+
 ## [0.4.6](https://github.com/sidevoice/sidevoice-core/compare/v0.4.5...v0.4.6) (2026-10-18)
 
 
