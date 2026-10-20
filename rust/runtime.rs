@@ -16,7 +16,7 @@ mod stop;
 #[cfg(test)]
 mod tests;
 
-pub use command::{Command, CommandError};
+pub use command::Cli;
 pub use config::Config;
 pub use language::system_language;
 
