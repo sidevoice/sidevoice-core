@@ -1,34 +1,62 @@
-//! What the process was asked to do, from its command line.
+//! What the process was asked to do, from its command line and environment.
+//!
+//! Like the connector's, the command line is English only and is not translated: `--help`, usage and
+//! refusals are clap's. A flag that is not given falls back to its environment variable, then to its default.
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 
-use super::Config;
+use clap::Parser;
 
-pub enum Command {
-    Help,
-    Serve(Config),
+/// Sidevoice core: this node's conversations.
+#[derive(Debug, Parser)]
+#[command(name = "sidevoice-core", disable_version_flag = true)]
+pub struct Cli {
+    /// Address to listen on [default: 127.0.0.1]
+    #[arg(long, env = "SIDEVOICE_CORE_HOST", value_name = "HOST")]
+    pub host: Option<String>,
+    /// Port to listen on; 0 chooses a free port [default: 10829]
+    #[arg(long, env = "SIDEVOICE_CORE_PORT", value_name = "PORT")]
+    pub port: Option<u16>,
+    /// Private core data directory [default: ~/.sidevoice/core]
+    #[arg(long, env = "SIDEVOICE_CORE_DATA_DIR", value_name = "PATH")]
+    pub data_dir: Option<PathBuf>,
+    /// Local socket path [default: local.sock in the data directory]
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
+    /// Readiness file path [default: core.json in the data directory]
+    #[arg(long, value_name = "PATH")]
+    pub ready_file: Option<PathBuf>,
+    /// Identifier for this launch [default: a new one]
+    #[arg(long, value_name = "ID")]
+    pub launch_id: Option<String>,
+    /// Log path [default: core.log beside the data directory]
+    #[arg(long, value_name = "PATH")]
+    pub log_file: Option<PathBuf>,
+    /// Connector-owned pairing credential file
+    #[arg(long, env = "SIDEVOICE_ROOM_CREDENTIAL", value_name = "PATH")]
+    pub room_credential: Option<String>,
+    /// Exit after this many idle seconds; 0 disables [default: 600]
+    #[arg(
+        long,
+        env = "SIDEVOICE_CORE_IDLE_SECONDS",
+        value_name = "SECONDS",
+        value_parser = idle_seconds,
+        allow_hyphen_values = true
+    )]
+    pub idle_exit: Option<f64>,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum CommandError {
-    /// The arguments are not valid; rendered as `runtime.arguments`.
-    Arguments,
-}
-
-impl Command {
-    /// Parse the arguments after the program name. Any non-UTF-8 argument is invalid.
-    pub fn from_args_os(args: impl IntoIterator<Item = OsString>) -> Result<Self, CommandError> {
-        let flags: Option<Vec<String>> =
-            args.into_iter().map(|arg| arg.into_string().ok()).collect();
-        Self::parse(&flags.ok_or(CommandError::Arguments)?)
+fn idle_seconds(value: &str) -> Result<f64, String> {
+    match value.parse::<f64>() {
+        Ok(seconds) if seconds.is_finite() && seconds >= 0.0 => Ok(seconds),
+        _ => Err("expected a finite number of seconds, 0 or more".to_owned()),
     }
+}
 
-    pub fn parse(flags: &[String]) -> Result<Self, CommandError> {
-        if flags.iter().any(|flag| flag == "--help" || flag == "-h") {
-            return Ok(Self::Help);
-        }
-        Config::from_args(flags)
-            .map(Self::Serve)
-            .map_err(|_| CommandError::Arguments)
+impl Cli {
+    /// Parse the arguments after the program name.
+    pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Self, clap::Error> {
+        Self::try_parse_from(std::iter::once(OsString::from("sidevoice-core")).chain(args))
     }
 }
