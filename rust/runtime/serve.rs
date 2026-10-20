@@ -56,6 +56,7 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         rendezvous.clone(),
     ));
     let delivery_task = tokio::spawn(stored.room.pump());
+    let mut signals = stop::Signals::install();
     let ready = ready::document(config, port, &stored.connector_id, &stored.token);
     let mut servers = Servers::spawn(tcp, local, state.clone());
     let startup = async {
@@ -72,7 +73,7 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
     }
     let rendezvous_task = tokio::spawn(rendezvous.clone().run());
     let crashed = tokio::select! {
-        _ = stop::signal_received() => false,
+        _ = signals.received() => false,
         _ = servers.exited() => true,
         _ = stop::idle_for(state, config.idle_exit), if config.idle_exit > 0.0 => false,
     };
