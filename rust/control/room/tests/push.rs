@@ -7,7 +7,10 @@ use super::support::{pull_room, say};
 fn push_serializes_one_conversation_even_with_an_idle_older_binding() {
     let (_directory, room, _) = pull_room(&["connector"]);
     let older = room
-        .register("connector", &json!({"thread":"busy","harness":"claude"}))
+        .register(
+            "connector",
+            &json!({"thread":"busy","harness":"claude","capabilities":{"deliver":"supported"}}),
+        )
         .unwrap()["binding_id"]
         .as_str()
         .unwrap()
@@ -26,6 +29,7 @@ fn push_serializes_one_conversation_even_with_an_idle_older_binding() {
         let mut inner = room.inner.lock().unwrap();
         let binding = inner.bindings.get_or_create("newer", "connector", "busy");
         binding.harness = "claude".into();
+        binding.capabilities = json!({"deliver":"supported"});
         binding.created += 1;
         "newer".to_owned()
     };

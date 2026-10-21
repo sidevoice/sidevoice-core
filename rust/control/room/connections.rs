@@ -66,15 +66,9 @@ impl Room {
 }
 
 impl Inner {
-    /// Bindings `ids` lost their connection: input they claimed by pull returns to the queue, and
-    /// a push delivery still awaiting their acknowledgement is retried at once: a message, or a note with the list it
-    /// was telling.
+    /// Claimed input stays delivered when a binding goes offline; a replacement binding may
+    /// fetch it, but never inject it. A push delivery awaiting acknowledgement is retried.
     fn bindings_went_offline(&mut self, ids: &[String]) {
-        self.release_pull_claims(|row| {
-            row.pull_claimed_by
-                .as_ref()
-                .is_some_and(|claim| ids.contains(claim))
-        });
         for bid in ids {
             if let Some(row_id) = self.inflight.finish(bid) {
                 if let Some(row) = self.journal.find_mut(&row_id) {

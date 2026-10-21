@@ -19,7 +19,6 @@ pub(super) struct Binding {
     pub(super) capabilities: Value,
     pub(super) engine: Option<Value>,
     pub(super) route: Option<String>,
-    pub(super) pull_input: bool,
 }
 impl Binding {
     fn new(id: &str, connector: &str, thread: &str) -> Self {
@@ -36,13 +35,12 @@ impl Binding {
             capabilities: Value::Null,
             engine: None,
             route: None,
-            pull_input: false,
         }
     }
     /// Take a fresh registration: the binding is active and live again, and what the connector
     /// declared replaces what it declared before, except that an absent title, inbound report
     /// or engine keeps the previous one.
-    pub(super) fn renew(&mut self, declared: Declaration, pull_input: bool) {
+    pub(super) fn renew(&mut self, declared: Declaration) {
         self.harness = declared.harness;
         self.active = true;
         self.live = true;
@@ -57,7 +55,6 @@ impl Binding {
             self.engine = declared.engine;
         }
         self.route = declared.route;
-        self.pull_input = pull_input;
     }
     pub(super) fn end(&mut self) {
         self.active = false;
@@ -67,7 +64,6 @@ impl Binding {
         json!({"id": self.id, "connector": self.connector, "thread": self.thread,
         "harness": self.harness, "title": self.title, "created": self.created, "active": self.active as u8,
         "inbound": self.inbound, "capabilities": self.capabilities, "engine": self.engine, "route": self.route,
-        "input_mode": if self.pull_input { "pull" } else { "push" },
         "connected": self.live})
     }
 }
@@ -136,16 +132,14 @@ impl Bindings {
             .filter(|b| b.active && b.live && b.thread == thread)
             .max_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)))
     }
-    /// The newest live push binding of a thread that is not `busy` with another delivery.
+    /// The newest live binding that can inject and is not `busy` with another delivery.
     pub(super) fn push_target(
         &self,
         thread: &str,
         busy: impl Fn(&str) -> bool,
     ) -> Option<&Binding> {
-        self.by_id
-            .values()
-            .filter(|b| b.active && b.live && b.thread == thread && !b.pull_input && !busy(&b.id))
-            .max_by_key(|b| b.created)
+        self.delivery_target(thread)
+            .filter(|b| b.capabilities["deliver"] == "supported" && !busy(&b.id))
     }
     /// Connector `cid` lost the connection its active bindings used; returns their IDs.
     pub(super) fn go_offline_active(&mut self, cid: &str) -> Vec<String> {
