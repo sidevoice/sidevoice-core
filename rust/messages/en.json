@@ -69,16 +69,6 @@
   "room.reach_holding": "The connected harness is holding incoming messages.",
   "room.reach_unsupported": "This conversation cannot receive your messages through its harness.",
   "room.you": "You",
-  "relay.node_unavailable": "The node could not answer the relayed request.",
-  "relay.socket_refused": "The node refused the relayed call socket.",
-  "relay.credential_transport": "The Sidevoice address must use HTTPS unless it is on this machine or a trusted cluster host.",
-  "relay.dial_refused": "This machine is not paired with the Sidevoice address calling it.",
-  "relay.hello_refused": "Sidevoice did not confirm this machine's connection.",
-  "relay.revoked": "Sidevoice revoked this machine's pairing.",
-  "relay.pair_invalid": "Enter the Sidevoice address and a pairing code.",
-  "relay.connector_unavailable": "The connector is not connected to this core.",
-  "relay.pair_timeout": "The connector did not answer the pairing request in time.",
-  "relay.pair_failed": "Pairing failed.",
   "connector.credential_refused": "This connector's credential is not this core's: the core writes a fresh one when it starts, and the connector reads it from the core's ready file. Restart the connector.",
   "connector.protocol_unsupported": "This connector speaks protocol {protocol} and this core speaks {supported}: update the connector."
 }

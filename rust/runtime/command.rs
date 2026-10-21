@@ -33,9 +33,6 @@ pub struct Cli {
     /// Log path [default: core.log beside the data directory]
     #[arg(long, value_name = "PATH")]
     pub log_file: Option<PathBuf>,
-    /// Connector-owned pairing credential file
-    #[arg(long, env = "SIDEVOICE_ROOM_CREDENTIAL", value_name = "PATH")]
-    pub room_credential: Option<String>,
     /// Exit after this many idle seconds; 0 disables [default: 600]
     #[arg(
         long,

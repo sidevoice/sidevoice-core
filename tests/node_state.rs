@@ -96,30 +96,6 @@ async fn a_forged_upgrade_or_spoofed_local_headers_grant_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_log_never_names_the_room_credential() {
-    let root = tempfile::tempdir().unwrap();
-    let logs = root.path().join("logs");
-    private_dir(&logs);
-    let log = logs.join("custom.log");
-    let credential = root.path().join("room-credentials.json");
-    let mut core = Launch::new(root.path().join("core"))
-        .arg("--log-file")
-        .arg(log.display().to_string())
-        .arg("--room-credential")
-        .arg(credential.display().to_string())
-        .start();
-    let text = until(STEP, "the ready line in the log", || {
-        let text = fs::read_to_string(&log).ok()?;
-        text.contains("runtime.log_ready").then_some(text)
-    });
-    assert!(text.contains("runtime.log_start"), "{text}");
-    assert!(
-        !text.contains("room-credentials.json"),
-        "the log names no credential: {text}"
-    );
-    assert_eq!(core.stop(), 0);
-}
-#[tokio::test(flavor = "multi_thread")]
 async fn a_broken_connector_credential_is_replaced_and_nothing_else_is() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("core");

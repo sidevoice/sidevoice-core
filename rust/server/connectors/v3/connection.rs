@@ -68,9 +68,6 @@ impl Connection {
         let _ = out
             .send(json!({"jsonrpc":"2.0","method":"connector.welcome","params":{"protocol":3}}))
             .await;
-        let _ = out
-            .send(json!({"jsonrpc":"2.0","method":"node.rendezvous","params":state.rendezvous.snapshot()}))
-            .await;
         let (finished, completed) = mpsc::channel::<String>(MAX_INCOMING);
         Self {
             state,
