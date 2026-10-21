@@ -23,10 +23,6 @@ fn every_flag_overrides_its_setting() {
         config.log_file,
         PathBuf::from("/var/log/sidevoice/core.log")
     );
-    assert_eq!(
-        config.room_credential.as_deref(),
-        Some("/srv/sidevoice/room.json")
-    );
     assert_eq!(config.idle_exit, 0.0);
 }
 
@@ -112,10 +108,6 @@ fn the_environment_variables_are_the_documented_ones() {
     assert_eq!(env("port").as_deref(), Some("SIDEVOICE_CORE_PORT"));
     assert_eq!(env("data_dir").as_deref(), Some("SIDEVOICE_CORE_DATA_DIR"));
     assert_eq!(
-        env("room_credential").as_deref(),
-        Some("SIDEVOICE_ROOM_CREDENTIAL")
-    );
-    assert_eq!(
         env("idle_exit").as_deref(),
         Some("SIDEVOICE_CORE_IDLE_SECONDS")
     );
@@ -140,7 +132,6 @@ fn the_flag_names_are_unchanged() {
             "ready-file",
             "launch-id",
             "log-file",
-            "room-credential",
             "idle-exit"
         ]
     );

@@ -22,7 +22,6 @@ fn config(log_file: PathBuf) -> Config {
         port: 0,
         launch_id: "logged".into(),
         log_file,
-        room_credential: None,
         idle_exit: 0.0,
     }
 }

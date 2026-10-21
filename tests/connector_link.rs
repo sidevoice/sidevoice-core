@@ -860,7 +860,7 @@ async fn a_reply_in_a_language_the_core_does_not_know_is_still_sent() {
 
 /// Every message a connector sends, with fields this core does not know at the top level, nested and next to `jsonrpc`
 /// and `method`: the hello, a registration, its reports, a delivery answer, a reply, a pull, answers about host agents
-/// and a room pairing, and an unregistration. All are taken as their known part says.
+/// and an unregistration. All are taken as their known part says.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
     let root = tempfile::tempdir().unwrap();
@@ -968,32 +968,6 @@ async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
     let listed = listing.await.unwrap();
     assert_eq!(listed.status, 200, "{listed:?}");
     assert_eq!(listed.json()["agents"], agents);
-
-    // Pairing with a room: the page's body and the connector's answer, both with keys the core does not read.
-    let pairing = tokio::spawn(
-        core.post(
-            "/api/rendezvous/pair",
-            json!({"room": "https://room.example", "code": "ABCD", "added_later": extra}),
-        )
-        .origin("tauri://localhost")
-        .token(&token)
-        .send(),
-    );
-    let ask = peer.event("pair.request").await;
-    assert_eq!(
-        ask["params"],
-        json!({"room": "https://room.example", "code": "ABCD"})
-    );
-    peer.answer(
-        &ask["id"],
-        json!({"ok": true, "origin": "https://room.example", "connector_id": "c-1", "added_later": extra}),
-    );
-    let paired = pairing.await.unwrap();
-    assert_eq!(paired.status, 200, "{paired:?}");
-    assert_eq!(
-        paired.json(),
-        json!({"ok": true, "room": "https://room.example", "connector_id": "c-1"})
-    );
 
     peer.emit(
         "binding.unregister",

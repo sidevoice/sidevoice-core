@@ -23,8 +23,6 @@ pub(super) fn full_config() -> Config {
         "launch",
         "--log-file",
         "/var/log/sidevoice/core.log",
-        "--room-credential",
-        "/srv/sidevoice/room.json",
         "--idle-exit",
         "0",
     ]))

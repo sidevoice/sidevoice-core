@@ -96,7 +96,4 @@ impl Peers {
     pub(super) fn latest(&self) -> Option<&ConnectorPeer> {
         self.recent().find_map(|cid| self.attached.get(cid))
     }
-    pub(super) fn all(&self) -> Vec<ConnectorPeer> {
-        self.attached.values().cloned().collect()
-    }
 }

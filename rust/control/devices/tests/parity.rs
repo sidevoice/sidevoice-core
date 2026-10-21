@@ -148,7 +148,7 @@ fn a_code_is_the_payload_it_carries() {
     assert_eq!(payload, issued["payload"]);
     let mut keys: Vec<_> = payload.as_object().unwrap().keys().cloned().collect();
     keys.sort();
-    assert_eq!(keys, ["exp", "fp", "host", "rv", "secret", "urls", "v"]);
+    assert_eq!(keys, ["exp", "fp", "host", "secret", "urls", "v"]);
     assert_eq!(payload["v"], 1);
     assert_eq!(payload["fp"], identity.fingerprint.as_str());
     assert_eq!(payload["host"], "laptop");
@@ -163,8 +163,8 @@ fn a_code_is_the_payload_it_carries() {
     assert!((payload["exp"].as_i64().unwrap() - (now() + 600)).abs() <= 5);
     let bare = registry.issue_code(&identity, None, &[])["payload"].clone();
     assert_eq!(
-        (&bare["host"], &bare["rv"], &bare["urls"]),
-        (&Value::Null, &Value::Null, &json!([])),
+        (&bare["host"], &bare["urls"]),
+        (&Value::Null, &json!([])),
         "absent values are null"
     );
 }

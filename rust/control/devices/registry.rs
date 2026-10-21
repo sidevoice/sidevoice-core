@@ -50,7 +50,7 @@ impl DeviceRegistry {
     ) -> Value {
         let (secret, expires) = self.secrets.issue();
         let payload = json!({"v": 1, "fp": identity.fingerprint, "host": host, "urls": urls,
-            "rv": null, "secret": secret, "exp": expires});
+            "secret": secret, "exp": expires});
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("JSON object"));
         json!({"code": format!("SV1.{encoded}"), "payload": payload, "expires_in": PAIRING_TTL_SECONDS})
     }

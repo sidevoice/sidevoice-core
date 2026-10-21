@@ -1,11 +1,8 @@
 //! The process lifecycle: claim the directories, load state, serve, report ready, and stop.
 
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 
 use super::directories::Directories;
 use super::event_log::log_event;
@@ -14,11 +11,8 @@ use super::servers::Servers;
 use super::{local_socket, ready, stop, Config};
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
-use crate::server::rendezvous::Rendezvous;
 use crate::server::AppState;
 use crate::storage::PrivateDir;
-
-const RENDEZVOUS_GRACE: Duration = Duration::from_secs(10);
 
 pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
     let directories = Directories::lock(config)?;
@@ -37,13 +31,6 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    let rendezvous = Rendezvous::new(
-        config.room_credential.as_ref().map(PathBuf::from),
-        url::Url::parse(&format!("http://127.0.0.1:{port}/"))
-            .map_err(|_| StartFailure::new("start", "start.failed"))?,
-        machine_host.clone(),
-        stored.room.clone(),
-    );
     let state = Arc::new(AppState::new(
         dir.clone(),
         stored.identity,
@@ -53,7 +40,6 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         config.host.clone(),
         port,
         stored.room.clone(),
-        rendezvous.clone(),
     ));
     let delivery_task = tokio::spawn(stored.room.pump());
     let mut signals = stop::Signals::install();
@@ -71,15 +57,12 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         servers.join().await;
         return Err(error);
     }
-    let rendezvous_task = tokio::spawn(rendezvous.clone().run());
     let crashed = tokio::select! {
         _ = signals.received() => false,
         _ = servers.exited() => true,
         _ = stop::idle_for(state, config.idle_exit), if config.idle_exit > 0.0 => false,
     };
     servers.stop();
-    rendezvous.stop();
-    join_or_abort(rendezvous_task).await;
     servers.join().await;
     ready::remove_own(&config.ready_file);
     drop(cleanup);
@@ -116,15 +99,5 @@ impl Stored {
             connector_id,
             token,
         })
-    }
-}
-
-async fn join_or_abort(mut task: JoinHandle<()>) {
-    if tokio::time::timeout(RENDEZVOUS_GRACE, &mut task)
-        .await
-        .is_err()
-    {
-        task.abort();
-        let _ = task.await;
     }
 }

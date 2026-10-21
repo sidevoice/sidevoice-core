@@ -16,7 +16,6 @@ pub struct Config {
     pub port: u16,
     pub launch_id: String,
     pub log_file: PathBuf,
-    pub room_credential: Option<String>,
     pub idle_exit: f64,
 }
 
@@ -50,7 +49,6 @@ impl Config {
             port: cli.port.unwrap_or(10829),
             launch_id: cli.launch_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
             log_file,
-            room_credential: cli.room_credential,
             idle_exit: cli.idle_exit.unwrap_or(600.0),
         })
     }

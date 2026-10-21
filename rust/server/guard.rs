@@ -102,12 +102,9 @@ fn socket_token(headers: &HeaderMap) -> Option<&str> {
         .find_map(|value| value.strip_prefix("sidevoice.token."))
 }
 
-/// Routes that answer without a paired device's bearer token. The room's dialling link carries its own key, and
-/// Socket.IO long-polling POSTs to it too, so any method under it is open.
+/// Routes that answer without a paired device's bearer token.
 pub(super) fn open_route(method: &Method, path: &str, local: bool) -> bool {
     (method == Method::GET && matches!(path, "/api/rendezvous" | "/api/device/identity"))
-        || path == "/api/rendezvous/link"
-        || path.starts_with("/api/rendezvous/link/")
         || (method == Method::POST && path == "/api/device/pair")
         || (local && local_only(path))
 }

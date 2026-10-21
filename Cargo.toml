@@ -13,7 +13,7 @@ name = "sidevoice-core-rust"
 path = "rust/main.rs"
 
 # Integration tests are the files in tests/, found by Cargo. Each drives the binary as a process or the router
-# in-process, with every peer (browser, connector, room) a local fake written in Rust. `compat` runs against the
+# in-process, with every peer (browser, connector) a local fake written in Rust. `compat` runs against the
 # latest published connector and web client through `cargo xtask compat` (ignored otherwise).
 
 [dependencies]
@@ -26,7 +26,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fs2 = "0.4"
 futures-util = "=0.3.32"
 hostname = "0.4"
-httpdate = "=1.0.3"
 libc = "0.2"
 opentelemetry = { version = "0.31", default-features = false, features = ["trace", "metrics"] }
 opentelemetry-http = { version = "0.31", default-features = false }
@@ -36,13 +35,10 @@ p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 percent-encoding = "=2.3.2"
 rand = "0.8"
 reqwest = { version = "=0.13.0", default-features = false, features = ["json", "multipart", "rustls"] }
-rmpv = { version = "1", features = ["with-serde"] }
 rustix = { version = "1", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "=0.10.9"
-sioc = "=0.5.0"
-socketioxide = { version = "0.18.7", features = ["state"] }
 subtle = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "io-util"] }
