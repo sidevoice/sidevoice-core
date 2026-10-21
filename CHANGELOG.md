@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/sidevoice/sidevoice-core/compare/v0.5.0...v0.6.0) (2026-10-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **delivery:** share journal claims between injection and fetch ([#143](https://github.com/sidevoice/sidevoice-core/issues/143))
+
+### Features
+
+* **delivery:** share journal claims between injection and fetch ([#143](https://github.com/sidevoice/sidevoice-core/issues/143)) ([984d7e2](https://github.com/sidevoice/sidevoice-core/commit/984d7e2cb3f240df87450b473d0977e9162aa654))
+
 ## [0.5.0](https://github.com/sidevoice/sidevoice-core/compare/v0.4.7...v0.5.0) (2026-10-21)
 
 
