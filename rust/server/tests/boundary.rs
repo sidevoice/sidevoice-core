@@ -1,5 +1,5 @@
 //! The node's trust boundary over both listeners: what only the socket serves, and that none of it
-//! exists over TCP or to a page (the relay half is beside `relayable`); the token every route but a
+//! exists over TCP or to a page; the token every route but a
 //! few requires, the call socket's token as a subprotocol, revocation; and CORS and preflights for
 //! desktop origins, a foreign Host refused.
 
@@ -363,14 +363,9 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
     let node = Node::new();
     let (_, token) = node.paired().await;
     let basic = format!("Basic {token}");
-    let protected: [(&str, &str, Option<Value>); 9] = [
+    let protected: [(&str, &str, Option<Value>); 8] = [
         ("GET", "/api/presentation/admission", None),
         ("GET", "/api/connectors", None),
-        (
-            "POST",
-            "/api/rendezvous/pair",
-            Some(json!({"room": "https://room.example", "code": "ABCD"})),
-        ),
         ("GET", "/api/device/devices", None),
         ("DELETE", "/api/device/devices/nobody", None),
         (
@@ -433,19 +428,6 @@ async fn every_route_but_the_open_ones_needs_a_device_token() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "the scheme is case-insensitive");
-    let (status, _, _) = send(
-        &node.tcp(),
-        "POST",
-        "/api/rendezvous/pair",
-        &[("origin", APP), ("authorization", &authorization)],
-        Some(json!({"room": "https://room.example", "code": "ABCD"})),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "past the token: no connector here to pair with"
-    );
     // Open: what this is, the redemption, the identity proof, preflights.
     let (status, _, what) = send(&node.tcp(), "GET", "/api/rendezvous", &[], None).await;
     assert_eq!(status, StatusCode::OK);
@@ -689,7 +671,7 @@ fn a_code_says_where_the_node_answers() {
     let node = Node::new();
     let payload = node.state.issue_code()["payload"].clone();
     assert_eq!(payload["urls"][0], "http://127.0.0.1:10829");
-    assert_eq!(payload["rv"], Value::Null, "no rendezvous, no room");
+    assert!(payload.get("rv").is_none());
     assert_eq!(payload["host"], "fixture-host");
 }
 
@@ -840,54 +822,6 @@ async fn a_foreign_host_is_still_refused_first() {
     )
     .await;
     assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "on the socket too");
-}
-
-#[tokio::test]
-async fn pairing_a_room_is_a_page_s_act_not_a_script_s() {
-    let node = Node::new();
-    let (_, token) = node.paired().await;
-    let authorization = bearer(&token);
-    let body = json!({"room": " https://room.example ", "code": " ABCD-1234 "});
-    for origin in [None, Some("https://evil.example")] {
-        let mut headers = vec![("authorization", authorization.as_str())];
-        if let Some(origin) = origin {
-            headers.push(("origin", origin));
-        }
-        let (status, _, _) = send(
-            &node.tcp(),
-            "POST",
-            "/api/rendezvous/pair",
-            &headers,
-            Some(body.clone()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{origin:?}");
-    }
-    let page = [("origin", APP), ("authorization", authorization.as_str())];
-    let (status, headers, answer) = send(
-        &node.tcp(),
-        "POST",
-        "/api/rendezvous/pair",
-        &page,
-        Some(body),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "no connector linked"
-    );
-    assert!(answer["detail"].is_string());
-    assert_eq!(allowed_origin(&headers), Some(APP));
-    let (status, _, _) = send(
-        &node.tcp(),
-        "POST",
-        "/api/rendezvous/pair",
-        &page,
-        Some(json!({"room": "", "code": "x"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 // --- Integrations: routes that never reach a provider ----------------------------------------

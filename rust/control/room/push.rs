@@ -13,6 +13,9 @@ use crate::control::telemetry::Counted;
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
 /// Seconds before another attempt, by attempts made so far.
 const RETRY_SECONDS: [u64; 4] = [2, 5, 15, 60];
+/// Failed attempts after which a note is given up on. Notes are exempt from expiry, so without this one
+/// nobody confirms reading would be resent forever.
+const MAX_NOTE_ATTEMPTS: usize = 5;
 /// The longest `detail` of a delivery answer the room keeps, in bytes.
 const MAX_DETAIL: usize = 1000;
 
@@ -111,6 +114,13 @@ impl Room {
             Some("accepted") => "delivered",
             Some("unknown") if !note => "unconfirmed",
             Some("unsupported") if !note => "not_sent",
+            _ if note && row.attempts + 1 >= MAX_NOTE_ATTEMPTS => {
+                if status == Some("unknown") {
+                    "unconfirmed"
+                } else {
+                    "not_sent"
+                }
+            }
             _ => "pending",
         };
         row.status = new_status.into();

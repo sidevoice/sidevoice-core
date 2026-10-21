@@ -28,6 +28,9 @@ impl Room {
         let session = row.session.clone();
         let epoch = row.epoch;
         let length = row.text.chars().count() as u64;
+        // A reply sent to an earlier call of this device is heard by the same person in the same app call: this
+        // call's report stands for it, so the earlier call's part is not waited for forever.
+        let earlier = inner.browsers.earlier_calls_of(sid, &row.hearing_expected);
         let original = history_id
             .rsplit_once(":voice:")
             .map(|(_, id)| id)
@@ -58,8 +61,10 @@ impl Room {
         if !stronger {
             return Ok(());
         }
-        row.hearing_reports
-            .insert(sid.to_owned(), (outcome.to_owned(), extent));
+        for reporter in std::iter::once(sid.to_owned()).chain(earlier) {
+            row.hearing_reports
+                .insert(reporter, (outcome.to_owned(), extent));
+        }
         let maximum = row
             .hearing_reports
             .values()
@@ -112,7 +117,9 @@ impl Room {
             inner.track_unheard(history_id);
         }
         inner.reconcile_unclaimed(&thread);
-        if !inner.conversations.is_open(&thread) {
+        // With nobody in the call, what was missed waits for the person: telling the agent now
+        // only invites a reply into the void. Their return sends it as one `user_returned` note.
+        if !inner.conversations.is_open(&thread) && inner.browsers.listener_on(&thread).is_some() {
             let message = inner.journal.newer_spoken_message(&thread, epoch);
             let empty = inner.conversations.empty_after(&thread, epoch);
             match (message, empty) {

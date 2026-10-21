@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
-use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
+use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -15,8 +15,7 @@ use super::support::{app_state, private_dir};
 use crate::control::room::Room;
 use crate::server::call::Reattach;
 use crate::server::guard::open_route;
-use crate::server::node::pair_refused;
-use crate::server::{advertisable_room, router, AppState};
+use crate::server::{router, AppState};
 
 /// A node with one paired device, and that device's token.
 fn paired() -> (tempfile::TempDir, Arc<AppState>, String) {
@@ -37,52 +36,12 @@ async fn body_json(response: Response) -> Value {
 }
 
 #[test]
-fn the_dial_link_needs_no_token_for_any_method() {
-    for method in [Method::GET, Method::POST] {
-        for path in [
-            "/api/rendezvous/link",
-            "/api/rendezvous/link/",
-            "/api/rendezvous/link/x",
-        ] {
-            assert!(open_route(&method, path, false), "{method} {path}");
-        }
-    }
-    assert!(!open_route(&Method::POST, "/api/rendezvous/linked", false));
+fn only_discovery_and_device_pairing_need_no_token() {
+    assert!(open_route(&Method::GET, "/api/rendezvous", false));
     assert!(!open_route(&Method::POST, "/api/rendezvous", false));
     assert!(open_route(&Method::POST, "/api/device/pair", false));
     assert!(!open_route(&Method::GET, "/api/local/health", false));
     assert!(open_route(&Method::GET, "/api/local/health", true));
-}
-
-#[test]
-fn a_pairing_code_names_the_room_only_over_a_safe_transport() {
-    let room = |url: &str| Some(json!({"url": url, "node": "connector"}));
-    assert_eq!(
-        advertisable_room(room("https://room.example")),
-        room("https://room.example")
-    );
-    assert_eq!(advertisable_room(room("http://room.example")), None);
-    assert_eq!(advertisable_room(None), None);
-}
-
-#[tokio::test]
-async fn a_refused_pairing_keeps_the_connectors_reason() {
-    let headers = HeaderMap::new();
-    let refused = pair_refused(
-        &json!({"ok":false,"detail":"That code has expired."}),
-        &headers,
-    );
-    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        body_json(refused).await,
-        json!({"detail":"That code has expired."})
-    );
-    let generic = pair_refused(&json!({"ok":false}), &headers);
-    assert_eq!(generic.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        body_json(generic).await,
-        json!({"detail":"Pairing failed."})
-    );
 }
 
 #[tokio::test]

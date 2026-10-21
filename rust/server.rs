@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use axum::middleware;
 
 use axum::Router;
-use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
@@ -17,29 +16,24 @@ mod connector_routes;
 mod connectors;
 mod device_address;
 mod guard;
+mod limits;
 mod node;
 mod pairing;
 mod presentation;
 mod refusal;
-pub mod rendezvous;
 mod request;
 #[cfg(test)]
 mod tests;
 mod trust;
 
-pub(crate) use trust::{credential_safe, local_only, safe_url};
-
-/// The room a pairing code may name, only when the device's pairing secret and token may travel to it.
-fn advertisable_room(room: Option<Value>) -> Option<Value> {
-    room.filter(|room| room["url"].as_str().is_some_and(credential_safe))
-}
+pub(crate) use trust::safe_url;
 
 pub struct AppState {
     pub dir: PrivateDir,
     pub room: Arc<Room>,
-    pub rendezvous: Arc<rendezvous::Rendezvous>,
     pub identity: NodeIdentity,
     registry: Mutex<DeviceRegistry>,
+    limits: limits::Limits,
     calls: call::CallRegistry,
     /// Every live call a page may come back to, and the client messages already taken.
     resumable: call::ResumableCalls,
@@ -67,14 +61,13 @@ impl AppState {
         bind_host: String,
         port: u16,
         room: Arc<Room>,
-        rendezvous: Arc<rendezvous::Rendezvous>,
     ) -> Self {
         Self {
             dir,
             room,
-            rendezvous,
             identity,
             registry: Mutex::new(registry),
+            limits: limits::Limits::default(),
             calls: call::CallRegistry::default(),
             resumable: call::ResumableCalls::default(),
             seen: call::SeenMessages::default(),
@@ -103,20 +96,11 @@ impl AppState {
                 urls.push(url);
             }
         }
-        let mut code = self.registry.lock().expect("registry lock").issue_code(
+        self.registry.lock().expect("registry lock").issue_code(
             &self.identity,
             Some(&self.host),
             &urls,
-        );
-        if let Some(rv) = advertisable_room(self.rendezvous.room_for_devices()) {
-            code["payload"]["rv"] = rv;
-            let payload = serde_json::to_vec(&code["payload"]).expect("pairing payload");
-            code["code"] = json!(format!(
-                "SV1.{}",
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
-            ));
-        }
-        code
+        )
     }
 
     pub fn open_calls(&self) -> usize {
@@ -159,11 +143,6 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
     let router = router
         .fallback(refusal::not_found)
         .with_state(state.clone());
-    let router = if local {
-        router
-    } else {
-        rendezvous::layer(router, state.clone())
-    };
     let router = router.layer(middleware::from_fn_with_state((state, local), guard::guard));
     match telemetry {
         Some(telemetry) => router.layer(middleware::from_fn_with_state(

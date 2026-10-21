@@ -140,11 +140,7 @@ impl Inner {
     pub(super) fn materialize_due_notes(&mut self) {
         let now = seconds();
         for thread in self.unheard.due_notes(now) {
-            let session = self
-                .browsers
-                .on_thread(&thread)
-                .find(|(_, browser)| browser.parked.is_none() && browser.speech_on)
-                .map(|(sid, _)| sid.to_owned());
+            let session = self.browsers.listener_on(&thread);
             let Some(session) = session else {
                 continue;
             };

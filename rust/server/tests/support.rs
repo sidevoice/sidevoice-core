@@ -3,11 +3,10 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use url::Url;
 
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
-use crate::server::{rendezvous, AppState};
+use crate::server::AppState;
 use crate::storage::PrivateDir;
 
 /// A private directory that lives as long as the returned guard.
@@ -20,12 +19,6 @@ pub(in crate::server) fn private_dir() -> (TempDir, PrivateDir) {
 pub(in crate::server) fn app_state(dir: &PrivateDir, room: Arc<Room>, host: &str) -> Arc<AppState> {
     let identity = NodeIdentity::load_or_create(dir).unwrap();
     let registry = DeviceRegistry::load(dir.clone()).unwrap();
-    let relay = rendezvous::Rendezvous::new(
-        None,
-        Url::parse("http://127.0.0.1:10829/").unwrap(),
-        host.to_owned(),
-        room.clone(),
-    );
     Arc::new(AppState::new(
         dir.clone(),
         identity,
@@ -35,6 +28,5 @@ pub(in crate::server) fn app_state(dir: &PrivateDir, room: Arc<Room>, host: &str
         "127.0.0.1".to_owned(),
         10829,
         room,
-        relay,
     ))
 }

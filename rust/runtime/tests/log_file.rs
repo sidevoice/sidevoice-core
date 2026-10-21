@@ -22,14 +22,13 @@ fn config(log_file: PathBuf) -> Config {
         port: 0,
         launch_id: "logged".into(),
         log_file,
-        room_credential: None,
         idle_exit: 0.0,
     }
 }
 
 #[test]
 fn a_launch_without_an_id_makes_one_up() {
-    let parsed = Config::from_args(&args(&["--data-dir", "/tmp/x"])).unwrap();
+    let parsed = Config::from_args(args(&["--data-dir", "/tmp/x"])).unwrap();
     assert_eq!(
         Uuid::parse_str(&parsed.launch_id).unwrap().to_string(),
         parsed.launch_id

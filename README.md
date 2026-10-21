@@ -46,7 +46,7 @@ Beta. What works today:
 - Several devices in the same conversation.
 - One-time pairing codes, per-device tokens and immediate revocation.
 
-Reaching your machine from outside your network needs a relay; that part is still being built.
+To reach your machine from outside your network, serve it at a URL you control (a reverse proxy, say) and list that URL in `SIDEVOICE_PUBLIC_URLS`, so the pairing code carries it.
 
 ## Build it from source
 
@@ -93,6 +93,11 @@ apply. The Core's standalone bind default remains loopback.
 - **Discovery** (`GET /api/rendezvous`, `GET /api/device/identity`) answers without a token and says only what
   pairing needs: that this is a Sidevoice machine, its fingerprint and public key, and a signature over the
   caller's nonce. The machine's name is given only to a paired device.
+- **Network limits.** In each 60-second window the TCP listener allows 10 failed pairing attempts per peer IP and
+  40 globally, or 60 failed authentication attempts per peer IP and 300 globally. Further attempts receive 429
+  with `Retry-After`. It serves at most 256 concurrent HTTP or WebSocket connections. The peer is the direct TCP
+  address (the proxy's address behind a proxy); forwarded headers are ignored. The local Unix socket has no such
+  limits.
 - **Transport.** The core serves plain HTTP on its listen address. The web client normally sends pairing secrets
   and device tokens only over HTTPS or loopback; the native app can also send them to a private LAN address after
   explicit unencrypted-connection consent. Anyone able to read that LAN traffic can read those credentials. Public
@@ -100,9 +105,9 @@ apply. The Core's standalone bind default remains loopback.
   or hosts in `SIDEVOICE_TRUSTED_CLUSTER_HOSTS`. An entry starting with a dot is a suffix
   (`.svc.cluster.local`); any other entry is one exact host. Listing a host there states that the network to it is
   yours (a Kubernetes cluster's pod network, say): whoever can read that network can read those credentials.
-- **Relays are trusted.** A relay between a device and this machine terminates TLS on both sides: it sees the pairing
+- **Proxies are trusted.** A reverse proxy between a device and this machine terminates TLS on both sides: it sees the pairing
   secret redeemed through it, device tokens and all the traffic, including what you say as text and the agent's
-  replies. The machine's signed identity proves which machine answered; it encrypts nothing. Use only a relay you
+  replies. The machine's signed identity proves which machine answered; it encrypts nothing. Use only a proxy you
   trust, or reach the machine directly. End-to-end encryption to the machine's pinned identity is planned, not
   there yet.
 

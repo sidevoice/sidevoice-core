@@ -46,12 +46,6 @@ impl Room {
             .latest()
             .cloned()
     }
-    pub async fn rendezvous_changed(&self, state: Value) {
-        let peers = self.inner.lock().expect("room lock").peers.all();
-        for peer in peers {
-            let _ = peer.send("node.rendezvous", state.clone()).await;
-        }
-    }
     pub fn latest_connector_identity(&self) -> Value {
         let inner = self.inner.lock().expect("room lock");
         let Some(row) = inner

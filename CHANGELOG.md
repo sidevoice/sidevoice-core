@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.5.0](https://github.com/sidevoice/sidevoice-core/compare/v0.4.7...v0.5.0) (2026-10-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** remove the room link and its pairing ([#162](https://github.com/sidevoice/sidevoice-core/issues/162))
+
+### Bug Fixes
+
+* **room:** accept receipts for replies sent to an earlier call of the same device ([#158](https://github.com/sidevoice/sidevoice-core/issues/158)) ([a02a03a](https://github.com/sidevoice/sidevoice-core/commit/a02a03a2b0ca4164fbfdcb897da2ef250558f6d5)), closes [#155](https://github.com/sidevoice/sidevoice-core/issues/155)
+* **room:** hold misses while nobody is in the call for the return note ([#154](https://github.com/sidevoice/sidevoice-core/issues/154)) ([8133696](https://github.com/sidevoice/sidevoice-core/commit/8133696ca55d0970897356680762c3660ad7364d)), closes [#153](https://github.com/sidevoice/sidevoice-core/issues/153)
+* **runtime:** install signal listeners before the core reports ready ([#160](https://github.com/sidevoice/sidevoice-core/issues/160)) ([1aa251e](https://github.com/sidevoice/sidevoice-core/commit/1aa251e7708f0228d3151a433f6075ac0760dbae))
+
+
+### Code Refactoring
+
+* **core:** remove the room link and its pairing ([#162](https://github.com/sidevoice/sidevoice-core/issues/162)) ([b4007e5](https://github.com/sidevoice/sidevoice-core/commit/b4007e50bdf89537f7c61f6d995359f97631cba0))
+
+## [0.4.7](https://github.com/sidevoice/sidevoice-core/compare/v0.4.6...v0.4.7) (2026-10-19)
+
+
+### Bug Fixes
+
+* **push:** stop resending unconfirmed notes after 5 attempts ([#148](https://github.com/sidevoice/sidevoice-core/issues/148)) ([faff8b1](https://github.com/sidevoice/sidevoice-core/commit/faff8b132ccc82dca0d677167cc51a5a2d119988))
+
+## [0.4.6](https://github.com/sidevoice/sidevoice-core/compare/v0.4.5...v0.4.6) (2026-10-18)
+
+
+### Bug Fixes
+
+* **server:** limit pairing and unauthenticated network attempts ([#145](https://github.com/sidevoice/sidevoice-core/issues/145)) ([04b6c10](https://github.com/sidevoice/sidevoice-core/commit/04b6c109816cbb755f78bd190900f348cd8fa4c3)), closes [#144](https://github.com/sidevoice/sidevoice-core/issues/144)
+
 ## [0.4.5](https://github.com/sidevoice/sidevoice-core/compare/v0.4.4...v0.4.5) (2026-10-18)
 
 

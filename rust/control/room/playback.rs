@@ -58,8 +58,19 @@ impl Room {
         if heard_chars.is_some_and(|heard| length.is_some_and(|length| heard > length)) {
             return Err(RoomError::new(400, "room.receipt_invalid"));
         }
+        // A report from this device's later call about a reply sent to an earlier one is that earlier call's.
+        let owner = if record.clients.contains_key(sid) {
+            sid.to_owned()
+        } else {
+            inner
+                .browsers
+                .earlier_calls_of(sid, record.clients.keys())
+                .into_iter()
+                .next()
+                .ok_or_else(stale)?
+        };
         let record = inner.utterances.get_mut(uid).ok_or_else(stale)?;
-        let entry = record.clients.get_mut(sid).ok_or_else(stale)?;
+        let entry = record.clients.get_mut(&owner).ok_or_else(stale)?;
         let next = match status {
             "heard" => "playback_finished",
             "interrupted" | "unplayed" => "interrupted",
@@ -72,7 +83,7 @@ impl Room {
                 if status == "heard" {
                     entry.1 = next.into();
                 }
-                if let Some(end) = record.ends.get_mut(sid) {
+                if let Some(end) = record.ends.get_mut(&owner) {
                     end.heard_chars = match (end.heard_chars, heard_chars) {
                         (Some(a), Some(b)) => Some(a.max(b)),
                         (a, b) => a.or(b),
@@ -87,7 +98,7 @@ impl Room {
         }
         entry.1 = next.into();
         record.ends.insert(
-            sid.to_owned(),
+            owner.clone(),
             End {
                 reason: match status {
                     "heard" | "playing" => None,

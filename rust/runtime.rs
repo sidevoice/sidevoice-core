@@ -6,6 +6,7 @@ mod directories;
 mod event_log;
 mod failure;
 mod language;
+mod limited_listener;
 mod local_socket;
 mod ready;
 mod serve;
@@ -15,7 +16,7 @@ mod stop;
 #[cfg(test)]
 mod tests;
 
-pub use command::{Command, CommandError};
+pub use command::Cli;
 pub use config::Config;
 pub use language::system_language;
 
