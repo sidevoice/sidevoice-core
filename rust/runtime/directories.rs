@@ -1,47 +1,24 @@
-//! The data and socket directories, held exclusively for the life of the process.
+//! The data directory, held exclusively for the life of the process.
 
-use std::fs::{self, File};
+use std::fs::File;
 
 use super::failure::StartFailure;
 use super::Config;
-use crate::platform::ipc::SocketFile;
 use crate::storage::PrivateDir;
 
 pub(super) struct Directories {
     pub(super) data: PrivateDir,
-    _locks: (File, Option<File>),
+    _lock: File,
 }
 
 impl Directories {
-    /// Open both directories privately and lock each once; a held lock means a Core is running.
+    /// Open the data directory privately and lock it; a held lock means a Core is running. The local channel's
+    /// endpoint is derived from it (`Endpoint::new(data_dir, "local")`), so this one lock also makes it one Core's.
     pub(super) fn lock(config: &Config) -> Result<Self, StartFailure> {
-        let unsafe_directory = |_| StartFailure::new("directory", "identity.unsafe-directory");
-        let data = PrivateDir::open(&config.data_dir).map_err(unsafe_directory)?;
-        // Where the endpoint is a socket file, its directory is held too; a named pipe has none.
-        let socket = config
-            .endpoint
-            .socket_file()
-            .map(|path| {
-                let parent = path
-                    .parent()
-                    .ok_or_else(|| StartFailure::new("directory", "identity.unsafe-directory"))?;
-                PrivateDir::open(parent)
-                    .map_err(|_| StartFailure::new("directory", "identity.unsafe-directory"))
-            })
-            .transpose()?;
-        let data_lock = lock(&data)?;
-        let socket_lock = match &socket {
-            Some(socket)
-                if fs::canonicalize(data.path()).ok() != fs::canonicalize(socket.path()).ok() =>
-            {
-                Some(lock(socket)?)
-            }
-            _ => None,
-        };
-        Ok(Self {
-            data,
-            _locks: (data_lock, socket_lock),
-        })
+        let data = PrivateDir::open(&config.data_dir)
+            .map_err(|_| StartFailure::new("directory", "identity.unsafe-directory"))?;
+        let lock = lock(&data)?;
+        Ok(Self { data, _lock: lock })
     }
 }
 
