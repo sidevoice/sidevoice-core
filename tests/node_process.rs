@@ -285,6 +285,7 @@ fn the_ready_file_carries_the_link_and_leaves_with_the_process() {
         (&json!("launch-1"), &json!(1))
     );
     assert_eq!(facts["socket"], data.join("local.sock").to_str().unwrap());
+    assert_eq!(facts["endpoint"], facts["socket"]);
     let socket = PathBuf::from(facts["socket"].as_str().unwrap());
     let meta = fs::symlink_metadata(&socket).unwrap();
     assert!(meta.file_type().is_socket());
@@ -384,7 +385,12 @@ async fn a_call_still_waiting_for_its_first_message_keeps_the_core_up_and_is_cou
             .parse()
             .unwrap(),
     );
-    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let stream = sidevoice_core::platform::ipc::connect(
+        &sidevoice_core::platform::ipc::Endpoint::from_record(facts["endpoint"].as_str().unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let (mut ws, _) = tokio_tungstenite::client_async(request, stream)
         .await
         .unwrap();
@@ -470,6 +476,7 @@ fn a_relative_data_directory_is_one_directory() {
         ready(&data.join("core.json"))
     });
     assert_eq!(facts["socket"], data.join("local.sock").to_str().unwrap());
+    assert_eq!(facts["endpoint"], facts["socket"]);
     let (status, _) = via_socket(&data.join("local.sock"), "GET", "/api/local/health");
     assert_eq!(status, 200);
 }

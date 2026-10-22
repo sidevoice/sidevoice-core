@@ -1,0 +1,11 @@
+# The operating system is touched in `rust/platform` and nowhere else; `#[allow]` for these lives only there.
+disallowed-types = [
+    { path = "tokio::net::UnixListener", reason = "the local channel is `platform::ipc`" },
+    { path = "tokio::net::UnixStream", reason = "the local channel is `platform::ipc`" },
+]
+disallowed-methods = [
+    { path = "rustix::process::geteuid", reason = "the user is `platform::user`" },
+    { path = "rustix::process::getuid", reason = "the user is `platform::user`" },
+    { path = "libc::geteuid", reason = "the user is `platform::user`" },
+    { path = "libc::getuid", reason = "the user is `platform::user`" },
+]

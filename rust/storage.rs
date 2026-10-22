@@ -2,7 +2,7 @@
 
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
@@ -116,7 +116,7 @@ impl PrivateDir {
 }
 
 fn is_own_directory(found: &fs::Metadata) -> bool {
-    found.file_type().is_dir() && found.uid() == rustix::process::getuid().as_raw()
+    found.file_type().is_dir() && crate::platform::user::current().owns(found)
 }
 
 fn unsafe_directory() -> io::Error {

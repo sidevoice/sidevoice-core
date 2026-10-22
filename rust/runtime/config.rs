@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+use crate::platform::ipc::Endpoint;
+
 use super::Cli;
 
 pub struct Config {
     pub data_dir: PathBuf,
-    pub socket: PathBuf,
+    pub endpoint: Endpoint,
     pub ready_file: PathBuf,
     pub host: String,
     pub port: u16,
@@ -35,7 +37,15 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         let data_dir = absolute(cli.data_dir.unwrap_or_else(|| home.join(".sidevoice/core")))?;
-        let socket = absolute(cli.socket.unwrap_or_else(|| data_dir.join("local.sock")))?;
+        #[cfg(unix)]
+        let from_socket = cli.socket.as_deref().map(Endpoint::from_socket_path);
+        #[cfg(not(unix))]
+        let from_socket = None;
+        let endpoint = match (cli.endpoint.as_deref(), from_socket) {
+            (Some(record), _) => Endpoint::from_record(record)?,
+            (None, Some(endpoint)) => endpoint?,
+            (None, None) => Endpoint::new(&data_dir)?,
+        };
         let ready_file = absolute(cli.ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;
         let log_file = absolute(
             cli.log_file
@@ -43,7 +53,7 @@ impl Config {
         )?;
         Ok(Self {
             data_dir,
-            socket,
+            endpoint,
             ready_file,
             host: cli.host.unwrap_or_else(|| "127.0.0.1".to_owned()),
             port: cli.port.unwrap_or(10829),

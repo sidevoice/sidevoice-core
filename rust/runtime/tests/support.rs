@@ -11,7 +11,7 @@ pub(super) fn full_config() -> Config {
     Config::from_args(args(&[
         "--data-dir",
         "/srv/sidevoice/core",
-        "--socket",
+        "--endpoint",
         "/run/sidevoice/local.sock",
         "--ready-file",
         "/run/sidevoice/ready.json",

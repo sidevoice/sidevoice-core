@@ -16,7 +16,7 @@ runs:
         echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
         if [ "$RUNNER_OS" = macOS ]; then
           brew install zstd
-        else
+        elif [ "$RUNNER_OS" = Linux ]; then
           sudo apt-get update
           sudo apt-get install -y zstd
         fi

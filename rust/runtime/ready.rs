@@ -9,10 +9,13 @@ use super::failure::StartFailure;
 use super::{Config, API, CONNECTOR_PROTOCOL};
 use crate::storage::PrivateDir;
 
-/// What a launcher needs to reach this process and connect to its Room.
+/// What a launcher needs to reach this process and connect to its Room. `endpoint` is the local channel (an opaque
+/// string: connect with what it says, never derive it); `socket` is its older form, the socket path, deprecated
+/// and `null` where there is no socket file (Windows).
 pub(super) fn document(config: &Config, port: u16, connector_id: &str, token: &str) -> Value {
     json!({"pid": std::process::id(), "port": port, "url": format!("http://127.0.0.1:{port}"),
-        "socket": config.socket, "launch_id": config.launch_id, "version": env!("CARGO_PKG_VERSION"),
+        "endpoint": config.endpoint.to_record(), "socket": config.endpoint.socket_path(),
+        "launch_id": config.launch_id, "version": env!("CARGO_PKG_VERSION"),
         "api": API, "protocol": CONNECTOR_PROTOCOL, "connector_protocols": [CONNECTOR_PROTOCOL, 3],
         "connector_id": connector_id, "token": token})
 }

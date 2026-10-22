@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use sidevoice_core::platform::ipc::{self, Endpoint, Stream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
@@ -149,6 +150,11 @@ impl Core {
         self.child.id()
     }
 
+    /// Where the core says it listens for this machine's processes: the ready file's `endpoint`.
+    pub fn endpoint(&self) -> Endpoint {
+        Endpoint::from_record(self.ready["endpoint"].as_str().unwrap()).unwrap()
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.data.join("local.sock")
     }
@@ -236,7 +242,7 @@ impl Core {
 
     /// A request over the local socket, which only this machine's user can open.
     pub fn local(&self, method: &str, path: &str) -> Http {
-        Http::new(Target::Unix(self.socket()), method, path)
+        Http::new(Target::Local(self.endpoint()), method, path)
     }
 
     /// Pairs a device over the local socket, as the desktop app does; its bearer token.
@@ -416,7 +422,7 @@ impl Drop for Core {
 #[derive(Clone)]
 enum Target {
     Tcp(u16),
-    Unix(PathBuf),
+    Local(Endpoint),
 }
 
 pub struct Http {
@@ -505,8 +511,8 @@ impl Http {
                     )
                     .await
                 }
-                Target::Unix(path) => {
-                    exchange(UnixStream::connect(path).await.unwrap(), &self).await
+                Target::Local(endpoint) => {
+                    exchange(ipc::connect(endpoint).await.unwrap(), &self).await
                 }
             }
         };
@@ -888,7 +894,7 @@ impl Browser {
 
 pub struct Rpc {
     tx: Writer,
-    rx: SplitStream<WebSocketStream<UnixStream>>,
+    rx: SplitStream<WebSocketStream<Stream>>,
     seen: Vec<Value>,
     next_id: i64,
     pub close_code: Option<u16>,
@@ -896,7 +902,7 @@ pub struct Rpc {
 
 impl Rpc {
     pub async fn open(core: &Core) -> Self {
-        let stream = UnixStream::connect(core.socket()).await.unwrap();
+        let stream = ipc::connect(&core.endpoint()).await.unwrap();
         let (ws, _) = tokio_tungstenite::client_async("ws://localhost/api/connectors/v3", stream)
             .await
             .expect("the v3 link opens over the local socket");
