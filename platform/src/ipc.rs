@@ -89,10 +89,11 @@ pub trait Channel {
     /// name, `\\.\pipe\...`.
     fn check(record: &str) -> io::Result<()>;
 
-    /// Starts listening at `endpoint`, reachable by this user alone. Unix: a socket left by a dead process is
-    /// replaced, but only once it is checked to be this user's and private; the socket file is `0600` and goes away
-    /// when the listener is dropped. Windows: the first instance of the pipe (a name already taken is an error),
-    /// with a descriptor that lets in its owner, SYSTEM and Administrators only, refusing remote clients.
+    /// Starts listening at `endpoint`, reachable by this user alone. A name another process listens on is an error.
+    /// Unix: only in a directory of this user's open to nobody else; a socket left by a dead process is replaced,
+    /// but only once it is checked to be this user's and private; the socket file is `0600` and goes away when the
+    /// listener is dropped. Windows: the first instance of the pipe, with a descriptor that lets in its owner,
+    /// SYSTEM and Administrators only, refusing remote clients.
     fn listen(endpoint: &Endpoint) -> io::Result<Listener>;
 
     /// Connects to `endpoint`, refusing a server that is not this user. Unix: first, the socket must be this

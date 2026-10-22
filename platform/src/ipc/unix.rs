@@ -7,7 +7,6 @@ use crate::user::{User, UserId};
 use interprocess::local_socket::traits::Stream as SyncStream;
 use interprocess::local_socket::traits::StreamCommon as _;
 use interprocess::local_socket::{ListenerOptions, Name};
-use interprocess::os::unix::local_socket::ListenerOptionsExt;
 use std::ffi::OsString;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -35,6 +34,10 @@ impl super::Channel for Os {
 
     fn listen(endpoint: &Endpoint) -> io::Result<Listener> {
         let path = Path::new(&endpoint.0);
+        // Only in a private directory: nobody else can reach the socket between its creation and its `chmod`
+        // below. (Choosing the mode before `bind`, `interprocess`'s `mode`, is `Unsupported` on macOS, whose
+        // `fchmod` refuses sockets.)
+        verify_dir(path)?;
         // A socket left by a dead process is replaced, once it is known to be ours and private and nobody answers
         // on it; a live one is somebody's name.
         if std::fs::symlink_metadata(path).is_ok() {
@@ -47,7 +50,6 @@ impl super::Channel for Os {
         }
         let listener = ListenerOptions::new()
             .name(endpoint.name()?)
-            .mode(0o600)
             .create_tokio()?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         Ok(Listener(listener))
@@ -72,22 +74,28 @@ pub(super) fn socket_path(endpoint: &Endpoint) -> Option<&Path> {
     Some(Path::new(&endpoint.0))
 }
 
-/// A socket before anything talks to it or replaces it: in a directory of this user's open to nobody else, a
-/// socket, this user's, open to nobody else.
+/// A socket before anything talks to it or replaces it: in a directory of this user's open to nobody else
+/// ([`verify_dir`]), a socket, this user's, open to nobody else.
 fn verify_socket(path: &Path) -> io::Result<()> {
-    let me = UserId::current();
-    let private = |path: &Path| -> io::Result<bool> {
-        Ok(me.owns_path(path)? && std::fs::symlink_metadata(path)?.mode() & 0o077 == 0)
-    };
-    let parent = path.parent().ok_or_else(|| unsafe_socket(path))?;
-    if !std::fs::symlink_metadata(parent)?.is_dir()
-        || !private(parent)?
-        || !std::fs::symlink_metadata(path)?.file_type().is_socket()
-        || !private(path)?
-    {
+    verify_dir(path)?;
+    if !std::fs::symlink_metadata(path)?.file_type().is_socket() || !private(path)? {
         return Err(unsafe_socket(path));
     }
     Ok(())
+}
+
+/// The directory the socket `path` is in: a real directory (not a link), this user's, open to nobody else.
+fn verify_dir(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| unsafe_socket(path))?;
+    if !std::fs::symlink_metadata(parent)?.is_dir() || !private(parent)? {
+        return Err(unsafe_socket(path));
+    }
+    Ok(())
+}
+
+/// This user's and open to nobody else, judged on `path` itself (no link followed).
+fn private(path: &Path) -> io::Result<bool> {
+    Ok(UserId::current().owns_path(path)? && std::fs::symlink_metadata(path)?.mode() & 0o077 == 0)
 }
 
 fn unsafe_socket(path: &Path) -> io::Error {
@@ -128,6 +136,19 @@ mod tests {
         std::fs::write(path(&file), b"").unwrap();
         chmod(path(&file), 0o600);
         assert!(Channels::connect(&file).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_listener_is_made_only_in_a_private_directory_and_its_socket_is_private() {
+        let scratch = super::super::tests::scratch();
+        let endpoint = Endpoint::new(scratch.path(), "l");
+        chmod(scratch.path(), 0o755);
+        assert!(Channels::listen(&endpoint).is_err());
+        assert!(!path(&endpoint).exists());
+        chmod(scratch.path(), 0o700);
+        let _listener = Channels::listen(&endpoint).unwrap();
+        let mode = std::fs::symlink_metadata(path(&endpoint)).unwrap().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[tokio::test]
