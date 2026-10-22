@@ -4,7 +4,7 @@ use std::fs::{self, File};
 
 use super::failure::StartFailure;
 use super::Config;
-use crate::platform::ipc::Address;
+use crate::platform::ipc::SocketFile;
 use crate::storage::PrivateDir;
 
 pub(super) struct Directories {
@@ -20,7 +20,7 @@ impl Directories {
         // Where the endpoint is a socket file, its directory is held too; a named pipe has none.
         let socket = config
             .endpoint
-            .socket_path()
+            .socket_file()
             .map(|path| {
                 let parent = path
                     .parent()

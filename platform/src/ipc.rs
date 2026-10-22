@@ -43,11 +43,6 @@ pub trait Address:
     /// pipe `\\.\pipe\sidevoice-<hash of (user, dir)>-<name>`, so two profiles or two users never meet on one name.
     /// A record read back is, on Unix, an absolute socket path, and on Windows a full local pipe name.
     fn new(dir: &Path, name: &str) -> Self;
-
-    /// Core-facing: the socket file, where the endpoint is one (Unix); `None` where it has no file (a Windows pipe).
-    /// Only for what a file has and an address does not: the core's ready file keeps it as its deprecated `socket`
-    /// field, and the core holds its directory besides its data directory.
-    fn socket_path(&self) -> Option<&Path>;
 }
 
 /// What every OS implements ([`Channels`], in `ipc/unix.rs` and `ipc/windows.rs`): how a listener is made private to
@@ -128,16 +123,6 @@ mod tests {
         assert_ne!(endpoint, Endpoint::new(b.path(), "local"));
         assert_ne!(endpoint, Endpoint::new(a.path(), "connector"));
         assert!(endpoint.to_string().contains("local"));
-    }
-
-    #[test]
-    fn a_socket_path_is_inside_the_directory_when_there_is_one() {
-        let dir = scratch();
-        let endpoint = Endpoint::new(dir.path(), "local");
-        if let Some(socket) = endpoint.socket_path() {
-            assert_eq!(socket.parent(), Some(dir.path()));
-            assert_eq!(socket.to_str(), Some(endpoint.to_string().as_str()));
-        }
     }
 
     #[tokio::test]

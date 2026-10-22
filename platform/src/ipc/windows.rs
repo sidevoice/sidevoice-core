@@ -35,11 +35,6 @@ impl super::Address for Endpoint {
             hex::encode(&hash.finalize()[..8])
         ))
     }
-
-    // A pipe has no file.
-    fn socket_path(&self) -> Option<&Path> {
-        None
-    }
 }
 
 // A record is a full local pipe name, `\\.\pipe\...`.

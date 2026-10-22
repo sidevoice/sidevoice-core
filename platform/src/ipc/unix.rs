@@ -21,10 +21,6 @@ impl super::Address for Endpoint {
     fn new(dir: &Path, name: &str) -> Endpoint {
         Endpoint(dir.join(format!("{name}.sock")))
     }
-
-    fn socket_path(&self) -> Option<&Path> {
-        Some(&self.0)
-    }
 }
 
 // A record is an absolute socket path.
@@ -133,7 +129,7 @@ mod tests {
     }
 
     fn path(endpoint: &Endpoint) -> &Path {
-        endpoint.socket_path().unwrap()
+        &endpoint.0
     }
 
     #[test]
