@@ -404,12 +404,16 @@ async fn a_call_still_waiting_for_its_first_message_keeps_the_core_up_and_is_cou
             .unwrap(),
     );
     let stream = {
-        use sidevoice_core::platform::ipc::{Channel, Endpoint};
-        Endpoint::from_record(facts["endpoint"].as_str().unwrap())
-            .unwrap()
-            .connect()
-            .await
-            .unwrap()
+        use sidevoice_core::platform::ipc::{Channel, Channels, Endpoint};
+        Channels::connect(
+            &facts["endpoint"]
+                .as_str()
+                .unwrap()
+                .parse::<Endpoint>()
+                .unwrap(),
+        )
+        .await
+        .unwrap()
     };
     let (mut ws, _) = tokio_tungstenite::client_async(request, stream)
         .await

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use sidevoice_core::platform::ipc::{Channel, Endpoint, Stream};
+use sidevoice_core::platform::ipc::{Channel, Channels, Endpoint, Stream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -152,7 +152,11 @@ impl Core {
 
     /// Where the core says it listens for this machine's processes: the ready file's `endpoint`.
     pub fn endpoint(&self) -> Endpoint {
-        Endpoint::from_record(self.ready["endpoint"].as_str().unwrap()).unwrap()
+        self.ready["endpoint"]
+            .as_str()
+            .unwrap()
+            .parse::<Endpoint>()
+            .unwrap()
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -511,7 +515,9 @@ impl Http {
                     )
                     .await
                 }
-                Target::Local(endpoint) => exchange(endpoint.connect().await.unwrap(), &self).await,
+                Target::Local(endpoint) => {
+                    exchange(Channels::connect(endpoint).await.unwrap(), &self).await
+                }
             }
         };
         tokio::time::timeout(self.timeout, answer)
@@ -900,7 +906,7 @@ pub struct Rpc {
 
 impl Rpc {
     pub async fn open(core: &Core) -> Self {
-        let stream = core.endpoint().connect().await.unwrap();
+        let stream = Channels::connect(&core.endpoint()).await.unwrap();
         let (ws, _) = tokio_tungstenite::client_async("ws://localhost/api/connectors/v3", stream)
             .await
             .expect("the v3 link opens over the local socket");

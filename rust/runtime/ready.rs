@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::failure::StartFailure;
 use super::{Config, API, CONNECTOR_PROTOCOL};
-use crate::platform::ipc::Channel;
+use crate::platform::ipc::SocketFile;
 use crate::storage::PrivateDir;
 
 /// What a launcher needs to reach this process and connect to its Room. `endpoint` is the local channel (an opaque
@@ -15,7 +15,7 @@ use crate::storage::PrivateDir;
 /// and `null` where there is no socket file (Windows).
 pub(super) fn document(config: &Config, port: u16, connector_id: &str, token: &str) -> Value {
     json!({"pid": std::process::id(), "port": port, "url": format!("http://127.0.0.1:{port}"),
-        "endpoint": config.endpoint.to_string(), "socket": config.endpoint.socket_path(),
+        "endpoint": config.endpoint.to_string(), "socket": config.endpoint.socket_file(),
         "launch_id": config.launch_id, "version": env!("CARGO_PKG_VERSION"),
         "api": API, "protocol": CONNECTOR_PROTOCOL, "connector_protocols": [CONNECTOR_PROTOCOL, 3],
         "connector_id": connector_id, "token": token})

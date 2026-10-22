@@ -76,9 +76,7 @@ impl super::User for Id {
             .open(path)?;
         self.owns_file(&file)
     }
-}
 
-impl Id {
     fn owns_file(&self, file: &File) -> io::Result<bool> {
         let mut owner: PSID = null_mut();
         let mut descriptor = null_mut();

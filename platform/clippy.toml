@@ -1,0 +1,2 @@
+# This whole crate is operating-system code: the calls the core's `clippy.toml` keeps inside `rust/platform` are what
+# it is made of, so none is disallowed here (Clippy reads the nearest `clippy.toml`, this one, for this crate).

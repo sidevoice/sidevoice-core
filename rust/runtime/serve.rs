@@ -12,7 +12,7 @@ use super::servers::Servers;
 use super::{ready, stop, Config};
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
-use crate::platform::ipc::Channel;
+use crate::platform::ipc::{Channel, Channels};
 use crate::platform::signal::{Signals, Stop};
 use crate::platform::user::{User, UserId};
 use crate::server::AppState;
@@ -30,7 +30,7 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         .local_addr()
         .map_err(|_| StartFailure::new("bind", "start.failed"))?;
     let port = tcp_address.port();
-    let local = config.endpoint.listen().map_err(|error| {
+    let local = Channels::listen(&config.endpoint).map_err(|error| {
         let taken = matches!(
             error.kind(),
             io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied

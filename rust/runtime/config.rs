@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::platform::ipc::{Channel, Endpoint};
+use crate::platform::ipc::{Address, Endpoint};
 
 use super::Cli;
 
@@ -41,11 +41,14 @@ impl Config {
         // channel is no socket (a Windows pipe), a path is no endpoint and is refused.
         let socket = cli.socket.map(absolute).transpose()?;
         let endpoint = match (cli.endpoint, socket) {
-            (Some(record), _) => Endpoint::from_record(&record)?,
-            (None, Some(path)) => Endpoint::from_record(path.to_str().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "the socket path is not UTF-8")
-            })?)?,
-            (None, None) => Endpoint::in_dir(&data_dir, "local"),
+            (Some(record), _) => record.parse::<Endpoint>()?,
+            (None, Some(path)) => path
+                .to_str()
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "the socket path is not UTF-8")
+                })?
+                .parse::<Endpoint>()?,
+            (None, None) => Endpoint::new(&data_dir, "local"),
         };
         let ready_file = absolute(cli.ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;
         let log_file = absolute(
