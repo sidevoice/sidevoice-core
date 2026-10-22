@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 
 use super::failure::StartFailure;
 use super::{Config, API, CONNECTOR_PROTOCOL};
-use crate::platform::ipc::Channel;
 use crate::storage::PrivateDir;
 
 /// What a launcher needs to reach this process and connect to its Room. `endpoint` is the local channel (an opaque

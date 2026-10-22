@@ -12,17 +12,34 @@ use std::fmt;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-/// An endpoint as its socket path.
+/// An endpoint: its socket path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Endpoint(PathBuf);
 
-impl super::Channel for Endpoint {
-    fn in_dir(dir: &Path, name: &str) -> Endpoint {
+impl Endpoint {
+    /// Our own endpoint called `name` for the data directory `dir`: the socket `dir/<name>.sock`.
+    pub fn new(dir: &Path, name: &str) -> Endpoint {
         Endpoint(dir.join(format!("{name}.sock")))
     }
 
-    fn from_record(record: &str) -> io::Result<Endpoint> {
+    /// The socket file. Only for what a file has and an address does not: the core's ready file keeps it as its
+    /// deprecated `socket` field, and the core holds its directory besides its data directory.
+    pub fn socket_path(&self) -> Option<&Path> {
+        Some(&self.0)
+    }
+
+    fn name(&self) -> io::Result<Name<'static>> {
+        self.0.clone().to_fs_name::<GenericFilePath>()
+    }
+}
+
+/// A record is an absolute socket path; anything else is refused.
+impl FromStr for Endpoint {
+    type Err = io::Error;
+
+    fn from_str(record: &str) -> io::Result<Endpoint> {
         let path = PathBuf::from(record);
         if !path.is_absolute() {
             return Err(io::Error::new(
@@ -32,37 +49,6 @@ impl super::Channel for Endpoint {
         }
         Ok(Endpoint(path))
     }
-
-    fn socket_path(&self) -> Option<&Path> {
-        Some(&self.0)
-    }
-
-    fn listen(&self) -> io::Result<Listener> {
-        // A socket left by a dead process is replaced, once it is known to be ours and private and nobody answers
-        // on it; a live one is somebody's name.
-        if std::fs::symlink_metadata(&self.0).is_ok() {
-            verify_socket(&self.0)?;
-            if <interprocess::local_socket::Stream as SyncStream>::connect(self.name()?).is_ok() {
-                return Err(io::Error::from(io::ErrorKind::AddrInUse));
-            }
-            std::fs::remove_file(&self.0)?;
-        }
-        let listener = ListenerOptions::new()
-            .name(self.name()?)
-            .mode(0o600)
-            .create_tokio()?;
-        std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o600))?;
-        Ok(Listener(listener))
-    }
-
-    fn to_connect(&self) -> io::Result<Name<'static>> {
-        verify_socket(&self.0)?;
-        self.name()
-    }
-
-    fn peer_is_this_user(stream: &Stream) -> io::Result<bool> {
-        Ok(stream.peer_creds()?.euid() == Some(rustix::process::geteuid().as_raw()))
-    }
 }
 
 impl fmt::Display for Endpoint {
@@ -71,10 +57,41 @@ impl fmt::Display for Endpoint {
     }
 }
 
-impl Endpoint {
-    fn name(&self) -> io::Result<Name<'static>> {
-        self.0.clone().to_fs_name::<GenericFilePath>()
+/// Unix side of [`super::Channel`].
+pub struct Os;
+
+impl super::Channel for Os {
+    fn listen(endpoint: &Endpoint) -> io::Result<Listener> {
+        // A socket left by a dead process is replaced, once it is known to be ours and private and nobody answers
+        // on it; a live one is somebody's name.
+        if std::fs::symlink_metadata(&endpoint.0).is_ok() {
+            verify_socket(&endpoint.0)?;
+            if <interprocess::local_socket::Stream as SyncStream>::connect(endpoint.name()?).is_ok()
+            {
+                return Err(io::Error::from(io::ErrorKind::AddrInUse));
+            }
+            std::fs::remove_file(&endpoint.0)?;
+        }
+        let listener = ListenerOptions::new()
+            .name(endpoint.name()?)
+            .mode(0o600)
+            .create_tokio()?;
+        std::fs::set_permissions(&endpoint.0, std::fs::Permissions::from_mode(0o600))?;
+        Ok(Listener(listener))
     }
+}
+
+/// What [`super::Channel::connect`] dials: the socket, once it is this user's, open to nobody else, in a private
+/// directory.
+pub(super) fn to_connect(endpoint: &Endpoint) -> io::Result<Name<'static>> {
+    verify_socket(&endpoint.0)?;
+    endpoint.name()
+}
+
+/// Whether the process at the other end of `stream` is this user: the connection's own credentials, the peer's
+/// effective uid (`SO_PEERCRED` / `LOCAL_PEERCRED`), which the kernel vouches for (macOS gives no peer pid).
+pub(super) fn peer_is_this_user(stream: &Stream) -> io::Result<bool> {
+    Ok(stream.peer_creds()?.euid() == Some(rustix::process::geteuid().as_raw()))
 }
 
 /// A socket before anything talks to it or replaces it: in a directory of this user's open to nobody else, a
@@ -106,7 +123,7 @@ fn unsafe_socket(path: &Path) -> io::Error {
 // pipe has no file, no mode, and goes with its last handle.
 #[cfg(test)]
 mod tests {
-    use super::super::Channel as _;
+    use super::super::{Channel as _, Channels};
     use super::*;
 
     fn chmod(path: &Path, mode: u32) {
@@ -116,31 +133,31 @@ mod tests {
     #[tokio::test]
     async fn a_socket_is_trusted_only_in_a_private_directory_and_open_to_nobody_else() {
         let scratch = super::super::tests::scratch();
-        let endpoint = Endpoint::in_dir(scratch.path(), "s");
-        let _listener = endpoint.listen().unwrap();
-        endpoint.connect().await.unwrap();
+        let endpoint = Endpoint::new(scratch.path(), "s");
+        let _listener = Channels::listen(&endpoint).unwrap();
+        Channels::connect(&endpoint).await.unwrap();
         chmod(&endpoint.0, 0o666);
-        assert!(endpoint.connect().await.is_err());
+        assert!(Channels::connect(&endpoint).await.is_err());
         chmod(&endpoint.0, 0o600);
         chmod(scratch.path(), 0o755);
-        assert!(endpoint.connect().await.is_err());
+        assert!(Channels::connect(&endpoint).await.is_err());
         chmod(scratch.path(), 0o700);
-        let file = Endpoint::in_dir(scratch.path(), "plain");
+        let file = Endpoint::new(scratch.path(), "plain");
         std::fs::write(&file.0, b"").unwrap();
         chmod(&file.0, 0o600);
-        assert!(file.connect().await.is_err());
+        assert!(Channels::connect(&file).await.is_err());
     }
 
     #[tokio::test]
     async fn a_stale_socket_is_replaced_but_a_file_that_is_not_one_is_not() {
         let scratch = super::super::tests::scratch();
-        let endpoint = Endpoint::in_dir(scratch.path(), "t");
+        let endpoint = Endpoint::new(scratch.path(), "t");
         // Left behind by a process that died: the file stays, nothing listens.
         drop(std::os::unix::net::UnixListener::bind(&endpoint.0).unwrap());
         chmod(&endpoint.0, 0o600);
         assert!(endpoint.0.exists());
-        let listener = endpoint.listen().unwrap();
-        endpoint.connect().await.unwrap();
+        let listener = Channels::listen(&endpoint).unwrap();
+        Channels::connect(&endpoint).await.unwrap();
         drop(listener);
         assert!(
             !endpoint.0.exists(),
@@ -149,7 +166,7 @@ mod tests {
         // Something that is not a socket is never unlinked.
         std::fs::write(&endpoint.0, b"mine").unwrap();
         chmod(&endpoint.0, 0o600);
-        assert!(endpoint.listen().is_err());
+        assert!(Channels::listen(&endpoint).is_err());
         assert_eq!(std::fs::read(&endpoint.0).unwrap(), b"mine");
     }
 }
