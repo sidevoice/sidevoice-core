@@ -2097,9 +2097,6 @@ dependencies = [
  "clap",
  "fs2",
  "futures-util",
- "gethostname",
- "hex",
- "interprocess",
  "libc",
  "opentelemetry",
  "opentelemetry-http",
@@ -2111,12 +2108,11 @@ dependencies = [
  "prost",
  "rand 0.8.8",
  "reqwest",
- "rustix",
  "serde",
  "serde_json",
  "sha2",
+ "sidevoice-platform",
  "subtle",
- "sysinfo",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -2124,10 +2120,24 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "sidevoice-platform"
+version = "0.6.0"
+dependencies = [
+ "gethostname",
+ "hex",
+ "interprocess",
+ "rustix",
+ "sha2",
+ "sysinfo",
+ "tempfile",
+ "tokio",
  "whoami",
  "widestring",
  "windows-sys 0.61.2",
- "wiremock",
 ]
 
 [[package]]

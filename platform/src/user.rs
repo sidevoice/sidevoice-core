@@ -1,11 +1,9 @@
-//! This process's user: who it is, whether a path is theirs, what the host is called.
+//! This process's user: who it is, whether a file is theirs, what the host is called.
 //!
 //! The interface is the [`User`] trait; [`UserId`] is the one OS implementation compiled in, chosen below. Unix:
 //! the effective uid, from `rustix`, compared with the file's owner. Windows: the user's SID, read from the process
 //! token, compared (`EqualSid`) with the owner of the file's security descriptor. Callers import both:
-//! `use crate::platform::user::{User, UserId};` then `UserId::current().owns_path(..)`, `UserId::host_name()`.
-//!
-//! The same trait as the connector's `platform::user`, less `owns_file`, which nothing in the core uses.
+//! `use sidevoice_platform::user::{User, UserId};` then `UserId::current().owns_path(..)`, `UserId::host_name()`.
 
 #[cfg(unix)]
 #[path = "user/unix.rs"]
@@ -16,6 +14,7 @@ mod imp;
 
 pub use imp::Id as UserId;
 
+use std::fs::File;
 use std::io;
 use std::path::Path;
 
@@ -26,8 +25,11 @@ pub trait User: Sized {
     /// Whether this user owns what `path` names. A symlink (or Windows junction) is judged itself, not what it
     /// points to.
     fn owns_path(&self, path: &Path) -> io::Result<bool>;
-    /// The login name, for what must name the user to the system (the local channel's pipe name); `None` when the
-    /// system cannot tell. One body for every OS (`whoami`); an OS overrides it only if it must.
+    /// Whether this user owns the file behind an open handle: what was opened is what is judged.
+    fn owns_file(&self, file: &File) -> io::Result<bool>;
+    /// The login name, for what must name the user to the system (the local channel's pipe name, `loginctl
+    /// enable-linger`); `None` when the system cannot tell. One body for every OS (`whoami`); an OS overrides it
+    /// only if it must.
     fn name() -> Option<String> {
         whoami::username().ok()
     }
@@ -52,6 +54,9 @@ mod tests {
         let file = dir.path().join("f");
         std::fs::write(&file, b"").unwrap();
         assert!(UserId::current().owns_path(&file).unwrap());
+        assert!(UserId::current()
+            .owns_file(&File::open(&file).unwrap())
+            .unwrap());
     }
 
     #[test]

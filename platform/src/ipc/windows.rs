@@ -4,7 +4,7 @@
 //! Administrators. The peer check is the trait's one body: the pipe's other process belongs to this user.
 
 use super::Listener;
-use crate::platform::user::{User, UserId};
+use crate::user::{User, UserId};
 use interprocess::local_socket::{GenericFilePath, ListenerOptions, Name, ToFsName};
 use interprocess::os::windows::local_socket::ListenerOptionsExt;
 use interprocess::os::windows::security_descriptor::SecurityDescriptor;

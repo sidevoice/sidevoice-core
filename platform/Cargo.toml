@@ -1,0 +1,40 @@
+[package]
+name = "sidevoice-platform"
+# Moved by release-please with the core's (a workspace member is released with it, tagged `vX.Y.Z`): never by hand.
+version = "0.6.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "The operating-system code Sidevoice's crates share: this user, and the local channel between this user's processes."
+
+# Only what the shared concerns need: whoever depends on this crate (the core by path, the connector by the git tag of
+# a core release) pulls nothing else.
+[dependencies]
+# The local channel (ipc): Unix sockets and Windows named pipes behind one API.
+interprocess = { version = "2.4", features = ["tokio"] }
+# The login name and the host name (user), the same on every OS.
+gethostname = "1"
+whoami = "2"
+# Whether a pipe peer's process is this user's (ipc's default peer check).
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+
+# Unix: the effective uid (user), with no `unsafe` of ours.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
+# Windows: this process's user and file owners (user); the pipe's name hash and security descriptor (ipc).
+[target.'cfg(windows)'.dependencies]
+hex = "0.4"
+sha2 = "0.10"
+widestring = "1"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util"] }

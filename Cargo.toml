@@ -5,6 +5,12 @@ edition = "2021"
 rust-version = "1.98"
 publish = false
 
+# The core, and beside it the operating-system code it shares with the connector (`platform/`, `sidevoice-platform`),
+# released together: one version, one `vX.Y.Z` tag (RELEASING.md). `xtask` is its own build, outside.
+[workspace]
+members = ["platform"]
+exclude = ["xtask"]
+
 [lib]
 path = "rust/lib.rs"
 
@@ -45,29 +51,8 @@ tokio-tungstenite = { version = "0.30", features = ["connect", "rustls-tls-nativ
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4"] }
 url = "2"
-# The local channel (rust/platform/ipc): Unix sockets and Windows named pipes behind one API.
-interprocess = { version = "2.4", features = ["tokio"] }
-# rust/platform: the login name and host name (user), the pipe-name hash (ipc), and whether a pipe peer's process is
-# this user's (ipc), the same on every OS.
-gethostname = "1"
-hex = "0.4"
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-whoami = "2"
-
-# Unix: the effective uid (src/platform/user), with no `unsafe` of ours.
-[target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
-
-# Windows: this process's user and file owners (rust/platform/user); the pipe's security descriptor (rust/platform/ipc).
-[target.'cfg(windows)'.dependencies]
-widestring = "1"
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Threading",
-] }
+# This user and the local channel, shared with the connector (rust/platform re-exports them).
+sidevoice-platform = { path = "platform" }
 
 [dev-dependencies]
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics"] }

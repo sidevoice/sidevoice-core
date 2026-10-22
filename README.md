@@ -124,6 +124,8 @@ rust/              the core: one crate, the binary sidevoice-core-rust
   control/         conversations, devices and pairing, latency, telemetry
   messages/        the message bundles: English only, one file per language
   storage/         private files and process locks
+  platform/        the OS door: re-exports the shared crate below, plus the core-only concerns (signals)
+platform/          sidevoice-platform: OS code shared with the connector (this user, the local channel)
 tests/             integration tests
 xtask/             build tooling: release archives, manifest, compatibility (`cargo xtask`)
 ```

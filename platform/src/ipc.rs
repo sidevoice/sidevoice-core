@@ -1,20 +1,18 @@
-//! The local channel between this user's processes: the core's endpoint, where the connector, the desktop app and
-//! the core's own readiness probe reach it.
+//! The local channel between this user's processes: the core's endpoint (where the connector, the desktop app and
+//! the core's own readiness probe reach it) and the connector's endpoint for its clients.
 //!
 //! The interface is the [`Channel`] trait; [`Endpoint`] is the one OS implementation compiled in, chosen below: a
 //! Unix socket on macOS and Linux, a named pipe on Windows, both through `interprocess`. What this module adds is
 //! the user check, on every OS and on both ends: a listener only ever hands out streams whose peer is this user, and
-//! a client only talks to a server that is this user. Streams are plain `AsyncRead + AsyncWrite + Unpin`, so the
-//! local HTTP API and its WebSockets run over them unchanged. Callers import both:
-//! `use crate::platform::ipc::{Channel, Endpoint};` then `Endpoint::in_dir(dir, "local").listen()`,
+//! a client only talks to a server that is this user. Streams are plain `AsyncRead + AsyncWrite + Unpin`, so what
+//! runs over them (an HTTP API and its WebSockets, a line-JSON protocol) runs unchanged. Callers import both:
+//! `use sidevoice_platform::ipc::{Channel, Endpoint};` then `Endpoint::in_dir(dir, "local").listen()`,
 //! `endpoint.connect().await`.
 //!
-//! An endpoint is opaque: the core's is made by [`Channel::in_dir`] (or given on the command line as a record), and
-//! written in the ready file as its record, its `Display`, which whoever reads it passes to [`Channel::from_record`];
-//! nothing derives one from the other or looks inside.
-//!
-//! The same trait, pipe naming, descriptor and peer check as the connector's `platform::ipc` (sidevoice-connector),
-//! so both compute the same pipe for the same directory and name; the core adds [`Channel::socket_path`].
+//! An endpoint is opaque: a process makes its own with [`Channel::in_dir`], and publishes it as its record, its
+//! `Display` (the core's ready file, the `--endpoint` flag), which whoever reads it passes to
+//! [`Channel::from_record`]; nothing derives one from the other or looks inside. Every crate computes the same pipe
+//! for the same directory and name, because they all run this one implementation.
 
 #[cfg(unix)]
 #[path = "ipc/unix.rs"]
@@ -49,8 +47,8 @@ pub trait Channel: Sized + Clone + fmt::Debug + fmt::Display + PartialEq + Send 
     /// absolute socket path. Windows: a full pipe name, `\\.\pipe\...`. Anything else is refused.
     fn from_record(record: &str) -> io::Result<Self>;
 
-    /// The socket file, where the channel is one (Unix); `None` where it has no file (a Windows pipe). The ready
-    /// file's deprecated `socket` field, and the directory the core holds besides its data directory.
+    /// The socket file, where the channel is one (Unix); `None` where it has no file (a Windows pipe). The core's
+    /// ready file keeps it as its deprecated `socket` field, and holds its directory besides its data directory.
     fn socket_path(&self) -> Option<&Path>;
 
     /// Starts listening, reachable by this user alone. A name another process listens on is an error. Unix: a socket

@@ -2,11 +2,8 @@
 //! (`SO_PEERCRED` / `LOCAL_PEERCRED`, through `peer_creds()`); a socket is trusted before it is touched only when it
 //! is a socket, this user's, and open to nobody else, in a directory open to nobody else.
 
-// The raw calls the rest of the crate is not allowed to make (`clippy.toml`) are made here.
-#![allow(clippy::disallowed_methods)]
-
 use super::{Listener, Stream};
-use crate::platform::user::{User, UserId};
+use crate::user::{User, UserId};
 use interprocess::local_socket::traits::Stream as SyncStream;
 use interprocess::local_socket::traits::StreamCommon as _;
 use interprocess::local_socket::{GenericFilePath, ListenerOptions, Name, ToFsName};

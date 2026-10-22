@@ -43,7 +43,7 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.sha }}
       - uses: ./.github/actions/setup
-      - run: cargo test --locked --all-features
+      - run: cargo test --locked --workspace --all-features
       - run: cargo xtask dist
       # The Linux archive on the oldest distribution it supports (glibc floor, xtask/src/glibc.rs).
       - if: runner.os == 'Linux'

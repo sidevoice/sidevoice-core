@@ -4,6 +4,12 @@ One version for the core, tagged `vX.Y.Z`. It lives in `Cargo.toml` (and the roo
 release-please moves it (`release-please-config.json`). Never edit it by hand. The core is distributed as GitHub
 Releases of this repository.
 
+The workspace's other member, `platform/` (`sidevoice-platform`, the OS code the connector shares), is released with
+the core: release-please moves its version to the same one, in its `Cargo.toml` and `Cargo.lock`, and the same
+`vX.Y.Z` tag marks it. It has no tag, release or assets of its own. Consumers outside this repository depend on it
+by git at a release tag, never `nightly` or a branch:
+`sidevoice-platform = { git = "https://github.com/sidevoice/sidevoice-core", tag = "vX.Y.Z" }`.
+
 ## What each act means
 
 | Act | Who | What happens |
