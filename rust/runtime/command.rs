@@ -21,7 +21,11 @@ pub struct Cli {
     /// Private core data directory [default: ~/.sidevoice/core]
     #[arg(long, env = "SIDEVOICE_CORE_DATA_DIR", value_name = "PATH")]
     pub data_dir: Option<PathBuf>,
-    /// Local socket path [default: local.sock in the data directory]
+    /// Where to listen for this machine's own processes, as the ready file's `endpoint` records it [default:
+    /// derived from the data directory]
+    #[arg(long, value_name = "ENDPOINT", conflicts_with = "socket")]
+    pub endpoint: Option<String>,
+    /// Deprecated: the local socket path, where the local channel is a socket (not on Windows); use `--endpoint`
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
     /// Readiness file path [default: core.json in the data directory]

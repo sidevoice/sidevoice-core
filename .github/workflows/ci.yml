@@ -44,3 +44,14 @@ jobs:
       # The Linux archive on the oldest distribution it supports (glibc floor, xtask/src/glibc.rs).
       - if: runner.os == 'Linux'
         run: cargo xtask verify-floor native/sidevoice-core-${{ matrix.target }}.tar.zst
+
+  # Windows support (sidevoice-core#82) is being built: this job builds the core and runs its tests on Windows and is
+  # expected to fail until the platform work lands. It is not part of the release.
+  windows:
+    name: Test (windows-x86_64)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/setup
+      - run: cargo build --locked -p sidevoice-core
+      - run: cargo test --locked -p sidevoice-core

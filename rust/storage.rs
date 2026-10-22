@@ -2,12 +2,14 @@
 
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 use serde_json::Value;
 use tempfile::NamedTempFile;
+
+use crate::platform::user::{User, UserId};
 
 #[derive(Clone, Debug)]
 pub struct PrivateDir {
@@ -23,7 +25,7 @@ impl PrivateDir {
             .mode(0o700)
             .create(path)?;
         let found = fs::symlink_metadata(path)?;
-        if !is_own_directory(&found) || found.permissions().mode() & 0o077 != 0 {
+        if !is_own_directory(path, &found) || found.permissions().mode() & 0o077 != 0 {
             return Err(unsafe_directory());
         }
         Ok(Self {
@@ -34,7 +36,7 @@ impl PrivateDir {
     /// Accept an existing directory of this user, whatever its mode, to leave a failure report in.
     pub fn open_for_report(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
-        if !is_own_directory(&fs::symlink_metadata(path)?) {
+        if !is_own_directory(path, &fs::symlink_metadata(path)?) {
             return Err(unsafe_directory());
         }
         Ok(Self {
@@ -115,8 +117,8 @@ impl PrivateDir {
     }
 }
 
-fn is_own_directory(found: &fs::Metadata) -> bool {
-    found.file_type().is_dir() && found.uid() == rustix::process::getuid().as_raw()
+fn is_own_directory(path: &Path, found: &fs::Metadata) -> bool {
+    found.file_type().is_dir() && UserId::current().owns_path(path).unwrap_or(false)
 }
 
 fn unsafe_directory() -> io::Error {

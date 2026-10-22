@@ -2,18 +2,18 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::serve::ListenerExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::failure::StartFailure;
 use super::limited_listener::LimitedListener;
+use crate::platform::ipc::{self, Channel, Endpoint};
 use crate::server::{self, AppState};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
@@ -30,7 +30,7 @@ pub(super) struct Servers {
 }
 
 impl Servers {
-    pub(super) fn spawn(tcp: TcpListener, local: UnixListener, state: Arc<AppState>) -> Self {
+    pub(super) fn spawn(tcp: TcpListener, local: ipc::Listener, state: Arc<AppState>) -> Self {
         let (stopping, receiver) = watch::channel(false);
         let tcp_app = server::router(state.clone(), false);
         let local_app = server::router(state, true);
@@ -45,7 +45,7 @@ impl Servers {
             .await
         });
         let local = tokio::spawn(async move {
-            axum::serve(local, local_app)
+            axum::serve(LocalListener(local), local_app)
                 .with_graceful_shutdown(wait_stop(receiver))
                 .await
         });
@@ -60,7 +60,7 @@ impl Servers {
     pub(super) async fn await_serving(
         &self,
         tcp_address: SocketAddr,
-        socket: &Path,
+        endpoint: &Endpoint,
     ) -> Result<(), StartFailure> {
         let probe_address = loopback_for(tcp_address);
         await_serving(&self.tcp, || async move {
@@ -71,7 +71,7 @@ impl Servers {
         })
         .await?;
         await_serving(&self.local, || async move {
-            match tokio::time::timeout(PROBE_TIMEOUT, UnixStream::connect(socket)).await {
+            match tokio::time::timeout(PROBE_TIMEOUT, endpoint.connect()).await {
                 Ok(Ok(stream)) => probe_http(stream, "/api/local/health").await,
                 _ => false,
             }
@@ -153,4 +153,25 @@ async fn probe_http<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, path: &str
     })
     .await
     .is_ok_and(|result| result.unwrap_or(false))
+}
+
+/// The local channel as an Axum listener: the connections it yields are already this user's.
+struct LocalListener(ipc::Listener);
+
+impl axum::serve::Listener for LocalListener {
+    type Io = ipc::Stream;
+    type Addr = ();
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.0.accept().await {
+                Ok(stream) => return (stream, ()),
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        Ok(())
+    }
 }

@@ -250,9 +250,10 @@ fn network_bind_accepts_ip_hosts_unless_an_administrator_set_a_host_allowlist() 
     }
 }
 
-const LOCAL_PATHS: [(&str, &str); 4] = [
+const LOCAL_PATHS: [(&str, &str); 5] = [
     ("GET", "/api/connectors/v3"),
     ("GET", "/api/local/health"),
+    ("POST", "/api/local/shutdown"),
     ("POST", "/api/device/local/pair"),
     ("DELETE", "/api/device/local"),
 ];
@@ -285,6 +286,7 @@ fn the_ready_file_carries_the_link_and_leaves_with_the_process() {
         (&json!("launch-1"), &json!(1))
     );
     assert_eq!(facts["socket"], data.join("local.sock").to_str().unwrap());
+    assert_eq!(facts["endpoint"], facts["socket"]);
     let socket = PathBuf::from(facts["socket"].as_str().unwrap());
     let meta = fs::symlink_metadata(&socket).unwrap();
     assert!(meta.file_type().is_socket());
@@ -353,6 +355,23 @@ fn a_manager_s_sigterm_or_a_sigint_is_a_clean_exit() {
 }
 
 #[test]
+fn a_local_request_to_leave_is_a_clean_exit() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("core");
+    let mut core = Core::start(&data, "0", &["--launch-id", "launch-1"]);
+    wait_ready(&data);
+    let (status, answer) = via_socket(&data.join("local.sock"), "POST", "/api/local/shutdown");
+    assert_eq!(status, 202, "{answer}");
+    assert_eq!(
+        (&answer["launch_id"], &answer["pid"]),
+        (&json!("launch-1"), &json!(core.pid()))
+    );
+    assert_eq!(core.wait(20).code(), Some(0));
+    assert!(!data.join("core.json").exists());
+    assert!(!data.join("local.sock").exists());
+}
+
+#[test]
 fn a_core_nothing_uses_leaves_on_its_own() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("core");
@@ -384,7 +403,14 @@ async fn a_call_still_waiting_for_its_first_message_keeps_the_core_up_and_is_cou
             .parse()
             .unwrap(),
     );
-    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let stream = {
+        use sidevoice_core::platform::ipc::{Channel, Endpoint};
+        Endpoint::from_record(facts["endpoint"].as_str().unwrap())
+            .unwrap()
+            .connect()
+            .await
+            .unwrap()
+    };
     let (mut ws, _) = tokio_tungstenite::client_async(request, stream)
         .await
         .unwrap();
@@ -448,8 +474,9 @@ fn a_socket_a_dead_core_left_is_replaced() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("core");
     private_dir(&data);
-    // Bound, never listening, nobody behind it: what a SIGKILLed core leaves.
+    // Bound, never listening, nobody behind it, `0600`: what a SIGKILLed core leaves.
     drop(std::os::unix::net::UnixListener::bind(data.join("local.sock")).unwrap());
+    fs::set_permissions(data.join("local.sock"), fs::Permissions::from_mode(0o600)).unwrap();
     assert!(data.join("local.sock").exists());
     let core = Core::start(&data, "0", &[]);
     let facts = wait_ready(&data);
@@ -470,6 +497,7 @@ fn a_relative_data_directory_is_one_directory() {
         ready(&data.join("core.json"))
     });
     assert_eq!(facts["socket"], data.join("local.sock").to_str().unwrap());
+    assert_eq!(facts["endpoint"], facts["socket"]);
     let (status, _) = via_socket(&data.join("local.sock"), "GET", "/api/local/health");
     assert_eq!(status, 200);
 }

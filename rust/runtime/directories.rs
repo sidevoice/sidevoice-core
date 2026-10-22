@@ -4,6 +4,7 @@ use std::fs::{self, File};
 
 use super::failure::StartFailure;
 use super::Config;
+use crate::platform::ipc::Channel;
 use crate::storage::PrivateDir;
 
 pub(super) struct Directories {
@@ -16,18 +17,27 @@ impl Directories {
     pub(super) fn lock(config: &Config) -> Result<Self, StartFailure> {
         let unsafe_directory = |_| StartFailure::new("directory", "identity.unsafe-directory");
         let data = PrivateDir::open(&config.data_dir).map_err(unsafe_directory)?;
-        let socket_parent = config
-            .socket
-            .parent()
-            .ok_or_else(|| StartFailure::new("directory", "identity.unsafe-directory"))?;
-        let socket = PrivateDir::open(socket_parent).map_err(unsafe_directory)?;
+        // Where the endpoint is a socket file, its directory is held too; a named pipe has none.
+        let socket = config
+            .endpoint
+            .socket_path()
+            .map(|path| {
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| StartFailure::new("directory", "identity.unsafe-directory"))?;
+                PrivateDir::open(parent)
+                    .map_err(|_| StartFailure::new("directory", "identity.unsafe-directory"))
+            })
+            .transpose()?;
         let data_lock = lock(&data)?;
-        let socket_lock =
-            if fs::canonicalize(data.path()).ok() == fs::canonicalize(socket.path()).ok() {
-                None
-            } else {
-                Some(lock(&socket)?)
-            };
+        let socket_lock = match &socket {
+            Some(socket)
+                if fs::canonicalize(data.path()).ok() != fs::canonicalize(socket.path()).ok() =>
+            {
+                Some(lock(socket)?)
+            }
+            _ => None,
+        };
         Ok(Self {
             data,
             _locks: (data_lock, socket_lock),

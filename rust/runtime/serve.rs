@@ -1,5 +1,6 @@
 //! The process lifecycle: claim the directories, load state, serve, report ready, and stop.
 
+use std::io;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -8,9 +9,12 @@ use super::directories::Directories;
 use super::event_log::log_event;
 use super::failure::StartFailure;
 use super::servers::Servers;
-use super::{local_socket, ready, stop, Config};
+use super::{ready, stop, Config};
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
+use crate::platform::ipc::Channel;
+use crate::platform::signal::{Signals, Stop};
+use crate::platform::user::{User, UserId};
 use crate::server::AppState;
 use crate::storage::PrivateDir;
 
@@ -26,11 +30,21 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         .local_addr()
         .map_err(|_| StartFailure::new("bind", "start.failed"))?;
     let port = tcp_address.port();
-    let (local, cleanup) = local_socket::bind(&config.socket).await?;
-    let machine_host = hostname::get()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
+    let local = config.endpoint.listen().map_err(|error| {
+        let taken = matches!(
+            error.kind(),
+            io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+        );
+        StartFailure::new(
+            "bind",
+            if taken {
+                "bind.port-in-use"
+            } else {
+                "start.failed"
+            },
+        )
+    })?;
+    let machine_host = UserId::host_name();
     let state = Arc::new(AppState::new(
         dir.clone(),
         stored.identity,
@@ -42,11 +56,11 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         stored.room.clone(),
     ));
     let delivery_task = tokio::spawn(stored.room.pump());
-    let mut signals = stop::Signals::install();
+    let mut signals = Signals::install();
     let ready = ready::document(config, port, &stored.connector_id, &stored.token);
     let mut servers = Servers::spawn(tcp, local, state.clone());
     let startup = async {
-        servers.await_serving(tcp_address, &config.socket).await?;
+        servers.await_serving(tcp_address, &config.endpoint).await?;
         ready::write(config, dir.path(), &ready)?;
         let _ = log_event(config, "runtime.log_ready", None);
         Ok::<_, StartFailure>(())
@@ -59,13 +73,13 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
     }
     let crashed = tokio::select! {
         _ = signals.received() => false,
+        _ = state.shutdown_requested() => false,
         _ = servers.exited() => true,
-        _ = stop::idle_for(state, config.idle_exit), if config.idle_exit > 0.0 => false,
+        _ = stop::idle_for(state.clone(), config.idle_exit), if config.idle_exit > 0.0 => false,
     };
     servers.stop();
     servers.join().await;
     ready::remove_own(&config.ready_file);
-    drop(cleanup);
     delivery_task.abort();
     crate::control::telemetry::shutdown().await;
     if crashed {

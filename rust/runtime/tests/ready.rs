@@ -11,7 +11,8 @@ fn document_describes_this_process_and_its_protocols() {
     assert_eq!(
         ready,
         json!({"pid": std::process::id(), "port": 9000, "url": "http://127.0.0.1:9000",
-            "socket": "/run/sidevoice/local.sock", "launch_id": "launch",
+            "endpoint": "/run/sidevoice/local.sock", "socket": "/run/sidevoice/local.sock",
+            "launch_id": "launch",
             "version": env!("CARGO_PKG_VERSION"), "api": 1, "protocol": 2,
             "connector_protocols": [2, 3], "connector_id": "connector", "token": "token"})
     );

@@ -16,7 +16,7 @@ fn config(log_file: PathBuf) -> Config {
     let root = log_file.parent().unwrap().to_owned();
     Config {
         data_dir: root.join("core"),
-        socket: root.join("core/local.sock"),
+        endpoint: crate::platform::ipc::Channel::in_dir(&root.join("core"), "local"),
         ready_file: root.join("core/core.json"),
         host: "127.0.0.1".into(),
         port: 0,
