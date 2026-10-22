@@ -37,19 +37,8 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         let data_dir = absolute(cli.data_dir.unwrap_or_else(|| home.join(".sidevoice/core")))?;
-        // `--socket` is the older spelling of a socket endpoint: a path, made absolute like the others. Where the
-        // channel is no socket (a Windows pipe), a path is no endpoint and is refused.
-        let socket = cli.socket.map(absolute).transpose()?;
-        let endpoint = match (cli.endpoint, socket) {
-            (Some(record), _) => record.parse::<Endpoint>()?,
-            (None, Some(path)) => path
-                .to_str()
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "the socket path is not UTF-8")
-                })?
-                .parse::<Endpoint>()?,
-            (None, None) => Endpoint::new(&data_dir, "local"),
-        };
+        // The local channel is derived from the data directory alone, so the data directory's lock holds it too.
+        let endpoint = Endpoint::new(&data_dir, "local");
         let ready_file = absolute(cli.ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;
         let log_file = absolute(
             cli.log_file

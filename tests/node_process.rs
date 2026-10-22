@@ -285,9 +285,11 @@ fn the_ready_file_carries_the_link_and_leaves_with_the_process() {
         (&facts["launch_id"], &facts["api"]),
         (&json!("launch-1"), &json!(1))
     );
-    assert_eq!(facts["socket"], data.join("local.sock").to_str().unwrap());
-    assert_eq!(facts["endpoint"], facts["socket"]);
-    let socket = PathBuf::from(facts["socket"].as_str().unwrap());
+    // The desktop app reaches `C/local.sock` without reading the ready file: that path is a contract. The ready
+    // file carries only `endpoint` (no deprecated `socket`).
+    assert_eq!(facts["endpoint"], data.join("local.sock").to_str().unwrap());
+    assert!(facts.get("socket").is_none());
+    let socket = PathBuf::from(facts["endpoint"].as_str().unwrap());
     let meta = fs::symlink_metadata(&socket).unwrap();
     assert!(meta.file_type().is_socket());
     assert_eq!(
@@ -390,7 +392,7 @@ async fn a_call_still_waiting_for_its_first_message_keeps_the_core_up_and_is_cou
     let data = root.path().join("core");
     let mut core = Core::start(&data, "2", &[]);
     let facts = wait_ready(&data);
-    let socket = PathBuf::from(facts["socket"].as_str().unwrap());
+    let socket = PathBuf::from(facts["endpoint"].as_str().unwrap());
     let (status, paired) = via_socket(&socket, "POST", "/api/device/local/pair");
     assert_eq!(status, 200, "{paired}");
     let token = paired["token"].as_str().unwrap();
@@ -500,33 +502,9 @@ fn a_relative_data_directory_is_one_directory() {
         assert!(core.running(), "{}", core.stderr());
         ready(&data.join("core.json"))
     });
-    assert_eq!(facts["socket"], data.join("local.sock").to_str().unwrap());
-    assert_eq!(facts["endpoint"], facts["socket"]);
+    assert_eq!(facts["endpoint"], data.join("local.sock").to_str().unwrap());
     let (status, _) = via_socket(&data.join("local.sock"), "GET", "/api/local/health");
     assert_eq!(status, 200);
-}
-
-#[test]
-fn a_socket_named_through_an_alias_of_the_data_directory() {
-    let root = tempfile::tempdir().unwrap();
-    let data = root.path().join("core");
-    std::os::unix::fs::symlink(root.path(), root.path().join("alias")).unwrap();
-    let aliased = root.path().join("alias").join("core").join("local.sock");
-    let mut core = Core::start(&data, "0", &["--socket", aliased.to_str().unwrap()]);
-    let facts = until(60, || {
-        assert!(core.running(), "{}", core.stderr());
-        ready(&data.join("core.json"))
-    });
-    assert_eq!(facts["socket"], aliased.to_str().unwrap());
-    assert!(
-        fs::symlink_metadata(data.join("local.sock"))
-            .unwrap()
-            .file_type()
-            .is_socket(),
-        "one directory, two spellings"
-    );
-    let (_, health) = via_socket(&aliased, "GET", "/api/local/health");
-    assert_eq!(health["pid"], core.pid());
 }
 
 #[test]

@@ -11,7 +11,6 @@ use crate::runtime::{Cli, Config};
 fn every_flag_overrides_its_setting() {
     let config = full_config();
     assert_eq!(config.data_dir, PathBuf::from("/srv/sidevoice/core"));
-    assert_eq!(config.endpoint.to_string(), "/run/sidevoice/local.sock");
     assert_eq!(
         config.ready_file,
         PathBuf::from("/run/sidevoice/ready.json")
@@ -111,7 +110,7 @@ fn the_environment_variables_are_the_documented_ones() {
         env("idle_exit").as_deref(),
         Some("SIDEVOICE_CORE_IDLE_SECONDS")
     );
-    for flag in ["endpoint", "socket", "ready_file", "launch_id", "log_file"] {
+    for flag in ["ready_file", "launch_id", "log_file"] {
         assert_eq!(env(flag), None, "{flag}");
     }
 }
@@ -128,20 +127,10 @@ fn the_flag_names_are_unchanged() {
             "host",
             "port",
             "data-dir",
-            "endpoint",
-            "socket",
             "ready-file",
             "launch-id",
             "log-file",
             "idle-exit"
         ]
     );
-}
-
-#[test]
-fn the_endpoint_flag_and_its_deprecated_socket_alias_name_the_same_thing() {
-    let by_socket = Config::from_args(args(&["--socket", "/run/a.sock"])).unwrap();
-    let by_endpoint = Config::from_args(args(&["--endpoint", "/run/a.sock"])).unwrap();
-    assert_eq!(by_socket.endpoint, by_endpoint.endpoint);
-    assert!(Config::from_args(args(&["--socket", "/a", "--endpoint", "/b"])).is_err());
 }
