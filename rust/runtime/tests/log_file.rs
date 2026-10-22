@@ -16,7 +16,10 @@ fn config(log_file: PathBuf) -> Config {
     let root = log_file.parent().unwrap().to_owned();
     Config {
         data_dir: root.join("core"),
-        endpoint: crate::platform::ipc::Endpoint::new(&root.join("core"), "local"),
+        endpoint: <crate::platform::ipc::Endpoint as crate::platform::ipc::Address>::new(
+            &root.join("core"),
+            "local",
+        ),
         ready_file: root.join("core/core.json"),
         host: "127.0.0.1".into(),
         port: 0,

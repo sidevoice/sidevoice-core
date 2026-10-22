@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::platform::ipc::Endpoint;
+use crate::platform::ipc::{Address, Endpoint};
 
 use super::Cli;
 

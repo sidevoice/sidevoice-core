@@ -1,15 +1,15 @@
 //! The local channel between this user's processes: the core's endpoint (where the connector, the desktop app and
 //! the core's own readiness probe reach it) and the connector's endpoint for its clients.
 //!
-//! The interface is the [`Channel`] trait; [`Channels`] is the one OS implementation compiled in, chosen below: a
-//! Unix socket on macOS and Linux, a named pipe on Windows, both through `interprocess`. [`Endpoint`] is only an
-//! address, opaque, defined once here: a process makes its own with `Endpoint::new(dir, name)` and publishes its
-//! `Display`, the record (the core's ready file, the `--endpoint` flag), which whoever reads it parses back
-//! (`record.parse::<Endpoint>()`). Nothing derives one from the other or looks inside. What this module adds is the
-//! user check, on every OS and on both ends: a listener only ever hands out streams whose peer is this user, and a
-//! client only talks to a server that is this user. Streams are plain `AsyncRead + AsyncWrite + Unpin`, so what runs
-//! over them (an HTTP API and its WebSockets, a line-JSON protocol) runs unchanged. Callers import the trait and the
-//! types, std-style (`TcpListener::bind(addr)`): `use sidevoice_platform::ipc::{Channel, Channels, Endpoint};` then
+//! Two traits, each with the one OS implementation compiled in, chosen below: a Unix socket on macOS and Linux, a
+//! named pipe on Windows, both through `interprocess`. [`Address`] is where a channel is, implemented by
+//! [`Endpoint`]: a process makes its own with `Endpoint::new(dir, name)` and publishes its `Display`, the record
+//! (the core's ready file, the `--endpoint` flag), which whoever reads it parses back (`record.parse::<Endpoint>()`).
+//! [`Channel`], implemented by [`Channels`], listens and connects. What this module adds is the user check, on every
+//! OS and on both ends: a listener only ever hands out streams whose peer is this user, and a client only talks to a
+//! server that is this user. Streams are plain `AsyncRead + AsyncWrite + Unpin`, so what runs over them (an HTTP API
+//! and its WebSockets, a line-JSON protocol) runs unchanged. Callers import the traits and the types, std-style
+//! (`TcpListener::bind(addr)`): `use sidevoice_platform::ipc::{Address, Channel, Channels, Endpoint};` then
 //! `Channels::listen(&Endpoint::new(dir, "local"))`, `Channels::connect(&endpoint).await`. Every crate computes the
 //! same pipe for the same directory and name, because they all run this one implementation.
 
@@ -20,12 +20,10 @@ mod imp;
 #[path = "ipc/windows.rs"]
 mod imp;
 
-pub use imp::Os as Channels;
+pub use imp::{Endpoint, Os as Channels};
 
 use interprocess::local_socket::tokio::Listener as RawListener;
 use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
-use interprocess::local_socket::{GenericFilePath, Name, ToFsName};
-use std::ffi::OsString;
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -35,60 +33,26 @@ use std::str::FromStr;
 /// One connection. `AsyncRead + AsyncWrite + Unpin`; its peer has been checked to be this user.
 pub type Stream = interprocess::local_socket::tokio::Stream;
 
-/// Where a channel is: a socket path (Unix) or a pipe name (Windows), as one opaque value. Nothing outside derives
-/// one from another or looks inside.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Endpoint(OsString);
+/// Where a channel is, as every OS implements it ([`Endpoint`], in `ipc/unix.rs` and `ipc/windows.rs`): an opaque
+/// address. `Display` writes it as its record (the core's ready file, the `--endpoint` flag) and `FromStr` reads one
+/// back, refusing anything this OS cannot reach (`InvalidInput`). Nothing derives one from another or looks inside.
+pub trait Address:
+    Sized + Clone + fmt::Debug + fmt::Display + PartialEq + FromStr<Err = io::Error>
+{
+    /// Our own endpoint called `name` for the data directory `dir`. Unix: the socket `dir/<name>.sock`. Windows: the
+    /// pipe `\\.\pipe\sidevoice-<hash of (user, dir)>-<name>`, so two profiles or two users never meet on one name.
+    /// A record read back is, on Unix, an absolute socket path, and on Windows a full local pipe name.
+    fn new(dir: &Path, name: &str) -> Self;
 
-impl Endpoint {
-    /// Our own endpoint called `name` for the data directory `dir` ([`Channel::address`]).
-    pub fn new(dir: &Path, name: &str) -> Endpoint {
-        Endpoint(Channels::address(dir, name))
-    }
-
-    /// The socket file, where the endpoint is one (Unix); `None` where it has no file (a Windows pipe). Core-only:
-    /// the core's ready file keeps it as its deprecated `socket` field, and the core holds its directory besides its
-    /// data directory.
-    pub fn socket_path(&self) -> Option<&Path> {
-        imp::socket_path(self)
-    }
-
-    /// The endpoint as `interprocess` names it.
-    fn name(&self) -> io::Result<Name<'static>> {
-        self.0.clone().to_fs_name::<GenericFilePath>()
-    }
+    /// Core-facing: the socket file, where the endpoint is one (Unix); `None` where it has no file (a Windows pipe).
+    /// Only for what a file has and an address does not: the core's ready file keeps it as its deprecated `socket`
+    /// field, and the core holds its directory besides its data directory.
+    fn socket_path(&self) -> Option<&Path>;
 }
 
-/// An endpoint another process published, as `Display` writes it; refused unless [`Channel::check`] accepts it.
-impl FromStr for Endpoint {
-    type Err = io::Error;
-
-    fn from_str(record: &str) -> io::Result<Endpoint> {
-        Channels::check(record)?;
-        Ok(Endpoint(record.into()))
-    }
-}
-
-/// The record another process reads back with `parse`.
-impl fmt::Display for Endpoint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.to_string_lossy().fmt(f)
-    }
-}
-
-/// What every OS implements ([`Channels`], in `ipc/unix.rs` and `ipc/windows.rs`): what an address is, and how a
-/// listener is made private to this user. Connecting is one body for every OS; what is checked before connecting and
-/// the peer check are internal to each OS file (`to_connect`, `peer_is_this_user`).
+/// What every OS implements ([`Channels`], in `ipc/unix.rs` and `ipc/windows.rs`): how a listener is made private to
+/// this user. Connecting is one body for every OS; the peer check is internal to each OS file (`peer_is_this_user`).
 pub trait Channel {
-    /// The address of our own endpoint called `name` for the data directory `dir`. Unix: the socket
-    /// `dir/<name>.sock`. Windows: the pipe `\\.\pipe\sidevoice-<hash of (user, dir)>-<name>`, so two profiles or two
-    /// users never meet on one name.
-    fn address(dir: &Path, name: &str) -> OsString;
-
-    /// Whether `record` is an address this OS can use. Unix: an absolute socket path. Windows: a full local pipe
-    /// name, `\\.\pipe\...`.
-    fn check(record: &str) -> io::Result<()>;
-
     /// Starts listening at `endpoint`, reachable by this user alone. A name another process listens on is an error.
     /// Unix: only in a directory of this user's open to nobody else; a socket left by a dead process is replaced,
     /// but only once it is checked to be this user's and private; the socket file is `0600` and goes away when the
@@ -96,10 +60,10 @@ pub trait Channel {
     /// SYSTEM and Administrators only, refusing remote clients.
     fn listen(endpoint: &Endpoint) -> io::Result<Listener>;
 
-    /// Connects to `endpoint`, refusing a server that is not this user. Unix: first, the socket must be this
-    /// user's, open to nobody else, in a private directory. No timeout: callers bound it.
+    /// Connects to `endpoint`, refusing a server that is not this user: what is checked is the process at the other
+    /// end, once connected, not the file or pipe before. No timeout: callers bound it.
     fn connect(endpoint: &Endpoint) -> impl Future<Output = io::Result<Stream>> + Send {
-        let name = imp::to_connect(endpoint);
+        let name = endpoint.name();
         let at = endpoint.to_string();
         async move {
             let stream = Stream::connect(name?).await?;
