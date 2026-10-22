@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0](https://github.com/sidevoice/sidevoice-core/compare/v0.6.0...v0.7.0) (2026-10-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** the ready file no longer carries socket; --socket and --endpoint are gone.
+
+### Features
+
+* **platform:** local channel over interprocess, peer check on every OS, in-band shutdown ([#165](https://github.com/sidevoice/sidevoice-core/issues/165)) ([376d5dc](https://github.com/sidevoice/sidevoice-core/commit/376d5dc22178a26c914f30ca751ee1b071214581))
+
+
+### Code Refactoring
+
+* **core:** the ready file names the endpoint only; no --socket/--endpoint ([#169](https://github.com/sidevoice/sidevoice-core/issues/169)) ([7d3d1e3](https://github.com/sidevoice/sidevoice-core/commit/7d3d1e34f48640ac54817dc61ef49f7475642c82))
+
 ## [0.6.0](https://github.com/sidevoice/sidevoice-core/compare/v0.5.0...v0.6.0) (2026-10-21)
 
 
