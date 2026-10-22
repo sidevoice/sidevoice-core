@@ -8,4 +8,5 @@ disallowed-methods = [
     { path = "rustix::process::getuid", reason = "the user is `platform::user`" },
     { path = "libc::geteuid", reason = "the user is `platform::user`" },
     { path = "libc::getuid", reason = "the user is `platform::user`" },
+    { path = "tokio::signal::unix::signal", reason = "the request to leave is `platform::signal`" },
 ]

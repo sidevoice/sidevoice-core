@@ -1,32 +1,10 @@
-//! What ends a running process: a termination signal or a quiet period without calls.
+//! What ends a running process besides the operating system's request to leave (`platform::signal`) and the
+//! in-band one (`POST /api/local/shutdown`): a quiet period without calls.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::signal::unix::{signal, SignalKind};
-
 use crate::server::AppState;
-
-/// SIGTERM and SIGINT listeners. They are installed before the core says it is ready, so a
-/// signal a manager sends once it sees the ready file is held, never lost to the default action.
-pub(super) struct Signals {
-    term: tokio::signal::unix::Signal,
-    interrupt: tokio::signal::unix::Signal,
-}
-
-impl Signals {
-    pub(super) fn install() -> Self {
-        Self {
-            term: signal(SignalKind::terminate()).expect("SIGTERM listener"),
-            interrupt: signal(SignalKind::interrupt()).expect("SIGINT listener"),
-        }
-    }
-
-    /// Resolve on SIGTERM or SIGINT.
-    pub(super) async fn received(&mut self) {
-        tokio::select! { _ = self.term.recv() => (), _ = self.interrupt.recv() => () }
-    }
-}
 
 /// Resolve once no call has been open and no connector linked for `seconds`.
 pub(super) async fn idle_for(state: Arc<AppState>, seconds: f64) {

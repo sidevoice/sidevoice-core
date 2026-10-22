@@ -11,7 +11,7 @@ use crate::runtime::{Cli, Config};
 fn every_flag_overrides_its_setting() {
     let config = full_config();
     assert_eq!(config.data_dir, PathBuf::from("/srv/sidevoice/core"));
-    assert_eq!(config.endpoint.to_record(), "/run/sidevoice/local.sock");
+    assert_eq!(config.endpoint.to_string(), "/run/sidevoice/local.sock");
     assert_eq!(
         config.ready_file,
         PathBuf::from("/run/sidevoice/ready.json")
@@ -30,7 +30,7 @@ fn every_flag_overrides_its_setting() {
 fn unset_paths_derive_from_the_data_directory() {
     let config = Config::from_args(args(&["--data-dir", "/srv/sidevoice/core"])).unwrap();
     assert_eq!(
-        config.endpoint.to_record(),
+        config.endpoint.to_string(),
         "/srv/sidevoice/core/local.sock"
     );
     assert_eq!(

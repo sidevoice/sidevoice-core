@@ -20,8 +20,9 @@ use crate::server::{router, AppState};
 use crate::storage::PrivateDir;
 
 const APP: &str = "tauri://localhost";
-const LOCAL_PATHS: [(&str, &str); 4] = [
+const LOCAL_PATHS: [(&str, &str); 5] = [
     ("GET", "/api/local/health"),
+    ("POST", "/api/local/shutdown"),
     ("POST", "/api/device/local/pair"),
     ("DELETE", "/api/device/local"),
     ("GET", "/api/connectors/v3"),
@@ -193,6 +194,55 @@ async fn a_page_reaching_the_socket_gets_none_of_it() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
     }
     assert!(node.devices_on_disk().is_empty(), "nothing was paired");
+}
+
+/// Through the socket a request to leave is taken whatever else its body holds, unless it names another launch.
+#[tokio::test]
+async fn through_the_socket_a_request_to_leave_is_taken_unless_it_names_another_launch() {
+    let taken = |state: Arc<AppState>, within: u64| async move {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(within),
+            state.shutdown_requested(),
+        )
+        .await
+        .is_ok()
+    };
+    for body in [
+        None,
+        Some(json!({"launch_id": "fixture", "reason": "update"})),
+        Some(json!(["not", "an", "object"])),
+    ] {
+        let node = Node::new();
+        let (status, _, answer) = send(
+            &node.socket(),
+            "POST",
+            "/api/local/shutdown",
+            &[],
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body:?}");
+        assert_eq!(
+            (&answer["launch_id"], &answer["pid"]),
+            (&json!("fixture"), &json!(std::process::id()))
+        );
+        assert!(taken(node.state.clone(), 1000).await, "{body:?}");
+    }
+    let node = Node::new();
+    let (status, _, answer) = send(
+        &node.socket(),
+        "POST",
+        "/api/local/shutdown",
+        &[],
+        Some(json!({"launch_id": "another"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        answer["detail"],
+        "This request is for another launch of the core."
+    );
+    assert!(!taken(node.state.clone(), 50).await, "it stays up");
 }
 
 /// Through the socket the connector's link is there, JSON-RPC v3 only: the old Socket.IO link is gone.

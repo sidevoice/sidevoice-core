@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use sidevoice_core::platform::ipc::{self, Endpoint, Stream};
+use sidevoice_core::platform::ipc::{Channel, Endpoint, Stream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -511,9 +511,7 @@ impl Http {
                     )
                     .await
                 }
-                Target::Local(endpoint) => {
-                    exchange(ipc::connect(endpoint).await.unwrap(), &self).await
-                }
+                Target::Local(endpoint) => exchange(endpoint.connect().await.unwrap(), &self).await,
             }
         };
         tokio::time::timeout(self.timeout, answer)
@@ -902,7 +900,7 @@ pub struct Rpc {
 
 impl Rpc {
     pub async fn open(core: &Core) -> Self {
-        let stream = ipc::connect(&core.endpoint()).await.unwrap();
+        let stream = core.endpoint().connect().await.unwrap();
         let (ws, _) = tokio_tungstenite::client_async("ws://localhost/api/connectors/v3", stream)
             .await
             .expect("the v3 link opens over the local socket");

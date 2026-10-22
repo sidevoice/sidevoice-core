@@ -75,7 +75,7 @@ fn a_link_is_refused_however_it_is_spelled() {
 
 #[test]
 fn another_user_s_directory_is_refused() {
-    if crate::platform::user::current().raw() == 0 {
+    if UserId::current().owns_path(Path::new("/")).unwrap() {
         return; // root owns `/`; unprivileged, `/` stands for another user's directory.
     }
     let refused = PrivateDir::open("/").unwrap_err();
@@ -128,8 +128,8 @@ fn every_staging_file_has_a_name_of_its_own() {
 
 #[test]
 fn a_write_that_fails_leaves_the_old_file_and_no_temporary() {
-    if crate::platform::user::current().raw() == 0 {
-        return; // root writes into a read-only directory.
+    if UserId::current().owns_path(Path::new("/")).unwrap() {
+        return; // root (who owns `/`) writes into a read-only directory.
     }
     let root = tempfile::tempdir().unwrap();
     let dir = PrivateDir::open(root.path().join("core")).unwrap();

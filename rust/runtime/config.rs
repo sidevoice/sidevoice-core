@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::platform::ipc::Endpoint;
+use crate::platform::ipc::{Channel, Endpoint};
 
 use super::Cli;
 
@@ -37,14 +37,15 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         let data_dir = absolute(cli.data_dir.unwrap_or_else(|| home.join(".sidevoice/core")))?;
-        #[cfg(unix)]
-        let from_socket = cli.socket.as_deref().map(Endpoint::from_socket_path);
-        #[cfg(not(unix))]
-        let from_socket = None;
-        let endpoint = match (cli.endpoint.as_deref(), from_socket) {
-            (Some(record), _) => Endpoint::from_record(record)?,
-            (None, Some(endpoint)) => endpoint?,
-            (None, None) => Endpoint::new(&data_dir)?,
+        // `--socket` is the older spelling of a socket endpoint: a path, made absolute like the others. Where the
+        // channel is no socket (a Windows pipe), a path is no endpoint and is refused.
+        let socket = cli.socket.map(absolute).transpose()?;
+        let endpoint = match (cli.endpoint, socket) {
+            (Some(record), _) => Endpoint::from_record(&record)?,
+            (None, Some(path)) => Endpoint::from_record(path.to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "the socket path is not UTF-8")
+            })?)?,
+            (None, None) => Endpoint::in_dir(&data_dir, "local"),
         };
         let ready_file = absolute(cli.ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;
         let log_file = absolute(

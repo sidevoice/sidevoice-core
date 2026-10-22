@@ -58,7 +58,9 @@ cargo run --locked --release        # listens on 127.0.0.1:10829
 ```
 
 `--help` lists its options. The connector starts it as `sidevoice-core-rust --data-dir D --port P`; `D/core.json`
-(mode 0600) then says where it listens and which credential the connector links with. `cargo xtask dist` builds,
+(mode 0600) then says where it listens and which credential the connector links with. Its local channel, `endpoint`
+there, is a Unix socket on macOS and Linux and a named pipe on Windows, and serves only processes of the same user;
+`POST /api/local/shutdown` on it stops the core as `SIGTERM` does on Unix. `cargo xtask dist` builds,
 packages and verifies this machine's release archive, exactly as a release does ([`RELEASING.md`](RELEASING.md)).
 
 Compatibility with the latest published connector and web client is `cargo xtask compat`, run weekly in CI.
@@ -96,8 +98,7 @@ apply. The Core's standalone bind default remains loopback.
 - **Network limits.** In each 60-second window the TCP listener allows 10 failed pairing attempts per peer IP and
   40 globally, or 60 failed authentication attempts per peer IP and 300 globally. Further attempts receive 429
   with `Retry-After`. It serves at most 256 concurrent HTTP or WebSocket connections. The peer is the direct TCP
-  address (the proxy's address behind a proxy); forwarded headers are ignored. The local Unix socket has no such
-  limits.
+  address (the proxy's address behind a proxy); forwarded headers are ignored. The local channel has no such limits.
 - **Transport.** The core serves plain HTTP on its listen address. The web client normally sends pairing secrets
   and device tokens only over HTTPS or loopback; the native app can also send them to a private LAN address after
   explicit unencrypted-connection consent. Anyone able to read that LAN traffic can read those credentials. Public

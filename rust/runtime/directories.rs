@@ -4,6 +4,7 @@ use std::fs::{self, File};
 
 use super::failure::StartFailure;
 use super::Config;
+use crate::platform::ipc::Channel;
 use crate::storage::PrivateDir;
 
 pub(super) struct Directories {

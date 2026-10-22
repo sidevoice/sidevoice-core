@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 
 use super::failure::StartFailure;
 use super::limited_listener::LimitedListener;
-use crate::platform::ipc::{self, Endpoint};
+use crate::platform::ipc::{self, Channel, Endpoint};
 use crate::server::{self, AppState};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
@@ -71,7 +71,7 @@ impl Servers {
         })
         .await?;
         await_serving(&self.local, || async move {
-            match tokio::time::timeout(PROBE_TIMEOUT, ipc::connect(endpoint)).await {
+            match tokio::time::timeout(PROBE_TIMEOUT, endpoint.connect()).await {
                 Ok(Ok(stream)) => probe_http(stream, "/api/local/health").await,
                 _ => false,
             }

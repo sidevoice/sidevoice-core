@@ -22,6 +22,7 @@
   "runtime.log_ready": "The core is listening.",
   "runtime.log_stop": "The core has stopped.",
   "runtime.log_failure": "The core could not start ({key}).",
+  "runtime.launch_mismatch": "This request is for another launch of the core.",
   "settings.ui_language_invalid": "The interface language is not valid.",
   "room.full": "The maximum number of browsers is already connected.",
   "room.thread_invalid": "Invalid conversation identifier.",

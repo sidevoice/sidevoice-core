@@ -42,6 +42,8 @@ pub struct AppState {
     host: String,
     bind_host: String,
     port: u16,
+    /// Set by `POST /api/local/shutdown`; the runtime stops as it does on `SIGTERM`.
+    shutdown: tokio::sync::Notify,
 }
 
 #[derive(Clone)]
@@ -75,6 +77,7 @@ impl AppState {
             host,
             bind_host,
             port,
+            shutdown: tokio::sync::Notify::new(),
         }
     }
 
@@ -101,6 +104,12 @@ impl AppState {
             Some(&self.host),
             &urls,
         )
+    }
+
+    /// Resolves once a local client has asked this process to leave (`POST /api/local/shutdown`), also when it
+    /// asked before anyone waited.
+    pub async fn shutdown_requested(&self) {
+        self.shutdown.notified().await;
     }
 
     pub fn open_calls(&self) -> usize {

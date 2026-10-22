@@ -23,11 +23,9 @@ pub struct Cli {
     pub data_dir: Option<PathBuf>,
     /// Where to listen for this machine's own processes, as the ready file's `endpoint` records it [default:
     /// derived from the data directory]
-    #[arg(long, value_name = "ENDPOINT")]
-    #[cfg_attr(unix, arg(conflicts_with = "socket"))]
+    #[arg(long, value_name = "ENDPOINT", conflicts_with = "socket")]
     pub endpoint: Option<String>,
-    /// Deprecated, Unix only: the local socket path; use `--endpoint`
-    #[cfg(unix)]
+    /// Deprecated: the local socket path, where the local channel is a socket (not on Windows); use `--endpoint`
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
     /// Readiness file path [default: core.json in the data directory]
