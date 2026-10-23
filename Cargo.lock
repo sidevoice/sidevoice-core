@@ -2304,6 +2304,7 @@ dependencies = [
 name = "sidevoice-platform"
 version = "0.8.0"
 dependencies = [
+ "dirs",
  "gethostname",
  "hex",
  "interprocess",
