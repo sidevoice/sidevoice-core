@@ -10,7 +10,8 @@
 //! | Windows | `%LOCALAPPDATA%\Sidevoice` |
 //!
 //! `$SIDEVOICE_DATA_DIR` (absolute) overrides it: tests, profiles. Layout: `D/core` is the core's directory, `D/install`
-//! holds the connector's releases; each program that listens publishes where in a small record under `D`
+//! holds the connector's releases, `D/Models` the downloaded models the engine and the desktop app share (the connector
+//! never writes or removes it; same place on every OS, Linux included); each program that listens publishes where in a small record under `D`
 //! (`core/core.json`, `connector.json`), so none computes a socket path.
 //!
 //! Nothing differs per OS but the folder's name, so this is a plain module of free functions: no trait, no per-OS files.
@@ -67,6 +68,16 @@ pub fn core_dir(data: &Path) -> PathBuf {
     data.join("core")
 }
 
+/// The name of the models folder inside `D`: the downloaded models the engine and the desktop app share. It is theirs,
+/// never the connector's: uninstalling the connector leaves it.
+pub const MODELS: &str = "Models";
+
+/// The shared models folder inside `data` (`D/Models`): the same rule on every OS, and it follows `D`, so
+/// `$SIDEVOICE_DATA_DIR` moves it with everything else.
+pub fn models_dir(data: &Path) -> PathBuf {
+    data.join(MODELS)
+}
+
 /// The connector's releases inside `data` (`D/install`): `current.json` and `releases/<id>`.
 pub fn releases_dir(data: &Path) -> PathBuf {
     data.join("install")
@@ -96,6 +107,11 @@ mod tests {
             elsewhere
         );
         assert_eq!(
+            models_dir(&elsewhere),
+            elsewhere.join("Models"),
+            "the models follow the override, with the same name on every OS (Linux too)"
+        );
+        assert_eq!(
             resolve(|name| (name == VARIABLE).then(OsString::new)).unwrap(),
             default,
             "an empty override is no override"
@@ -105,8 +121,11 @@ mod tests {
     }
 
     #[test]
-    fn the_core_and_the_releases_are_inside_the_data_directory() {
+    fn the_core_the_releases_and_the_models_are_inside_the_data_directory() {
         let data = std::env::temp_dir().join("data");
+        assert_eq!(models_dir(&data), data.join("Models"));
+        assert_ne!(models_dir(&data), core_dir(&data));
+        assert_ne!(models_dir(&data), releases_dir(&data));
         assert_eq!(core_dir(&data).parent().unwrap(), data);
         assert_eq!(releases_dir(&data).parent().unwrap(), data);
         assert_ne!(core_dir(&data), releases_dir(&data));
