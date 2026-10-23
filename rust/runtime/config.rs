@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::platform::data_dir::{DataDir, DataDirs};
+use crate::platform::data_dir;
 use crate::platform::ipc::{Address, Endpoint};
 
 use super::Cli;
@@ -35,10 +35,10 @@ impl Config {
     /// Derive the unset paths from the data directory and make every path absolute.
     pub fn from_cli(cli: Cli) -> io::Result<Self> {
         // Unnamed, the core lives in `D/core`, `D` being the one data directory every Sidevoice program shares.
-        let data_dir = match cli.data_dir {
-            Some(path) => absolute(path)?,
-            None => DataDirs::core_dir(&DataDirs::resolve(|name| std::env::var_os(name))?),
-        };
+        let data_dir = absolute(match cli.data_dir {
+            Some(dir) => dir,
+            None => data_dir::core_dir(&data_dir::resolve(|name| std::env::var_os(name))?),
+        })?;
         // The local channel is derived from the data directory alone, so the data directory's lock holds it too.
         let endpoint = Endpoint::new(&data_dir, "local");
         let ready_file = absolute(cli.ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;

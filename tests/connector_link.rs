@@ -15,7 +15,7 @@ const THREAD: &str = "typed-thread";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uncertain_speech_recovery_over_rpc_saves_without_audio_and_recovers_prior_answer() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
@@ -69,7 +69,7 @@ async fn uncertain_speech_recovery_over_rpc_saves_without_audio_and_recovers_pri
 
 #[tokio::test(flavor = "multi_thread")]
 async fn open_turn_refusal_keeps_rpc_identity_and_empty_notice_reaches_pull() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
@@ -138,7 +138,7 @@ async fn open_turn_refusal_keeps_rpc_identity_and_empty_notice_reaches_pull() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn refused_and_turned_away_calls_give_their_seat_back() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let _first = core.join(&token, Value::Null).await;
@@ -171,7 +171,7 @@ async fn refused_and_turned_away_calls_give_their_seat_back() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
@@ -338,7 +338,7 @@ async fn typed_input_is_delivered_read_and_answered_and_replies_play_in_order() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_host_scan_holds_no_input_and_a_host_refusal_keeps_only_its_key() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
@@ -388,7 +388,7 @@ async fn a_slow_host_scan_holds_no_input_and_a_host_refusal_keeps_only_its_key()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_host_agent_check_reaches_the_connector_and_an_unknown_action_does_not() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (mut peer, _) = connector_with_binding(&core, "check", THREAD).await;
@@ -439,7 +439,7 @@ async fn a_host_agent_check_reaches_the_connector_and_an_unknown_action_does_not
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reconnected_connector_keeps_its_binding_and_a_replaced_one_settles_nothing() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
@@ -503,7 +503,7 @@ async fn a_reconnected_connector_keeps_its_binding_and_a_replaced_one_settles_no
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_paired_device_reads_the_sidevoice_version_the_linked_connector_said() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let status = || async { core.get("/api/host/status").token(&token).send().await };
@@ -585,7 +585,7 @@ async fn a_paired_device_reads_the_sidevoice_version_the_linked_connector_said()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_v3_connector_speaks_json_rpc_on_the_local_socket_only() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     assert_eq!(core.ready["connector_protocols"], json!([2, 3]));
     assert_eq!(
@@ -663,7 +663,7 @@ async fn a_v3_connector_speaks_json_rpc_on_the_local_socket_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_saturated_v3_link_recovers_and_a_malformed_id_ends_it_without_losing_the_binding() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
@@ -751,7 +751,7 @@ async fn a_saturated_v3_link_recovers_and_a_malformed_id_ends_it_without_losing_
 /// second is tried again, as a failed one is.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delivery_answer_with_keys_the_core_does_not_read_still_settles_it() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
@@ -785,7 +785,7 @@ async fn a_delivery_answer_with_keys_the_core_does_not_read_still_settles_it() {
 /// know: it binds, and the capabilities it does not know are left out.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_registration_with_values_the_core_does_not_know_binds_as_push() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
@@ -832,7 +832,7 @@ async fn a_registration_with_values_the_core_does_not_know_binds_as_push() {
 /// A reply in a language this core does not speak is kept and sent to the call as one that names no language.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_in_a_language_the_core_does_not_know_is_still_sent() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;
@@ -860,7 +860,7 @@ async fn a_reply_in_a_language_the_core_does_not_know_is_still_sent() {
 /// and an unregistration. All are taken as their known part says.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_connector_message_with_fields_the_core_does_not_know_is_taken() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, Value::Null).await;

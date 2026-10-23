@@ -4,23 +4,31 @@
 //! socket in a 0700 directory, leaves when nothing uses it, and — when it cannot start — says
 //! why in `core-failure.json` and by its exit status what the service manager should do.
 
+mod support;
+
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use fs2::FileExt;
 use serde_json::{json, Value};
+use sidevoice_core::platform::ipc::{Address, Channel, Channels, Endpoint};
+use support::{is_private, private_dir};
 
 const CORE: &str = env!("CARGO_BIN_EXE_sidevoice-core-rust");
 
 struct Core {
     child: Child,
+    #[cfg_attr(
+        unix,
+        allow(
+            dead_code,
+            reason = "only Windows asks the core to leave over its local channel"
+        )
+    )]
+    data: PathBuf,
 }
 
 impl Drop for Core {
@@ -50,6 +58,7 @@ impl Core {
         }
         Self {
             child: command.spawn().expect("the core binary starts"),
+            data: PathBuf::from(data),
         }
     }
 
@@ -57,8 +66,21 @@ impl Core {
         self.child.id()
     }
 
+    #[cfg(unix)]
     fn signal(&self, signal: libc::c_int) {
         assert_eq!(unsafe { libc::kill(self.pid() as libc::pid_t, signal) }, 0);
+    }
+
+    /// Asks the core to leave the way its manager does on this OS: SIGTERM on Unix; on Windows, which has no signal for
+    /// a process without a console, a shutdown request over its local channel.
+    fn terminate(&self) {
+        #[cfg(unix)]
+        self.signal(libc::SIGTERM);
+        #[cfg(windows)]
+        assert_eq!(
+            via_endpoint(&local(&self.data), "POST", "/api/local/shutdown").0,
+            202
+        );
     }
 
     fn running(&mut self) -> bool {
@@ -127,10 +149,6 @@ fn wait_ready(data: &Path) -> Value {
     until(60, || ready(&data.join("core.json")))
 }
 
-fn mode(path: &Path) -> u32 {
-    fs::metadata(path).unwrap().permissions().mode() & 0o777
-}
-
 fn names(path: &Path) -> Vec<String> {
     let mut names: Vec<_> = fs::read_dir(path)
         .unwrap()
@@ -140,23 +158,28 @@ fn names(path: &Path) -> Vec<String> {
     names
 }
 
-fn private_dir(path: &Path) {
-    fs::DirBuilder::new().mode(0o700).create(path).unwrap();
-}
-
-/// One HTTP/1.1 exchange with `Connection: close`, over any stream.
-fn exchange(mut stream: impl Read + Write, method: &str, path: &str, host: &str) -> (u16, Value) {
+/// An HTTP/1.1 request with `Connection: close`.
+fn request(method: &str, path: &str, host: &str) -> Vec<u8> {
     let body = if method == "POST" { "{}" } else { "" };
-    write!(
-        stream,
+    format!(
         "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )
-    .unwrap();
+    .into_bytes()
+}
+
+/// One exchange over any stream.
+fn exchange(mut stream: impl Read + Write, method: &str, path: &str, host: &str) -> (u16, Value) {
+    stream.write_all(&request(method, path, host)).unwrap();
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).unwrap();
-    let text = String::from_utf8_lossy(&raw);
+    answer(&raw)
+}
+
+/// The status and the JSON body (or text) of a raw HTTP answer.
+fn answer(raw: &[u8]) -> (u16, Value) {
+    let text = String::from_utf8_lossy(raw);
     let (head, rest) = text.split_once("\r\n\r\n").expect("an HTTP answer");
     let status = head.split(' ').nth(1).unwrap().parse().unwrap();
     let body = if head
@@ -183,13 +206,51 @@ fn exchange(mut stream: impl Read + Write, method: &str, path: &str, host: &str)
     )
 }
 
-fn via_socket(socket: &Path, method: &str, path: &str) -> (u16, Value) {
-    exchange(
-        UnixStream::connect(socket).unwrap(),
-        method,
-        path,
-        "localhost",
-    )
+/// The local channel of the core whose data directory is `data`.
+fn local(data: &Path) -> Endpoint {
+    Endpoint::new(data, "local")
+}
+
+/// Runs `work` on a runtime of its own, in a thread of its own: the callers are plain tests and async ones alike.
+fn blocking<T: Send>(work: impl std::future::Future<Output = T> + Send) -> T {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(work)
+            })
+            .join()
+            .unwrap()
+    })
+}
+
+fn via_endpoint(endpoint: &Endpoint, method: &str, path: &str) -> (u16, Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let raw = blocking(async {
+        let mut stream = Channels::connect(endpoint).await.unwrap();
+        stream
+            .write_all(&request(method, path, "localhost"))
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        raw
+    });
+    answer(&raw)
+}
+
+/// Nothing listens at the local channel of `data` any more, and no socket file is left behind (Unix).
+fn nothing_left(data: &Path) {
+    let endpoint = local(data);
+    assert!(
+        blocking(async { Channels::connect(&endpoint).await.is_err() }),
+        "nobody listens"
+    );
+    #[cfg(unix)]
+    assert!(!data.join("local.sock").exists(), "no socket file left");
 }
 
 fn over_tcp(port: u64, method: &str, path: &str) -> (u16, Value) {
@@ -203,9 +264,9 @@ fn network_bind_accepts_ip_hosts_unless_an_administrator_set_a_host_allowlist() 
         (None, 200),
         (Some(OsString::from("")), 421),
         (Some(OsString::from("trusted.example")), 421),
-        (Some(OsString::from_vec(vec![0xff])), 421),
+        (Some(invalid_unicode()), 421),
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = support::private_tempdir();
         let data = root.path().join("core");
         let mut command = Command::new(CORE);
         command
@@ -231,6 +292,7 @@ fn network_bind_accepts_ip_hosts_unless_an_administrator_set_a_host_allowlist() 
         }
         let mut core = Core {
             child: command.spawn().unwrap(),
+            data: data.clone(),
         };
         let port = wait_ready(&data)["port"].as_u64().unwrap();
         let request = |host: &str, path: &str| {
@@ -245,9 +307,17 @@ fn network_bind_accepts_ip_hosts_unless_an_administrator_set_a_host_allowlist() 
         } else if allowed_hosts.as_deref() == Some(OsStr::new("trusted.example")) {
             assert_eq!(request("trusted.example:10829", "/api/rendezvous"), 200);
         }
-        core.signal(libc::SIGTERM);
+        core.terminate();
         assert!(core.wait(20).success());
     }
+}
+
+/// Text no OS can read as Unicode: a byte no UTF-8 string holds, a lone surrogate no UTF-16 string holds.
+fn invalid_unicode() -> OsString {
+    #[cfg(unix)]
+    return std::os::unix::ffi::OsStringExt::from_vec(vec![0xff]);
+    #[cfg(windows)]
+    return std::os::windows::ffi::OsStringExt::from_wide(&[0xd800]);
 }
 
 const LOCAL_PATHS: [(&str, &str); 5] = [
@@ -262,18 +332,13 @@ const LOCAL_PATHS: [(&str, &str); 5] = [
 
 #[test]
 fn the_ready_file_carries_the_link_and_leaves_with_the_process() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     let mut core = Core::start(&data, "0", &["--launch-id", "launch-1"]);
     let facts = wait_ready(&data);
-    assert_eq!(
-        mode(&data.join("core.json")),
-        0o600,
-        "it holds a credential"
-    );
-    assert_eq!(
-        mode(&data),
-        0o700,
+    assert!(is_private(&data.join("core.json")), "it holds a credential");
+    assert!(
+        is_private(&data),
         "a directory it created is this user's alone"
     );
     assert_eq!(facts["pid"], core.pid());
@@ -285,25 +350,27 @@ fn the_ready_file_carries_the_link_and_leaves_with_the_process() {
         (&facts["launch_id"], &facts["api"]),
         (&json!("launch-1"), &json!(1))
     );
-    // The desktop app reaches `C/local.sock` without reading the ready file: that path is a contract. The ready
-    // file carries only `endpoint` (no deprecated `socket`).
-    assert_eq!(facts["endpoint"], data.join("local.sock").to_str().unwrap());
+    // The ready file carries only `endpoint` (no deprecated `socket`), the core's own address for this directory.
+    assert_eq!(facts["endpoint"], local(&data).to_string());
     assert!(facts.get("socket").is_none());
-    let socket = PathBuf::from(facts["endpoint"].as_str().unwrap());
-    let meta = fs::symlink_metadata(&socket).unwrap();
-    assert!(meta.file_type().is_socket());
-    assert_eq!(
-        meta.permissions().mode() & 0o777,
-        0o600,
-        "the socket is this user's alone"
-    );
+    let endpoint: Endpoint = facts["endpoint"].as_str().unwrap().parse().unwrap();
+    // Unix: the desktop app reaches `C/local.sock` without reading the ready file: that path is a contract; the
+    // socket is a socket, this user's alone.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        assert_eq!(facts["endpoint"], data.join("local.sock").to_str().unwrap());
+        let meta = fs::symlink_metadata(data.join("local.sock")).unwrap();
+        assert!(meta.file_type().is_socket());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
     assert!(facts["connector_id"]
         .as_str()
         .is_some_and(|id| !id.is_empty()));
     assert!(facts["token"]
         .as_str()
         .is_some_and(|token| !token.is_empty()));
-    let (status, health) = via_socket(&socket, "GET", "/api/local/health");
+    let (status, health) = via_endpoint(&endpoint, "GET", "/api/local/health");
     assert_eq!(status, 200);
     assert_eq!(
         (&health["launch_id"], &health["pid"]),
@@ -317,13 +384,13 @@ fn the_ready_file_carries_the_link_and_leaves_with_the_process() {
             "{method} {path} over TCP"
         );
     }
-    core.signal(libc::SIGTERM);
+    core.terminate();
     assert!(core.wait(20).success());
     assert!(
         !data.join("core.json").exists(),
         "the file leaves with the process"
     );
-    assert!(!data.join("local.sock").exists(), "and so does the socket");
+    nothing_left(&data);
     // Started again, it keeps the same credential: a connector reconnecting needs no new one.
     let mut again = Core::start(&data, "0", &[]);
     let second = wait_ready(&data);
@@ -338,14 +405,17 @@ fn the_ready_file_carries_the_link_and_leaves_with_the_process() {
         (&second["connector_id"], &second["token"]),
         (&facts["connector_id"], &facts["token"])
     );
-    again.signal(libc::SIGTERM);
+    again.terminate();
     assert!(again.wait(20).success());
 }
 
+// Unix only: these are the signals a Unix manager sends; Windows has none for a console-less process (its stop is the
+// local request, tested below).
+#[cfg(unix)]
 #[test]
 fn a_manager_s_sigterm_or_a_sigint_is_a_clean_exit() {
     for signal in [libc::SIGTERM, libc::SIGINT] {
-        let root = tempfile::tempdir().unwrap();
+        let root = support::private_tempdir();
         let data = root.path().join("core");
         let mut core = Core::start(&data, "0", &[]);
         wait_ready(&data);
@@ -358,11 +428,11 @@ fn a_manager_s_sigterm_or_a_sigint_is_a_clean_exit() {
 
 #[test]
 fn a_local_request_to_leave_is_a_clean_exit() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     let mut core = Core::start(&data, "0", &["--launch-id", "launch-1"]);
     wait_ready(&data);
-    let (status, answer) = via_socket(&data.join("local.sock"), "POST", "/api/local/shutdown");
+    let (status, answer) = via_endpoint(&local(&data), "POST", "/api/local/shutdown");
     assert_eq!(status, 202, "{answer}");
     assert_eq!(
         (&answer["launch_id"], &answer["pid"]),
@@ -370,30 +440,30 @@ fn a_local_request_to_leave_is_a_clean_exit() {
     );
     assert_eq!(core.wait(20).code(), Some(0));
     assert!(!data.join("core.json").exists());
-    assert!(!data.join("local.sock").exists());
+    nothing_left(&data);
 }
 
 #[test]
 fn a_core_nothing_uses_leaves_on_its_own() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     let mut core = Core::start(&data, "1", &[]);
     wait_ready(&data);
     assert_eq!(core.wait(30).code(), Some(0));
     assert!(!data.join("core.json").exists());
-    assert!(!data.join("local.sock").exists());
+    nothing_left(&data);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_still_waiting_for_its_first_message_keeps_the_core_up_and_is_counted() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     let mut core = Core::start(&data, "2", &[]);
     let facts = wait_ready(&data);
-    let socket = PathBuf::from(facts["endpoint"].as_str().unwrap());
-    let (status, paired) = via_socket(&socket, "POST", "/api/device/local/pair");
+    let socket: Endpoint = facts["endpoint"].as_str().unwrap().parse().unwrap();
+    let (status, paired) = via_endpoint(&socket, "POST", "/api/device/local/pair");
     assert_eq!(status, 200, "{paired}");
     let token = paired["token"].as_str().unwrap();
     let mut request = "ws://localhost/api/presentation/ws"
@@ -420,7 +490,7 @@ async fn a_call_still_waiting_for_its_first_message_keeps_the_core_up_and_is_cou
     let (mut ws, _) = tokio_tungstenite::client_async(request, stream)
         .await
         .unwrap();
-    let (_, health) = via_socket(&socket, "GET", "/api/local/health");
+    let (_, health) = via_endpoint(&socket, "GET", "/api/local/health");
     assert_eq!(health["calls"], 1, "before any hello");
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert!(
@@ -434,7 +504,7 @@ async fn a_call_still_waiting_for_its_first_message_keeps_the_core_up_and_is_cou
 
 #[test]
 fn a_start_clears_the_failure_report_a_previous_one_left() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
     fs::write(
@@ -449,7 +519,7 @@ fn a_start_clears_the_failure_report_a_previous_one_left() {
 
 #[test]
 fn the_core_writes_its_own_private_log() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     let mut core = Core::start(&data, "0", &["--launch-id", "logged"]);
     wait_ready(&data);
@@ -459,11 +529,11 @@ fn the_core_writes_its_own_private_log() {
             .ok()
             .filter(|text| text.contains("runtime.log_ready"))
     });
-    assert_eq!(mode(&log), 0o600);
+    assert!(is_private(&log));
     assert!(text.lines().all(|line| {
         serde_json::from_str::<Value>(line).is_ok_and(|entry| entry["launch_id"] == "logged")
     }));
-    core.signal(libc::SIGTERM);
+    core.terminate();
     assert!(core.wait(20).success());
     assert!(fs::read_to_string(&log)
         .unwrap()
@@ -475,9 +545,12 @@ fn the_core_writes_its_own_private_log() {
     );
 }
 
+// Unix only: a socket file left by a dead process; a Windows pipe goes with its last handle.
+#[cfg(unix)]
 #[test]
 fn a_socket_a_dead_core_left_is_replaced() {
-    let root = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
     // Bound, never listening, nobody behind it, `0600`: what a SIGKILLed core leaves.
@@ -486,31 +559,35 @@ fn a_socket_a_dead_core_left_is_replaced() {
     assert!(data.join("local.sock").exists());
     let core = Core::start(&data, "0", &[]);
     let facts = wait_ready(&data);
-    let (status, health) = via_socket(&data.join("local.sock"), "GET", "/api/local/health");
+    let (status, health) = via_endpoint(&local(&data), "GET", "/api/local/health");
     assert_eq!((status, &health["pid"]), (200, &json!(core.pid())));
     assert_eq!(facts["pid"], core.pid());
 }
 
 #[test]
 fn a_relative_data_directory_is_one_directory() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let mut core = Core::start_in(Some(root.path()), "relative-core", "0", &[]);
     // The core makes it absolute from its working directory, which the OS reports resolved
     // (macOS's temporary directory sits behind the `/var` -> `/private/var` link).
-    let data = fs::canonicalize(root.path()).unwrap().join("relative-core");
+    let data = if cfg!(windows) {
+        root.path().join("relative-core") // `canonicalize` there is a `\\?\` path, which the core's is not.
+    } else {
+        fs::canonicalize(root.path()).unwrap().join("relative-core")
+    };
     let facts = until(60, || {
         assert!(core.running(), "{}", core.stderr());
         ready(&data.join("core.json"))
     });
-    assert_eq!(facts["endpoint"], data.join("local.sock").to_str().unwrap());
-    let (status, _) = via_socket(&data.join("local.sock"), "GET", "/api/local/health");
+    assert_eq!(facts["endpoint"], local(&data).to_string());
+    let (status, _) = via_endpoint(&local(&data), "GET", "/api/local/health");
     assert_eq!(status, 200);
 }
 
 #[test]
 fn overlapping_starts_leave_exactly_one_core() {
     for _attempt in 0..3 {
-        let root = tempfile::tempdir().unwrap();
+        let root = support::private_tempdir();
         let data = root.path().join("core");
         private_dir(&data);
         let mut rivals: Vec<_> = (0..2)
@@ -538,13 +615,13 @@ fn overlapping_starts_leave_exactly_one_core() {
             (&json!("bind.core-running"), &json!("bind"))
         );
         assert_eq!(report["launch_id"], format!("rival-{loser}"));
-        let (_, health) = via_socket(&data.join("local.sock"), "GET", "/api/local/health");
+        let (_, health) = via_endpoint(&local(&data), "GET", "/api/local/health");
         assert_eq!(
             health["pid"],
             rivals[winner].pid(),
             "the socket is the survivor's"
         );
-        rivals[winner].signal(libc::SIGTERM);
+        rivals[winner].terminate();
         assert!(rivals[winner].wait(20).success());
     }
 }
@@ -562,7 +639,7 @@ fn failure(
 ) -> Value {
     assert_eq!(result.0.code(), Some(status), "{}", result.1);
     let path = data.join("core-failure.json");
-    assert_eq!(mode(&path), 0o600);
+    assert!(is_private(&path));
     let report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     let mut keys: Vec<_> = report.as_object().unwrap().keys().cloned().collect();
     keys.sort();
@@ -590,10 +667,10 @@ fn an_identity_that_cannot_be_read() {
         b"\xff\xfe",
         b"{\"private_key_pem\": \"\xc3\x28\"}",
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = support::private_tempdir();
         let data = root.path().join("core");
         private_dir(&data);
-        fs::write(data.join("node-identity.json"), content).unwrap();
+        support::write_private(&data.join("node-identity.json"), content);
         let result = run_core(data.to_str().unwrap(), &[]);
         failure(&data, &result, "identity", "identity.unreadable", 0);
         assert!(!data.join("core.json").exists(), "never says it is ready");
@@ -607,7 +684,7 @@ fn an_identity_that_cannot_be_read() {
 
 #[test]
 fn any_other_failure_before_ready_is_start_failed() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     fs::write(root.path().join("a-file"), b"").unwrap();
     let ready_file = root.path().join("a-file").join("core.json");
@@ -616,18 +693,15 @@ fn any_other_failure_before_ready_is_start_failed() {
         &["--ready-file", ready_file.to_str().unwrap()],
     );
     failure(&data, &result, "start", "start.failed", 0);
-    assert!(
-        !data.join("local.sock").exists(),
-        "nothing it bound is left"
-    );
+    nothing_left(&data);
 }
 
 #[test]
 fn a_failure_without_a_launch_id_reports_the_one_made_up() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
-    fs::write(data.join("node-identity.json"), b"not a key").unwrap();
+    support::write_private(&data.join("node-identity.json"), b"not a key");
     let output = Command::new(CORE)
         .args([
             "--port",
@@ -654,11 +728,11 @@ fn a_failure_without_a_launch_id_reports_the_one_made_up() {
 
 #[test]
 fn a_directory_another_core_holds() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
-    let lock = fs::File::create(data.join("core.lock")).unwrap();
-    lock.try_lock_exclusive().unwrap();
+    let lock = support::create_private(&data.join("core.lock"));
+    lock.try_lock().unwrap();
     let result = run_core(data.to_str().unwrap(), &[]);
     failure(&data, &result, "bind", "bind.core-running", 75);
     assert_eq!(
@@ -668,14 +742,19 @@ fn a_directory_another_core_holds() {
     );
 }
 
+// Unix only, this test and the three below: the unsafe fixtures are built with `chmod` and `symlink`; the rules they drive
+// (a loose or linked directory is refused, never repaired or written through) are tested on every OS against the
+// interface in `sidevoice-platform` and in `storage`.
+#[cfg(unix)]
 #[test]
 #[ignore = "known gap: refusal messages carry no parameters (they should name the socket path, the port and the directory mode)"]
 fn a_refusal_names_what_it_refused() {
-    let root = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
-    let lock = fs::File::create(data.join("core.lock")).unwrap();
-    lock.try_lock_exclusive().unwrap();
+    let lock = support::create_private(&data.join("core.lock"));
+    lock.try_lock().unwrap();
     let report = failure(
         &data,
         &run_core(data.to_str().unwrap(), &[]),
@@ -701,25 +780,32 @@ fn a_refusal_names_what_it_refused() {
     assert!(report["message"].as_str().unwrap().contains("0750"));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_directory_other_users_may_enter() {
-    let root = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
     fs::set_permissions(&data, fs::Permissions::from_mode(0o750)).unwrap();
     let result = run_core(data.to_str().unwrap(), &[]);
     failure(&data, &result, "directory", "identity.unsafe-directory", 0);
-    assert!(!data.join("local.sock").exists());
+    nothing_left(&data);
     assert!(
         !data.join("node-identity.json").exists(),
         "no secret is written into it"
     );
-    assert_eq!(mode(&data), 0o750, "left as it was");
+    assert_eq!(
+        fs::metadata(&data).unwrap().permissions().mode() & 0o777,
+        0o750,
+        "left as it was"
+    );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_data_directory_that_is_a_link_is_not_written_through() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let elsewhere = root.path().join("elsewhere");
     private_dir(&elsewhere);
     fs::write(elsewhere.join("core-failure.json"), "somebody else's").unwrap();
@@ -740,11 +826,12 @@ fn a_data_directory_that_is_a_link_is_not_written_through() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "known gap: a symlinked data directory spelled `core/`, `core/.` or `core//` is followed and written through"]
 fn a_data_directory_that_is_a_link_is_not_written_through_however_it_is_spelled() {
     for suffix in ["/", "/.", "//"] {
-        let root = tempfile::tempdir().unwrap();
+        let root = support::private_tempdir();
         let elsewhere = root.path().join("elsewhere");
         private_dir(&elsewhere);
         fs::write(elsewhere.join("core-failure.json"), "somebody else's").unwrap();
@@ -762,7 +849,7 @@ fn a_data_directory_that_is_a_link_is_not_written_through_however_it_is_spelled(
 
 #[test]
 fn a_port_in_use() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = holder.local_addr().unwrap().port().to_string();
     let data = root.path().join("core");
@@ -785,12 +872,12 @@ fn a_port_in_use() {
     );
     failure(&data, &result, "bind", "bind.port-in-use", 0);
     assert!(!data.join("core.json").exists());
-    assert!(!data.join("local.sock").exists(), "no socket left behind");
+    nothing_left(&data);
 }
 
 #[test]
 fn a_socket_a_live_core_serves_is_not_taken_from_it() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     let mut first = Core::start(&data, "0", &[]);
     assert_eq!(wait_ready(&data)["pid"], first.pid());
@@ -802,8 +889,8 @@ fn a_socket_a_live_core_serves_is_not_taken_from_it() {
         first.pid(),
         "and so is the file that says it is serving"
     );
-    let (_, health) = via_socket(&data.join("local.sock"), "GET", "/api/local/health");
+    let (_, health) = via_endpoint(&local(&data), "GET", "/api/local/health");
     assert_eq!(health["pid"], first.pid());
-    first.signal(libc::SIGTERM);
+    first.terminate();
     assert!(first.wait(20).success());
 }

@@ -154,7 +154,10 @@ fn floor_xtask() -> Result<PathBuf> {
 /// Starts the core from the unpacked tree, checks its ready file and health over the local socket, and checks it
 /// leaves nothing behind on SIGTERM.
 fn start(root: &Path) -> Result<Value> {
+    // Private, as the connector's state root is: the core's log goes beside its data directory, and the core refuses a
+    // log whose directory others can enter.
     let work = TempDir::new_in(Path::new("/tmp"), "sidevoice relocated state")?;
+    chmod(&work.0, 0o700)?;
     let binary = root.join(ENTRYPOINT);
     let command = |args: &[&str]| {
         let mut command = Command::new(&binary);

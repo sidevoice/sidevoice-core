@@ -1,17 +1,17 @@
 //! Node identity, pairing codes and device tokens, as the store keeps them.
 //! Pairing-secret expiry is `PairingSecrets`' own, covered beside it.
 
-use std::os::unix::fs::PermissionsExt;
-
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use p256::pkcs8::DecodePublicKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use uuid::Uuid;
 
 use super::super::{digest, now, valid_nonce, DeviceRegistry, NodeIdentity};
+use crate::platform::fs::{Create, Files, Fs};
 use crate::storage::PrivateDir;
 
 fn private_dir() -> (tempfile::TempDir, PrivateDir) {
@@ -46,10 +46,7 @@ fn the_identity_is_created_once_kept_private_and_stable() {
     let (_root, dir) = private_dir();
     let first = NodeIdentity::load_or_create(&dir).unwrap();
     let path = dir.path().join("node-identity.json");
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert!(crate::storage::is_private_file(&path));
     let saved = dir.read_json("node-identity.json").unwrap().unwrap();
     let mut keys: Vec<_> = saved.as_object().unwrap().keys().cloned().collect();
     keys.sort();
@@ -83,7 +80,10 @@ fn an_identity_that_cannot_be_read_is_refused_never_replaced() {
         b"{\"private_key_pem\": \"\xc3\x28\"}",
     ] {
         let (_root, dir) = private_dir();
-        std::fs::write(dir.path().join("node-identity.json"), content).unwrap();
+        Files::open_private(&dir.path().join("node-identity.json"), Create::New)
+            .unwrap()
+            .write_all(content)
+            .unwrap();
         assert!(NodeIdentity::load_or_create(&dir).is_err(), "{content:?}");
         assert_eq!(
             std::fs::read(dir.path().join("node-identity.json")).unwrap(),
@@ -200,10 +200,7 @@ fn a_code_is_redeemed_once_and_only_its_hash_is_kept() {
     Uuid::parse_str(&device_id).unwrap();
     assert_eq!(URL_SAFE_NO_PAD.decode(&token).unwrap().len(), 32);
     let path = dir.path().join("devices.json");
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert!(crate::storage::is_private_file(&path));
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains(&token), "the token itself is never written");
     let entry = &dir.read_json("devices.json").unwrap().unwrap()["devices"][&device_id];

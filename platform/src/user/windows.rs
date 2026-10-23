@@ -62,6 +62,13 @@ pub struct Id {
     default_owner: Sid,
 }
 
+impl Id {
+    /// Whether `sid` is this user: the user or the token's default owner (`fs` judges access entries with it).
+    pub(crate) fn is(&self, sid: PSID) -> bool {
+        self.user.is(sid) || self.default_owner.is(sid)
+    }
+}
+
 impl super::User for Id {
     fn current() -> Id {
         read_token().expect("the process token is readable")
@@ -97,7 +104,7 @@ impl super::User for Id {
         if status != ERROR_SUCCESS {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
-        let mine = self.user.is(owner) || self.default_owner.is(owner);
+        let mine = self.is(owner);
         unsafe { LocalFree(descriptor) };
         Ok(mine)
     }
