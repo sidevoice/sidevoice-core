@@ -4,19 +4,22 @@
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
 use serde_json::{json, Value};
+use sidevoice_platform::stop::{StopRequest, StopRequests};
 
 use crate::archive::unpack_checked;
 use crate::glibc;
-use crate::libraries::LINUX_SYSTEM;
+use crate::libraries::{windows_libraries, LINUX_SYSTEM};
 use crate::util::*;
-use crate::{Result, ENTRYPOINT};
+use crate::{entrypoint, Result, ENTRYPOINT_STEM};
 
 /// Where `verify-floor` mounts the unpacked archive, and the xtask that starts it, in the container.
 const CONTAINER_ROOT: &str = "/opt/sidevoice-core-rust";
@@ -36,9 +39,22 @@ const CA_BUNDLES: [&str; 2] = [
 /// start runs in that container instead: the unpacked tree mounted read-only, no network, driven
 /// by this xtask built against the floor.
 pub(crate) fn verify(archive: &Path, image: Option<&str>) -> Result<()> {
-    // Under /tmp, not $TMPDIR: on macOS that path is so long a Unix socket in it exceeds the 104-byte limit.
-    let work = TempDir::new_in(Path::new("/tmp"), "sidevoice relocated tree")?;
+    let work = TempDir::new_in(&scratch_base(), "sidevoice relocated tree")?;
     let (root, inventory) = unpack_checked(archive, &work.0)?;
+    let target = inventory["target"].as_str().unwrap_or("");
+    let entrypoint = entrypoint(target);
+    if target != host_target()? {
+        return Err(format!(
+            "the archive is for {target}, this machine is {}",
+            host_target()?
+        ));
+    }
+    // A Windows binary may import only the system's DLLs, and not the Visual C++ runtime (it links it statically).
+    let imports = if target.starts_with("windows-") {
+        Some(windows_libraries(&root.join(&entrypoint))?)
+    } else {
+        None
+    };
     let floor = inventory["glibc"].as_str();
     let needed = match floor {
         Some(floor) => Some(check_floor(&root, floor)?),
@@ -49,12 +65,12 @@ pub(crate) fn verify(archive: &Path, image: Option<&str>) -> Result<()> {
             let floor = floor.ok_or("the archive records no glibc floor to run it on")?;
             in_container(image, &root, floor)?
         }
-        None => start(&root)?,
+        None => start(&root, &entrypoint)?,
     };
     println!(
         "{}",
         json!({"target": inventory["target"], "source_sha": inventory["source_sha"], "started": started,
-               "glibc": {"floor": floor, "needed": needed}, "ran_in": image,
+               "glibc": {"floor": floor, "needed": needed}, "windows_imports": imports, "ran_in": image,
                "files": inventory["files"].as_array().map(Vec::len), "relocation": true})
     );
     Ok(())
@@ -63,22 +79,24 @@ pub(crate) fn verify(archive: &Path, image: Option<&str>) -> Result<()> {
 /// The binary may name only the system's libraries, and may not need a glibc newer than `floor`. Returns the newest
 /// glibc it needs.
 fn check_floor(root: &Path, floor: &str) -> Result<String> {
-    let path = root.join(ENTRYPOINT);
+    let path = root.join(ENTRYPOINT_STEM);
     let path = path.to_str().ok_or("path")?;
     for name in glibc::needed_libraries(path)? {
         if !LINUX_SYSTEM.contains(&name.as_str()) {
-            return Err(format!("{ENTRYPOINT} needs {name}, which is not on every system"));
+            return Err(format!(
+                "{ENTRYPOINT_STEM} needs {name}, which is not on every system"
+            ));
         }
     }
     let needed = glibc::needed(path)?;
-    glibc::check(ENTRYPOINT, &needed, floor)?;
+    glibc::check(ENTRYPOINT_STEM, &needed, floor)?;
     Ok(glibc::newest(String::from("2.0"), needed))
 }
 
 /// `verify-tree ROOT`: the start of an already unpacked and checked tree, as `verify-floor` runs
 /// them in its container.
 pub(crate) fn verify_tree(root: &Path) -> Result<()> {
-    println!("{}", start(root)?);
+    println!("{}", start(root, &entrypoint(host_target()?))?);
     Ok(())
 }
 
@@ -151,14 +169,44 @@ fn floor_xtask() -> Result<PathBuf> {
     Ok(repo().join("xtask/target").join(triple).join("debug/xtask"))
 }
 
+/// `GET /api/local/health` over the core's local channel at `endpoint` (a Unix socket path or a named pipe's name, as
+/// its ready file records it): the raw response, read to the end, within 10 seconds.
+fn get_health(endpoint: &Path) -> Result<Vec<u8>> {
+    let endpoint = endpoint.to_str().ok_or("path")?.to_string();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let fetched = (|| -> Result<Vec<u8>> {
+            let name = endpoint
+                .as_str()
+                .to_fs_name::<GenericFilePath>()
+                .map_err(|error| format!("{endpoint}: {error}"))?;
+            let mut socket =
+                Stream::connect(name).map_err(|error| format!("{endpoint}: {error}"))?;
+            socket
+                .write_all(b"GET /api/local/health HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                .map_err(|error| error.to_string())?;
+            let mut response = Vec::new();
+            // The server closes after answering. A pipe can report that as an error after the whole answer.
+            match socket.read_to_end(&mut response) {
+                Err(error) if response.is_empty() => Err(error.to_string()),
+                _ => Ok(response),
+            }
+        })();
+        let _ = sender.send(fetched);
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "no health response within 10 seconds".to_string())?
+}
+
 /// Starts the core from the unpacked tree, checks its ready file and health over the local socket, and checks it
 /// leaves nothing behind on SIGTERM.
-fn start(root: &Path) -> Result<Value> {
+fn start(root: &Path, entrypoint: &str) -> Result<Value> {
     // Private, as the connector's state root is: the core's log goes beside its data directory, and the core refuses a
     // log whose directory others can enter.
-    let work = TempDir::new_in(Path::new("/tmp"), "sidevoice relocated state")?;
+    let work = TempDir::new_in(&scratch_base(), "sidevoice relocated state")?;
     chmod(&work.0, 0o700)?;
-    let binary = root.join(ENTRYPOINT);
+    let binary = root.join(entrypoint);
     let command = |args: &[&str]| {
         let mut command = Command::new(&binary);
         command.args(args);
@@ -214,19 +262,12 @@ fn start(root: &Path) -> Result<Value> {
         }
         let ready = parse_json(&read(&data.join("core.json"))?, "core.json")?;
         // The socket is where the ready file says: in this user's runtime directory when there is one.
-        let path = PathBuf::from(ready["endpoint"].as_str().ok_or("core.json names no endpoint")?);
-        let mut socket = UnixStream::connect(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(|error| error.to_string())?;
-        socket
-            .write_all(b"GET /api/local/health HTTP/1.0\r\nHost: localhost\r\n\r\n")
-            .map_err(|error| error.to_string())?;
-        let mut response = Vec::new();
-        socket
-            .read_to_end(&mut response)
-            .map_err(|error| error.to_string())?;
-        let response = String::from_utf8_lossy(&response).into_owned();
+        let path = PathBuf::from(
+            ready["endpoint"]
+                .as_str()
+                .ok_or("core.json names no endpoint")?,
+        );
+        let response = String::from_utf8_lossy(&get_health(&path)?).into_owned();
         let (head, body) = response
             .split_once("\r\n\r\n")
             .ok_or("malformed health response")?;
@@ -246,10 +287,8 @@ fn start(root: &Path) -> Result<Value> {
         }
         Ok((health, path))
     })();
-    // The shell's own kill: not every system has a kill program.
-    let _ = Command::new("sh")
-        .args(["-c", &format!("kill -TERM {}", core.id())])
-        .status();
+    // Asked to leave the way the OS does (Unix SIGTERM, Windows its stop event); a core that does not is killed below.
+    let _ = StopRequests::ask(core.id());
     let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
         if let Some(status) = core.try_wait().map_err(|error| error.to_string())? {

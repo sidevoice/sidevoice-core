@@ -20,7 +20,7 @@ by git at a release tag, never `nightly` or a branch:
 
 The tests are part of the build: an asset is only produced on a target where the whole suite passed. Everything
 besides the GitHub steps is code in `xtask/` (`cargo xtask dist | verify | verify-floor | manifest | publish`): run `cargo xtask dist` on a machine to get that machine's archive, built, packaged and verified exactly as
-the release one. A pull request already runs that packaging on every target. On Linux `dist` needs
+the release one. A pull request already runs that packaging on every target. On Windows `dist` needs `zstd` on the `PATH` (CI installs it). On Linux `dist` needs
 [zig](https://ziglang.org), [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) and `readelf` on
 the `PATH` (CI installs the zig and cargo-zigbuild pinned in `.github/actions/setup`), and `cargo xtask verify-floor
 <archive>` (needs Docker) starts the archive's core again in a container of the oldest distribution it supports; CI
@@ -49,11 +49,17 @@ supported.
 
 ## Assets
 
-- `sidevoice-core-<version>-<target>.tar.zst` for `macos-aarch64`, `linux-x86_64` and `linux-aarch64` (on the nightly,
+- `sidevoice-core-<version>-<target>.tar.zst` for `macos-aarch64`, `linux-x86_64`, `linux-aarch64` and `windows-x86_64` (on the nightly,
   `sidevoice-core-nightly-<target>.tar.zst`, fixed names whose download URLs never change): the relocatable native
-  core per target (`bin/sidevoice-core-rust` and its licence notices; archive kind `rust-native-v2`). The
+  core per target (`bin/sidevoice-core-rust`, `bin/sidevoice-core-rust.exe` on Windows, and its licence notices; archive kind `rust-native-v2`). The
   source commit is in the manifest and in each archive's `native-core.json`, and on Linux the glibc floor too. The
   Linux archives run on glibc 2.28 or newer, x86_64 and arm64; the macOS one on Apple silicon.
+  The Windows one is built natively with MSVC and the C runtime linked statically (`.cargo/config.toml`), so it needs
+  no Visual C++ Redistributable: `dist` and `verify` fail a binary that imports any DLL outside a fixed baseline of
+  Windows system libraries (`xtask/src/libraries.rs`). Its inventory names `bin/sidevoice-core-rust.exe` as the
+  `entrypoint`. It is not signed (Authenticode) and there is no installer: the archive is the whole Windows
+  distribution, which the connector bundles. Nothing else is published per target (no wheel or package), so Windows
+  needs nothing more here.
 - `native-core-manifest.json`: every archive with its digest and size, bound to the source commit.
 - `SHA256SUMS`.
 - `attestation.sigstore.json`: one SLSA provenance attestation whose subjects are every archive and the manifest.

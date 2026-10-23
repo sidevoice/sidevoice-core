@@ -13,11 +13,11 @@ use std::process::Command;
 use serde_json::json;
 
 use crate::glibc;
-use crate::libraries::linux_libraries;
+use crate::libraries::{linux_libraries, windows_libraries};
 use crate::notices::stage_notices;
 use crate::util::*;
 use crate::verify::verify;
-use crate::{Result, ENTRYPOINT, KIND, ROOT_NAME};
+use crate::{entrypoint, exe_suffix, Result, KIND, ROOT_NAME};
 
 pub(crate) fn dist() -> Result<()> {
     let repo = repo();
@@ -28,18 +28,20 @@ pub(crate) fn dist() -> Result<()> {
         .map_err(|_| "commit time")?;
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let linux = target.starts_with("linux-");
+    let windows = target.starts_with("windows-");
+    let entrypoint = entrypoint(target);
     let mut build = Command::new(&cargo);
     let built = if linux {
         let triple = glibc::host_triple()?;
-            build
-                .args([
-                    "zigbuild",
-                    "--locked",
-                    "--release",
-                    "--bin",
-                    "sidevoice-core-rust",
-                ])
-                .args(["--target", &format!("{triple}.{}", glibc::FLOOR)]);
+        build
+            .args([
+                "zigbuild",
+                "--locked",
+                "--release",
+                "--bin",
+                "sidevoice-core-rust",
+            ])
+            .args(["--target", &format!("{triple}.{}", glibc::FLOOR)]);
         repo.join("target").join(triple).join("release")
     } else {
         build.args([
@@ -64,12 +66,17 @@ pub(crate) fn dist() -> Result<()> {
     for name in ["bin", "notices"] {
         mkdir(&stage.join(name))?;
     }
-    let binary = stage.join(ENTRYPOINT);
-    write(&binary, &read(&built.join("sidevoice-core-rust"))?)?;
+    let binary = stage.join(&entrypoint);
+    write(
+        &binary,
+        &read(&built.join(format!("sidevoice-core-rust{}", exe_suffix(target))))?,
+    )?;
     chmod(&binary, 0o755)?;
     stage_notices(&stage.join("notices"), target)?;
     let links = if linux {
         linux_libraries(&binary)?
+    } else if windows {
+        windows_libraries(&binary)?
     } else {
         output("otool", &["-L", binary.to_str().ok_or("path")?], None)?
     };
@@ -82,14 +89,14 @@ pub(crate) fn dist() -> Result<()> {
     }
     let count = files.len();
     let mut inventory = json!({"schema": 1, "kind": KIND, "target": target, "source_sha": source_sha,
-                               "entrypoint": ENTRYPOINT, "files": files});
+                               "entrypoint": entrypoint, "files": files});
     if linux {
         inventory["glibc"] = glibc::FLOOR.into();
     }
     write(&stage.join("native-core.json"), &canonical(&inventory))?;
 
     let raw = work.0.join("bundle.tar");
-    write_tar(&work.0, &raw, epoch)?;
+    write_tar(&work.0, &raw, epoch, &entrypoint)?;
     let archive = repo
         .join("native")
         .join(format!("sidevoice-core-{target}.tar.zst"));
@@ -116,7 +123,7 @@ pub(crate) fn dist() -> Result<()> {
 
 /// A reproducible tar of `<work>/sidevoice-core-rust`: owner root, fixed time, 0755 for directories and the
 /// entrypoint, 0644 for everything else.
-pub(crate) fn write_tar(work: &Path, raw: &Path, epoch: u64) -> Result<()> {
+pub(crate) fn write_tar(work: &Path, raw: &Path, epoch: u64, entrypoint: &str) -> Result<()> {
     let file = fs::File::create(raw).map_err(|error| error.to_string())?;
     let mut builder = tar::Builder::new(file);
     let stage = work.join(ROOT_NAME);
@@ -140,7 +147,7 @@ pub(crate) fn write_tar(work: &Path, raw: &Path, epoch: u64) -> Result<()> {
         } else {
             let bytes = read(&work.join(&name))?;
             header.set_entry_type(tar::EntryType::Regular);
-            header.set_mode(if relative == ENTRYPOINT { 0o755 } else { 0o644 });
+            header.set_mode(if relative == entrypoint { 0o755 } else { 0o644 });
             header.set_size(bytes.len() as u64);
             builder.append_data(&mut header, &name, bytes.as_slice())
         }

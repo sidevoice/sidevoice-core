@@ -81,7 +81,13 @@ pub(crate) fn stage_notices(notices: &Path, target: &str) -> Result<()> {
     write(
         &notices.join("native-dependencies.json"),
         &canonical(&json!({
-            "system_trust_roots": if linux { "ca-certificates" } else { "macOS system trust store" },
+            "system_trust_roots": if linux {
+                "ca-certificates"
+            } else if target.starts_with("windows-") {
+                "Windows system trust store"
+            } else {
+                "macOS system trust store"
+            },
         })),
     )
 }

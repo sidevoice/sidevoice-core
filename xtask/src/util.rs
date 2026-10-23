@@ -2,7 +2,6 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,9 +33,17 @@ pub(crate) fn mkdir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// Sets the Unix permission bits. Windows has none (a program is one by its `.exe` name): nothing to do.
+#[cfg(unix)]
 pub(crate) fn chmod(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn chmod(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
 }
 
 /// Compact JSON with sorted keys and a final newline: the one byte form of every JSON file in an archive.
@@ -79,6 +86,7 @@ pub(crate) fn host_target() -> Result<&'static str> {
         ("linux", "x86_64") => Ok("linux-x86_64"),
         ("linux", "aarch64") => Ok("linux-aarch64"),
         ("macos", "aarch64") => Ok("macos-aarch64"),
+        ("windows", "x86_64") => Ok("windows-x86_64"),
         (os, arch) => Err(format!("unsupported build host {os}-{arch}")),
     }
 }
@@ -104,11 +112,14 @@ pub(crate) fn walk(root: &Path) -> Result<Vec<(String, bool)>> {
     fn visit(root: &Path, dir: &Path, found: &mut Vec<(String, bool)>) -> Result<()> {
         for entry in fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))? {
             let path = entry.map_err(|error| error.to_string())?.path();
+            // Always `/`: the names in an inventory and in a tar, whatever the host.
             let relative = path
                 .strip_prefix(root)
                 .expect("below root")
-                .to_string_lossy()
-                .into_owned();
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
             let is_dir = path.is_dir();
             found.push((relative, is_dir));
             if is_dir {
@@ -141,5 +152,16 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Where `verify` unpacks and runs the core: a path with a space, away from the checkout. `/tmp` on Unix, not
+/// `$TMPDIR`: on macOS that path is so long a Unix socket in it exceeds the 104-byte limit. Windows has no such place,
+/// so the user's temporary directory.
+pub(crate) fn scratch_base() -> PathBuf {
+    if cfg!(windows) {
+        env::temp_dir()
+    } else {
+        PathBuf::from("/tmp")
     }
 }
