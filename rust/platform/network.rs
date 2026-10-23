@@ -5,16 +5,29 @@
 //! [`Network::interface_ips`] only if it must. Callers import both: `use crate::platform::network::{Host, Network};`
 //! then `Host::interface_ips()`.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 /// What the host tells about its network.
 pub trait Network {
     /// The addresses of the interfaces that are up and not loopback, IPv4 and IPv6; empty when the system cannot say.
+    ///
+    /// Loopback is judged per interface, not per address: any address on an interface that carries a loopback
+    /// address (`lo`, Windows' Loopback Pseudo-Interface) is left out, so a private address added to the loopback
+    /// interface is never offered as a way in. `if-addrs` reports no interface flags (its `is_loopback` reads the
+    /// address), so the interface is known by the loopback address it carries; one with none is not recognised.
     fn interface_ips() -> Vec<IpAddr> {
-        if_addrs::get_if_addrs()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|interface| interface.is_oper_up() && !interface.is_loopback())
+        let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+        let loopback: HashSet<&str> = interfaces
+            .iter()
+            .filter(|interface| interface.is_loopback())
+            .map(|interface| interface.name.as_str())
+            .collect();
+        interfaces
+            .iter()
+            .filter(|interface| {
+                interface.is_oper_up() && !loopback.contains(interface.name.as_str())
+            })
             .map(|interface| interface.ip())
             .collect()
     }
