@@ -12,7 +12,7 @@ by git at a release tag, never `nightly` or a branch:
 
 `xtask/` is a workspace of its own and its `Cargo.lock` records `sidevoice-platform`'s version, which release-please's
 `extra-files` cannot edit in a lockfile. So the `release-please` workflow copies the version from the root `Cargo.lock`
-into `xtask/Cargo.lock` on the release PR's branch, then dispatches the checks.
+into `xtask/Cargo.lock` on the release PR's branch (a commit made through the GitHub API, so it is signed), then dispatches the checks.
 
 ## What each act means
 
