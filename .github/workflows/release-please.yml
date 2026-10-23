@@ -38,14 +38,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          # The action's own JSON array of the release PRs it created or updated (headBranchName, number, ...). Read
+          # through env and jq, never fromJSON(): an empty output must not fail the job at expression time.
+          PRS: ${{ steps.release.outputs.prs }}
         # xtask/ is its own workspace and records sidevoice-platform's version, which release-please does not move
         # (its `extra-files` toml updater did nothing on Cargo.lock), and `cargo xtask dist --locked` fails on a
         # stale lock. So copy the version release-please just wrote to the root Cargo.lock, commit it through the API (signed), and only then
         # dispatch the checks (a GITHUB_TOKEN commit starts none).
-        # The release PR's branch is read from the PR itself: the action's `pr` output can be empty while
-        # `prs_created` is true, and fromJSON('') then fails the whole job.
+        # The branches come from the action's outputs, not from a label query: right after the PR is created the label
+        # search lags and finds nothing (0.10.1). The same outputs cover a release PR that was only updated.
         run: |
-          for branch in $(gh pr list --state open --label 'autorelease: pending' --json headRefName --jq '.[].headRefName'); do
+          branches=$(jq -r '.[]?.headBranchName // empty' <<< "${PRS:-[]}")
+          [ -n "$branches" ] || { echo "prs_created is true but the action returned no PR branch"; exit 1; }
+          for branch in $branches; do
             git fetch --quiet origin "$branch"
             git checkout --quiet --detach "origin/$branch"
             version=$(awk '$0 == "name = \"sidevoice-platform\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
