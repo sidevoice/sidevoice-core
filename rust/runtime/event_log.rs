@@ -22,8 +22,14 @@ pub(super) fn log_event(config: &Config, key: &str, cause: Option<&str>) -> io::
     {
         PrivateDir::open(parent)?;
     }
-    rotate_if_full(path)?;
+    // Judged before anything else, whatever its size: a full log that is a link or open to others is refused, not
+    // rotated out of the way.
     let mut file = open_private_append(path)?;
+    if file.metadata()?.len() >= ROTATE_AT_BYTES {
+        drop(file);
+        rotate_if_full(path)?;
+        file = open_private_append(path)?;
+    }
     let mut message = LocalizedMessage::new(key);
     if let Some(cause) = cause {
         message = message.with_param("key", cause);

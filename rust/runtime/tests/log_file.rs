@@ -119,3 +119,29 @@ fn a_log_where_others_can_enter_or_read_is_refused_not_repaired() {
     assert!(log_event(&config(log), "runtime.log_ready", None).is_err());
     assert_eq!(mode(&parent), 0o755, "not repaired");
 }
+
+// Unix only: the unsafe fixtures are built with `chmod` and a symlink; the refusal itself is the interface's
+// (`Files::open_private`, `Files::open_to_others`), tested on every OS in `sidevoice-platform`.
+#[cfg(unix)]
+#[test]
+fn a_full_log_that_is_unsafe_is_refused_before_it_is_rotated() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = PrivateTemp::new();
+    let log = root.path().join("core.log");
+    fs::write(&log, vec![b'x'; 5_000_000]).unwrap();
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(log_event(&config(log.clone()), "runtime.log_start", None).is_err());
+    assert_eq!(fs::metadata(&log).unwrap().len(), 5_000_000, "not rotated");
+    assert!(!root.path().join("core.log.1").exists());
+
+    fs::remove_file(&log).unwrap();
+    let target = root.path().join("somebody-else");
+    fs::write(&target, vec![b'x'; 5_000_000]).unwrap();
+    std::os::unix::fs::symlink(&target, &log).unwrap();
+    assert!(log_event(&config(log.clone()), "runtime.log_start", None).is_err());
+    assert!(
+        fs::symlink_metadata(&log).unwrap().is_symlink(),
+        "left where it was"
+    );
+    assert!(!root.path().join("core.log.1").exists());
+}
