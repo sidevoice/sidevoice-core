@@ -5,7 +5,8 @@
 //!
 //! The interface is the [`Fs`] trait; [`Files`] is the one OS implementation compiled in, chosen below. What differs
 //! per OS is only how access is set and read: Unix mode bits and `O_NOFOLLOW`; on Windows a protected DACL set when
-//! a file or directory is created, read back from the handle, and reparse points (links, junctions) refused. Who owns
+//! a file or directory is created, read back from the handle, and reparse points (links, junctions, mount points)
+//! refused, at the path and on the way to it. Who owns
 //! something is [`user`](crate::user)'s (`UserId::current().owns_path/owns_file`). The rule for the directories on
 //! the way is the connector's (its `platform::fs`, `check_ancestor`), so the two can converge. Callers import both:
 //! `use sidevoice_platform::fs::{Files, Fs};` then `Files::create_private_dirs(..)`, `Files::open_private(..)`.
@@ -80,10 +81,13 @@ pub trait Fs {
 
     /// Whether `path` is a directory itself (a link to one is not), this user's and open to nobody else, and every
     /// directory on the way to it (from its absolute form) is this user's or the system's with nobody else able to
-    /// replace what is in it. Unix judges each of those entries itself (a link as a link): owned by this user or root,
-    /// not writable by group or others unless sticky (`/tmp`). Windows judges the directory each leads to: owned by
-    /// this user, SYSTEM, Administrators or TrustedInstaller, nobody else allowed to delete or rename what is in it or
-    /// to take it over. A missing path is an error; a link, or anything the checks cannot read, is not private.
+    /// replace what is in it. Only the path as written is judged, never where a link on the way leads, so a link on
+    /// the way is refused unless the system made it: Unix judges each entry itself, owned by this user or root, not
+    /// writable by group or others unless sticky (`/tmp`), and a link only when root's (macOS's `/var`, `/tmp`; Linux
+    /// gives every link mode `0777`, so none passes there). Windows refuses any reparse point on the way (junction, symlink, mount point) and judges each
+    /// directory: owned by this user, SYSTEM, Administrators or TrustedInstaller, nobody but this user and the system
+    /// allowed to delete or rename what is in it or to take it over. A missing path is an error; a link, or anything
+    /// the checks cannot read, is not private.
     fn is_private_dir(path: &Path) -> io::Result<bool> {
         let path = std::path::absolute(path)?;
         let dir = match Self::open_read(&path) {
@@ -185,6 +189,44 @@ mod tests {
         assert!(
             Files::is_private_dir(&dir.join("..").join("data")).is_ok_and(|private| !private),
             "however it is spelled"
+        );
+    }
+
+    #[test]
+    fn a_private_directory_reached_through_a_link_on_the_way_is_not_private() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("shared");
+        let dir = shared.join("private");
+        Files::create_private_dirs(&dir).unwrap();
+        imp::let_others_in(&shared);
+        let link = root.path().join("link");
+        imp::link_dir(&dir, &link);
+        assert!(!private(&dir), "others can replace it");
+        let inside = dir.join("inside");
+        Files::create_private_dir(&inside).unwrap();
+        assert!(
+            !private(&link.join("inside")),
+            "a link on the way is refused"
+        );
+    }
+
+    // Windows only: who owns a profile folder (Administrators or SYSTEM, granting its user full control) has no Unix
+    // counterpart, where a directory has one owner and mode bits; `/setowner` to Administrators needs the elevated
+    // token the CI runner has.
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_on_the_way_owned_by_administrators_granting_this_user_is_trusted() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        std::fs::create_dir(&profile).unwrap();
+        let user = UserId::name().unwrap();
+        imp::icacls(&profile, &["/grant", &format!("{user}:(OI)(CI)(F)")]);
+        imp::icacls(&profile, &["/setowner", "*S-1-5-32-544"]);
+        let dir = profile.join("AppData").join("Local").join("data");
+        Files::create_private_dirs(&dir).unwrap();
+        assert!(
+            private(&dir),
+            "this user's own entry is not somebody else's"
         );
     }
 

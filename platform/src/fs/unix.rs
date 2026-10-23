@@ -46,11 +46,14 @@ impl super::Fs for Os {
     }
 }
 
-/// A directory on the way to something private (the connector's rule): the entry itself (a link is judged as a link);
-/// this user's or root's; others writing is harmless only under the sticky bit (`/tmp`), where nobody can remove or
-/// rename what is not theirs.
+/// A directory on the way to something private (the connector's rule): the entry itself; this user's or root's;
+/// others writing is harmless only under the sticky bit (`/tmp`), where nobody can remove or rename what is not
+/// theirs. A link is judged as a link and trusted only when root's: where one of this user's leads is not judged.
 pub(super) fn trusted_ancestor(dir: &Path) -> io::Result<bool> {
     let metadata = fs::symlink_metadata(dir)?;
+    if metadata.is_symlink() && metadata.uid() != 0 {
+        return Ok(false);
+    }
     Ok((metadata.uid() == 0 || UserId::current().owns_path(dir)?)
         && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0))
 }

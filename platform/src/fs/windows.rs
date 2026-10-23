@@ -1,12 +1,13 @@
 //! Windows: a protected DACL set when a file or directory is created, read back from the handle; reparse points
-//! (links, junctions) refused.
+//! (links, junctions, mount points) refused, at the path and on the way to it.
 //!
 //! "Private" is a protected DACL (it inherits nothing) granting full control to the owner (`OWNER RIGHTS`), SYSTEM
 //! and Administrators only, inherited by what is created inside. Whether others may do anything is read from the
 //! DACL of the handle that was opened (`GetSecurityInfo`): a DACL that is not protected counts (it takes whatever its
-//! parent passes down), and so does an allow entry for anybody but the file's owner, SYSTEM, Administrators or
-//! `OWNER RIGHTS`, including one only what is created inside inherits; who the owner is, is
-//! [`user`](crate::user)'s. The directories on the way are judged as the connector does (`trusted_ancestor`).
+//! parent passes down), and so does an allow entry for anybody but the file's owner, this user, SYSTEM,
+//! Administrators or `OWNER RIGHTS`, including one only what is created inside inherits; who the owner is, is
+//! [`user`](crate::user)'s. The directories on the way are judged as the connector does (`trusted_ancestor`),
+//! except that a reparse point among them is refused rather than followed.
 //!
 //! Own `unsafe` over `windows-sys`: no maintained crate covers "create with this DACL" and "read what this handle's
 //! DACL grants" (`windows-acl` is unmaintained; `windows-permissions` is a thin binding with the same calls left to
@@ -103,15 +104,21 @@ impl super::Fs for Os {
     }
 }
 
-/// A directory on the way to something private (the connector's rule): this user's or the system's, nobody else able
-/// to delete or rename what is in it, or to take it over. A reparse point on the way (a redirected known folder, a
-/// mounted volume) is followed: what is judged is the directory it leads to. Adding entries is not judged: there is no
-/// sticky bit, and `C:\` lets every user add folders.
+/// A directory on the way to something private (the connector's rule): this user's or the system's, nobody but this
+/// user and the system able to delete or rename what is in it, or to take it over. A reparse point on the way
+/// (junction, symlink, mount point) is refused, not followed: only the path as written is judged, and one leading
+/// into a directory others can change would hide it. A default profile has none on the way to its folders
+/// (`C:\Users\<name>\AppData\Local\Temp`, `C:\Users\<name>\.sidevoice`): the legacy junctions (`Application Data`,
+/// `Local Settings`, `C:\Documents and Settings`) sit beside that path, not on it. Adding entries is not judged: there
+/// is no sticky bit, and `C:\` lets every user add folders.
 pub(super) fn trusted_ancestor(dir: &Path) -> io::Result<bool> {
     let file = OpenOptions::new()
         .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(dir)?;
+    if is_link(&file)? {
+        return Ok(false);
+    }
     let judged = Judged::of(&file)?;
     Ok(
         (UserId::current().owns_file(&file)? || judged.owner_is_system())
@@ -154,11 +161,17 @@ fn wide(path: &Path) -> Vec<u16> {
 
 /// Refuses a handle that turned out to be a link of any kind (the open did not follow it).
 fn not_a_link(file: File) -> io::Result<File> {
-    let metadata = file.metadata()?;
-    if metadata.is_symlink() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if is_link(&file)? {
         return Err(io::Error::other("a link (reparse point)"));
     }
     Ok(file)
+}
+
+/// Whether a handle opened with `OPEN_REPARSE_POINT` is a reparse point of any kind: a symlink, a junction, a mount
+/// point.
+fn is_link(file: &File) -> io::Result<bool> {
+    let metadata = file.metadata()?;
+    Ok(metadata.is_symlink() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
 }
 
 /// An owned SID, parsed from its string form.
@@ -191,9 +204,10 @@ impl Drop for Sid {
     }
 }
 
-/// SYSTEM, Administrators and `OWNER RIGHTS`: who may hold anything in what is ours besides its owner; and
+/// This user, SYSTEM, Administrators and `OWNER RIGHTS`: who may hold anything in what is ours besides its owner; and
 /// TrustedInstaller, which owns `C:\` and the system's folders.
 struct Principals {
+    user: UserId,
     system: Sid,
     administrators: Sid,
     owner_rights: Sid,
@@ -203,6 +217,7 @@ struct Principals {
 fn principals() -> &'static Principals {
     static PRINCIPALS: OnceLock<Principals> = OnceLock::new();
     PRINCIPALS.get_or_init(|| Principals {
+        user: UserId::current(),
         system: Sid::parse("SY"),
         administrators: Sid::parse("BA"),
         owner_rights: Sid::parse("OW"),
@@ -272,11 +287,14 @@ impl Judged {
             || p.trusted_installer.is(self.owner)
     }
 
-    /// Who may hold anything in what is ours: its owner, SYSTEM, Administrators and `OWNER RIGHTS`.
+    /// Who may hold anything in what is ours: its owner; this user, whoever the owner is (a profile folder owned by
+    /// Administrators or SYSTEM that grants its user full control is a default layout); SYSTEM, Administrators and
+    /// `OWNER RIGHTS`.
     fn trusted(&self, sid: PSID) -> bool {
         let p = principals();
         // SAFETY: both point at valid SIDs (null is refused first).
         (!self.owner.is_null() && !sid.is_null() && unsafe { EqualSid(self.owner, sid) } != 0)
+            || p.user.is(sid)
             || p.system.is(sid)
             || p.administrators.is(sid)
             || p.owner_rights.is(sid)
