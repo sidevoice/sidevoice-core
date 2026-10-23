@@ -1,34 +1,27 @@
 //! The host's network interfaces: which addresses this machine answers on.
 //!
-//! The interface is the [`Network`] trait; [`Host`] is its implementation. One body for every OS (`if-addrs`:
-//! `getifaddrs` on Unix, `GetAdaptersAddresses` on Windows), so there are no per-OS files: an OS would override
-//! [`Network::interface_ips`] only if it must. Callers import both: `use crate::platform::network::{Host, Network};`
-//! then `Host::interface_ips()`.
+//! The interface is the [`Network`] trait; [`Host`] is its implementation. One body for every OS (`netdev`: netlink
+//! on Linux, `getifaddrs` on the BSDs and macOS, `GetAdaptersAddresses` on Windows), so there are no per-OS files: an
+//! OS would override [`Network::interface_ips`] only if it must. Callers import both:
+//! `use crate::platform::network::{Host, Network};` then `Host::interface_ips()`.
 
-use std::collections::HashSet;
 use std::net::IpAddr;
 
 /// What the host tells about its network.
 pub trait Network {
-    /// The addresses of the interfaces that are up and not loopback, IPv4 and IPv6; empty when the system cannot say.
+    /// The addresses of the interfaces that are up and running and not loopback, IPv4 and IPv6; empty when the
+    /// system cannot say.
     ///
-    /// Loopback is judged per interface, not per address: any address on an interface that carries a loopback
-    /// address (`lo`, Windows' Loopback Pseudo-Interface) is left out, so a private address added to the loopback
-    /// interface is never offered as a way in. `if-addrs` reports no interface flags (its `is_loopback` reads the
-    /// address), so the interface is known by the loopback address it carries; one with none is not recognised.
+    /// Loopback is the interface's own flag, not inferred from its addresses or name: `IFF_LOOPBACK` on Unix (so
+    /// every address on `lo`, whatever its label, such as `lo:sv`, or its range), Windows' software-loopback interface
+    /// type. A private address added to the loopback interface is never offered as a way in.
     fn interface_ips() -> Vec<IpAddr> {
-        let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
-        let loopback: HashSet<&str> = interfaces
-            .iter()
-            .filter(|interface| interface.is_loopback())
-            .map(|interface| interface.name.as_str())
-            .collect();
-        interfaces
+        netdev::get_interfaces()
             .iter()
             .filter(|interface| {
-                interface.is_oper_up() && !loopback.contains(interface.name.as_str())
+                interface.is_up() && interface.is_running() && !interface.is_loopback()
             })
-            .map(|interface| interface.ip())
+            .flat_map(|interface| interface.ip_addrs())
             .collect()
     }
 }

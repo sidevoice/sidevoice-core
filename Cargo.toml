@@ -30,8 +30,9 @@ base64 = "=0.22.1"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures-util = "=0.3.32"
-# The host's network interfaces (platform/network), the same on every OS.
-if-addrs = "0.15"
+# The host's network interfaces with their flags (platform/network), the same on every OS. No default features: the
+# gateway, DNS, Apple SystemConfiguration and Android extras are not used.
+netdev = { version = "0.46", default-features = false }
 # The user's home directory, the same on every OS (runtime/config).
 dirs = "7"
 opentelemetry = { version = "0.31", default-features = false, features = ["trace", "metrics"] }
