@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0](https://github.com/sidevoice/sidevoice-core/compare/v0.8.0...v0.9.0) (2026-10-23)
+
+
+### Features
+
+* **platform:** local sockets in the user's runtime directory ([#171](https://github.com/sidevoice/sidevoice-core/issues/171)) ([0dbbf03](https://github.com/sidevoice/sidevoice-core/commit/0dbbf038ce7d9a8f1ad9c69088d6da15a55de36c))
+* **platform:** one data directory for every Sidevoice program ([#174](https://github.com/sidevoice/sidevoice-core/issues/174)) ([2874acb](https://github.com/sidevoice/sidevoice-core/commit/2874acb91286fdac081e75b550d135f858a2b2cd))
+* **platform:** one private-files implementation for core and connector ([#176](https://github.com/sidevoice/sidevoice-core/issues/176)) ([9bc2518](https://github.com/sidevoice/sidevoice-core/commit/9bc25182c927f119d0c54f30e7e9ab1891fcc30c))
+* **platform:** private dirs and files, interface addresses and data dir on Windows ([#170](https://github.com/sidevoice/sidevoice-core/issues/170)) ([4b54c38](https://github.com/sidevoice/sidevoice-core/commit/4b54c38023a6f6dd0a8518afbcd8ed395062f4c0))
+* **release:** publish a windows-x86_64 build ([#177](https://github.com/sidevoice/sidevoice-core/issues/177)) ([9ce8432](https://github.com/sidevoice/sidevoice-core/commit/9ce843252c68537e2f2a94f8635d16ef14f6fdac))
+
 ## [0.8.0](https://github.com/sidevoice/sidevoice-core/compare/v0.7.0...v0.8.0) (2026-10-23)
 
 
