@@ -60,6 +60,8 @@ supported.
   `entrypoint`. It is not signed (Authenticode) and there is no installer: the archive is the whole Windows
   distribution, which the connector bundles. Nothing else is published per target (no wheel or package), so Windows
   needs nothing more here.
+  A failure on any target (Windows included) blocks the whole release: the connector pins one core version and needs every
+  target's archive, so nothing is published partially.
 - `native-core-manifest.json`: every archive with its digest and size, bound to the source commit.
 - `SHA256SUMS`.
 - `attestation.sigstore.json`: one SLSA provenance attestation whose subjects are every archive and the manifest.
