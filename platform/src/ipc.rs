@@ -21,6 +21,9 @@ mod imp;
 mod imp;
 
 pub use imp::{Endpoint, Os as Channels};
+// The pipe's descriptor, which a process's stop event shares (`crate::stop`).
+#[cfg(windows)]
+pub(crate) use imp::OWNER_ONLY;
 
 use interprocess::local_socket::tokio::Listener as RawListener;
 use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};

@@ -38,8 +38,9 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// `POST /api/local/shutdown`: leave as on `SIGTERM` (finish the requests in flight, remove the ready file, exit 0).
-/// The in-band request to leave, the only one a console-less core on Windows can get (decision "Graceful stop",
-/// 2026-10-22); the same on every OS. Local channel only, like every `/api/local` route.
+/// The in-band request to leave, the same on every OS, for a local client. The connector does not use it: it asks the
+/// OS's way (`SIGTERM`, or on Windows the core's stop event; `platform::signal`). Local channel only, like every
+/// `/api/local` route.
 ///
 /// Body optional, JSON: `{"launch_id": "..."}` names the launch the caller means (from the ready file); another
 /// launch refuses with 409 `runtime.launch_mismatch` and stays up. Unknown fields, an empty body or one that is not
