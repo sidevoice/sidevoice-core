@@ -10,9 +10,12 @@
 //! | Windows | `%LOCALAPPDATA%\Sidevoice` |
 //!
 //! `$SIDEVOICE_DATA_DIR` (absolute) overrides it: tests, profiles. Layout: `D/core` is the core's directory, `D/install`
-//! holds the connector's releases, `D/Models` the downloaded models the engine and the desktop app share (the connector
-//! never writes or removes it; same place on every OS, Linux included); each program that listens publishes where in a small record under `D`
+//! holds the connector's releases; each program that listens publishes where in a small record under `D`
 //! (`core/core.json`, `connector.json`), so none computes a socket path.
+//!
+//! The models the engine downloads and the desktop app shares are NOT in `D`: `Models` is always in the OS's standard
+//! place ([`models_dir`]), whatever `$SIDEVOICE_DATA_DIR` says, one content-addressed cache for every Sidevoice instance
+//! of this user. The connector never removes it.
 //!
 //! Nothing differs per OS but the folder's name, so this is a plain module of free functions: no trait, no per-OS files.
 //! `use sidevoice_platform::data_dir;` then `data_dir::resolve(|name| std::env::var_os(name))?`.
@@ -68,14 +71,15 @@ pub fn core_dir(data: &Path) -> PathBuf {
     data.join("core")
 }
 
-/// The name of the models folder inside `D`: the downloaded models the engine and the desktop app share. It is theirs,
-/// never the connector's: uninstalling the connector leaves it.
+/// The name of the shared models folder. It is the engine's and the desktop app's, never the connector's:
+/// uninstalling the connector leaves it.
 pub const MODELS: &str = "Models";
 
-/// The shared models folder inside `data` (`D/Models`): the same rule on every OS, and it follows `D`, so
-/// `$SIDEVOICE_DATA_DIR` moves it with everything else.
-pub fn models_dir(data: &Path) -> PathBuf {
-    data.join(MODELS)
+/// The shared models folder: `Models` in the OS's [`standard`] place (`standard()/Models`), the same rule on every OS
+/// (Linux too) and independent of `$SIDEVOICE_DATA_DIR`, so every Sidevoice instance of this user shares one cache of
+/// downloaded models. `None` when the user has no standard data directory.
+pub fn models_dir() -> Option<PathBuf> {
+    standard().map(|place| place.join(MODELS))
 }
 
 /// The connector's releases inside `data` (`D/install`): `current.json` and `releases/<id>`.
@@ -107,11 +111,6 @@ mod tests {
             elsewhere
         );
         assert_eq!(
-            models_dir(&elsewhere),
-            elsewhere.join("Models"),
-            "the models follow the override, with the same name on every OS (Linux too)"
-        );
-        assert_eq!(
             resolve(|name| (name == VARIABLE).then(OsString::new)).unwrap(),
             default,
             "an empty override is no override"
@@ -121,11 +120,23 @@ mod tests {
     }
 
     #[test]
-    fn the_core_the_releases_and_the_models_are_inside_the_data_directory() {
+    fn the_models_are_in_the_standard_place_whatever_the_override_says() {
+        let models = models_dir().unwrap();
+        assert_eq!(models, standard().unwrap().join("Models"));
+        assert_eq!(models.file_name().unwrap(), MODELS);
+        assert!(models.is_absolute());
+        let elsewhere = std::env::temp_dir().join("elsewhere");
+        let data =
+            resolve(|name| (name == VARIABLE).then(|| elsewhere.clone().into_os_string())).unwrap();
+        assert!(
+            !models.starts_with(&data),
+            "an override of D does not move the models"
+        );
+    }
+
+    #[test]
+    fn the_core_and_the_releases_are_inside_the_data_directory() {
         let data = std::env::temp_dir().join("data");
-        assert_eq!(models_dir(&data), data.join("Models"));
-        assert_ne!(models_dir(&data), core_dir(&data));
-        assert_ne!(models_dir(&data), releases_dir(&data));
         assert_eq!(core_dir(&data).parent().unwrap(), data);
         assert_eq!(releases_dir(&data).parent().unwrap(), data);
         assert_ne!(core_dir(&data), releases_dir(&data));
