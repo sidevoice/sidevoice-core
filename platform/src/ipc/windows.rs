@@ -26,6 +26,8 @@ pub struct Endpoint(String);
 
 impl super::Address for Endpoint {
     fn new(dir: &Path, name: &str) -> Endpoint {
+        // `dir` itself: a pipe has no path to keep short, so Windows has no runtime directory.
+        let dir = super::endpoint_dir(<Os as super::Channel>::runtime_dir().as_deref(), dir);
         let mut hash = Sha256::new();
         hash.update(UserId::name().unwrap_or_default().to_lowercase().as_bytes());
         hash.update([0]);

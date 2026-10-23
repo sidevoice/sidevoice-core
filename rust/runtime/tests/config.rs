@@ -1,10 +1,11 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::error::ErrorKind;
 use clap::CommandFactory;
 
 use super::support::{args, full_config};
+use crate::platform::ipc::{Address, Endpoint};
 use crate::runtime::{Cli, Config};
 
 #[test]
@@ -28,9 +29,10 @@ fn every_flag_overrides_its_setting() {
 #[test]
 fn unset_paths_derive_from_the_data_directory() {
     let config = Config::from_args(args(&["--data-dir", "/srv/sidevoice/core"])).unwrap();
+    // In this user's runtime directory when there is one (`ipc` tests where), else in the data directory.
     assert_eq!(
-        config.endpoint.to_string(),
-        "/srv/sidevoice/core/local.sock"
+        config.endpoint,
+        Endpoint::new(Path::new("/srv/sidevoice/core"), "local")
     );
     assert_eq!(
         config.ready_file,

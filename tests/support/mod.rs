@@ -160,7 +160,7 @@ impl Core {
     }
 
     pub fn socket(&self) -> PathBuf {
-        self.data.join("local.sock")
+        PathBuf::from(self.endpoint().to_string())
     }
 
     pub fn connector_id(&self) -> String {

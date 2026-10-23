@@ -37,7 +37,9 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         let data_dir = absolute(cli.data_dir.unwrap_or_else(|| home.join(".sidevoice/core")))?;
-        // The local channel is derived from the data directory alone, so the data directory's lock holds it too.
+        // The local channel is derived from the data directory alone (in this user's runtime directory when there
+        // is one, so its path stays short), so the data directory's lock holds it too. Readers take it from the
+        // ready file.
         let endpoint = Endpoint::new(&data_dir, "local");
         let ready_file = absolute(cli.ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;
         let log_file = absolute(
