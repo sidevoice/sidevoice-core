@@ -59,6 +59,14 @@ pub trait Fs {
     /// syncs the directory; Windows does nothing (NTFS journals its metadata and gives no handle to flush).
     fn sync_dir(dir: &Path) -> io::Result<()>;
 
+    /// Whether the file behind an open handle is a regular file, this user's and open to nobody else: what was opened
+    /// is what is judged, so a record or lock already there is used only when this holds (refused, never repaired).
+    fn is_private_file(file: &File) -> io::Result<bool> {
+        Ok(file.metadata()?.is_file()
+            && UserId::current().owns_file(file)?
+            && !Self::open_to_others(file)?)
+    }
+
     /// Makes `path` and any missing parents, each private; what is already there is left as it is.
     fn create_private_dirs(path: &Path) -> io::Result<()> {
         let created = match Self::create_private_dir(path) {
@@ -207,6 +215,22 @@ mod tests {
         assert!(
             !private(&link.join("inside")),
             "a link on the way is refused"
+        );
+    }
+
+    #[test]
+    fn a_private_file_is_a_regular_file_of_this_user_s_open_to_nobody_else() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("record");
+        drop(Files::open_private(&file, Create::New).unwrap());
+        assert!(Files::is_private_file(&Files::open_read(&file).unwrap()).unwrap());
+        imp::let_others_in(&file);
+        assert!(!Files::is_private_file(&Files::open_read(&file).unwrap()).unwrap());
+        let dir = root.path().join("dir");
+        Files::create_private_dir(&dir).unwrap();
+        assert!(
+            !Files::is_private_file(&Files::open_read(&dir).unwrap()).unwrap(),
+            "a directory is not a file"
         );
     }
 

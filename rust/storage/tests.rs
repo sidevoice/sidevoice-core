@@ -274,3 +274,52 @@ fn a_directory_that_would_let_others_read_its_files_is_refused() {
     let refused = PrivateDir::open(dir.path()).unwrap_err();
     assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
 }
+
+#[test]
+fn a_record_or_lock_that_is_not_a_file_is_refused_and_left_as_it_is() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = PrivateDir::open(root.path().join("core")).unwrap();
+    for name in ["node-identity.json", "core.lock"] {
+        Files::create_private_dir(&dir.file(name)).unwrap();
+    }
+    let refused = dir.read_json("node-identity.json").unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+    assert!(dir.lock().is_err());
+    assert!(dir.file("node-identity.json").is_dir() && dir.file("core.lock").is_dir());
+}
+
+// Unix only: the loose files are built with `chmod` and `symlink`; that a file others can open is not private is tested
+// on every OS against the interface (`sidevoice-platform`, fs tests), as is a link in a private file's place.
+#[cfg(unix)]
+#[test]
+fn a_record_or_lock_others_can_open_or_that_is_a_link_is_refused_and_left_as_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let dir = PrivateDir::open(root.path().join("core")).unwrap();
+    dir.write_json(
+        "connector-credential.json",
+        &serde_json::json!({"token": "t"}),
+    )
+    .unwrap();
+    drop(dir.lock().unwrap().expect("first lock"));
+    for loose in [0o640, 0o604, 0o620, 0o602] {
+        for name in ["connector-credential.json", "core.lock"] {
+            fs::set_permissions(dir.file(name), fs::Permissions::from_mode(loose)).unwrap();
+        }
+        let refused = dir.read_json("connector-credential.json").unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{loose:o}");
+        assert_eq!(
+            dir.lock().unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+            "{loose:o}"
+        );
+        let mode = |name: &str| fs::metadata(dir.file(name)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("connector-credential.json"), loose, "never repaired");
+        assert_eq!(mode("core.lock"), loose, "never repaired");
+    }
+    let target = root.path().join("somebody-else.json");
+    fs::write(&target, br#"{"token": "theirs"}"#).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(&target, dir.file("node-identity.json")).unwrap();
+    assert!(dir.read_json("node-identity.json").is_err(), "not followed");
+}

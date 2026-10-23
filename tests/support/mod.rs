@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use sidevoice_core::platform::fs::{Files, Fs};
+use sidevoice_core::platform::fs::{Create, Files, Fs};
 use sidevoice_core::platform::ipc::{Channel, Channels, Endpoint, Stream};
 use sidevoice_core::platform::user::{User, UserId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -1114,6 +1114,18 @@ pub fn message_id() -> String {
 /// A directory of this user's, open to nobody else, as the core makes its own.
 pub fn private_dir(path: &Path) {
     Files::create_private_dir(path).unwrap();
+}
+
+/// Creates a new file at `path` as the core makes its own: private from its creation (`Files::open_private`), so what
+/// a test plants is judged by its content, not refused as open to others.
+pub fn create_private(path: &Path) -> fs::File {
+    Files::open_private(path, Create::New).unwrap()
+}
+
+/// Writes a new private file at `path` (`create_private`).
+pub fn write_private(path: &Path, bytes: impl AsRef<[u8]>) {
+    use std::io::Write;
+    create_private(path).write_all(bytes.as_ref()).unwrap();
 }
 
 /// Whether what `path` names (a file or a directory) is this user's and open to nobody else.

@@ -10,12 +10,12 @@ use super::Room;
 impl Room {
     pub fn local_credential(&self) -> io::Result<(String, String)> {
         let mut inner = self.inner.lock().expect("room lock");
-        if let Some(saved) = self
-            .dir
-            .read_json("connector-credential.json")
-            .ok()
-            .flatten()
-        {
+        // One that does not parse is replaced; one that cannot be trusted (a link, open to others) is refused.
+        let saved = match self.dir.read_json("connector-credential.json") {
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => None,
+            read => read?,
+        };
+        if let Some(saved) = saved {
             let cid = field(&saved, "connector_id");
             let token = field(&saved, "token");
             if inner.credentials.is_paired(cid, token) {

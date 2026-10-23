@@ -62,13 +62,13 @@ pub(super) fn rotate_if_full(path: &Path) -> io::Result<()> {
 }
 
 /// The log, opened for appending: created private, a link in its place refused, and a file already there that others
-/// can open refused rather than repaired.
+/// can open (or that is not this user's regular file) refused rather than repaired.
 fn open_private_append(path: &Path) -> io::Result<File> {
     let file = Files::open_private(path, Create::Append)?;
-    if Files::open_to_others(&file)? {
+    if !Files::is_private_file(&file)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "the log is open to others",
+            "the log is not a private file of this user's",
         ));
     }
     Ok(file)

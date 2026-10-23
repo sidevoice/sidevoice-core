@@ -670,7 +670,7 @@ fn an_identity_that_cannot_be_read() {
         let root = support::private_tempdir();
         let data = root.path().join("core");
         private_dir(&data);
-        fs::write(data.join("node-identity.json"), content).unwrap();
+        support::write_private(&data.join("node-identity.json"), content);
         let result = run_core(data.to_str().unwrap(), &[]);
         failure(&data, &result, "identity", "identity.unreadable", 0);
         assert!(!data.join("core.json").exists(), "never says it is ready");
@@ -701,7 +701,7 @@ fn a_failure_without_a_launch_id_reports_the_one_made_up() {
     let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
-    fs::write(data.join("node-identity.json"), b"not a key").unwrap();
+    support::write_private(&data.join("node-identity.json"), b"not a key");
     let output = Command::new(CORE)
         .args([
             "--port",
@@ -731,7 +731,7 @@ fn a_directory_another_core_holds() {
     let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
-    let lock = fs::File::create(data.join("core.lock")).unwrap();
+    let lock = support::create_private(&data.join("core.lock"));
     lock.try_lock().unwrap();
     let result = run_core(data.to_str().unwrap(), &[]);
     failure(&data, &result, "bind", "bind.core-running", 75);
@@ -753,7 +753,7 @@ fn a_refusal_names_what_it_refused() {
     let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
-    let lock = fs::File::create(data.join("core.lock")).unwrap();
+    let lock = support::create_private(&data.join("core.lock"));
     lock.try_lock().unwrap();
     let report = failure(
         &data,

@@ -7,9 +7,11 @@ use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use p256::pkcs8::DecodePublicKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use uuid::Uuid;
 
 use super::super::{digest, now, valid_nonce, DeviceRegistry, NodeIdentity};
+use crate::platform::fs::{Create, Files, Fs};
 use crate::storage::PrivateDir;
 
 fn private_dir() -> (tempfile::TempDir, PrivateDir) {
@@ -78,7 +80,10 @@ fn an_identity_that_cannot_be_read_is_refused_never_replaced() {
         b"{\"private_key_pem\": \"\xc3\x28\"}",
     ] {
         let (_root, dir) = private_dir();
-        std::fs::write(dir.path().join("node-identity.json"), content).unwrap();
+        Files::open_private(&dir.path().join("node-identity.json"), Create::New)
+            .unwrap()
+            .write_all(content)
+            .unwrap();
         assert!(NodeIdentity::load_or_create(&dir).is_err(), "{content:?}");
         assert_eq!(
             std::fs::read(dir.path().join("node-identity.json")).unwrap(),

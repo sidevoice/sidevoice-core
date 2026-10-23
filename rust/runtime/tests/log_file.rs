@@ -102,13 +102,17 @@ fn a_log_that_is_a_link_is_not_written_through() {
 #[cfg(unix)]
 #[test]
 fn a_log_where_others_can_enter_or_read_is_refused_not_repaired() {
+    use crate::platform::fs::{Files, Fs};
     use std::os::unix::fs::PermissionsExt;
     let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
     let root = tempfile::tempdir().unwrap();
     let parent = root.path().join("logs");
     let log = parent.join("core.log");
     log_event(&config(log.clone()), "runtime.log_start", None).unwrap();
-    assert!(is_private_file(&parent), "a parent it made is private");
+    assert!(
+        Files::is_private_dir(&parent).unwrap(),
+        "a parent it made is private"
+    );
 
     fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(log_event(&config(log.clone()), "runtime.log_ready", None).is_err());

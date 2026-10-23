@@ -96,7 +96,8 @@ async fn a_broken_connector_credential_is_replaced_and_nothing_else_is() {
     let room = read_json(&data.join("room-state.json"));
     let identity = fs::read(data.join("node-identity.json")).unwrap();
 
-    fs::write(data.join("connector-credential.json"), "{invalid-json").unwrap();
+    fs::remove_file(data.join("connector-credential.json")).unwrap();
+    write_private(&data.join("connector-credential.json"), "{invalid-json");
     let mut core = Launch::new(&data).start();
     let second = (core.connector_id(), core.connector_token());
     assert_ne!(

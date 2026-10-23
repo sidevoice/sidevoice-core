@@ -1,7 +1,7 @@
 //! The single owner of private files and process locks.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -48,14 +48,24 @@ impl PrivateDir {
         self.path.join(name)
     }
 
+    /// A record of ours, `None` when there is none. It is read from the handle that was judged: opened without
+    /// following a link, and used only when it is a regular file of this user's open to nobody else
+    /// (`Files::is_private_file`); anything else is refused with `PermissionDenied` and left as it is. What does not
+    /// parse is `InvalidData`.
     pub fn read_json(&self, name: &str) -> io::Result<Option<Value>> {
-        match fs::read(self.file(name)) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
+        let mut file = match Files::open_read(&self.file(name)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if !Files::is_private_file(&file)? {
+            return Err(not_private());
         }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
     pub fn write_json(&self, name: &str, value: &Value) -> io::Result<()> {
@@ -98,8 +108,13 @@ impl PrivateDir {
         }
     }
 
+    /// Takes the directory's lock, `None` while another process holds it. A lock file already there is used only when
+    /// it is a regular file of this user's open to nobody else; anything else is refused and left as it is.
     pub fn lock(&self) -> io::Result<Option<File>> {
         let file = Files::open_private(&self.file("core.lock"), Create::ReadWrite)?;
+        if !Files::is_private_file(&file)? {
+            return Err(not_private());
+        }
         match file.try_lock() {
             Ok(()) => Ok(Some(file)),
             Err(fs::TryLockError::WouldBlock) => Ok(None),
@@ -116,12 +131,18 @@ fn unsafe_directory() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "identity.unsafe-directory")
 }
 
+fn not_private() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "not a private file of this user's",
+    )
+}
+
 /// Whether the file at `path` is this user's and open to nobody else, judged on a handle opened without following a link
 /// (tests, on every OS).
 #[cfg(test)]
 pub(crate) fn is_private_file(path: &Path) -> bool {
-    let file = Files::open_read(path).unwrap();
-    UserId::current().owns_file(&file).unwrap() && !Files::open_to_others(&file).unwrap()
+    Files::is_private_file(&Files::open_read(path).unwrap()).unwrap()
 }
 
 /// A temporary directory that is private to this user: `tempfile` makes its own with the process's umask, and the core refuses
