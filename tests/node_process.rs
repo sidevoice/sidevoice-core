@@ -211,6 +211,12 @@ fn local(data: &Path) -> Endpoint {
     Endpoint::new(data, "local")
 }
 
+/// Where that channel's socket file is: in this user's runtime directory when there is one, else in `data`.
+#[cfg(unix)]
+fn local_socket(data: &Path) -> PathBuf {
+    PathBuf::from(local(data).to_string())
+}
+
 /// Runs `work` on a runtime of its own, in a thread of its own: the callers are plain tests and async ones alike.
 fn blocking<T: Send>(work: impl std::future::Future<Output = T> + Send) -> T {
     std::thread::scope(|scope| {
@@ -250,7 +256,7 @@ fn nothing_left(data: &Path) {
         "nobody listens"
     );
     #[cfg(unix)]
-    assert!(!data.join("local.sock").exists(), "no socket file left");
+    assert!(!local_socket(data).exists(), "no socket file left");
 }
 
 fn over_tcp(port: u64, method: &str, path: &str) -> (u16, Value) {
@@ -354,13 +360,11 @@ fn the_ready_file_carries_the_link_and_leaves_with_the_process() {
     assert_eq!(facts["endpoint"], local(&data).to_string());
     assert!(facts.get("socket").is_none());
     let endpoint: Endpoint = facts["endpoint"].as_str().unwrap().parse().unwrap();
-    // Unix: the desktop app reaches `C/local.sock` without reading the ready file: that path is a contract; the
-    // socket is a socket, this user's alone.
+    // Unix: the endpoint is a socket, this user's alone.
     #[cfg(unix)]
     {
         use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-        assert_eq!(facts["endpoint"], data.join("local.sock").to_str().unwrap());
-        let meta = fs::symlink_metadata(data.join("local.sock")).unwrap();
+        let meta = fs::symlink_metadata(local_socket(&data)).unwrap();
         assert!(meta.file_type().is_socket());
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
@@ -422,7 +426,7 @@ fn a_manager_s_sigterm_or_a_sigint_is_a_clean_exit() {
         core.signal(signal);
         assert_eq!(core.wait(20).code(), Some(0), "signal {signal}");
         assert!(!data.join("core.json").exists());
-        assert!(!data.join("local.sock").exists());
+        assert!(!local_socket(&data).exists());
     }
 }
 
@@ -553,10 +557,15 @@ fn a_socket_a_dead_core_left_is_replaced() {
     let root = support::private_tempdir();
     let data = root.path().join("core");
     private_dir(&data);
+    // Its directory: `data` itself, or one of its own in the runtime directory.
+    let dir = local_socket(&data).parent().unwrap().to_owned();
+    if !dir.exists() {
+        private_dir(&dir);
+    }
     // Bound, never listening, nobody behind it, `0600`: what a SIGKILLed core leaves.
-    drop(std::os::unix::net::UnixListener::bind(data.join("local.sock")).unwrap());
-    fs::set_permissions(data.join("local.sock"), fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(data.join("local.sock").exists());
+    drop(std::os::unix::net::UnixListener::bind(local_socket(&data)).unwrap());
+    fs::set_permissions(local_socket(&data), fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(local_socket(&data).exists());
     let core = Core::start(&data, "0", &[]);
     let facts = wait_ready(&data);
     let (status, health) = via_endpoint(&local(&data), "GET", "/api/local/health");
@@ -765,7 +774,7 @@ fn a_refusal_names_what_it_refused() {
     assert!(report["message"]
         .as_str()
         .unwrap()
-        .contains(data.join("local.sock").to_str().unwrap()));
+        .contains(&local(&data).to_string()));
     drop(lock);
     let loose = root.path().join("loose");
     private_dir(&loose);

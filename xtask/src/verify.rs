@@ -197,7 +197,7 @@ fn start(root: &Path) -> Result<Value> {
         let text = fs::read_to_string(&log).unwrap_or_default();
         text[text.len().saturating_sub(3000)..].to_string()
     };
-    let checked = (|| -> Result<Value> {
+    let checked = (|| -> Result<(Value, PathBuf)> {
         let deadline = Instant::now() + Duration::from_secs(40);
         while !data.join("core.json").exists() {
             if Instant::now() > deadline {
@@ -213,8 +213,9 @@ fn start(root: &Path) -> Result<Value> {
             sleep(Duration::from_millis(100));
         }
         let ready = parse_json(&read(&data.join("core.json"))?, "core.json")?;
-        let mut socket = UnixStream::connect(data.join("local.sock"))
-            .map_err(|error| format!("local.sock: {error}"))?;
+        // The socket is where the ready file says: in this user's runtime directory when there is one.
+        let path = PathBuf::from(ready["endpoint"].as_str().ok_or("core.json names no endpoint")?);
+        let mut socket = UnixStream::connect(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|error| error.to_string())?;
@@ -243,7 +244,7 @@ fn start(root: &Path) -> Result<Value> {
         {
             return Err("ready/health process or node identity mismatch".into());
         }
-        Ok(health)
+        Ok((health, path))
     })();
     // The shell's own kill: not every system has a kill program.
     let _ = Command::new("sh")
@@ -260,11 +261,11 @@ fn start(root: &Path) -> Result<Value> {
         }
         sleep(Duration::from_millis(100));
     };
-    let health = checked?;
+    let (health, socket) = checked?;
     if !status.is_some_and(|status| status.success()) {
         return Err(format!("core shutdown failed: {}", tail()));
     }
-    if data.join("core.json").exists() || data.join("local.sock").exists() {
+    if data.join("core.json").exists() || socket.exists() {
         return Err("the core left its ready file or socket after shutdown".into());
     }
     Ok(json!({"fingerprint": health["fingerprint"]}))

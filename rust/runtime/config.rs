@@ -39,7 +39,8 @@ impl Config {
             Some(dir) => dir,
             None => data_dir::core_dir(&data_dir::resolve(|name| std::env::var_os(name))?),
         })?;
-        // The local channel is derived from the data directory alone, so the data directory's lock holds it too.
+        // The local channel is derived from the data directory alone (in this user's runtime directory when there is
+        // one, so its path stays short), so the data directory's lock holds it too. Readers take it from the ready file.
         let endpoint = Endpoint::new(&data_dir, "local");
         let ready_file = absolute(cli.ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;
         let log_file = absolute(
