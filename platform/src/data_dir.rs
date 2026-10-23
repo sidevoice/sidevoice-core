@@ -13,6 +13,10 @@
 //! holds the connector's releases; each program that listens publishes where in a small record under `D`
 //! (`core/core.json`, `connector.json`), so none computes a socket path.
 //!
+//! The models the engine downloads and the desktop app shares are NOT in `D`: `Models` is always in the OS's standard
+//! place ([`models_dir`]), whatever `$SIDEVOICE_DATA_DIR` says, one content-addressed cache for every Sidevoice instance
+//! of this user. The connector never removes it.
+//!
 //! Nothing differs per OS but the folder's name, so this is a plain module of free functions: no trait, no per-OS files.
 //! `use sidevoice_platform::data_dir;` then `data_dir::resolve(|name| std::env::var_os(name))?`.
 
@@ -67,6 +71,17 @@ pub fn core_dir(data: &Path) -> PathBuf {
     data.join("core")
 }
 
+/// The name of the shared models folder. It is the engine's and the desktop app's, never the connector's:
+/// uninstalling the connector leaves it.
+pub const MODELS: &str = "Models";
+
+/// The shared models folder: `Models` in the OS's [`standard`] place (`standard()/Models`), the same rule on every OS
+/// (Linux too) and independent of `$SIDEVOICE_DATA_DIR`, so every Sidevoice instance of this user shares one cache of
+/// downloaded models. `None` when the user has no standard data directory.
+pub fn models_dir() -> Option<PathBuf> {
+    standard().map(|place| place.join(MODELS))
+}
+
 /// The connector's releases inside `data` (`D/install`): `current.json` and `releases/<id>`.
 pub fn releases_dir(data: &Path) -> PathBuf {
     data.join("install")
@@ -102,6 +117,21 @@ mod tests {
         );
         let relative = resolve(|name| (name == VARIABLE).then(|| "relative".into()));
         assert_eq!(relative.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn the_models_are_in_the_standard_place_whatever_the_override_says() {
+        let models = models_dir().unwrap();
+        assert_eq!(models, standard().unwrap().join("Models"));
+        assert_eq!(models.file_name().unwrap(), MODELS);
+        assert!(models.is_absolute());
+        let elsewhere = std::env::temp_dir().join("elsewhere");
+        let data =
+            resolve(|name| (name == VARIABLE).then(|| elsewhere.clone().into_os_string())).unwrap();
+        assert!(
+            !models.starts_with(&data),
+            "an override of D does not move the models"
+        );
     }
 
     #[test]
