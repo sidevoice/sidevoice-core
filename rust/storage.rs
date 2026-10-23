@@ -17,13 +17,14 @@ pub struct PrivateDir {
 
 impl PrivateDir {
     /// Create `path` if needed and accept it only as an owner-only directory of this user whose every ancestor is this
-    /// user's or the system's with nobody else able to replace what is in it (`Files::is_private_dir`).
+    /// user's or the system's with nobody else able to replace what is in it (`Files::ensure_private_dir`); a refusal is
+    /// `identity.unsafe-directory`.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
-        Files::create_private_dirs(path)?;
-        if !Files::is_private_dir(path)? {
-            return Err(unsafe_directory());
-        }
+        Files::ensure_private_dir(path).map_err(|error| match error.kind() {
+            io::ErrorKind::PermissionDenied => unsafe_directory(),
+            _ => error,
+        })?;
         Ok(Self {
             path: path.to_path_buf(),
         })
@@ -49,18 +50,15 @@ impl PrivateDir {
     }
 
     /// A record of ours, `None` when there is none. It is read from the handle that was judged: opened without
-    /// following a link, and used only when it is a regular file of this user's open to nobody else
-    /// (`Files::is_private_file`); anything else is refused with `PermissionDenied` and left as it is. What does not
+    /// following a link, and used only when it is a regular file of this user's with one name, open to nobody else
+    /// (`Files::open_private_file`); anything else is refused with `PermissionDenied` and left as it is. What does not
     /// parse is `InvalidData`.
     pub fn read_json(&self, name: &str) -> io::Result<Option<Value>> {
-        let mut file = match Files::open_read(&self.file(name)) {
+        let mut file = match Files::open_private_file(&self.file(name)) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        if !Files::is_private_file(&file)? {
-            return Err(not_private());
-        }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         serde_json::from_slice(&bytes)
@@ -109,12 +107,11 @@ impl PrivateDir {
     }
 
     /// Takes the directory's lock, `None` while another process holds it. A lock file already there is used only when
-    /// it is a regular file of this user's open to nobody else; anything else is refused and left as it is.
+    /// it is a regular file of this user's with one name, open to nobody else (`Files::check_private`; a directory there
+    /// cannot be opened for writing); anything else is refused and left as it is.
     pub fn lock(&self) -> io::Result<Option<File>> {
         let file = Files::open_private(&self.file("core.lock"), Create::ReadWrite)?;
-        if !Files::is_private_file(&file)? {
-            return Err(not_private());
-        }
+        Files::check_private(&file)?;
         match file.try_lock() {
             Ok(()) => Ok(Some(file)),
             Err(fs::TryLockError::WouldBlock) => Ok(None),
@@ -131,18 +128,11 @@ fn unsafe_directory() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "identity.unsafe-directory")
 }
 
-fn not_private() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "not a private file of this user's",
-    )
-}
-
-/// Whether the file at `path` is this user's and open to nobody else, judged on a handle opened without following a link
-/// (tests, on every OS).
+/// Whether the file at `path` is a regular file of this user's with one name, open to nobody else, judged on a handle
+/// opened without following a link (tests, on every OS).
 #[cfg(test)]
 pub(crate) fn is_private_file(path: &Path) -> bool {
-    Files::is_private_file(&Files::open_read(path).unwrap()).unwrap()
+    Files::open_private_file(path).is_ok()
 }
 
 /// A temporary directory that is private to this user: `tempfile` makes its own with the process's umask, and the core refuses

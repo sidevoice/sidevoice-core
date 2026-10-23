@@ -2309,12 +2309,15 @@ dependencies = [
  "hex",
  "interprocess",
  "rustix",
+ "serde",
+ "serde_json",
  "sha2",
  "sysinfo",
  "tempfile",
  "tokio",
  "whoami",
  "widestring",
+ "winapi-util",
  "windows-sys 0.61.2",
 ]
 

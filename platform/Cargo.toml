@@ -17,6 +17,12 @@ dirs = "7"
 # The login name and the host name (user), the same on every OS.
 gethostname = "1"
 whoami = "2"
+# A record written as JSON (fs: `write_json`).
+serde = "1"
+serde_json = "1"
+# A record's staging file (fs): a fresh name beside the record, created by `open_private`, removed on failure (the
+# rename too), renamed over it.
+tempfile = "3"
 
 # Unix: the effective uid (user), the open flags (fs) and sending `SIGTERM` (stop), with no `unsafe` of ours; hearing it
 # (stop), `tokio`.
@@ -32,6 +38,8 @@ sha2 = "0.10"
 widestring = "1"
 tokio = { version = "1", features = ["sync"] }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# How many names a file has, and which file a handle is (fs): `winapi-util` (walkdir, ripgrep), no `unsafe` of ours.
+winapi-util = "0.1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -40,6 +48,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
+[features]
+# What tests do to files and a program never does (fs: `TestFiles`): for a dependent's tests, through a dev-dependency
+# on this crate with this feature. Never in a release build.
+test-support = []
+
 [dev-dependencies]
-tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "time"] }

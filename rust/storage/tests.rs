@@ -4,7 +4,7 @@ use super::*;
 
 /// Whether the directory at `path` is private to this user, as the storage judges it.
 fn private(path: &Path) -> bool {
-    Files::is_private_dir(path).unwrap()
+    Files::ensure_private_dir(path).is_ok()
 }
 
 fn names(path: &Path) -> Vec<String> {

@@ -65,11 +65,6 @@ pub(super) fn rotate_if_full(path: &Path) -> io::Result<()> {
 /// can open (or that is not this user's regular file) refused rather than repaired.
 fn open_private_append(path: &Path) -> io::Result<File> {
     let file = Files::open_private(path, Create::Append)?;
-    if !Files::is_private_file(&file)? {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "the log is not a private file of this user's",
-        ));
-    }
+    Files::check_private(&file)?;
     Ok(file)
 }
