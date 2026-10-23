@@ -243,16 +243,19 @@ fn create_all<F: Fs + ?Sized>(path: &Path) -> io::Result<()> {
 }
 
 /// Writes `bytes` as `path` whole or not at all: staged in a new file beside it, created private by
-/// [`Fs::open_private`] before any byte is written, under a fresh name `tempfile` picks and removes on failure (the
-/// rename too), synced, renamed over `path`, the directory synced. With `keep_access` the replacement takes the mode
-/// `path` has now (Unix; a Windows replacement is private).
+/// [`Fs::open_private`] before any byte is written, under a fresh name `tempfile` picks (`.<name>.<random>`, so what a
+/// killed writer left is known by its name) and removes on failure (the rename too), synced, renamed over `path`, the
+/// directory synced. With `keep_access` the replacement takes the mode `path` has now (Unix; a Windows replacement is
+/// private).
 fn write_whole<F: Fs + ?Sized>(path: &Path, bytes: &[u8], keep_access: bool) -> io::Result<()> {
     let dir = path
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let mut staged =
-        tempfile::Builder::new().make_in(dir, |temp| F::open_private(temp, Create::New))?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let mut staged = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .make_in(dir, |temp| F::open_private(temp, Create::New))?;
     staged.write_all(bytes)?;
     if keep_access {
         imp::keep_access(path, staged.as_file())?;
@@ -269,7 +272,7 @@ fn read_bounded(file: File, path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     if bytes.len() as u64 > limit {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
-            format!("{} is larger than {limit} bytes", path.display()),
+            format!("{} is too large: over {limit} bytes", path.display()),
         ));
     }
     Ok(bytes)
