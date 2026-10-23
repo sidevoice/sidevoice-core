@@ -27,10 +27,11 @@ pub(crate) use imp::OWNER_ONLY;
 
 use interprocess::local_socket::tokio::Listener as RawListener;
 use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// One connection. `AsyncRead + AsyncWrite + Unpin`; its peer has been checked to be this user.
@@ -42,17 +43,44 @@ pub type Stream = interprocess::local_socket::tokio::Stream;
 pub trait Address:
     Sized + Clone + fmt::Debug + fmt::Display + PartialEq + FromStr<Err = io::Error>
 {
-    /// Our own endpoint called `name` for the data directory `dir`. Unix: the socket `dir/<name>.sock`. Windows: the
-    /// pipe `\\.\pipe\sidevoice-<hash of (user, dir)>-<name>`, so two profiles or two users never meet on one name.
-    /// A record read back is, on Unix, an absolute socket path, and on Windows a full local pipe name.
+    /// Our own endpoint called `name` for the data directory `dir`. Unix: the socket `<name>.sock` in this user's
+    /// runtime directory ([`Channel::runtime_dir`]), inside a directory of `dir`'s own, `sidevoice-<hash of dir>`, so
+    /// the path stays short whatever `dir` is and two data directories never share one; without a runtime
+    /// directory, `dir/<name>.sock`. Windows: the pipe `\\.\pipe\sidevoice-<hash of (user, dir)>-<name>`, so two
+    /// profiles or two users never meet on one name. A record read back is, on Unix, an absolute socket path, and on
+    /// Windows a full local pipe name.
     fn new(dir: &Path, name: &str) -> Self;
+}
+
+/// The directory an endpoint for the data directory `dir` is named in, given this user's runtime directory
+/// ([`Channel::runtime_dir`]): `runtime/sidevoice-<first 8 bytes of SHA-256(dir), in hex>`, or `dir` itself without
+/// one.
+fn endpoint_dir(runtime: Option<&Path>, dir: &Path) -> PathBuf {
+    match runtime {
+        Some(runtime) => {
+            let hash = Sha256::digest(dir.as_os_str().as_encoded_bytes());
+            runtime.join(format!("sidevoice-{}", hex::encode(&hash[..8])))
+        }
+        None => dir.to_owned(),
+    }
 }
 
 /// What every OS implements ([`Channels`], in `ipc/unix.rs` and `ipc/windows.rs`): how a listener is made private to
 /// this user. Connecting is one body for every OS; the peer check is internal to each OS file (`peer_is_this_user`).
 pub trait Channel {
+    /// This user's runtime directory, where [`Address::new`] puts the endpoints' directories so a socket path stays
+    /// within the OS limit (104 bytes on macOS, 108 on Linux) however long the data directory is. Linux:
+    /// `$XDG_RUNTIME_DIR` (`/run/user/<uid>`). macOS: the per-user temporary directory, `$TMPDIR`, else
+    /// `confstr(_CS_DARWIN_USER_TEMP_DIR)` (`/var/folders/…/T/`), as `std::env::temp_dir` reads it. `None` where
+    /// there is none (Linux without a login session, a container) and on Windows, whose pipes have no path: the
+    /// endpoints then stay in their data directory. One body for every OS (`dirs`); macOS overrides it.
+    fn runtime_dir() -> Option<PathBuf> {
+        dirs::runtime_dir()
+    }
+
     /// Starts listening at `endpoint`, reachable by this user alone. A name another process listens on is an error.
-    /// Unix: only in a directory of this user's open to nobody else; a socket left by a dead process is replaced,
+    /// Unix: only in a directory of this user's open to nobody else, made (`0700`) when missing, one already there
+    /// used only if it passes (refused, never repaired); a socket left by a dead process is replaced,
     /// but only once it is checked to be this user's and private; the socket file is `0600` and goes away when the
     /// listener is dropped. Windows: the first instance of the pipe, with a descriptor that lets in its owner,
     /// SYSTEM and Administrators only, refusing remote clients.
@@ -126,6 +154,48 @@ mod tests {
         assert_ne!(endpoint, Endpoint::new(b.path(), "local"));
         assert_ne!(endpoint, Endpoint::new(a.path(), "connector"));
         assert!(endpoint.to_string().contains("local"));
+    }
+
+    /// A data directory a 22-byte user name and a profile make too long for a socket in it, and a macOS per-user
+    /// temporary directory, as long as it gets.
+    const LONG_DATA_DIR: &str =
+        "/Users/a-twenty-two-byte-user/Library/Application Support/Sidevoice-profiles/a-long-profile-name/core";
+    const MACOS_TMPDIR: &str = "/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/";
+    /// The most a Unix socket path may hold on macOS (`sun_path`), its last byte the terminating NUL.
+    const SUN_PATH: usize = 104;
+
+    #[test]
+    fn under_a_runtime_directory_a_long_data_directory_makes_a_short_endpoint_of_its_own() {
+        let runtime = Path::new(MACOS_TMPDIR);
+        let dir = endpoint_dir(Some(runtime), Path::new(LONG_DATA_DIR));
+        assert!(dir.starts_with(runtime));
+        assert!(dir.join("connector.sock").as_os_str().len() < SUN_PATH);
+        assert!(
+            Path::new(LONG_DATA_DIR)
+                .join("connector.sock")
+                .as_os_str()
+                .len()
+                >= SUN_PATH
+        );
+        assert_eq!(dir, endpoint_dir(Some(runtime), Path::new(LONG_DATA_DIR)));
+        assert_ne!(
+            dir,
+            endpoint_dir(Some(runtime), &Path::new(LONG_DATA_DIR).join("other"))
+        );
+        assert_eq!(
+            endpoint_dir(None, Path::new(LONG_DATA_DIR)),
+            Path::new(LONG_DATA_DIR)
+        );
+    }
+
+    #[test]
+    fn with_a_runtime_directory_here_a_long_data_directory_still_makes_a_reachable_endpoint() {
+        // Where this host has none, endpoints stay in their data directory (Unix) or have no path (Windows).
+        if Channels::runtime_dir().is_none() {
+            return;
+        }
+        let endpoint = Endpoint::new(Path::new(LONG_DATA_DIR), "connector");
+        assert!(endpoint.to_string().len() < SUN_PATH, "{endpoint}");
     }
 
     #[tokio::test]

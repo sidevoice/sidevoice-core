@@ -12,11 +12,14 @@ description = "The operating-system code Sidevoice's crates share: this user, th
 [dependencies]
 # The local channel (ipc): Unix sockets and Windows named pipes behind one API.
 interprocess = { version = "2.4", features = ["tokio"] }
-# The OS's standard place for a program's data (data_dir).
-dirs = "7"
 # The login name and the host name (user), the same on every OS.
 gethostname = "1"
 whoami = "2"
+# The OS's standard places for a program's data (data_dir) and this user's runtime directory (ipc: where its sockets
+# go), and the short name an endpoint's directory (Unix) or pipe (Windows) takes from its data directory.
+dirs = "7"
+hex = "0.4"
+sha2 = "0.10"
 
 # Unix: the effective uid (user), the open flags (fs) and sending `SIGTERM` (stop), with no `unsafe` of ours; hearing it
 # (stop), `tokio`.
@@ -24,11 +27,9 @@ whoami = "2"
 rustix = { version = "1", features = ["process", "fs"] }
 tokio = { version = "1", features = ["signal"] }
 
-# Windows: this process's user and file owners (user); the pipe's name hash and security descriptor, and whether a
+# Windows: this process's user and file owners (user); the pipe's security descriptor, and whether a
 # pipe peer's process is this user's (ipc); the stop event, and a channel from the thread that waits on it (stop).
 [target.'cfg(windows)'.dependencies]
-hex = "0.4"
-sha2 = "0.10"
 widestring = "1"
 tokio = { version = "1", features = ["sync"] }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
