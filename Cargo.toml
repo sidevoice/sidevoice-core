@@ -1,6 +1,6 @@
 [package]
 name = "sidevoice-core"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.98"
 publish = false
@@ -29,9 +29,12 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "=0.22.1"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-fs2 = "0.4"
 futures-util = "=0.3.32"
-libc = "0.2"
+# The host's network interfaces with their flags (platform/network), the same on every OS. No default features: the
+# gateway, DNS, Apple SystemConfiguration and Android extras are not used.
+netdev = { version = "0.46", default-features = false }
+# The user's home directory, the same on every OS (runtime/config).
+dirs = "7"
 opentelemetry = { version = "0.31", default-features = false, features = ["trace", "metrics"] }
 opentelemetry-http = { version = "0.31", default-features = false }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "trace", "metrics"] }
@@ -53,6 +56,10 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 # This user and the local channel, shared with the connector (rust/platform re-exports them).
 sidevoice-platform = { path = "platform" }
+
+[target.'cfg(unix)'.dev-dependencies]
+# Signals sent to a core process, and its pid (tests/support).
+libc = "0.2"
 
 [dev-dependencies]
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics"] }

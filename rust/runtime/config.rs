@@ -33,13 +33,12 @@ impl Config {
 
     /// Derive the unset paths from the data directory and make every path absolute.
     pub fn from_cli(cli: Cli) -> io::Result<Self> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let data_dir = absolute(cli.data_dir.unwrap_or_else(|| home.join(".sidevoice/core")))?;
-        // The local channel is derived from the data directory alone (in this user's runtime directory when there
-        // is one, so its path stays short), so the data directory's lock holds it too. Readers take it from the
-        // ready file.
+        let data_dir = absolute(match cli.data_dir {
+            Some(dir) => dir,
+            None => default_data_dir()?,
+        })?;
+        // The local channel is derived from the data directory alone (in this user's runtime directory when there is
+        // one, so its path stays short), so the data directory's lock holds it too. Readers take it from the ready file.
         let endpoint = Endpoint::new(&data_dir, "local");
         let ready_file = absolute(cli.ready_file.unwrap_or_else(|| data_dir.join("core.json")))?;
         let log_file = absolute(
@@ -57,6 +56,16 @@ impl Config {
             idle_exit: cli.idle_exit.unwrap_or(600.0),
         })
     }
+}
+
+/// `~/.sidevoice/core`, the same place on every OS (the connector's own data directory is `~/.sidevoice`); the home
+/// is the OS's (`dirs`), never the current directory: without one the core refuses to guess where its identity lives.
+fn default_data_dir() -> io::Result<PathBuf> {
+    dirs::home_dir()
+        .map(|home| home.join(".sidevoice/core"))
+        .ok_or_else(|| {
+            io::Error::other("no home directory: pass --data-dir or SIDEVOICE_CORE_DATA_DIR")
+        })
 }
 
 fn absolute(value: PathBuf) -> io::Result<PathBuf> {

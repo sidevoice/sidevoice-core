@@ -17,8 +17,9 @@ use std::str::FromStr;
 
 const PREFIX: &str = r"\\.\pipe\";
 
-/// Full access for the pipe's owner, SYSTEM and Administrators; nobody else, nothing inherited.
-const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)";
+/// Full access for the pipe's owner, SYSTEM and Administrators; nobody else, nothing inherited. Also the descriptor of
+/// a process's stop event (`crate::stop`).
+pub(crate) const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)(A;;GA;;;BA)";
 
 /// An endpoint: its full pipe name.
 #[derive(Clone, Debug, PartialEq)]

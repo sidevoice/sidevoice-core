@@ -1,10 +1,10 @@
 //! What the operating system sends a process to ask it to leave, held from the moment it is installed.
 //!
-//! The interface is the [`Stop`] trait; [`Signals`] is the one OS implementation compiled in, chosen below. Unix:
-//! `SIGTERM` (what launchd, systemd and the connector send to stop a service) and `SIGINT`. Windows: Ctrl+C and
-//! Ctrl+Break, when the core runs in a console; a console-less core is asked to leave in band instead, over its local
-//! channel (`POST /api/local/shutdown`, decision "Graceful stop", 2026-10-22), which is not the OS's and not here.
-//! Callers import both: `use crate::platform::signal::{Signals, Stop};` then `Signals::install()`,
+//! The interface is the [`Stop`] trait; [`Signals`] is the one OS implementation compiled in, chosen below. On every
+//! OS, another process's request that this one leave, as `sidevoice_platform::stop` hears it (the connector asks that
+//! way): Unix `SIGTERM` (what launchd and systemd send too), Windows the core's own stop event, which reaches a
+//! console-less core. Besides it, the console's interrupts: Unix `SIGINT`; Windows Ctrl+C and Ctrl+Break, when the
+//! core runs in a console. Callers import both: `use crate::platform::signal::{Signals, Stop};` then `Signals::install()`,
 //! `signals.received().await`.
 
 #[cfg(unix)]

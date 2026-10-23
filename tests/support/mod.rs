@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use sidevoice_core::platform::fs::{Create, Files, Fs};
 use sidevoice_core::platform::ipc::{Channel, Channels, Endpoint, Stream};
+use sidevoice_core::platform::user::{User, UserId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -159,10 +161,6 @@ impl Core {
             .unwrap()
     }
 
-    pub fn socket(&self) -> PathBuf {
-        PathBuf::from(self.endpoint().to_string())
-    }
-
     pub fn connector_id(&self) -> String {
         self.ready["connector_id"].as_str().unwrap().to_owned()
     }
@@ -205,9 +203,37 @@ impl Core {
         tail.into_iter().rev().collect::<Vec<_>>().join("\n")
     }
 
+    #[cfg(unix)]
     pub fn signal(&self, signal: libc::c_int) {
         unsafe {
             libc::kill(self.pid() as libc::pid_t, signal);
+        }
+    }
+
+    /// Asks the core to leave the way its manager does on this OS: SIGTERM on Unix; on Windows, which has no signal for
+    /// a process without a console, a shutdown request over its local channel (decision "Graceful stop", 2026-10-22).
+    pub fn terminate(&self) {
+        #[cfg(unix)]
+        self.signal(libc::SIGTERM);
+        #[cfg(windows)]
+        {
+            let Some(endpoint) = self.ready["endpoint"]
+                .as_str()
+                .and_then(|endpoint| endpoint.parse::<Endpoint>().ok())
+            else {
+                return;
+            };
+            let request = Http::new(Target::Local(endpoint), "POST", "/api/local/shutdown");
+            // Its own thread and runtime: this is called inside a test's runtime as well as outside one.
+            // A core that is already gone answers nothing: `stop` and `Drop` then see it exit (or not).
+            let _ = std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(request.send())
+            })
+            .join();
         }
     }
 
@@ -225,11 +251,11 @@ impl Core {
         }
     }
 
-    /// SIGTERM, the way a service manager stops it; its exit status.
+    /// [`Core::terminate`], the way a service manager stops it; its exit status.
     pub fn stop(&mut self) -> i32 {
-        self.signal(libc::SIGTERM);
+        self.terminate();
         self.exited(Duration::from_secs(15))
-            .unwrap_or_else(|| panic!("the core ignored SIGTERM: {}", self.log()))
+            .unwrap_or_else(|| panic!("the core ignored the request to leave: {}", self.log()))
     }
 
     pub fn http(&self, method: &str, path: &str) -> Http {
@@ -408,7 +434,7 @@ impl Core {
 impl Drop for Core {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            self.signal(libc::SIGTERM);
+            self.terminate();
             if self.exited(Duration::from_secs(10)).is_none() {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
@@ -1080,4 +1106,50 @@ pub async fn publish(
 
 pub fn message_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Private directories and files, the same on every OS.
+
+/// A directory of this user's, open to nobody else, as the core makes its own.
+pub fn private_dir(path: &Path) {
+    Files::create_private_dir(path).unwrap();
+}
+
+/// Creates a new file at `path` as the core makes its own: private from its creation (`Files::open_private`), so what
+/// a test plants is judged by its content, not refused as open to others.
+pub fn create_private(path: &Path) -> fs::File {
+    Files::open_private(path, Create::New).unwrap()
+}
+
+/// Writes a new private file at `path` (`create_private`).
+pub fn write_private(path: &Path, bytes: impl AsRef<[u8]>) {
+    use std::io::Write;
+    create_private(path).write_all(bytes.as_ref()).unwrap();
+}
+
+/// Whether what `path` names (a file or a directory) is this user's and open to nobody else.
+pub fn is_private(path: &Path) -> bool {
+    let file = Files::open_read(path).unwrap();
+    UserId::current().owns_file(&file).unwrap() && !Files::open_to_others(&file).unwrap()
+}
+
+/// A temporary directory that is private to this user: `tempfile` makes its own with the process's umask, and the core
+/// refuses a log whose parent (here, the data directory's) is not private. `path()` is the private directory in it.
+pub struct PrivateTemp {
+    _outer: tempfile::TempDir,
+    dir: PathBuf,
+}
+
+pub fn private_tempdir() -> PrivateTemp {
+    let outer = tempfile::tempdir().unwrap();
+    let dir = outer.path().join("private");
+    private_dir(&dir);
+    PrivateTemp { _outer: outer, dir }
+}
+
+impl PrivateTemp {
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
 }

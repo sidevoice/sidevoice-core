@@ -21,7 +21,7 @@ fn own_rows(history: &[Value], session: &str, role: &str) -> Vec<Value> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (_peer, _binding) = connector_with_binding(&core, "resumed", THREAD).await;
@@ -106,7 +106,7 @@ async fn a_dropped_call_resumes_without_losing_or_repeating_anything() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_published_while_the_page_was_away_is_marked_unheard_not_played() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (mut peer, binding) = connector_with_binding(&core, "resumed", THREAD).await;
@@ -149,7 +149,7 @@ async fn a_reply_published_while_the_page_was_away_is_marked_unheard_not_played(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_page_that_never_comes_back_gives_its_seat_back_when_the_park_ends() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core"))
         .env("VOICE_RESUME_SECONDS", "1")
         .env("VOICE_BROWSER_HEARTBEAT_SECONDS", "0.5")

@@ -63,7 +63,8 @@ there, is a Unix socket on macOS and Linux and a named pipe on Windows, and serv
 The socket is in the user's runtime directory (Linux `$XDG_RUNTIME_DIR`, macOS the per-user `$TMPDIR`), in a private
 `sidevoice-<hash of D>` directory, so its path stays within the OS limit; without one (Linux with no login session)
 it is `D/local.sock`.
-`POST /api/local/shutdown` on it stops the core as `SIGTERM` does on Unix. `cargo xtask dist` builds,
+`POST /api/local/shutdown` on it stops the core as `SIGTERM` does on Unix. On Windows another process asks the core to
+leave by setting its named event `Local\sidevoice-stop-<pid>` (`sidevoice-platform`'s `stop`). `cargo xtask dist` builds,
 packages and verifies this machine's release archive, exactly as a release does ([`RELEASING.md`](RELEASING.md)).
 
 Compatibility with the latest published connector and web client is `cargo xtask compat`, run weekly in CI.
@@ -74,7 +75,7 @@ The conversation epoch, speech admission, playback fate and common push/pull not
 ## Configuration
 
 Its data — paired devices, the machine's identity key, the conversation journal — lives in
-`SIDEVOICE_CORE_DATA_DIR`, else `~/.sidevoice/core`. Every secret file there is created with mode 0600.
+`SIDEVOICE_CORE_DATA_DIR`, else `~/.sidevoice/core`. Every secret file there is created owner-only (mode 0600; on Windows a protected ACL for this user, SYSTEM and Administrators).
 
 | Variable | What it does |
 |---|---|

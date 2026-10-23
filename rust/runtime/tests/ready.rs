@@ -2,7 +2,7 @@ use std::fs;
 
 use serde_json::json;
 
-use super::support::full_config;
+use super::support::{core_endpoint, full_config};
 use crate::runtime::ready::{document, remove_own};
 
 #[test]
@@ -12,7 +12,7 @@ fn document_describes_this_process_and_its_protocols() {
     assert_eq!(
         ready,
         json!({"pid": std::process::id(), "port": 9000, "url": "http://127.0.0.1:9000",
-            "endpoint": config.endpoint.to_string(),
+            "endpoint": core_endpoint(),
             "launch_id": "launch",
             "version": env!("CARGO_PKG_VERSION"), "api": 1, "protocol": 2,
             "connector_protocols": [2, 3], "connector_id": "connector", "token": "token"})

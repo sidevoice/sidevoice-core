@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/sidevoice/sidevoice-core/compare/v0.7.0...v0.8.0) (2026-10-23)
+
+
+### Features
+
+* **platform:** a stop request the same on every OS (Windows stop event) ([#172](https://github.com/sidevoice/sidevoice-core/issues/172)) ([977f6f1](https://github.com/sidevoice/sidevoice-core/commit/977f6f16e0ef1cb5db06f88af6a11657dfee7d07))
+
 ## [0.7.0](https://github.com/sidevoice/sidevoice-core/compare/v0.6.0...v0.7.0) (2026-10-22)
 
 

@@ -19,12 +19,14 @@ pub struct DeviceRegistry {
 }
 
 impl DeviceRegistry {
-    /// Load the saved devices, ignoring an unreadable file and any row without a valid token hash.
+    /// Load the saved devices, ignoring a file that does not parse and any row without a valid token hash; one that
+    /// cannot be trusted (a link, open to others) is refused, never read or replaced.
     pub fn load(dir: PrivateDir) -> io::Result<Self> {
-        let devices = dir
-            .read_json(DEVICES_FILE)
-            .ok()
-            .flatten()
+        let saved = match dir.read_json(DEVICES_FILE) {
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => None,
+            read => read?,
+        };
+        let devices = saved
             .and_then(|v| v.get("devices").and_then(Value::as_object).cloned())
             .unwrap_or_default()
             .into_iter()
