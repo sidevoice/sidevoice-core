@@ -124,11 +124,11 @@ fn the_flag_names_are_unchanged() {
 }
 
 #[test]
-fn the_default_data_directory_is_under_the_home_never_the_current_directory() {
-    let Some(home) = dirs::home_dir() else {
-        return; // No home to derive from: the core refuses to start without --data-dir (below).
+fn the_default_data_directory_is_core_inside_the_shared_one_never_the_current_directory() {
+    let Ok(shared) = sidevoice_platform::data_dir::resolve(|name| std::env::var_os(name)) else {
+        return; // No data directory to derive from: the core refuses to start without --data-dir.
     };
     let config = Config::from_args(args(&[])).unwrap();
-    assert_eq!(config.data_dir, home.join(".sidevoice/core"));
-    assert_eq!(config.log_file, home.join(".sidevoice/core.log"));
+    assert_eq!(config.data_dir, shared.join("core"));
+    assert_eq!(config.log_file, shared.join("core.log"));
 }

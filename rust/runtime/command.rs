@@ -18,7 +18,7 @@ pub struct Cli {
     /// Port to listen on; 0 chooses a free port [default: 10829]
     #[arg(long, env = "SIDEVOICE_CORE_PORT", value_name = "PORT")]
     pub port: Option<u16>,
-    /// Private core data directory [default: ~/.sidevoice/core]
+    /// Private core data directory [default: <data directory>/core, see SIDEVOICE_DATA_DIR]
     #[arg(long, env = "SIDEVOICE_CORE_DATA_DIR", value_name = "PATH")]
     pub data_dir: Option<PathBuf>,
     /// Readiness file path [default: core.json in the data directory]

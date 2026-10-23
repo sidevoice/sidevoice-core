@@ -12,6 +12,8 @@ description = "The operating-system code Sidevoice's crates share: this user, th
 [dependencies]
 # The local channel (ipc): Unix sockets and Windows named pipes behind one API.
 interprocess = { version = "2.4", features = ["tokio"] }
+# The OS's standard place for a program's data (data_dir).
+dirs = "7"
 # The login name and the host name (user), the same on every OS.
 gethostname = "1"
 whoami = "2"
