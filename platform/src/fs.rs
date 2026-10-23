@@ -85,6 +85,11 @@ pub trait Fs {
     /// What others may do with the file or directory behind an open handle.
     fn others_of(file: &File) -> io::Result<Others>;
 
+    /// Whether a directory of the person's (a home, an agent's configuration) behind an open handle has an owner we
+    /// accept: this user (Unix); this user or the system (Windows: a profile folder `C:\Users\<name>` is owned by
+    /// SYSTEM or Administrators and grants its user full control, the default layout).
+    fn owner_of_user_directory_is_trusted(dir: &File) -> io::Result<bool>;
+
     /// Which file is behind an open handle (Unix: device and inode; Windows: volume serial number and the 128-bit
     /// file id, ReFS needing all of it; the 64-bit file index where the file system has no such id), read from the
     /// handle itself: the file being read, not whatever its path names a moment later.
@@ -146,7 +151,7 @@ pub trait Fs {
             )
         })?;
         if !dir.metadata()?.is_dir()
-            || !UserId::current().owns_file(&dir)?
+            || !Self::owner_of_user_directory_is_trusted(&dir)?
             || Self::others_of(&dir)? == Others::Change
         {
             return Err(denied(format!("unsafe user directory {}", path.display())));
@@ -904,6 +909,18 @@ mod tests {
             "not a directory"
         );
         assert!(Files::check_user_directory(&root.path().join("missing")).is_err());
+    }
+
+    // The person's own home as the OS laid it out: on Windows `C:\Users\<name>` is owned by SYSTEM (or
+    // Administrators) and grants its user full control.
+    #[test]
+    fn the_users_own_home_is_a_user_directory() {
+        let home = dirs::home_dir().expect("a home directory");
+        assert!(
+            Files::check_user_directory(&home).is_ok(),
+            "{}",
+            home.display()
+        );
     }
 
     #[test]
