@@ -34,7 +34,7 @@ impl NodeIdentity {
         let pem = signing.to_pkcs8_pem(LineEnding::LF).map_err(invalid)?;
         let bytes = serde_json::to_vec(&json!({"private_key_pem": pem.as_str(), "created": now()}))
             .map_err(invalid)?;
-        match dir.link_new("node-identity.json", &bytes) {
+        match dir.write_new("node-identity.json", &bytes) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
             Err(error) => return Err(error),

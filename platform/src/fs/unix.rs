@@ -1,13 +1,15 @@
-//! Unix: owner and mode bits, `O_NOFOLLOW`, the descriptor judged as opened. No `unsafe` of ours.
+//! Unix: owner and mode bits, `O_NOFOLLOW`, the descriptor judged as opened, a record written relative to a handle on
+//! its directory (`rustix`). No `unsafe` of ours.
 
-use super::{Create, FileId, Others};
+use super::{Create, FileId, Others, Publish};
 use crate::user::{User, UserId};
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
-use rustix::fs::OFlags;
+use rustix::fs::{self as rfs, AtFlags, Mode, OFlags};
+use rustix::io::Errno;
 
 /// This OS's files.
 pub struct Os;
@@ -93,16 +95,63 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Gives the staged replacement of `path` the mode `path` has now, if it exists (`Fs::replace`).
-pub(super) fn keep_access(path: &Path, staged: &File) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    match fs::metadata(path) {
-        Ok(metadata) => {
-            staged.set_permissions(fs::Permissions::from_mode(metadata.mode() & 0o7777))
+/// Writes `bytes` as `path` as `how` says ([`Publish`]), every step relative to one handle open on its directory, so
+/// the directory that is written in, renamed in, cleaned up and synced is the one opened, whatever its path names
+/// meanwhile: the staging file created there (`openat`, `O_EXCL | O_NOFOLLOW`, mode `0600`) under the name `tempfile`
+/// picks, written, given `path`'s mode for `Publish::KeepAccess`, synced, then renamed over the record (`renameat`)
+/// or, for `Publish::New`, linked to its name (`linkat`, which replaces nothing) and its staging name removed
+/// (`unlinkat`) before the directory is synced (`fsync`). On any failure the staging name is removed.
+pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
+    let (dir_path, name) = (
+        super::parent_of(path)?,
+        path.file_name().unwrap_or_default(),
+    );
+    let dir = rfs::open(
+        dir_path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let create =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    // `tempfile` only names it: what it would remove on drop is removed below, relative to `dir`.
+    let (mut file, staged) = tempfile::Builder::new()
+        .prefix(&super::staging_prefix(path))
+        .make_in(dir_path, |temp| {
+            let temp = temp.file_name().unwrap_or_default();
+            Ok(File::from(rfs::openat(
+                &dir,
+                temp,
+                create,
+                Mode::from_raw_mode(0o600),
+            )?))
+        })?
+        .keep()
+        .map_err(|error| error.error)?;
+    let staged = staged.file_name().unwrap_or_default();
+    let written = (|| {
+        file.write_all(bytes)?;
+        if how == Publish::KeepAccess {
+            match rfs::statat(&dir, name, AtFlags::empty()) {
+                Ok(record) => rfs::fchmod(&file, Mode::from_raw_mode(record.st_mode & 0o7777))?,
+                Err(Errno::NOENT) => (),
+                Err(error) => return Err(error.into()),
+            }
         }
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+        file.sync_all()?;
+        match how {
+            Publish::New => rfs::linkat(&dir, staged, &dir, name, AtFlags::empty()),
+            Publish::Private | Publish::KeepAccess => rfs::renameat(&dir, staged, &dir, name),
+        }
+        .map_err(io::Error::from)
+    })();
+    if written.is_err() || how == Publish::New {
+        let removed = rfs::unlinkat(&dir, staged, AtFlags::empty());
+        if written.is_ok() {
+            removed?;
+        }
     }
+    written?;
+    rfs::fsync(&dir).map_err(io::Error::from)
 }
 
 fn flags(flags: OFlags) -> i32 {

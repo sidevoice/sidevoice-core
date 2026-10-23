@@ -9,9 +9,10 @@
 //! file or directory is created, read back from the handle (one that is not protected, or that passes access down to
 //! others, is not private), and reparse points (links, junctions, mount points) refused, at the path and on the way to
 //! it. Who owns something is [`user`](crate::user)'s (`UserId::current().owns_path/owns_file`). Everything else has one
-//! body for every OS, the trait's default methods. Records are written whole: a temporary file beside the record,
-//! private from its creation (`open_private`, under a fresh name `tempfile` picks and removes on failure), synced,
-//! renamed over it. Callers import both: `use sidevoice_platform::fs::{Files, Fs};` then
+//! body for every OS, the trait's default methods. Records are written whole: a temporary file beside the record
+//! (`.<record>.<random>`, the name `tempfile` picks), private from its creation, synced, renamed over it (or, for a
+//! record made once, given its name with nothing replaced), the directory synced; on Unix every step in the directory
+//! is taken relative to one handle open on it. Callers import both: `use sidevoice_platform::fs::{Files, Fs};` then
 //! `Files::ensure_private_dir(..)`, `Files::read_trusted(..)`.
 
 #[cfg(unix)]
@@ -26,7 +27,7 @@ pub use imp::Os as Files;
 use crate::user::{User, UserId};
 use serde::Serialize;
 use std::fs::{self, File};
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 /// What somebody other than a file's owner (and the system: root, SYSTEM, Administrators) may do with it.
@@ -187,13 +188,20 @@ pub trait Fs {
     }
 
     /// A private file of ours opened for reading: [`Fs::check_private`] and a regular file, judged on the handle that
-    /// is returned (no link followed), so what was judged is what is read.
+    /// is returned (no link followed), so what was judged is what is read. A record [`Fs::create_private`] was making
+    /// when its writer stopped may still have its staging name as a second one: that name alone, in a private
+    /// directory, is removed and the record judged again. Any other second name is refused and left as it is.
     fn open_private_file(path: &Path) -> io::Result<File> {
         let file = Self::open_read(path).map_err(|error| match error.kind() {
             ErrorKind::NotFound => error,
             _ => refused_file(path, error),
         })?;
-        Self::check_private(&file).map_err(|error| refused_file(path, error))?;
+        if let Err(error) = Self::check_private(&file) {
+            if !drop_staging_name::<Self>(path, &file)? {
+                return Err(refused_file(path, error));
+            }
+            Self::check_private(&file).map_err(|error| refused_file(path, error))?;
+        }
         if !file.metadata()?.is_file() {
             return Err(refused_file(path, "not a file"));
         }
@@ -203,12 +211,18 @@ pub trait Fs {
     /// Writes `bytes` as `path`, private, whole or not at all, in a directory that must already be private. The
     /// temporary file it is written to is private from its creation, before any byte is in it.
     fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "a file with no parent"))?;
+        let parent = parent_of(path)?;
         Self::check_private(&Self::open_read(parent)?).map_err(|error| refused(parent, error))?;
-        write_whole::<Self>(path, bytes, false)
+        imp::write_whole(path, bytes, Publish::Private)
+    }
+
+    /// As [`Fs::write_private`], for a record made once and never replaced: `AlreadyExists` when something is at
+    /// `path`, left as it is. The staged file gets the record's name with nothing replaced (Unix: a hard link, its
+    /// staging name removed before the directory is synced; Windows: a rename that replaces nothing).
+    fn create_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let parent = parent_of(path)?;
+        Self::check_private(&Self::open_read(parent)?).map_err(|error| refused(parent, error))?;
+        imp::write_whole(path, bytes, Publish::New)
     }
 
     /// [`Fs::write_private`] of `value` as JSON.
@@ -221,7 +235,7 @@ pub trait Fs {
     /// Writes `bytes` as `path` whole or not at all, in a directory the caller has vouched for: an existing file
     /// keeps its access (Unix), a new one is private (Windows: the replacement always is, private from its creation).
     fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
-        write_whole::<Self>(path, bytes, true)
+        imp::write_whole(path, bytes, Publish::KeepAccess)
     }
 }
 
@@ -242,27 +256,69 @@ fn create_all<F: Fs + ?Sized>(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Writes `bytes` as `path` whole or not at all: staged in a new file beside it, created private by
-/// [`Fs::open_private`] before any byte is written, under a fresh name `tempfile` picks (`.<name>.<random>`, so what a
-/// killed writer left is known by its name) and removes on failure (the rename too), synced, renamed over `path`, the
-/// directory synced. With `keep_access` the replacement takes the mode `path` has now (Unix; a Windows replacement is
-/// private).
-fn write_whole<F: Fs + ?Sized>(path: &Path, bytes: &[u8], keep_access: bool) -> io::Result<()> {
-    let dir = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let mut staged = tempfile::Builder::new()
-        .prefix(&format!(".{name}."))
-        .make_in(dir, |temp| F::open_private(temp, Create::New))?;
-    staged.write_all(bytes)?;
-    if keep_access {
-        imp::keep_access(path, staged.as_file())?;
+/// How `imp::write_whole` puts `bytes` in place as a record: whole or not at all, staged in a new file beside it
+/// under a fresh name `tempfile` picks (`.<name>.<random>`, so what a killed writer left is known by its name), created
+/// private before any byte is written, synced, then given the record's name, the directory synced; the staging file
+/// is removed on any failure.
+#[derive(Clone, Copy, PartialEq)]
+enum Publish {
+    /// Renamed over the record; the replacement is private.
+    Private,
+    /// Renamed over the record, taking the mode the record has now (Unix; a Windows replacement is private).
+    KeepAccess,
+    /// Given the record's name only when nothing has it (`AlreadyExists` otherwise, what is there untouched).
+    New,
+}
+
+/// The staging name of a record to write at `path`: `.<name>.`, then what `tempfile` adds.
+fn staging_prefix(path: &Path) -> String {
+    format!(
+        ".{}.",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    )
+}
+
+/// The directory `path` is in, refused when it names none.
+fn parent_of(path: &Path) -> io::Result<&Path> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "a file with no parent"))
+}
+
+/// Removes the staging name [`Fs::create_private`] leaves on the record at `path` when its writer stops between
+/// giving the record its name and removing the staging one, and says so. Only when `file` (opened at `path`) is a
+/// regular file with two names, its directory is private (nobody else can put or swap a name in it) and the other
+/// name is the record's own `.<name>.<random>` beside it, the same file; `false`, everything left as it is, otherwise.
+fn drop_staging_name<F: Fs + ?Sized>(path: &Path, file: &File) -> io::Result<bool> {
+    if !file.metadata()?.is_file() || imp::link_count(file)? != 2 {
+        return Ok(false);
     }
-    staged.as_file().sync_all()?;
-    staged.persist(path).map_err(|error| error.error)?;
-    F::sync_dir(dir)
+    let Ok(dir) = parent_of(path) else {
+        return Ok(false);
+    };
+    if F::open_read(dir)
+        .and_then(|dir| F::check_private(&dir))
+        .is_err()
+    {
+        return Ok(false);
+    }
+    let (prefix, record) = (staging_prefix(path), F::identity(file)?);
+    for entry in fs::read_dir(dir)? {
+        let staged = entry?.path();
+        let named = staged
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(&prefix));
+        if named
+            && F::open_read(&staged)
+                .and_then(|it| F::identity(&it))
+                .is_ok_and(|it| it == record)
+        {
+            fs::remove_file(&staged)?;
+            F::sync_dir(dir)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// At most `limit` bytes from `file`, refused when there are more.
@@ -325,6 +381,7 @@ pub trait TestFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     /// A scratch directory under the temporary directory's canonical path (macOS: `/private/var/...`, not the `/var`
     /// link), so what the code canonicalizes equals what a test built. Not private: a test that needs a private
@@ -496,6 +553,64 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["state.json"]);
+    }
+
+    #[test]
+    fn a_record_made_once_is_never_replaced_and_leaves_no_staging_name() {
+        let root = scratch();
+        let dir = root.path().join("private");
+        Files::create_private_dir(&dir).unwrap();
+        let file = dir.join("identity.json");
+        Files::create_private(&file, b"first").unwrap();
+        let again = Files::create_private(&file, b"second").unwrap_err();
+        assert_eq!(again.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&file).unwrap(), b"first");
+        assert!(private(&file), "one name: the staging one is gone");
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["identity.json"]);
+    }
+
+    #[test]
+    fn a_record_its_writer_left_with_its_staging_name_is_recovered_and_no_other_second_name_is() {
+        let root = scratch();
+        let dir = root.path().join("private");
+        Files::create_private_dir(&dir).unwrap();
+        let file = dir.join("identity.json");
+        Files::create_private(&file, b"made").unwrap();
+        // The writer stopped after linking the record in, before removing its staging name.
+        let staged = dir.join(".identity.json.a1B2c3");
+        fs::hard_link(&file, &staged).unwrap();
+        assert!(!private(&file));
+        assert_eq!(Files::read_private(&file, 64).unwrap().unwrap(), b"made");
+        assert!(!staged.exists(), "the staging name is removed");
+        assert!(private(&file));
+        // A second name that is not its staging one, or not beside it, is somebody's: refused, left as it is.
+        for other in [
+            dir.join("other.json"),
+            root.path().join(".identity.json.d4E5f6"),
+        ] {
+            fs::hard_link(&file, &other).unwrap();
+            assert!(refused(Files::read_private(&file, 64)));
+            assert!(other.exists(), "left as it is");
+            fs::remove_file(&other).unwrap();
+        }
+        // A staging name of another record's is not this one's.
+        Files::create_private(&dir.join("other.json"), b"other").unwrap();
+        fs::hard_link(&file, dir.join(".other.json.g7H8i9")).unwrap();
+        assert!(refused(Files::read_private(&file, 64)));
+        fs::remove_file(dir.join(".other.json.g7H8i9")).unwrap();
+        // Nor is the staging name trusted where others can put names.
+        let open = root.path().join("open");
+        Files::create_private_dir(&open).unwrap();
+        let shared = open.join("identity.json");
+        Files::create_private(&shared, b"made").unwrap();
+        fs::hard_link(&shared, open.join(".identity.json.j1K2l3")).unwrap();
+        Files::let_others_change(&open);
+        assert!(refused(Files::read_private(&shared, 64)));
+        assert!(open.join(".identity.json.j1K2l3").exists());
     }
 
     #[test]

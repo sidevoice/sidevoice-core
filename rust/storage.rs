@@ -1,11 +1,10 @@
 //! The single owner of private files and process locks.
 
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tempfile::NamedTempFile;
 
 use crate::platform::fs::{Create, Files, Fs};
 use crate::platform::user::{User, UserId};
@@ -25,17 +24,6 @@ impl PrivateDir {
             io::ErrorKind::PermissionDenied => unsafe_directory(),
             _ => error,
         })?;
-        Ok(Self {
-            path: path.to_path_buf(),
-        })
-    }
-
-    /// Accept an existing directory of this user, whatever its mode, to leave a failure report in.
-    pub fn open_for_report(path: impl AsRef<Path>) -> io::Result<Self> {
-        let path = path.as_ref();
-        if !is_own_directory(path, &fs::symlink_metadata(path)?) {
-            return Err(unsafe_directory());
-        }
         Ok(Self {
             path: path.to_path_buf(),
         })
@@ -66,36 +54,14 @@ impl PrivateDir {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
+    /// Writes a record whole, private (`Files::write_json`).
     pub fn write_json(&self, name: &str, value: &Value) -> io::Result<()> {
-        let bytes = serde_json::to_vec(value)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        self.write_private(name, &bytes)
+        Files::write_json(&self.file(name), value)
     }
 
-    fn write_private(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
-        let mut staged = self.stage(bytes)?;
-        staged.flush()?;
-        staged
-            .persist(self.file(name))
-            .map_err(|error| error.error)?;
-        Files::sync_dir(&self.path)
-    }
-
-    pub fn link_new(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
-        let staged = self.stage(bytes)?;
-        fs::hard_link(staged.path(), self.file(name))?;
-        Files::sync_dir(&self.path)
-    }
-
-    /// A temporary file in the private directory, created private by `Files::open_private` (`0600` on Unix, its own
-    /// protected owner, SYSTEM and Administrators DACL on Windows, nothing taken from the directory) before any byte
-    /// is written, under a fresh name `tempfile` picks and removes on failure.
-    fn stage(&self, bytes: &[u8]) -> io::Result<NamedTempFile<File>> {
-        let mut staged = tempfile::Builder::new()
-            .make_in(&self.path, |path| Files::open_private(path, Create::New))?;
-        staged.write_all(bytes)?;
-        staged.as_file().sync_all()?;
-        Ok(staged)
+    /// Writes a record made once and never replaced (`Files::create_private`): `AlreadyExists` when it is there.
+    pub fn write_new(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        Files::create_private(&self.file(name), bytes)
     }
 
     pub fn remove(&self, name: &str) -> io::Result<()> {
@@ -117,6 +83,34 @@ impl PrivateDir {
             Err(fs::TryLockError::WouldBlock) => Ok(None),
             Err(fs::TryLockError::Error(error)) => Err(error),
         }
+    }
+}
+
+/// The one place a record is written outside a private directory: the failure report, left in the data directory even
+/// when that directory is what failed (not private), as long as it is this user's.
+pub struct ReportDir {
+    path: PathBuf,
+}
+
+impl ReportDir {
+    /// Accept an existing directory of this user, whatever its mode.
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        if !is_own_directory(path, &fs::symlink_metadata(path)?) {
+            return Err(unsafe_directory());
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Writes the report whole through the shared writer for a directory the caller vouched for (`Files::replace`):
+    /// `write_private` would refuse a directory that is not private. A new report is private; one already there keeps
+    /// its access.
+    pub fn write_json(&self, name: &str, value: &Value) -> io::Result<()> {
+        let bytes = serde_json::to_vec(value)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Files::replace(&self.path.join(name), &bytes)
     }
 }
 

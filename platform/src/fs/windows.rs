@@ -13,13 +13,13 @@
 //! DACL grants" (`windows-acl` is unmaintained; `windows-permissions` is a thin binding with the same calls left to
 //! us), and the surface is a few calls. The link count (and the identity of a file system with no 128-bit ids) comes
 //! from `winapi-util`; a file's identity is `FileIdInfo`, one more call. A record's staging file (a fresh name beside
-//! it, removed on failure, renamed over it) is `tempfile`'s.
+//! it, removed on failure, renamed over it or, for a record made once, renamed replacing nothing) is `tempfile`'s.
 
-use super::{Create, FileId, Others};
+use super::{Create, FileId, Fs, Others, Publish};
 use crate::user::{User, UserId};
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
@@ -196,10 +196,24 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Nothing: an existing file's DACL is not carried over to its replacement (`Fs::replace`), which is private like
-/// everything `open_private` creates.
-pub(super) fn keep_access(_path: &Path, _staged: &File) -> io::Result<()> {
-    Ok(())
+/// Writes `bytes` as `path` as `how` says ([`Publish`]): staged by `tempfile` (removed on failure, the rename's too)
+/// in a file `open_private` creates private, then renamed over `path`, or, for `Publish::New`, renamed without
+/// replacing (`MoveFileExW` with no `MOVEFILE_REPLACE_EXISTING`: the record never has a second name). An existing
+/// file's DACL is not carried over to its replacement, which is private like everything `open_private` creates. The
+/// directory is not synced (`Fs::sync_dir`).
+pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
+    let dir = super::parent_of(path)?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(&super::staging_prefix(path))
+        .make_in(dir, |temp| Os::open_private(temp, Create::New))?;
+    staged.write_all(bytes)?;
+    staged.as_file().sync_all()?;
+    match how {
+        Publish::New => staged.persist_noclobber(path),
+        Publish::Private | Publish::KeepAccess => staged.persist(path),
+    }
+    .map(drop)
+    .map_err(|error| error.error)
 }
 
 // Access rights (`winnt.h`), written out because they are the contract being checked.
