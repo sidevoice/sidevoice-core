@@ -19,6 +19,9 @@ runs:
         elif [ "$RUNNER_OS" = Linux ]; then
           sudo apt-get update
           sudo apt-get install -y zstd
+        elif [ "$RUNNER_OS" = Windows ]; then
+          # The archive tool `cargo xtask` runs; the runner image may already carry it.
+          command -v zstd >/dev/null || choco install zstandard --yes --no-progress
         fi
     # Each download checked against the digest pinned here (zig's from ziglang.org/download/index.json,
     # cargo-zigbuild's from its release's .sha256 files).

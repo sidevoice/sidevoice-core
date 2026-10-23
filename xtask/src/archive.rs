@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::glibc;
 use crate::util::*;
-use crate::{Result, ENTRYPOINT, KIND, ROOT_NAME, TARGETS};
+use crate::{entrypoint, Result, KIND, ROOT_NAME, TARGETS};
 
 /// Unpacks an archive into `destination` with every bound and identity check, and returns its root and inventory.
 pub(crate) fn unpack_checked(archive: &Path, destination: &Path) -> Result<(PathBuf, Value)> {
@@ -114,7 +114,7 @@ pub(crate) fn unpack_checked(archive: &Path, destination: &Path) -> Result<(Path
     }
     if inventory["schema"] != 1
         || inventory["kind"] != KIND
-        || inventory["entrypoint"] != ENTRYPOINT
+        || inventory["entrypoint"] != entrypoint(target).as_str()
     {
         return Err("wrong native kind or entrypoint".into());
     }

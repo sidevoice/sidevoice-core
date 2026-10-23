@@ -36,34 +36,18 @@ jobs:
           - { target: macos-aarch64, runner: macos-15 }
           - { target: linux-x86_64, runner: ubuntu-24.04 }
           - { target: linux-aarch64, runner: ubuntu-24.04-arm }
+          # Native, MSVC, the C runtime linked statically (.cargo/config.toml).
+          - { target: windows-x86_64, runner: windows-2025 }
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/setup
+      # The lint job sees Linux only: the code that is Windows-only (platform/, the core's own cfg(windows)) is linted here.
+      - if: runner.os == 'Windows'
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - if: runner.os == 'Windows'
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
       - run: cargo xtask dist
       # The Linux archive on the oldest distribution it supports (glibc floor, xtask/src/glibc.rs).
       - if: runner.os == 'Linux'
         run: cargo xtask verify-floor native/sidevoice-core-${{ matrix.target }}.tar.zst
-
-  # Windows support (sidevoice-core#82) is being built: this job builds the core and runs its tests on Windows and is
-  # expected to fail until the platform work lands. It is not part of the release.
-  windows:
-    name: Test (windows-x86_64)
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: ./.github/actions/setup
-      - run: cargo build --locked -p sidevoice-core
-      - run: cargo test --locked -p sidevoice-core
-
-  # The operating-system code shared with the connector (`platform/`, sidevoice-platform) already builds and passes on
-  # Windows, on its own: this job is green while the whole core's, above, is not yet. Lint included, since the lint job
-  # above sees Linux only.
-  windows-platform:
-    name: Test sidevoice-platform (windows-x86_64)
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: ./.github/actions/setup
-      - run: cargo clippy --locked -p sidevoice-platform --all-targets -- -D warnings
-      - run: cargo test --locked -p sidevoice-platform
