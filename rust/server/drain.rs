@@ -135,6 +135,8 @@ mod tcp_tests {
 
     const HEAD: &str =
         "POST /refused HTTP/1.1\r\nhost: x\r\nconnection: close\r\ncontent-length: 2\r\n\r\n";
+    /// No `connection: close` from the client: only the server's own header can end the exchange.
+    const KEEP_ALIVE_HEAD: &str = "POST /refused HTTP/1.1\r\nhost: x\r\ncontent-length: 4\r\n\r\n";
 
     #[tokio::test]
     async fn a_refusal_over_tcp_reaches_a_client_that_sends_its_body_after_the_head() {
@@ -152,12 +154,36 @@ mod tcp_tests {
     async fn a_withheld_body_does_not_hold_the_connection_past_the_deadline() {
         let address = serve(Duration::from_millis(200)).await;
         let mut stream = TcpStream::connect(address).await.unwrap();
-        stream.write_all(HEAD.as_bytes()).await.unwrap();
+        stream.write_all(KEEP_ALIVE_HEAD.as_bytes()).await.unwrap();
         let mut raw = Vec::new();
         tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut raw))
             .await
             .expect("the server closed the connection")
             .unwrap();
+        assert!(String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 408"));
+    }
+
+    #[tokio::test]
+    async fn a_body_trickled_past_the_deadline_is_refused_at_the_deadline() {
+        let address = serve(Duration::from_millis(500)).await;
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(KEEP_ALIVE_HEAD.as_bytes()).await.unwrap();
+        let (mut read, mut write) = stream.into_split();
+        // One byte every 200 ms never completes the 4 bytes inside the deadline.
+        tokio::spawn(async move {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if write.write_all(b"x").await.is_err() {
+                    return;
+                }
+            }
+            write.shutdown().await.ok();
+        });
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), read.read_to_end(&mut raw))
+            .await
+            .expect("the server closed the connection")
+            .ok();
         assert!(String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 408"));
     }
 }
