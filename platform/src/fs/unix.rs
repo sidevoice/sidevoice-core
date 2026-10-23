@@ -3,8 +3,10 @@
 
 use super::{Create, FileId, Others, Publish};
 use crate::user::{User, UserId};
+use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
@@ -96,26 +98,28 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
 }
 
 /// Writes `bytes` as `path` as `how` says ([`Publish`]), every step relative to one handle open on its directory, so
-/// the directory that is written in, renamed in, cleaned up and synced is the one opened, whatever its path names
-/// meanwhile: the staging file created there (`openat`, `O_EXCL | O_NOFOLLOW`, mode `0600`) under the name `tempfile`
-/// picks, written, given `path`'s mode for `Publish::KeepAccess`, synced, then renamed over the record (`renameat`)
-/// or, for `Publish::New`, linked to its name (`linkat`, which replaces nothing) and its staging name removed
-/// (`unlinkat`) before the directory is synced (`fsync`). On any failure the staging name is removed.
+/// the directory that is judged, written in, renamed in, cleaned up and synced is the one opened, whatever its path
+/// names meanwhile. For a private directory that handle is opened without following a link and judged
+/// (`super::judge_dir`) before anything is created through it. The staging file is created there (`openat`,
+/// `O_EXCL | O_NOFOLLOW`, mode `0600`) under the name `tempfile` picks, written, given `path`'s mode for
+/// `Publish::KeepAccess`, synced, then renamed over the record (`renameat`) or, for `Publish::New`, linked to its
+/// name (`linkat`, which replaces nothing) and its staging name removed (`unlinkat`) before the directory is synced
+/// (`fsync`). On any failure the staging name is removed.
 pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
     let (dir_path, name) = (
         super::parent_of(path)?,
         path.file_name().unwrap_or_default(),
     );
-    let dir = rfs::open(
-        dir_path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
+    let dir = open_dir(dir_path, how.judged())?;
+    if how.judged() {
+        super::judge_dir::<Os>(dir_path, &dir)?;
+    }
     let create =
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     // `tempfile` only names it: what it would remove on drop is removed below, relative to `dir`.
     let (mut file, staged) = tempfile::Builder::new()
         .prefix(&super::staging_prefix(path))
+        .rand_bytes(super::STAGING_RANDOM)
         .make_in(dir_path, |temp| {
             let temp = temp.file_name().unwrap_or_default();
             Ok(File::from(rfs::openat(
@@ -140,7 +144,7 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
         file.sync_all()?;
         match how {
             Publish::New => rfs::linkat(&dir, staged, &dir, name, AtFlags::empty()),
-            Publish::Private | Publish::KeepAccess => rfs::renameat(&dir, staged, &dir, name),
+            _ => rfs::renameat(&dir, staged, &dir, name),
         }
         .map_err(io::Error::from)
     })();
@@ -152,6 +156,62 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
     }
     written?;
     rfs::fsync(&dir).map_err(io::Error::from)
+}
+
+/// Finishes the creation of the record at `path` its writer (`write_whole`, `Publish::New`) left with its staging
+/// name too (`Fs::open_created_file`), every step relative to one handle on its directory, opened without following a
+/// link: only when that directory is private, the record in it is a regular file of this user's open to nobody else
+/// with exactly two names, and an entry named exactly as a staging name of it (`super::is_staging_name`) is that same
+/// file, is that entry removed (`unlinkat`) and the directory synced. Anything else is left as it is, for the read
+/// that follows to judge.
+pub(super) fn finish_creation(path: &Path) -> io::Result<()> {
+    let (Ok(dir_path), Some(name)) = (super::parent_of(path), path.file_name()) else {
+        return Ok(());
+    };
+    let Ok(dir) = open_dir(dir_path, true) else {
+        return Ok(());
+    };
+    if super::judge_dir::<Os>(dir_path, &dir).is_err() {
+        return Ok(());
+    }
+    let read =
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    let Ok(record) = rfs::openat(&dir, name, read, Mode::empty()).map(File::from) else {
+        return Ok(());
+    };
+    let metadata = record.metadata()?;
+    let stat = rfs::fstat(&record)?;
+    if !metadata.is_file()
+        || metadata.nlink() != 2
+        || !UserId::current().owns_file(&record)?
+        || <Os as super::Fs>::others_of(&record)? != Others::Nothing
+    {
+        return Ok(());
+    }
+    for entry in rfs::Dir::read_from(&dir)? {
+        let entry = entry?;
+        let staged = OsStr::from_bytes(entry.file_name().to_bytes());
+        if !super::is_staging_name(name, staged) {
+            continue;
+        }
+        let found = rfs::statat(&dir, staged, AtFlags::SYMLINK_NOFOLLOW)?;
+        if found.st_dev == stat.st_dev && found.st_ino == stat.st_ino {
+            rfs::unlinkat(&dir, staged, AtFlags::empty())?;
+            return rfs::fsync(&dir).map_err(io::Error::from);
+        }
+    }
+    Ok(())
+}
+
+/// A handle on the directory `path`, for `*at` calls; with `no_link`, a link there is refused, not followed.
+fn open_dir(path: &Path, no_link: bool) -> io::Result<File> {
+    let no_link = if no_link {
+        OFlags::NOFOLLOW
+    } else {
+        OFlags::empty()
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | no_link;
+    Ok(File::from(rfs::open(path, flags, Mode::empty())?))
 }
 
 fn flags(flags: OFlags) -> i32 {

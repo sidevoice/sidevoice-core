@@ -27,7 +27,7 @@ pub struct NodeIdentity {
 
 impl NodeIdentity {
     pub fn load_or_create(dir: &PrivateDir) -> io::Result<Self> {
-        if let Some(saved) = dir.read_json("node-identity.json")? {
+        if let Some(saved) = dir.read_created_json("node-identity.json")? {
             return Self::parse(&saved);
         }
         let signing = SigningKey::random(&mut OsRng);
@@ -40,7 +40,7 @@ impl NodeIdentity {
             Err(error) => return Err(error),
         }
         let saved = dir
-            .read_json("node-identity.json")?
+            .read_created_json("node-identity.json")?
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "identity.unreadable"))?;
         Self::parse(&saved)
     }

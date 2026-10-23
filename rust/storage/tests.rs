@@ -185,6 +185,9 @@ fn a_file_created_once_is_never_replaced() {
     );
 }
 
+// Unix only: only the Unix writer links a record made once in, which a stop can leave with a second name (the platform
+// crate's fs tests say why, and test the refusals).
+#[cfg(unix)]
 #[test]
 fn an_identity_whose_creation_was_interrupted_is_loaded_and_left_with_one_name() {
     let root = tempfile::tempdir().unwrap();

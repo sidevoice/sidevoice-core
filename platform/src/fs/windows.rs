@@ -198,22 +198,44 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
 
 /// Writes `bytes` as `path` as `how` says ([`Publish`]): staged by `tempfile` (removed on failure, the rename's too)
 /// in a file `open_private` creates private, then renamed over `path`, or, for `Publish::New`, renamed without
-/// replacing (`MoveFileExW` with no `MOVEFILE_REPLACE_EXISTING`: the record never has a second name). An existing
-/// file's DACL is not carried over to its replacement, which is private like everything `open_private` creates. The
-/// directory is not synced (`Fs::sync_dir`).
+/// replacing (`MoveFileExW` with no `MOVEFILE_REPLACE_EXISTING`: the record never has a second name). For a private
+/// directory, a handle on it (a reparse point refused) is judged (`super::judge_dir`) and held open, shared with no
+/// `FILE_SHARE_DELETE`, until the record is in place: the directory judged cannot be renamed, removed or replaced
+/// meanwhile, so the paths below name it. An existing file's DACL is not carried over to its replacement, which is
+/// private like everything `open_private` creates. The directory is not synced (`Fs::sync_dir`).
 pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
     let dir = super::parent_of(path)?;
+    let _held = if how.judged() {
+        let held = not_a_link(
+            OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(dir)?,
+        )?;
+        super::judge_dir::<Os>(dir, &held)?;
+        Some(held)
+    } else {
+        None
+    };
     let mut staged = tempfile::Builder::new()
         .prefix(&super::staging_prefix(path))
+        .rand_bytes(super::STAGING_RANDOM)
         .make_in(dir, |temp| Os::open_private(temp, Create::New))?;
     staged.write_all(bytes)?;
     staged.as_file().sync_all()?;
     match how {
         Publish::New => staged.persist_noclobber(path),
-        Publish::Private | Publish::KeepAccess => staged.persist(path),
+        _ => staged.persist(path),
     }
     .map(drop)
     .map_err(|error| error.error)
+}
+
+/// Nothing to finish (`Fs::open_created_file`): `write_whole` gives a record made once its name by a rename that
+/// replaces nothing, so it never has a second name.
+pub(super) fn finish_creation(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 // Access rights (`winnt.h`), written out because they are the contract being checked.

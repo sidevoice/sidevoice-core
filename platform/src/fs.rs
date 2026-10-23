@@ -188,40 +188,45 @@ pub trait Fs {
     }
 
     /// A private file of ours opened for reading: [`Fs::check_private`] and a regular file, judged on the handle that
-    /// is returned (no link followed), so what was judged is what is read. A record [`Fs::create_private`] was making
-    /// when its writer stopped may still have its staging name as a second one: that name alone, in a private
-    /// directory, is removed and the record judged again. Any other second name is refused and left as it is.
+    /// is returned (no link followed), so what was judged is what is read. Nothing is changed: a file that fails is
+    /// refused and left as it is.
     fn open_private_file(path: &Path) -> io::Result<File> {
         let file = Self::open_read(path).map_err(|error| match error.kind() {
             ErrorKind::NotFound => error,
             _ => refused_file(path, error),
         })?;
-        if let Err(error) = Self::check_private(&file) {
-            if !drop_staging_name::<Self>(path, &file)? {
-                return Err(refused_file(path, error));
-            }
-            Self::check_private(&file).map_err(|error| refused_file(path, error))?;
-        }
+        Self::check_private(&file).map_err(|error| refused_file(path, error))?;
         if !file.metadata()?.is_file() {
             return Err(refused_file(path, "not a file"));
         }
         Ok(file)
     }
 
-    /// Writes `bytes` as `path`, private, whole or not at all, in a directory that must already be private. The
-    /// temporary file it is written to is private from its creation, before any byte is in it.
+    /// [`Fs::open_private_file`] for a record [`Fs::create_private`] makes, after finishing a creation its writer did
+    /// not: on Unix a writer stopped between linking the record in and removing its staging name leaves the record
+    /// with that second name. It is removed only when the directory is private (judged on the handle every step goes
+    /// through, no link followed), the record there is a regular file of this user's open to nobody else with exactly
+    /// two names, and the other is exactly the staging name the writer gives (`.<name>.` and its random part), the
+    /// same file; otherwise nothing is touched and the record is judged as it is. Windows' writer never leaves a
+    /// second name, so there is nothing to finish there.
+    fn open_created_file(path: &Path) -> io::Result<File> {
+        imp::finish_creation(path)?;
+        Self::open_private_file(path)
+    }
+
+    /// Writes `bytes` as `path`, private, whole or not at all, in a directory that must be private: judged on the
+    /// handle that is then written through (Unix: no link followed, every step relative to it; Windows: held open so
+    /// it cannot be renamed or replaced meanwhile). The temporary file it is written to is private from its creation,
+    /// before any byte is in it.
     fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let parent = parent_of(path)?;
-        Self::check_private(&Self::open_read(parent)?).map_err(|error| refused(parent, error))?;
         imp::write_whole(path, bytes, Publish::Private)
     }
 
     /// As [`Fs::write_private`], for a record made once and never replaced: `AlreadyExists` when something is at
     /// `path`, left as it is. The staged file gets the record's name with nothing replaced (Unix: a hard link, its
-    /// staging name removed before the directory is synced; Windows: a rename that replaces nothing).
+    /// staging name removed before the directory is synced; Windows: a rename that replaces nothing). Read it back
+    /// with [`Fs::open_created_file`].
     fn create_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let parent = parent_of(path)?;
-        Self::check_private(&Self::open_read(parent)?).map_err(|error| refused(parent, error))?;
         imp::write_whole(path, bytes, Publish::New)
     }
 
@@ -236,6 +241,12 @@ pub trait Fs {
     /// keeps its access (Unix), a new one is private (Windows: the replacement always is, private from its creation).
     fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
         imp::write_whole(path, bytes, Publish::KeepAccess)
+    }
+
+    /// As [`Fs::replace`], but the file written is always private, whatever the one it replaces allowed: for a file
+    /// left in a directory of the user's that need not be private (a failure report).
+    fn replace_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        imp::write_whole(path, bytes, Publish::Vouched)
     }
 }
 
@@ -257,25 +268,54 @@ fn create_all<F: Fs + ?Sized>(path: &Path) -> io::Result<()> {
 }
 
 /// How `imp::write_whole` puts `bytes` in place as a record: whole or not at all, staged in a new file beside it
-/// under a fresh name `tempfile` picks (`.<name>.<random>`, so what a killed writer left is known by its name), created
-/// private before any byte is written, synced, then given the record's name, the directory synced; the staging file
-/// is removed on any failure.
+/// under the staging name ([`STAGING_RANDOM`]), created private before any byte is written, synced, then given the
+/// record's name, the directory synced; the staging file is removed on any failure.
 #[derive(Clone, Copy, PartialEq)]
 enum Publish {
-    /// Renamed over the record; the replacement is private.
+    /// In a private directory, judged on the handle written through ([`judge_dir`]); renamed over the record; the
+    /// replacement is private.
     Private,
-    /// Renamed over the record, taking the mode the record has now (Unix; a Windows replacement is private).
-    KeepAccess,
-    /// Given the record's name only when nothing has it (`AlreadyExists` otherwise, what is there untouched).
+    /// As `Private`, given the record's name only when nothing has it (`AlreadyExists` otherwise, what is there
+    /// untouched).
     New,
+    /// In a directory the caller vouched for, not judged; renamed over the record; the replacement is private.
+    Vouched,
+    /// As `Vouched`, taking the mode the record has now (Unix; a Windows replacement is private).
+    KeepAccess,
 }
 
-/// The staging name of a record to write at `path`: `.<name>.`, then what `tempfile` adds.
+impl Publish {
+    /// Whether the directory must be private, judged on the handle written through.
+    fn judged(self) -> bool {
+        matches!(self, Publish::Private | Publish::New)
+    }
+}
+
+/// How many random characters `tempfile` adds to a staging name (its default, written out because
+/// [`is_staging_name`] relies on it): `.<name>.` and that many ASCII letters and digits.
+const STAGING_RANDOM: usize = 6;
+
+/// The staging name of a record to write at `path`: `.<name>.`, then [`STAGING_RANDOM`] characters `tempfile` adds.
 fn staging_prefix(path: &Path) -> String {
     format!(
         ".{}.",
         path.file_name().unwrap_or_default().to_string_lossy()
     )
+}
+
+/// Whether `candidate` is exactly a staging name the writer gives the record `record`: `.<record>.` and
+/// [`STAGING_RANDOM`] ASCII letters or digits, nothing else.
+#[cfg_attr(windows, allow(dead_code))]
+fn is_staging_name(record: &std::ffi::OsStr, candidate: &std::ffi::OsStr) -> bool {
+    let (record, candidate) = (record.as_encoded_bytes(), candidate.as_encoded_bytes());
+    let Some(rest) = candidate
+        .strip_prefix(b".")
+        .and_then(|rest| rest.strip_prefix(record))
+        .and_then(|rest| rest.strip_prefix(b"."))
+    else {
+        return false;
+    };
+    rest.len() == STAGING_RANDOM && rest.iter().all(u8::is_ascii_alphanumeric)
 }
 
 /// The directory `path` is in, refused when it names none.
@@ -285,40 +325,12 @@ fn parent_of(path: &Path) -> io::Result<&Path> {
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "a file with no parent"))
 }
 
-/// Removes the staging name [`Fs::create_private`] leaves on the record at `path` when its writer stops between
-/// giving the record its name and removing the staging one, and says so. Only when `file` (opened at `path`) is a
-/// regular file with two names, its directory is private (nobody else can put or swap a name in it) and the other
-/// name is the record's own `.<name>.<random>` beside it, the same file; `false`, everything left as it is, otherwise.
-fn drop_staging_name<F: Fs + ?Sized>(path: &Path, file: &File) -> io::Result<bool> {
-    if !file.metadata()?.is_file() || imp::link_count(file)? != 2 {
-        return Ok(false);
+/// That the directory `dir` (at `path`) is a private one, judged on the handle: a directory, [`Fs::check_private`].
+fn judge_dir<F: Fs + ?Sized>(path: &Path, dir: &File) -> io::Result<()> {
+    if !dir.metadata()?.is_dir() {
+        return Err(refused(path, "not a directory"));
     }
-    let Ok(dir) = parent_of(path) else {
-        return Ok(false);
-    };
-    if F::open_read(dir)
-        .and_then(|dir| F::check_private(&dir))
-        .is_err()
-    {
-        return Ok(false);
-    }
-    let (prefix, record) = (staging_prefix(path), F::identity(file)?);
-    for entry in fs::read_dir(dir)? {
-        let staged = entry?.path();
-        let named = staged
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with(&prefix));
-        if named
-            && F::open_read(&staged)
-                .and_then(|it| F::identity(&it))
-                .is_ok_and(|it| it == record)
-        {
-            fs::remove_file(&staged)?;
-            F::sync_dir(dir)?;
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    F::check_private(dir).map_err(|error| refused(path, error))
 }
 
 /// At most `limit` bytes from `file`, refused when there are more.
@@ -574,7 +586,32 @@ mod tests {
     }
 
     #[test]
-    fn a_record_its_writer_left_with_its_staging_name_is_recovered_and_no_other_second_name_is() {
+    fn a_staging_name_is_exactly_the_one_the_writer_gives() {
+        let record = std::ffi::OsStr::new("identity.json");
+        let is = |name: &str| is_staging_name(record, std::ffi::OsStr::new(name));
+        assert!(is(".identity.json.a1B2c3"));
+        for name in [
+            "identity.json",
+            ".identity.json.",
+            ".identity.json.a1B2c",
+            ".identity.json.a1B2c3d",
+            ".identity.json.a1-2c3",
+            ".identity.json.a1B2c3.bak",
+            ".other.json.a1B2c3",
+            "identity.json.a1B2c3",
+        ] {
+            assert!(!is(name), "{name}");
+        }
+    }
+
+    // Unix only: only the Unix writer gives a record made once its name by a link, which a stop can leave with a
+    // second one; Windows renames without replacing, so the state cannot arise there and `open_created_file` has
+    // nothing to finish.
+    #[cfg(unix)]
+    #[test]
+    fn a_creation_its_writer_did_not_finish_is_finished_only_where_asked_and_only_when_it_is_ours()
+    {
+        use std::os::unix::fs::PermissionsExt;
         let root = scratch();
         let dir = root.path().join("private");
         Files::create_private_dir(&dir).unwrap();
@@ -583,34 +620,86 @@ mod tests {
         // The writer stopped after linking the record in, before removing its staging name.
         let staged = dir.join(".identity.json.a1B2c3");
         fs::hard_link(&file, &staged).unwrap();
-        assert!(!private(&file));
-        assert_eq!(Files::read_private(&file, 64).unwrap().unwrap(), b"made");
+        assert!(
+            refused(Files::read_private(&file, 64)),
+            "an ordinary read repairs nothing"
+        );
+        assert!(staged.exists(), "left as it is");
+        let mut read = Vec::new();
+        Files::open_created_file(&file)
+            .unwrap()
+            .read_to_end(&mut read)
+            .unwrap();
+        assert_eq!(read, b"made");
         assert!(!staged.exists(), "the staging name is removed");
         assert!(private(&file));
-        // A second name that is not its staging one, or not beside it, is somebody's: refused, left as it is.
+        // A second name that is not exactly its staging name, or not beside it, is somebody's: left, and refused.
         for other in [
             dir.join("other.json"),
+            dir.join(".identity.json.backup-1"),
             root.path().join(".identity.json.d4E5f6"),
         ] {
             fs::hard_link(&file, &other).unwrap();
-            assert!(refused(Files::read_private(&file, 64)));
+            assert!(refused(Files::open_created_file(&file)));
             assert!(other.exists(), "left as it is");
             fs::remove_file(&other).unwrap();
         }
         // A staging name of another record's is not this one's.
         Files::create_private(&dir.join("other.json"), b"other").unwrap();
         fs::hard_link(&file, dir.join(".other.json.g7H8i9")).unwrap();
-        assert!(refused(Files::read_private(&file, 64)));
+        assert!(refused(Files::open_created_file(&file)));
         fs::remove_file(dir.join(".other.json.g7H8i9")).unwrap();
-        // Nor is the staging name trusted where others can put names.
+        // A record others can read is refused before any name is removed.
+        fs::hard_link(&file, &staged).unwrap();
+        Files::let_others_read(&file);
+        assert!(refused(Files::open_created_file(&file)));
+        assert!(
+            staged.exists(),
+            "nothing removed for a record that is not private"
+        );
+        fs::remove_file(&staged).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        // Nor where others can put names.
         let open = root.path().join("open");
         Files::create_private_dir(&open).unwrap();
         let shared = open.join("identity.json");
         Files::create_private(&shared, b"made").unwrap();
         fs::hard_link(&shared, open.join(".identity.json.j1K2l3")).unwrap();
         Files::let_others_change(&open);
-        assert!(refused(Files::read_private(&shared, 64)));
+        assert!(refused(Files::open_created_file(&shared)));
         assert!(open.join(".identity.json.j1K2l3").exists());
+        // Nor through a link to the directory.
+        let link = root.path().join("link");
+        Files::shut_others_out(&open);
+        Files::symlink(&open, &link);
+        assert!(refused(Files::open_created_file(
+            &link.join("identity.json")
+        )));
+        assert!(open.join(".identity.json.j1K2l3").exists());
+    }
+
+    #[test]
+    fn a_private_write_through_a_link_to_a_private_directory_is_refused() {
+        let root = scratch();
+        let dir = root.path().join("private");
+        Files::create_private_dir(&dir).unwrap();
+        let link = root.path().join("link");
+        Files::symlink(&dir, &link);
+        assert!(Files::write_private(&link.join("state.json"), b"secret").is_err());
+        assert!(Files::create_private(&link.join("identity.json"), b"secret").is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "nothing written");
+    }
+
+    #[test]
+    fn a_private_replacement_is_private_whatever_the_file_it_replaces_allowed() {
+        let root = scratch();
+        let file = root.path().join("core-failure.json");
+        fs::write(&file, b"{}").unwrap();
+        Files::let_others_change(&file);
+        Files::replace_private(&file, b"{\"a\":1}").unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"{\"a\":1}");
+        assert!(private(&file));
+        assert!(Files::read_trusted(&file, 64).unwrap().is_some());
     }
 
     #[test]

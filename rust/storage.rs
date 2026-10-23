@@ -42,16 +42,13 @@ impl PrivateDir {
     /// (`Files::open_private_file`); anything else is refused with `PermissionDenied` and left as it is. What does not
     /// parse is `InvalidData`.
     pub fn read_json(&self, name: &str) -> io::Result<Option<Value>> {
-        let mut file = match Files::open_private_file(&self.file(name)) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        parse(Files::open_private_file(&self.file(name)))
+    }
+
+    /// As `read_json`, for a record `write_new` made: a creation its writer did not finish is finished first
+    /// (`Files::open_created_file`).
+    pub fn read_created_json(&self, name: &str) -> io::Result<Option<Value>> {
+        parse(Files::open_created_file(&self.file(name)))
     }
 
     /// Writes a record whole, private (`Files::write_json`).
@@ -104,14 +101,28 @@ impl ReportDir {
         })
     }
 
-    /// Writes the report whole through the shared writer for a directory the caller vouched for (`Files::replace`):
-    /// `write_private` would refuse a directory that is not private. A new report is private; one already there keeps
-    /// its access.
+    /// Writes the report whole and private through the shared writer for a directory the caller vouched for
+    /// (`Files::replace_private`): `write_private` would refuse a directory that is not private. The report is private
+    /// whatever the one it replaces allowed.
     pub fn write_json(&self, name: &str, value: &Value) -> io::Result<()> {
         let bytes = serde_json::to_vec(value)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        Files::replace(&self.path.join(name), &bytes)
+        Files::replace_private(&self.path.join(name), &bytes)
     }
+}
+
+/// The record behind `opened` as JSON, `None` when there is none; what does not parse is `InvalidData`.
+fn parse(opened: io::Result<File>) -> io::Result<Option<Value>> {
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn is_own_directory(path: &Path, found: &fs::Metadata) -> bool {
