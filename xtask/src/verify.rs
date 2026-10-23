@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
 use serde_json::{json, Value};
+use sidevoice_platform::fs::{Files, Fs};
 use sidevoice_platform::stop::{StopRequest, StopRequests};
 
 use crate::archive::unpack_checked;
@@ -202,10 +203,12 @@ fn get_health(endpoint: &Path) -> Result<Vec<u8>> {
 /// Starts the core from the unpacked tree, checks its ready file and health over the local socket, and checks it
 /// leaves nothing behind on SIGTERM.
 fn start(root: &Path, entrypoint: &str) -> Result<Value> {
-    // Private, as the connector's state root is: the core's log goes beside its data directory, and the core refuses a
-    // log whose directory others can enter.
     let work = TempDir::new_in(&scratch_base(), "sidevoice relocated state")?;
-    chmod(&work.0, 0o700)?;
+    // Private, as the connector's state root is: the core's log goes beside its data directory, and the core refuses a
+    // log whose directory others can enter. Made by the platform's own private-directory call, which is the same rule
+    // on every OS (a mode on Unix, a protected ACL on Windows, where `chmod` has nothing to set).
+    let state = work.0.join("state");
+    Files::create_private_dir(&state).map_err(|error| format!("{}: {error}", state.display()))?;
     let binary = root.join(entrypoint);
     let command = |args: &[&str]| {
         let mut command = Command::new(&binary);
@@ -222,11 +225,10 @@ fn start(root: &Path, entrypoint: &str) -> Result<Value> {
         return Err("this Linux host has no CA certificate bundle".into());
     }
 
-    let data = work.0.join("private state");
-    mkdir(&data)?;
-    chmod(&data, 0o700)?;
+    let data = state.join("private state");
+    Files::create_private_dir(&data).map_err(|error| format!("{}: {error}", data.display()))?;
     let launch_id = "relocated-native";
-    let log = work.0.join("core.stderr");
+    let log = state.join("core.stderr");
     let mut core = command(&[
         "--data-dir",
         data.to_str().ok_or("path")?,
