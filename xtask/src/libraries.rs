@@ -34,8 +34,8 @@ pub(crate) fn linux_libraries(binary: &Path) -> Result<String> {
 /// one is part of the Windows 10 and later system itself and documented as a Win32 API library on
 /// <https://learn.microsoft.com/en-us/windows/win32/api/> (the header's "Library" row names the DLL). A binary that
 /// imports another DLL fails `dist` and `verify` on purpose: add it here once it is known to be on every supported
-/// Windows.
-pub(crate) const WINDOWS_SYSTEM: [&str; 24] = [
+/// Windows. `pdh.dll` (Performance Data Helper, `pdh.h`) is there for `sysinfo`, which the core links.
+pub(crate) const WINDOWS_SYSTEM: [&str; 25] = [
     "advapi32.dll",
     "bcrypt.dll",
     "bcryptprimitives.dll",
@@ -51,6 +51,7 @@ pub(crate) const WINDOWS_SYSTEM: [&str; 24] = [
     "ntdll.dll",
     "ole32.dll",
     "oleaut32.dll",
+    "pdh.dll",
     "powrprof.dll",
     "psapi.dll",
     "rpcrt4.dll",
