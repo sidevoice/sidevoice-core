@@ -110,7 +110,7 @@ fn a_log_where_others_can_enter_or_read_is_refused_not_repaired() {
     let log = parent.join("core.log");
     log_event(&config(log.clone()), "runtime.log_start", None).unwrap();
     assert!(
-        Files::is_private_dir(&parent).unwrap(),
+        Files::ensure_private_dir(&parent).is_ok(),
         "a parent it made is private"
     );
 
@@ -125,7 +125,7 @@ fn a_log_where_others_can_enter_or_read_is_refused_not_repaired() {
 }
 
 // Unix only: the unsafe fixtures are built with `chmod` and a symlink; the refusal itself is the interface's
-// (`Files::open_private`, `Files::open_to_others`), tested on every OS in `sidevoice-platform`.
+// (`Files::open_private`, `Files::check_private`), tested on every OS in `sidevoice-platform`.
 #[cfg(unix)]
 #[test]
 fn a_full_log_that_is_unsafe_is_refused_before_it_is_rotated() {

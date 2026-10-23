@@ -4,7 +4,7 @@ use super::*;
 
 /// Whether the directory at `path` is private to this user, as the storage judges it.
 fn private(path: &Path) -> bool {
-    Files::is_private_dir(path).unwrap()
+    Files::ensure_private_dir(path).is_ok()
 }
 
 fn names(path: &Path) -> Vec<String> {
@@ -61,7 +61,7 @@ fn a_file_is_not_a_directory() {
     let file = root.path().join("file");
     fs::write(&file, b"").unwrap();
     assert!(PrivateDir::open(&file).is_err());
-    assert!(PrivateDir::open_for_report(&file).is_err());
+    assert!(ReportDir::open(&file).is_err());
 }
 
 // Unix only: a symlink needs no privilege there; on Windows a link is a junction or a privileged symlink, and the
@@ -75,7 +75,7 @@ fn a_link_to_a_directory_is_not_the_directory() {
     let link = root.path().join("core");
     std::os::unix::fs::symlink(&target, &link).unwrap();
     assert!(PrivateDir::open(&link).is_err());
-    assert!(PrivateDir::open_for_report(&link).is_err());
+    assert!(ReportDir::open(&link).is_err());
 }
 
 #[cfg(unix)]
@@ -90,10 +90,7 @@ fn a_link_is_refused_however_it_is_spelled() {
     for suffix in ["/", "/.", "//"] {
         let spelled = PathBuf::from(format!("{}{suffix}", link.display()));
         assert!(PrivateDir::open(&spelled).is_err(), "core{suffix}");
-        assert!(
-            PrivateDir::open_for_report(&spelled).is_err(),
-            "core{suffix}"
-        );
+        assert!(ReportDir::open(&spelled).is_err(), "core{suffix}");
     }
 }
 
@@ -104,7 +101,7 @@ fn another_user_s_directory_is_refused() {
     };
     let refused = PrivateDir::open(&other).unwrap_err();
     assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
-    assert!(PrivateDir::open_for_report(&other).is_err());
+    assert!(ReportDir::open(&other).is_err());
 }
 
 #[test]
@@ -127,26 +124,6 @@ fn a_secret_is_private_from_its_creation_and_leaves_no_temporary() {
         dir.read_json("integrations.json").unwrap().unwrap(),
         serde_json::json!({"openai": "sk-first-1111", "elevenlabs": "xi-second-2222"})
     );
-}
-
-#[test]
-fn every_staging_file_has_a_name_of_its_own() {
-    let root = tempfile::tempdir().unwrap();
-    let dir = PrivateDir::open(root.path().join("core")).unwrap();
-    let first = dir.stage(b"one").unwrap();
-    let second = dir.stage(b"two").unwrap();
-    assert_ne!(
-        first.path(),
-        second.path(),
-        "no fixed name another writer could share"
-    );
-    for staged in [&first, &second] {
-        assert_eq!(staged.path().parent(), Some(dir.path()));
-        assert!(
-            is_private_file(staged.path()),
-            "private before it is renamed in"
-        );
-    }
 }
 
 // Unix only: the write is made to fail by a read-only directory (mode 0500); a directory's read-only attribute on
@@ -188,7 +165,7 @@ fn a_rename_that_fails_removes_its_staging_file_too() {
     // The name is taken by a directory that is not empty.
     fs::create_dir(dir.file("taken")).unwrap();
     fs::write(dir.file("taken").join("inside"), b"").unwrap();
-    assert!(dir.write_private("taken", b"secret").is_err());
+    assert!(dir.write_json("taken", &serde_json::json!({})).is_err());
     assert_eq!(names(dir.path()), ["integrations.json", "taken"]);
 }
 
@@ -196,8 +173,8 @@ fn a_rename_that_fails_removes_its_staging_file_too() {
 fn a_file_created_once_is_never_replaced() {
     let root = tempfile::tempdir().unwrap();
     let dir = PrivateDir::open(root.path().join("core")).unwrap();
-    dir.link_new("node-identity.json", b"first").unwrap();
-    let again = dir.link_new("node-identity.json", b"second").unwrap_err();
+    dir.write_new("node-identity.json", b"first").unwrap();
+    let again = dir.write_new("node-identity.json", b"second").unwrap_err();
     assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(fs::read(dir.file("node-identity.json")).unwrap(), b"first");
     assert!(is_private_file(&dir.file("node-identity.json")));
@@ -206,6 +183,34 @@ fn a_file_created_once_is_never_replaced() {
         ["node-identity.json"],
         "no staging file is left behind"
     );
+}
+
+// Unix only: only the Unix writer links a record made once in, which a stop can leave with a second name (the platform
+// crate's fs tests say why, and test the refusals).
+#[cfg(unix)]
+#[test]
+fn an_identity_whose_creation_was_interrupted_is_loaded_and_left_with_one_name() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = PrivateDir::open(root.path().join("core")).unwrap();
+    let created = crate::control::devices::NodeIdentity::load_or_create(&dir).unwrap();
+    // The core stopped after linking the identity in, before removing its staging name.
+    fs::hard_link(
+        dir.file("node-identity.json"),
+        dir.file(".node-identity.json.x7Yz9Q"),
+    )
+    .unwrap();
+    let loaded = crate::control::devices::NodeIdentity::load_or_create(&dir).unwrap();
+    assert_eq!(loaded.fingerprint, created.fingerprint, "the same identity");
+    assert!(is_private_file(&dir.file("node-identity.json")));
+    assert_eq!(names(dir.path()), ["node-identity.json"]);
+    // A second name somebody else made is never accepted.
+    fs::hard_link(dir.file("node-identity.json"), dir.file("theirs")).unwrap();
+    let refused = crate::control::devices::NodeIdentity::load_or_create(&dir).err();
+    assert_eq!(
+        refused.map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(names(dir.path()), ["node-identity.json", "theirs"]);
 }
 
 #[test]

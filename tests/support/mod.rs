@@ -16,7 +16,6 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use sidevoice_core::platform::fs::{Create, Files, Fs};
 use sidevoice_core::platform::ipc::{Channel, Channels, Endpoint, Stream};
-use sidevoice_core::platform::user::{User, UserId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -1130,8 +1129,7 @@ pub fn write_private(path: &Path, bytes: impl AsRef<[u8]>) {
 
 /// Whether what `path` names (a file or a directory) is this user's and open to nobody else.
 pub fn is_private(path: &Path) -> bool {
-    let file = Files::open_read(path).unwrap();
-    UserId::current().owns_file(&file).unwrap() && !Files::open_to_others(&file).unwrap()
+    Files::check_private(&Files::open_read(path).unwrap()).is_ok()
 }
 
 /// A temporary directory that is private to this user: `tempfile` makes its own with the process's umask, and the core

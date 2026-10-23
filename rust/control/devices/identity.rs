@@ -27,20 +27,20 @@ pub struct NodeIdentity {
 
 impl NodeIdentity {
     pub fn load_or_create(dir: &PrivateDir) -> io::Result<Self> {
-        if let Some(saved) = dir.read_json("node-identity.json")? {
+        if let Some(saved) = dir.read_created_json("node-identity.json")? {
             return Self::parse(&saved);
         }
         let signing = SigningKey::random(&mut OsRng);
         let pem = signing.to_pkcs8_pem(LineEnding::LF).map_err(invalid)?;
         let bytes = serde_json::to_vec(&json!({"private_key_pem": pem.as_str(), "created": now()}))
             .map_err(invalid)?;
-        match dir.link_new("node-identity.json", &bytes) {
+        match dir.write_new("node-identity.json", &bytes) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
             Err(error) => return Err(error),
         }
         let saved = dir
-            .read_json("node-identity.json")?
+            .read_created_json("node-identity.json")?
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "identity.unreadable"))?;
         Self::parse(&saved)
     }

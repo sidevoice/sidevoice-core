@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use super::event_log::{log_event, timestamp};
 use super::{system_language, Config};
 use crate::messages::{render, LocalizedMessage};
-use crate::storage::PrivateDir;
+use crate::storage::ReportDir;
 
 pub(super) struct StartFailure {
     pub(super) step: &'static str,
@@ -57,7 +57,7 @@ pub(super) fn report(config: &Config, error: &StartFailure) {
     );
     let report = json!({"launch_id": config.launch_id, "step": error.step, "key": error.key,
         "message": message, "at": timestamp()});
-    if let Ok(dir) = PrivateDir::open_for_report(&config.data_dir) {
+    if let Ok(dir) = ReportDir::open(&config.data_dir) {
         let _ = dir.write_json("core-failure.json", &report);
     }
     eprintln!("{}", json!({"key": error.key, "message": message}));
