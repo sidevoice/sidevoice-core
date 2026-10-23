@@ -150,7 +150,8 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
     })();
     if written.is_err() || how == Publish::New {
         let removed = rfs::unlinkat(&dir, staged, AtFlags::empty());
-        if written.is_ok() {
+        // Gone already after a publication: a reader finishing the creation (`finish_creation`) removed it first.
+        if written.is_ok() && removed != Err(Errno::NOENT) {
             removed?;
         }
     }
@@ -194,9 +195,18 @@ pub(super) fn finish_creation(path: &Path) -> io::Result<()> {
         if !super::is_staging_name(name, staged) {
             continue;
         }
-        let found = rfs::statat(&dir, staged, AtFlags::SYMLINK_NOFOLLOW)?;
+        // A name gone meanwhile was removed by another reader finishing the same creation, or by the writer itself:
+        // not an error (never `NotFound`, which would read as no record), the read that follows judges the record.
+        let found = match rfs::statat(&dir, staged, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(found) => found,
+            Err(Errno::NOENT) => continue,
+            Err(error) => return Err(error.into()),
+        };
         if found.st_dev == stat.st_dev && found.st_ino == stat.st_ino {
-            rfs::unlinkat(&dir, staged, AtFlags::empty())?;
+            match rfs::unlinkat(&dir, staged, AtFlags::empty()) {
+                Ok(()) | Err(Errno::NOENT) => (),
+                Err(error) => return Err(error.into()),
+            }
             return rfs::fsync(&dir).map_err(io::Error::from);
         }
     }

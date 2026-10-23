@@ -209,9 +209,19 @@ pub trait Fs {
     /// two names, and the other is exactly the staging name the writer gives (`.<name>.` and its random part), the
     /// same file; otherwise nothing is touched and the record is judged as it is. Windows' writer never leaves a
     /// second name, so there is nothing to finish there.
+    ///
+    /// Readers may race each other and the writer: a staging name another one removed first is not an error, and a
+    /// record refused while a live writer had linked it in but not yet removed its staging name is finished and
+    /// judged once more.
     fn open_created_file(path: &Path) -> io::Result<File> {
         imp::finish_creation(path)?;
-        Self::open_private_file(path)
+        match Self::open_private_file(path) {
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                imp::finish_creation(path)?;
+                Self::open_private_file(path)
+            }
+            opened => opened,
+        }
     }
 
     /// Writes `bytes` as `path`, private, whole or not at all, in a directory that must be private: judged on the
@@ -676,6 +686,50 @@ mod tests {
             &link.join("identity.json")
         )));
         assert!(open.join(".identity.json.j1K2l3").exists());
+    }
+
+    // Unix only, as the test above: only there can a creation be left unfinished.
+    #[cfg(unix)]
+    #[test]
+    fn readers_racing_each_other_and_the_writer_finish_a_creation_without_errors() {
+        let root = scratch();
+        for round in 0..100 {
+            let dir = root.path().join(format!("private-{round}"));
+            Files::create_private_dir(&dir).unwrap();
+            // Several readers find the same unfinished creation: each one gets the record, none is told it is missing.
+            let file = dir.join("identity.json");
+            Files::create_private(&file, b"made").unwrap();
+            fs::hard_link(&file, dir.join(".identity.json.a1B2c3")).unwrap();
+            std::thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(|| Files::open_created_file(&file).unwrap());
+                }
+            });
+            assert!(private(&file));
+            // Readers race the writer: the writer succeeds even when a reader removed its staging name first, and a
+            // reader sees either no record yet or the record, never a refusal.
+            let next = dir.join("next.json");
+            std::thread::scope(|scope| {
+                scope.spawn(|| Files::create_private(&next, b"next").unwrap());
+                for _ in 0..3 {
+                    scope.spawn(|| loop {
+                        match Files::open_created_file(&next) {
+                            Ok(_) => break,
+                            Err(error) if error.kind() == ErrorKind::NotFound => {
+                                std::thread::yield_now()
+                            }
+                            Err(error) => panic!("{error}"),
+                        }
+                    });
+                }
+            });
+            assert!(private(&next));
+            assert_eq!(
+                fs::read_dir(&dir).unwrap().count(),
+                2,
+                "no staging name left"
+            );
+        }
     }
 
     #[test]
