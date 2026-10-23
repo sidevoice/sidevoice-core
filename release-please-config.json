@@ -8,7 +8,14 @@
     ".": {
       "release-type": "rust",
       "package-name": "sidevoice-core",
-      "bump-minor-pre-major": true
+      "bump-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "xtask/Cargo.lock",
+          "jsonpath": "$.package[?(@.name===\"sidevoice-platform\")].version"
+        }
+      ]
     }
   }
 }
