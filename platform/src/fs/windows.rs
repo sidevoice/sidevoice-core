@@ -104,6 +104,10 @@ impl super::Fs for Os {
         Ok(())
     }
 
+    fn owner_of_user_directory_is_trusted(dir: &File) -> io::Result<bool> {
+        Ok(UserId::current().owns_file(dir)? || Judged::of(dir)?.owner_is_system())
+    }
+
     // `Change`: an entry for others that applies to the object itself. Anything else short of private is `Read`: an
     // entry for others of any kind, including one only what is created inside inherits (inherit-only too), and a DACL
     // that is not protected, which takes whatever its parent passes down, now or later.

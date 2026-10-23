@@ -48,6 +48,10 @@ impl super::Fs for Os {
         File::open(dir)?.sync_all()
     }
 
+    fn owner_of_user_directory_is_trusted(dir: &File) -> io::Result<bool> {
+        UserId::current().owns_file(dir)
+    }
+
     fn others_of(file: &File) -> io::Result<Others> {
         let mode = file.metadata()?.mode();
         Ok(if mode & 0o022 != 0 {
