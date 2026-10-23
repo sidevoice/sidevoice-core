@@ -31,15 +31,36 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
-      - name: Run the PR checks on the release PR (its own pushes start no workflow)
+      - uses: actions/checkout@v4
+        if: steps.release.outputs.prs_created == 'true'
+      - name: Keep xtask's lock in step, then run the PR checks on the release PR (its own pushes start no workflow)
         if: steps.release.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        # The release PR's branch, read from the PR itself: the action's `pr` output can be empty while
+        # xtask/ is its own workspace and records sidevoice-platform's version, which release-please does not move
+        # (its `extra-files` toml updater did nothing on Cargo.lock), and `cargo xtask dist --locked` fails on a
+        # stale lock. So copy the version release-please just wrote to the root Cargo.lock, commit it through the API (signed), and only then
+        # dispatch the checks (a GITHUB_TOKEN commit starts none).
+        # The release PR's branch is read from the PR itself: the action's `pr` output can be empty while
         # `prs_created` is true, and fromJSON('') then fails the whole job.
         run: |
           for branch in $(gh pr list --state open --label 'autorelease: pending' --json headRefName --jq '.[].headRefName'); do
+            git fetch --quiet origin "$branch"
+            git checkout --quiet --detach "origin/$branch"
+            version=$(awk '$0 == "name = \"sidevoice-platform\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+            [ -n "$version" ] || { echo "no sidevoice-platform version in Cargo.lock"; exit 1; }
+            awk -v v="$version" '$0 == "name = \"sidevoice-platform\"" { print; getline; print "version = \"" v "\""; next } { print }' \
+              xtask/Cargo.lock > xtask/Cargo.lock.new
+            mv xtask/Cargo.lock.new xtask/Cargo.lock
+            if ! git diff --quiet -- xtask/Cargo.lock; then
+              # Through the API, so GitHub signs the commit (the signed-commits ruleset has no bypass actors).
+              gh api -X PUT "repos/$GH_REPO/contents/xtask/Cargo.lock" \
+                -f message="chore(xtask): lock sidevoice-platform $version" \
+                -f branch="$branch" \
+                -f sha="$(git rev-parse "HEAD:xtask/Cargo.lock")" \
+                -f content="$(base64 -w0 xtask/Cargo.lock)" > /dev/null
+            fi
             gh workflow run pr-title.yml --ref "$branch"
             gh workflow run ci.yml --ref "$branch"
           done

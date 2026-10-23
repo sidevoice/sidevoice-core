@@ -10,6 +10,10 @@ the core: release-please moves its version to the same one, in its `Cargo.toml` 
 by git at a release tag, never `nightly` or a branch:
 `sidevoice-platform = { git = "https://github.com/sidevoice/sidevoice-core", tag = "vX.Y.Z" }`.
 
+`xtask/` is a workspace of its own and its `Cargo.lock` records `sidevoice-platform`'s version, which release-please's
+`extra-files` cannot edit in a lockfile. So the `release-please` workflow copies the version from the root `Cargo.lock`
+into `xtask/Cargo.lock` on the release PR's branch (a commit made through the GitHub API, so it is signed), then dispatches the checks.
+
 ## What each act means
 
 | Act | Who | What happens |
