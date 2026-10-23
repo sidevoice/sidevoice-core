@@ -1,12 +1,13 @@
-# The operating system is touched in `rust/platform` and nowhere else; `#[allow]` for these lives only there.
+# The operating system is touched in `rust/platform` and nowhere else; `#[allow]` for these lives only there. Entries for
+# items a target does not have are not errors (`allow-invalid`): the Unix ones do not exist on Windows.
 disallowed-types = [
-    { path = "tokio::net::UnixListener", reason = "the local channel is `platform::ipc`" },
-    { path = "tokio::net::UnixStream", reason = "the local channel is `platform::ipc`" },
+    { path = "tokio::net::UnixListener", reason = "the local channel is `platform::ipc`", allow-invalid = true },
+    { path = "tokio::net::UnixStream", reason = "the local channel is `platform::ipc`", allow-invalid = true },
 ]
 disallowed-methods = [
-    { path = "rustix::process::geteuid", reason = "the user is `platform::user`" },
-    { path = "rustix::process::getuid", reason = "the user is `platform::user`" },
-    { path = "libc::geteuid", reason = "the user is `platform::user`" },
-    { path = "libc::getuid", reason = "the user is `platform::user`" },
-    { path = "tokio::signal::unix::signal", reason = "the request to leave is `platform::signal`" },
+    { path = "rustix::process::geteuid", reason = "the user is `platform::user`", allow-invalid = true },
+    { path = "rustix::process::getuid", reason = "the user is `platform::user`", allow-invalid = true },
+    { path = "libc::geteuid", reason = "the user is `platform::user`", allow-invalid = true },
+    { path = "libc::getuid", reason = "the user is `platform::user`", allow-invalid = true },
+    { path = "tokio::signal::unix::signal", reason = "the request to leave is `platform::signal`", allow-invalid = true },
 ]

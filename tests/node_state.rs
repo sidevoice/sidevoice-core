@@ -6,19 +6,10 @@
 mod support;
 
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 
 use serde_json::{json, Value};
 use support::*;
-
-fn private_dir(path: &Path) {
-    fs::DirBuilder::new().mode(0o700).create(path).unwrap();
-}
-
-fn mode(path: &Path) -> u32 {
-    fs::metadata(path).unwrap().permissions().mode() & 0o777
-}
 
 fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
@@ -26,7 +17,7 @@ fn read_json(path: &Path) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_forged_upgrade_or_spoofed_local_headers_grant_nothing() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Local app").await;
     let devices = core
@@ -97,7 +88,7 @@ async fn a_forged_upgrade_or_spoofed_local_headers_grant_nothing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_broken_connector_credential_is_replaced_and_nothing_else_is() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let data = root.path().join("core");
     let mut core = Launch::new(&data).start();
     let first = (core.connector_id(), core.connector_token());
@@ -117,7 +108,7 @@ async fn a_broken_connector_credential_is_replaced_and_nothing_else_is() {
         (saved["connector_id"].as_str(), saved["token"].as_str()),
         (Some(second.0.as_str()), Some(second.1.as_str()))
     );
-    assert_eq!(mode(&data.join("connector-credential.json")), 0o600);
+    assert!(is_private(&data.join("connector-credential.json")));
     let after = read_json(&data.join("room-state.json"));
     assert_eq!(
         after["connectors"][&first.0], room["connectors"][&first.0],
@@ -136,7 +127,7 @@ async fn a_broken_connector_credential_is_replaced_and_nothing_else_is() {
 /// empty room, and no connector it named can link.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_obsolete_room_history_neither_stops_the_start_nor_reaches_the_room() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     for (name, history) in [
         ("garbage", b"not a sqlite database".to_vec()),
         ("database", b"SQLite format 3\0".to_vec()),

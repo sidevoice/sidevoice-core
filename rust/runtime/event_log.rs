@@ -1,25 +1,26 @@
 //! The private, size-rotated process log of lifecycle events.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use serde_json::json;
 
 use super::{system_language, Config};
 use crate::messages::{render, LocalizedMessage};
+use crate::platform::fs::{Create, Files, Fs};
+use crate::storage::PrivateDir;
 
 const ROTATE_AT_BYTES: u64 = 5_000_000;
 
 /// Append one localized event line; `cause` becomes the message's `key` parameter.
 pub(super) fn log_event(config: &Config, key: &str, cause: Option<&str>) -> io::Result<()> {
     let path = &config.log_file;
-    if let Some(parent) = path.parent() {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        PrivateDir::open(parent)?;
     }
     rotate_if_full(path)?;
     let mut file = open_private_append(path)?;
@@ -54,13 +55,15 @@ pub(super) fn rotate_if_full(path: &Path) -> io::Result<()> {
     fs::rename(path, &first)
 }
 
+/// The log, opened for appending: created private, a link in its place refused, and a file already there that others
+/// can open refused rather than repaired.
 fn open_private_append(path: &Path) -> io::Result<File> {
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let file = Files::open_private(path, Create::Append)?;
+    if Files::open_to_others(&file)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the log is open to others",
+        ));
+    }
     Ok(file)
 }

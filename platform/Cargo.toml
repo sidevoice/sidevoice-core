@@ -5,7 +5,7 @@ version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
-description = "The operating-system code Sidevoice's crates share: this user, and the local channel between this user's processes."
+description = "The operating-system code Sidevoice's crates share: this user, the private directories and files it keeps, and the local channel between its processes."
 
 # Only what the shared concerns need: whoever depends on this crate (the core by path, the connector by the git tag of
 # a core release) pulls nothing else.
@@ -16,9 +16,9 @@ interprocess = { version = "2.4", features = ["tokio"] }
 gethostname = "1"
 whoami = "2"
 
-# Unix: the effective uid (user), with no `unsafe` of ours.
+# Unix: the effective uid (user) and the open flags (fs), with no `unsafe` of ours.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "fs"] }
 
 # Windows: this process's user and file owners (user); the pipe's name hash and security descriptor, and whether a
 # pipe peer's process is this user's (ipc).

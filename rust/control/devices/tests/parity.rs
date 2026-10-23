@@ -1,8 +1,6 @@
 //! Node identity, pairing codes and device tokens, as the store keeps them.
 //! Pairing-secret expiry is `PairingSecrets`' own, covered beside it.
 
-use std::os::unix::fs::PermissionsExt;
-
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
@@ -46,10 +44,7 @@ fn the_identity_is_created_once_kept_private_and_stable() {
     let (_root, dir) = private_dir();
     let first = NodeIdentity::load_or_create(&dir).unwrap();
     let path = dir.path().join("node-identity.json");
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert!(crate::storage::is_private_file(&path));
     let saved = dir.read_json("node-identity.json").unwrap().unwrap();
     let mut keys: Vec<_> = saved.as_object().unwrap().keys().cloned().collect();
     keys.sort();
@@ -200,10 +195,7 @@ fn a_code_is_redeemed_once_and_only_its_hash_is_kept() {
     Uuid::parse_str(&device_id).unwrap();
     assert_eq!(URL_SAFE_NO_PAD.decode(&token).unwrap().len(), 32);
     let path = dir.path().join("devices.json");
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert!(crate::storage::is_private_file(&path));
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains(&token), "the token itself is never written");
     let entry = &dir.read_json("devices.json").unwrap().unwrap()["devices"][&device_id];

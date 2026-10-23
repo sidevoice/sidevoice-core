@@ -1,5 +1,6 @@
 //! Explicit conversation leave survives a Core restart; transport loss does not become a leave.
 use serde_json::json;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tokio::sync::{mpsc, watch};
 
@@ -219,6 +220,9 @@ fn an_agent_leave_is_durable_but_an_ordinary_unregister_is_not() {
         .is_ok());
 }
 
+// Unix only: the save is made to fail by a read-only directory (mode 0500); Windows has no such fixture in std (a
+// directory's read-only attribute does not stop files being created in it).
+#[cfg(unix)]
 #[test]
 fn a_close_that_cannot_be_saved_does_not_acknowledge_or_retire_the_conversation() {
     let dir = tempfile::tempdir().unwrap();
@@ -242,6 +246,9 @@ fn a_close_that_cannot_be_saved_does_not_acknowledge_or_retire_the_conversation(
     );
 }
 
+// Unix only: the save is made to fail by a read-only directory (mode 0500); Windows has no such fixture in std (a
+// directory's read-only attribute does not stop files being created in it).
+#[cfg(unix)]
 #[test]
 fn an_agent_leave_is_not_left_listening_when_core_cannot_save_it() {
     let dir = tempfile::tempdir().unwrap();

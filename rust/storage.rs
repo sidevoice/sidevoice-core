@@ -1,14 +1,13 @@
 //! The single owner of private files and process locks.
 
-use std::fs::{self, File, OpenOptions, Permissions};
+use std::fs::{self, File};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use serde_json::Value;
 use tempfile::NamedTempFile;
 
+use crate::platform::fs::{Create, Files, Fs};
 use crate::platform::user::{User, UserId};
 
 #[derive(Clone, Debug)]
@@ -20,12 +19,8 @@ impl PrivateDir {
     /// Create `path` if needed and accept it only as an owner-only directory of this user.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)?;
-        let found = fs::symlink_metadata(path)?;
-        if !is_own_directory(path, &found) || found.permissions().mode() & 0o077 != 0 {
+        Files::create_private_dirs(path)?;
+        if !Files::is_private_dir(path)? {
             return Err(unsafe_directory());
         }
         Ok(Self {
@@ -74,20 +69,19 @@ impl PrivateDir {
         staged
             .persist(self.file(name))
             .map_err(|error| error.error)?;
-        File::open(&self.path)?.sync_all()
+        Files::sync_dir(&self.path)
     }
 
     pub fn link_new(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
         let staged = self.stage(bytes)?;
         fs::hard_link(staged.path(), self.file(name))?;
-        File::open(&self.path)?.sync_all()
+        Files::sync_dir(&self.path)
     }
 
+    /// A temporary file in the private directory: `tempfile` makes it owner-only on Unix (`0600`), and on Windows it
+    /// takes the directory's protected DACL, inherited.
     fn stage(&self, bytes: &[u8]) -> io::Result<NamedTempFile> {
         let mut staged = NamedTempFile::new_in(&self.path)?;
-        staged
-            .as_file()
-            .set_permissions(Permissions::from_mode(0o600))?;
         staged.write_all(bytes)?;
         staged.as_file().sync_all()?;
         Ok(staged)
@@ -95,24 +89,18 @@ impl PrivateDir {
 
     pub fn remove(&self, name: &str) -> io::Result<()> {
         match fs::remove_file(self.file(name)) {
-            Ok(()) => File::open(&self.path)?.sync_all(),
+            Ok(()) => Files::sync_dir(&self.path),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         }
     }
 
     pub fn lock(&self) -> io::Result<Option<File>> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(self.file("core.lock"))?;
-        match file.try_lock_exclusive() {
+        let file = Files::open_private(&self.file("core.lock"), Create::ReadWrite)?;
+        match file.try_lock() {
             Ok(()) => Ok(Some(file)),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
-            Err(error) => Err(error),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error),
         }
     }
 }
@@ -123,6 +111,36 @@ fn is_own_directory(path: &Path, found: &fs::Metadata) -> bool {
 
 fn unsafe_directory() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "identity.unsafe-directory")
+}
+
+/// Whether the file at `path` is this user's and open to nobody else, judged on a handle opened without following a link
+/// (tests, on every OS).
+#[cfg(test)]
+pub(crate) fn is_private_file(path: &Path) -> bool {
+    let file = Files::open_read(path).unwrap();
+    UserId::current().owns_file(&file).unwrap() && !Files::open_to_others(&file).unwrap()
+}
+
+/// A temporary directory that is private to this user: `tempfile` makes its own with the process's umask, and the core refuses
+/// a log whose parent is not private. `path()` is the private directory inside it (tests, on every OS).
+#[cfg(test)]
+pub(crate) struct PrivateTemp {
+    _outer: tempfile::TempDir,
+    dir: PathBuf,
+}
+
+#[cfg(test)]
+impl PrivateTemp {
+    pub(crate) fn new() -> Self {
+        let outer = tempfile::tempdir().unwrap();
+        let dir = outer.path().join("private");
+        Files::create_private_dir(&dir).unwrap();
+        Self { _outer: outer, dir }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.dir
+    }
 }
 
 #[cfg(test)]
