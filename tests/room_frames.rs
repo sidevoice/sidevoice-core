@@ -21,7 +21,7 @@ fn row<'a>(history: &'a [Value], id: &str) -> &'a Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delayed_socket_start_after_http_focus_change_keeps_captured_conversation() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (_peer_a, _) = connector_with_binding(&core, "captured-a", "captured-a").await;
@@ -74,7 +74,7 @@ async fn delayed_socket_start_after_http_focus_change_keeps_captured_conversatio
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (mut peer, binding) = connector_with_binding(&core, "frames", THREAD).await;
@@ -136,7 +136,7 @@ async fn a_spoken_turn_reaches_the_conversation_and_a_cancelled_one_does_not() {
 /// written before a turn started answers an older turn, finished or not.
 #[tokio::test(flavor = "multi_thread")]
 async fn turns_are_named_by_the_call_and_may_overlap() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (mut peer, binding) = connector_with_binding(&core, "overlap", THREAD).await;
@@ -213,7 +213,7 @@ async fn turns_are_named_by_the_call_and_may_overlap() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (mut peer, binding) = connector_with_binding(&core, "frames", THREAD).await;
@@ -320,7 +320,7 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
 /// Refusals carry their stable key, for the page to word, and the core's English text.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_message_without_an_id_is_refused_with_its_key_and_english_text() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, json!({"ui_language": 42})).await;
@@ -352,7 +352,7 @@ async fn a_client_message_without_an_id_is_refused_with_its_key_and_english_text
 /// counts.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part_counts() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let (mut peer, binding) = connector_with_binding(&core, "unknown", THREAD).await;
@@ -416,7 +416,7 @@ async fn a_report_with_values_the_core_does_not_know_is_taken_and_its_known_part
 /// current one.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interface_language_the_core_does_not_offer_falls_back_without_an_error() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let mut browser = core.join(&token, json!({"ui_language": "es"})).await;
@@ -454,7 +454,7 @@ async fn an_interface_language_the_core_does_not_offer_falls_back_without_an_err
 /// and no error frame is sent at any step.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_page_message_with_fields_the_core_does_not_know_is_taken() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let paired = core
         .local("POST", "/api/device/local/pair")

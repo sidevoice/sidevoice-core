@@ -72,7 +72,7 @@ The conversation epoch, speech admission, playback fate and common push/pull not
 ## Configuration
 
 Its data — paired devices, the machine's identity key, the conversation journal — lives in
-`SIDEVOICE_CORE_DATA_DIR`, else `~/.sidevoice/core`. Every secret file there is created with mode 0600.
+`SIDEVOICE_CORE_DATA_DIR`, else `~/.sidevoice/core`. Every secret file there is created owner-only (mode 0600; on Windows a protected ACL for this user, SYSTEM and Administrators).
 
 | Variable | What it does |
 |---|---|

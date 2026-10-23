@@ -1,14 +1,16 @@
 //! Direct private addresses a device may use when this Core actually listens on the network.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
+
+use crate::platform::network::{Host, Network};
 
 const MAX_LAN_URLS: usize = 7; // The web client reads at most eight code URLs, including loopback.
 
 pub(super) fn code_urls(bind_host: &str, port: u16) -> Vec<String> {
     let bound = bind_host.parse::<IpAddr>().ok();
     let candidates = match bound {
-        Some(IpAddr::V4(address)) if address.is_unspecified() => interface_ips(),
-        Some(IpAddr::V6(address)) if address.is_unspecified() => interface_ips(),
+        Some(IpAddr::V4(address)) if address.is_unspecified() => Host::interface_ips(),
+        Some(IpAddr::V6(address)) if address.is_unspecified() => Host::interface_ips(),
         Some(address) => vec![address],
         None => Vec::new(),
     };
@@ -62,52 +64,6 @@ fn private_ip(ip: IpAddr) -> bool {
         }
         IpAddr::V6(ip) => ip.segments()[0] & 0xfe00 == 0xfc00,
     }
-}
-
-/// Reads live interface addresses; the list is consulted only for a wildcard bind. The socket-address memory is
-/// owned by `getifaddrs` until `freeifaddrs`, and both supported release platforms (Linux and macOS) expose it.
-fn interface_ips() -> Vec<IpAddr> {
-    struct Interfaces(*mut libc::ifaddrs);
-    impl Drop for Interfaces {
-        fn drop(&mut self) {
-            unsafe { libc::freeifaddrs(self.0) };
-        }
-    }
-    let mut head = std::ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut head) } != 0 {
-        return Vec::new();
-    }
-    let _owned = Interfaces(head);
-    let mut found = Vec::new();
-    let mut cursor = head;
-    while !cursor.is_null() {
-        // `cursor` and `ifa_addr` remain valid until `_owned` drops; a null address is permitted by getifaddrs.
-        let item = unsafe { &*cursor };
-        if !item.ifa_addr.is_null()
-            && item.ifa_flags & (libc::IFF_UP as u32) != 0
-            && item.ifa_flags & (libc::IFF_LOOPBACK as u32) == 0
-        {
-            let addr = unsafe { &*item.ifa_addr };
-            let ip = match addr.sa_family as i32 {
-                libc::AF_INET => {
-                    let socket = unsafe { &*(item.ifa_addr as *const libc::sockaddr_in) };
-                    Some(IpAddr::V4(Ipv4Addr::from(
-                        socket.sin_addr.s_addr.to_ne_bytes(),
-                    )))
-                }
-                libc::AF_INET6 => {
-                    let socket = unsafe { &*(item.ifa_addr as *const libc::sockaddr_in6) };
-                    Some(IpAddr::V6(Ipv6Addr::from(socket.sin6_addr.s6_addr)))
-                }
-                _ => None,
-            };
-            if let Some(ip) = ip {
-                found.push(ip);
-            }
-        }
-        cursor = item.ifa_next;
-    }
-    found
 }
 
 #[cfg(test)]
