@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/sidevoice/sidevoice-core/compare/v0.10.0...v0.10.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **platform:** a Windows profile folder owned by SYSTEM is the user's ([#184](https://github.com/sidevoice/sidevoice-core/issues/184)) ([4daa941](https://github.com/sidevoice/sidevoice-core/commit/4daa941980957b38b63154829a8aac30d4335057))
+
 ## [0.10.0](https://github.com/sidevoice/sidevoice-core/compare/v0.9.0...v0.10.0) (2026-10-23)
 
 
