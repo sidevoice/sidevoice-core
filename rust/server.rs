@@ -155,7 +155,10 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .with_state(state.clone());
     let router = router
         .layer(middleware::from_fn_with_state((state, local), guard::guard))
-        .layer(middleware::from_fn(drain::drain));
+        .layer(middleware::from_fn_with_state(
+            drain::DRAIN_DEADLINE,
+            drain::drain,
+        ));
     match telemetry {
         Some(telemetry) => router.layer(middleware::from_fn_with_state(
             telemetry,
