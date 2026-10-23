@@ -3,14 +3,17 @@
 //!
 //! "Private" is a protected DACL (it inherits nothing) granting full control to the owner (`OWNER RIGHTS`), SYSTEM
 //! and Administrators only, inherited by what is created inside. Whether others may do anything is read from the
-//! DACL of the handle that was opened (`GetSecurityInfo`): an allow entry for anybody but the file's owner, SYSTEM,
-//! Administrators or `OWNER RIGHTS` counts; who the owner is, is [`user`](crate::user)'s.
+//! DACL of the handle that was opened (`GetSecurityInfo`): a DACL that is not protected counts (it takes whatever its
+//! parent passes down), and so does an allow entry for anybody but the file's owner, SYSTEM, Administrators or
+//! `OWNER RIGHTS`, including one only what is created inside inherits; who the owner is, is
+//! [`user`](crate::user)'s. The directories on the way are judged as the connector does (`trusted_ancestor`).
 //!
 //! Own `unsafe` over `windows-sys`: no maintained crate covers "create with this DACL" and "read what this handle's
 //! DACL grants" (`windows-acl` is unmaintained; `windows-permissions` is a thin binding with the same calls left to
 //! us), and the surface is a few calls.
 
 use super::Create;
+use crate::user::{User, UserId};
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -27,13 +30,13 @@ use windows_sys::Win32::Security::Authorization::{
     SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    EqualSid, GetAce, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID,
-    SECURITY_ATTRIBUTES,
+    EqualSid, GetAce, GetSecurityDescriptorControl, ACL, DACL_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_ALWAYS,
+    CreateDirectoryW, CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, READ_CONTROL,
 };
 
 /// This OS's files.
@@ -52,9 +55,10 @@ impl super::Fs for Os {
 
     // `CreateFileW` because `std` cannot pass the security attributes of what it creates.
     fn open_private(path: &Path, how: Create) -> io::Result<File> {
-        let access = match how {
-            Create::Append => APPEND,
-            Create::ReadWrite => GENERIC_READ | GENERIC_WRITE,
+        let (access, disposition) = match how {
+            Create::New => (GENERIC_WRITE, CREATE_NEW),
+            Create::Append => (APPEND, OPEN_ALWAYS),
+            Create::ReadWrite => (GENERIC_READ | GENERIC_WRITE, OPEN_ALWAYS),
         };
         let attributes = PrivateAttributes::new()?;
         let wide = wide(path);
@@ -65,7 +69,7 @@ impl super::Fs for Os {
                 access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 attributes.as_ptr(),
-                OPEN_ALWAYS,
+                disposition,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
                 null_mut(),
             )
@@ -88,7 +92,8 @@ impl super::Fs for Os {
     }
 
     fn open_to_others(file: &File) -> io::Result<bool> {
-        Ok(Judged::of(file)?.grants_others())
+        let judged = Judged::of(file)?;
+        Ok(!judged.protected()? || judged.grants_others(u32::MAX, true))
     }
 
     // A directory handle cannot be flushed (it needs write access, which a directory does not give), and NTFS
@@ -98,11 +103,35 @@ impl super::Fs for Os {
     }
 }
 
+/// A directory on the way to something private (the connector's rule): this user's or the system's, nobody else able
+/// to delete or rename what is in it, or to take it over. A reparse point on the way (a redirected known folder, a
+/// mounted volume) is followed: what is judged is the directory it leads to. Adding entries is not judged: there is no
+/// sticky bit, and `C:\` lets every user add folders.
+pub(super) fn trusted_ancestor(dir: &Path) -> io::Result<bool> {
+    let file = OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?;
+    let judged = Judged::of(&file)?;
+    Ok(
+        (UserId::current().owns_file(&file)? || judged.owner_is_system())
+            && !judged.grants_others(REPLACES_ENTRIES, false),
+    )
+}
+
 // Access rights (`winnt.h`), written out because they are the contract being checked.
+const FILE_WRITE_DATA: u32 = 0x0002;
+const FILE_DELETE_CHILD: u32 = 0x0040;
+const DELETE: u32 = 0x0001_0000;
+const WRITE_DAC: u32 = 0x0004_0000;
+const WRITE_OWNER: u32 = 0x0008_0000;
+const GENERIC_ALL: u32 = 0x1000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const GENERIC_READ: u32 = 0x8000_0000;
 /// `FILE_GENERIC_WRITE` without `FILE_WRITE_DATA`: what appending needs and no more.
-const APPEND: u32 = 0x0012_0116 & !0x0002;
+const APPEND: u32 = 0x0012_0116 & !FILE_WRITE_DATA;
+/// What lets somebody replace what is in a directory, or take it over.
+const REPLACES_ENTRIES: u32 = FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
 
 // ACE types and flags of a DACL (`winnt.h`).
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
@@ -162,11 +191,13 @@ impl Drop for Sid {
     }
 }
 
-/// SYSTEM, Administrators and `OWNER RIGHTS`: who may hold anything in what is ours besides its owner.
+/// SYSTEM, Administrators and `OWNER RIGHTS`: who may hold anything in what is ours besides its owner; and
+/// TrustedInstaller, which owns `C:\` and the system's folders.
 struct Principals {
     system: Sid,
     administrators: Sid,
     owner_rights: Sid,
+    trusted_installer: Sid,
 }
 
 fn principals() -> &'static Principals {
@@ -175,6 +206,9 @@ fn principals() -> &'static Principals {
         system: Sid::parse("SY"),
         administrators: Sid::parse("BA"),
         owner_rights: Sid::parse("OW"),
+        trusted_installer: Sid::parse(
+            "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+        ),
     })
 }
 
@@ -218,6 +252,26 @@ impl Judged {
         Ok(judged)
     }
 
+    /// Whether the DACL is protected: it takes nothing its parent passes down.
+    fn protected(&self) -> io::Result<bool> {
+        let (mut control, mut revision) = (0u16, 0u32);
+        // SAFETY: `descriptor` is the valid descriptor `GetSecurityInfo` returned, alive as long as `self`.
+        if unsafe { GetSecurityDescriptorControl(self.descriptor, &mut control, &mut revision) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(control & SE_DACL_PROTECTED != 0)
+    }
+
+    /// Whether the owner is the system: SYSTEM, Administrators or TrustedInstaller.
+    fn owner_is_system(&self) -> bool {
+        let p = principals();
+        p.system.is(self.owner)
+            || p.administrators.is(self.owner)
+            || p.trusted_installer.is(self.owner)
+    }
+
     /// Who may hold anything in what is ours: its owner, SYSTEM, Administrators and `OWNER RIGHTS`.
     fn trusted(&self, sid: PSID) -> bool {
         let p = principals();
@@ -228,9 +282,10 @@ impl Judged {
             || p.owner_rights.is(sid)
     }
 
-    /// Whether somebody untrusted is granted anything. No DACL at all grants everything to everybody; an allow entry
-    /// of a layout not read here is taken to grant it.
-    fn grants_others(&self) -> bool {
+    /// Whether somebody untrusted is granted anything in `mask`, counting the entries only what is created inside
+    /// inherits when `inherit_only` says so. No DACL at all grants everything to everybody; an allow entry of a layout
+    /// not read here is taken to grant it.
+    fn grants_others(&self, mask: u32, inherit_only: bool) -> bool {
         if self.dacl.is_null() {
             return true;
         }
@@ -252,7 +307,7 @@ impl Judged {
                     *((ace as *const u8).add(4) as *const u32),
                 )
             };
-            if flags & INHERIT_ONLY_ACE != 0 || access == 0 {
+            if (flags & INHERIT_ONLY_ACE != 0 && !inherit_only) || access & mask == 0 {
                 continue;
             }
             match kind {
@@ -318,13 +373,19 @@ impl Drop for PrivateAttributes {
 /// Lets everybody into `path` (tests).
 #[cfg(test)]
 pub(super) fn let_others_in(path: &Path) {
+    icacls(path, &["/grant", "*S-1-1-0:(F)"]);
+}
+
+/// `icacls <path> <args>`, which must succeed; Everyone is `S-1-1-0` (tests).
+#[cfg(test)]
+pub(super) fn icacls(path: &Path, args: &[&str]) {
     let status = std::process::Command::new("icacls")
         .arg(path)
-        .args(["/grant", "*S-1-1-0:(F)"])
+        .args(args)
         .output()
         .unwrap()
         .status;
-    assert!(status.success(), "icacls");
+    assert!(status.success(), "icacls {args:?}");
 }
 
 /// Makes `link` lead to the directory `target`: a junction, which needs no privilege (tests).

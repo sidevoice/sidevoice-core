@@ -242,3 +242,35 @@ fn removing_what_is_absent_is_not_an_error() {
     dir.remove("core-failure.json").unwrap();
     assert!(names(dir.path()).is_empty());
 }
+
+// Unix only: the loose parent is built with `chmod`; the same rule (a directory others can change on the way is not
+// trusted) is tested on every OS against the interface (`sidevoice-platform`, fs tests).
+#[cfg(unix)]
+#[test]
+fn a_private_directory_under_one_others_can_change_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let shared = root.path().join("shared");
+    PrivateDir::open(shared.join("core")).unwrap();
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+    let refused = PrivateDir::open(shared.join("core")).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+    PrivateDir::open(shared.join("core")).expect("under the sticky bit, as in /tmp");
+}
+
+// Windows only: an entry granting Everyone read on what is created inside (inherit-only) has no Unix counterpart.
+#[cfg(windows)]
+#[test]
+fn a_directory_that_would_let_others_read_its_files_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = PrivateDir::open(root.path().join("core")).unwrap();
+    let status = std::process::Command::new("icacls")
+        .arg(dir.path())
+        .args(["/grant", "*S-1-1-0:(OI)(IO)(R)"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "icacls");
+    let refused = PrivateDir::open(dir.path()).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+}

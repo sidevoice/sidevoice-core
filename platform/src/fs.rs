@@ -1,11 +1,13 @@
 //! Private directories and files: the file-system half of the trust boundary, the OS user. What keeps another user
-//! out is that our own directories and files are open to nobody else and that a link planted in their place is never
-//! followed. Anything that fails a check is refused, never repaired behind the person's back and never used.
+//! out is that every directory on the way to our files is this user's (or the system's) and nobody else can replace
+//! what is in it, that our own directories and files are open to nobody else, and that a link planted in their place
+//! is never followed. Anything that fails a check is refused, never repaired behind the person's back and never used.
 //!
 //! The interface is the [`Fs`] trait; [`Files`] is the one OS implementation compiled in, chosen below. What differs
 //! per OS is only how access is set and read: Unix mode bits and `O_NOFOLLOW`; on Windows a protected DACL set when
 //! a file or directory is created, read back from the handle, and reparse points (links, junctions) refused. Who owns
-//! something is [`user`](crate::user)'s (`UserId::current().owns_path/owns_file`). Callers import both:
+//! something is [`user`](crate::user)'s (`UserId::current().owns_path/owns_file`). The rule for the directories on
+//! the way is the connector's (its `platform::fs`, `check_ancestor`), so the two can converge. Callers import both:
 //! `use sidevoice_platform::fs::{Files, Fs};` then `Files::create_private_dirs(..)`, `Files::open_private(..)`.
 
 #[cfg(unix)]
@@ -24,8 +26,9 @@ use std::path::Path;
 
 /// How [`Fs::open_private`] opens a file of ours. Whatever it creates is private; a link in its place is refused,
 /// never followed.
-#[derive(Clone, Copy, Debug)]
 pub enum Create {
+    /// A new file for writing, never one already there.
+    New,
     /// For appending, created when missing.
     Append,
     /// For reading and writing, created when missing, what is in it kept.
@@ -46,7 +49,9 @@ pub trait Fs {
     fn open_read(path: &Path) -> io::Result<File>;
 
     /// Whether anybody but the owner (and the system: root, SYSTEM, Administrators) may do anything with the file or
-    /// directory behind an open handle.
+    /// directory behind an open handle, now or through what is created in it. On Windows that includes a DACL that is
+    /// not protected (it takes what its parent passes down) and an entry for others that only what is created inside
+    /// inherits.
     fn open_to_others(file: &File) -> io::Result<bool>;
 
     /// Makes what was just created, renamed or removed in the directory `dir` durable, where the OS has a way: Unix
@@ -73,17 +78,31 @@ pub trait Fs {
         }
     }
 
-    /// Whether `path` is a directory itself (a link to one is not), this user's, and open to nobody else. A missing
-    /// path is an error; a link, or anything the checks cannot read, is not private.
+    /// Whether `path` is a directory itself (a link to one is not), this user's and open to nobody else, and every
+    /// directory on the way to it (from its absolute form) is this user's or the system's with nobody else able to
+    /// replace what is in it. Unix judges each of those entries itself (a link as a link): owned by this user or root,
+    /// not writable by group or others unless sticky (`/tmp`). Windows judges the directory each leads to: owned by
+    /// this user, SYSTEM, Administrators or TrustedInstaller, nobody else allowed to delete or rename what is in it or
+    /// to take it over. A missing path is an error; a link, or anything the checks cannot read, is not private.
     fn is_private_dir(path: &Path) -> io::Result<bool> {
-        let dir = match Self::open_read(path) {
+        let path = std::path::absolute(path)?;
+        let dir = match Self::open_read(&path) {
             Ok(dir) => dir,
             Err(error) if error.kind() == ErrorKind::NotFound => return Err(error),
             Err(_) => return Ok(false),
         };
-        Ok(dir.metadata()?.is_dir()
-            && UserId::current().owns_file(&dir)?
-            && !Self::open_to_others(&dir)?)
+        if !dir.metadata()?.is_dir()
+            || !UserId::current().owns_file(&dir)?
+            || Self::open_to_others(&dir)?
+        {
+            return Ok(false);
+        }
+        for ancestor in path.ancestors().skip(1) {
+            if !imp::trusted_ancestor(ancestor)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -146,6 +165,47 @@ mod tests {
         assert!(!Files::open_to_others(&held).unwrap());
         assert!(UserId::current().owns_file(&held).unwrap());
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "one\ntwo\n", "kept");
+        let new = root.path().join("new");
+        writeln!(Files::open_private(&new, Create::New).unwrap(), "secret").unwrap();
+        assert!(Files::open_private(&new, Create::New).is_err(), "exclusive");
+        let new = Files::open_read(&new).unwrap();
+        assert!(!Files::open_to_others(&new).unwrap());
+        assert!(UserId::current().owns_file(&new).unwrap());
+    }
+
+    #[test]
+    fn a_private_directory_under_one_others_can_change_is_not_private() {
+        let root = tempfile::tempdir().unwrap();
+        let open = root.path().join("open");
+        let dir = open.join("data");
+        Files::create_private_dirs(&dir).unwrap();
+        assert!(private(&dir));
+        imp::let_others_in(&open);
+        assert!(!private(&dir), "others could replace it");
+        assert!(
+            Files::is_private_dir(&dir.join("..").join("data")).is_ok_and(|private| !private),
+            "however it is spelled"
+        );
+    }
+
+    // Windows only: an entry only inherited by what is created inside, and a DACL that takes its parent's, have no
+    // Unix counterpart (a directory's mode is not passed down).
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_that_passes_access_down_or_inherits_it_is_not_private() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("files-only");
+        Files::create_private_dir(&dir).unwrap();
+        imp::icacls(&dir, &["/grant", "*S-1-1-0:(OI)(IO)(R)"]);
+        assert!(Files::open_to_others(&Files::open_read(&dir).unwrap()).unwrap());
+        assert!(
+            !private(&dir),
+            "what is created in it would be readable by everybody"
+        );
+        let inheriting = root.path().join("inheriting");
+        Files::create_private_dir(&inheriting).unwrap();
+        imp::icacls(&inheriting, &["/inheritance:e"]);
+        assert!(!private(&inheriting), "its DACL is not protected");
     }
 
     #[test]

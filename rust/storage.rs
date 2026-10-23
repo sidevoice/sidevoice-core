@@ -16,7 +16,8 @@ pub struct PrivateDir {
 }
 
 impl PrivateDir {
-    /// Create `path` if needed and accept it only as an owner-only directory of this user.
+    /// Create `path` if needed and accept it only as an owner-only directory of this user whose every ancestor is this
+    /// user's or the system's with nobody else able to replace what is in it (`Files::is_private_dir`).
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         Files::create_private_dirs(path)?;
@@ -78,10 +79,12 @@ impl PrivateDir {
         Files::sync_dir(&self.path)
     }
 
-    /// A temporary file in the private directory: `tempfile` makes it owner-only on Unix (`0600`), and on Windows it
-    /// takes the directory's protected DACL, inherited.
-    fn stage(&self, bytes: &[u8]) -> io::Result<NamedTempFile> {
-        let mut staged = NamedTempFile::new_in(&self.path)?;
+    /// A temporary file in the private directory, created private by `Files::open_private` (`0600` on Unix, its own
+    /// protected owner, SYSTEM and Administrators DACL on Windows, nothing taken from the directory) before any byte
+    /// is written, under a fresh name `tempfile` picks and removes on failure.
+    fn stage(&self, bytes: &[u8]) -> io::Result<NamedTempFile<File>> {
+        let mut staged = tempfile::Builder::new()
+            .make_in(&self.path, |path| Files::open_private(path, Create::New))?;
         staged.write_all(bytes)?;
         staged.as_file().sync_all()?;
         Ok(staged)

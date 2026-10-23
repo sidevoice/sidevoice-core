@@ -1,7 +1,8 @@
 //! Unix: owner and mode bits, `O_NOFOLLOW`, the descriptor judged as opened. No `unsafe` of ours.
 
 use super::Create;
-use std::fs::{DirBuilder, File, OpenOptions};
+use crate::user::{User, UserId};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
@@ -19,6 +20,7 @@ impl super::Fs for Os {
     fn open_private(path: &Path, how: Create) -> io::Result<File> {
         let mut options = OpenOptions::new();
         match how {
+            Create::New => options.write(true).create_new(true),
             Create::Append => options.append(true).create(true),
             Create::ReadWrite => options.read(true).write(true).create(true).truncate(false),
         };
@@ -42,6 +44,15 @@ impl super::Fs for Os {
     fn sync_dir(dir: &Path) -> io::Result<()> {
         File::open(dir)?.sync_all()
     }
+}
+
+/// A directory on the way to something private (the connector's rule): the entry itself (a link is judged as a link);
+/// this user's or root's; others writing is harmless only under the sticky bit (`/tmp`), where nobody can remove or
+/// rename what is not theirs.
+pub(super) fn trusted_ancestor(dir: &Path) -> io::Result<bool> {
+    let metadata = fs::symlink_metadata(dir)?;
+    Ok((metadata.uid() == 0 || UserId::current().owns_path(dir)?)
+        && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0))
 }
 
 fn flags(flags: OFlags) -> i32 {
