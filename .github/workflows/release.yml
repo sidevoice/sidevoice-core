@@ -14,6 +14,14 @@ on:
         description: The draft vX.Y.Z release release-please created; its assets are built from that tag.
         type: string
         required: true
+  # By hand, for a draft vX.Y.Z release whose run failed before publishing: rebuild its assets from the tag
+  # (RELEASING.md, "When something fails").
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The draft vX.Y.Z release to build and publish from its tag.
+        type: string
+        required: true
 
 permissions:
   contents: read

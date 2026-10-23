@@ -15,6 +15,7 @@ mod call;
 mod connector_routes;
 mod connectors;
 mod device_address;
+mod drain;
 mod guard;
 mod limits;
 mod node;
@@ -152,7 +153,12 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
     let router = router
         .fallback(refusal::not_found)
         .with_state(state.clone());
-    let router = router.layer(middleware::from_fn_with_state((state, local), guard::guard));
+    let router = router
+        .layer(middleware::from_fn_with_state((state, local), guard::guard))
+        .layer(middleware::from_fn_with_state(
+            drain::DRAIN_DEADLINE,
+            drain::drain,
+        ));
     match telemetry {
         Some(telemetry) => router.layer(middleware::from_fn_with_state(
             telemetry,

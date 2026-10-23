@@ -110,6 +110,9 @@ Build artifacts on Actions runs are kept 7 days, for debugging only. Download fr
 
 - A release build or its verification fails: the Release stays a draft, its tag in place. Fix forward if needed,
   then re-run the failed jobs of that `release-please` run. Nothing is published until every check passed.
+- The tagged commit itself cannot build (re-running fails the same way): as long as the Release was never
+  published, delete the draft and its tag, fix on `main`, tag the fixed commit with the same `vX.Y.Z`, create the
+  draft Release again and run `release.yml` by hand with that tag (`gh workflow run release.yml -f tag=vX.Y.Z`).
 - A `nightly` run fails: the previous snapshot stays. The next green push replaces it.
 - A release run is never cancelled half-way; nightlies queue behind each other.
 
