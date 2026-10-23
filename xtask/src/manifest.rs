@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::archive::unpack_checked;
 use crate::util::*;
-use crate::{Result, ENTRYPOINT, KIND, TARGETS};
+use crate::{Result, ENTRYPOINT_STEM, KIND, TARGETS};
 
 pub(crate) fn manifest(dir: &Path, tag: Option<&str>) -> Result<()> {
     let repo = repo();
@@ -71,7 +71,7 @@ pub(crate) fn manifest(dir: &Path, tag: Option<&str>) -> Result<()> {
     }
     let value = json!({"schema": 1, "kind": KIND, "source_sha": source_sha,
                        "cargo_lock_sha256": sha256(&read(&repo.join("Cargo.lock"))?),
-                       "entrypoint": ENTRYPOINT, "bundles": bundles});
+                       "entrypoint": ENTRYPOINT_STEM, "bundles": bundles});
     let bytes = canonical(&value);
     write(&dir.join("native-core-manifest.json"), &bytes)?;
     sums.push(format!("{}  native-core-manifest.json\n", sha256(&bytes)));
