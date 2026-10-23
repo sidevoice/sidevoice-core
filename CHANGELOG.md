@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0](https://github.com/sidevoice/sidevoice-core/compare/v0.9.0...v0.10.0) (2026-10-23)
+
+
+### Features
+
+* **platform:** one rule for the shared models folder ([#180](https://github.com/sidevoice/sidevoice-core/issues/180)) ([4f843cd](https://github.com/sidevoice/sidevoice-core/commit/4f843cdff3a3990f5942364f6c49d9bc16602892))
+
+
+### Bug Fixes
+
+* **server:** drain small request bodies so refusals do not reset on Windows ([#181](https://github.com/sidevoice/sidevoice-core/issues/181)) ([1693d94](https://github.com/sidevoice/sidevoice-core/commit/1693d94e4f163bdcb0184bc28bb798606bd545b0))
+
 ## [0.9.0](https://github.com/sidevoice/sidevoice-core/compare/v0.8.0...v0.9.0) (2026-10-23)
 
 
