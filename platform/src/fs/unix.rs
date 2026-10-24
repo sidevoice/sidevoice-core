@@ -8,7 +8,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rustix::fs::{self as rfs, AtFlags, Mode, OFlags};
 use rustix::io::Errno;
@@ -42,6 +42,30 @@ impl super::Fs for Os {
             .read(true)
             .custom_flags(flags(OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY))
             .open(path)
+    }
+
+    fn trusted_program(path: &Path) -> io::Result<PathBuf> {
+        super::program_name(path)?;
+        // Preserve the desktop's resolved-program policy: the caller never launches the original link again.
+        let resolved = path
+            .canonicalize()
+            .map_err(|error| directory_error(path, error))?;
+        let parent = Held::open_with(super::parent_of(&resolved)?, None)?;
+        let name = super::child_name(super::program_name(&resolved)?)?;
+        let file = open_child(parent.0.leaf().1, name)?
+            .ok_or_else(|| io::Error::from(ErrorKind::NotFound))?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || (metadata.uid() != 0 && !UserId::current().owns_file(&file)?)
+            || metadata.mode() & 0o1022 != 0
+            || metadata.mode() & 0o111 == 0
+        {
+            return Err(super::denied(
+                "unsafe program owner, type or executable permissions",
+            ));
+        }
+        parent.0.verify()?;
+        Ok(resolved)
     }
 
     fn sync_dir(dir: &Path) -> io::Result<()> {
@@ -171,8 +195,8 @@ fn write_whole_at(dir: &File, path: &Path, bytes: &[u8], how: Publish) -> io::Re
 /// The directory capability: no public operations beyond `Directory`.
 pub struct Held(HeldState);
 
-impl super::Directory for Held {
-    fn open(path: &Path, access: Access) -> io::Result<Self> {
+impl Held {
+    fn open_with(path: &Path, access: Option<Access>) -> io::Result<Self> {
         let paths = super::directory_paths(path)?;
         let mut chain: Vec<(std::path::PathBuf, File)> = Vec::new();
         for (index, path) in paths.iter().enumerate() {
@@ -203,7 +227,7 @@ impl super::Directory for Held {
             } else {
                 open_dir(path, true)?
             };
-            if leaf {
+            if let Some(access) = access.filter(|_| leaf) {
                 super::judge_access(&file, access, true)
                     .map_err(|error| super::refused(path, error))?;
             } else {
@@ -214,6 +238,12 @@ impl super::Directory for Held {
         let held = Held(HeldState { chain, access });
         held.0.verify()?;
         Ok(held)
+    }
+}
+
+impl super::Directory for Held {
+    fn open(path: &Path, access: Access) -> io::Result<Self> {
+        Self::open_with(path, Some(access))
     }
 
     fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>> {
@@ -252,6 +282,15 @@ impl super::Directory for Held {
 }
 
 fn open_record(dir: &File, name: &Path, access: Access) -> io::Result<Option<File>> {
+    let Some(file) = open_child(dir, name)? else {
+        return Ok(None);
+    };
+    super::judge_access(&file, access, false)?;
+    Ok(Some(file))
+}
+
+// One no-follow child opener for records and programs, relative to the checked directory.
+fn open_child(dir: &File, name: &Path) -> io::Result<Option<File>> {
     let flags =
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
     let file = match rfs::openat(dir, name, flags, Mode::empty()) {
@@ -268,7 +307,6 @@ fn open_record(dir: &File, name: &Path, access: Access) -> io::Result<Option<Fil
             return Err(directory_error(name, error.into()));
         }
     };
-    super::judge_access(&file, access, false)?;
     Ok(Some(file))
 }
 
@@ -415,4 +453,9 @@ fn set_mode(path: &Path, change: impl Fn(u32) -> u32) {
     use std::os::unix::fs::PermissionsExt;
     let mode = fs::metadata(path).unwrap().mode() & 0o7777;
     fs::set_permissions(path, fs::Permissions::from_mode(change(mode))).unwrap();
+}
+
+#[cfg(test)]
+pub(super) fn system_program() -> PathBuf {
+    PathBuf::from("/bin/sh")
 }
