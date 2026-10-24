@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/sidevoice/sidevoice-core/compare/v0.11.0...v0.11.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **platform:** open held-directory ancestors with search access ([#196](https://github.com/sidevoice/sidevoice-core/issues/196)) ([a84a31d](https://github.com/sidevoice/sidevoice-core/commit/a84a31d5a292c6beb8573c7a55e2573479737744))
+
 ## [0.11.0](https://github.com/sidevoice/sidevoice-core/compare/v0.10.1...v0.11.0) (2026-10-24)
 
 
