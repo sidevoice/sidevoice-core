@@ -56,6 +56,7 @@ pub trait Directory: Sized {
     fn open(path: &Path, access: Access) -> io::Result<Self>;
 
     /// Reads a regular record from the checked handle, bounded by `limit` (`InvalidData` when exceeded).
+    /// Concurrent replacement can be refused if the opened record loses its name before the checks finish.
     /// `name` must be one ordinary child component, with no separators, NUL, `.` or `..`; Windows also refuses device
     /// names, alternate data streams and trailing dot/space aliases. Invalid names return `InvalidInput`.
     fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>>;
@@ -956,11 +957,17 @@ mod tests {
                 }
             });
             for _ in 0..48 {
-                let bytes = dir.read(name, Access::Private, 8192).unwrap().unwrap();
-                assert!(bytes == first || bytes == second);
+                match dir.read(name, Access::Private, 8192) {
+                    Ok(Some(bytes)) => assert!(bytes == first || bytes == second),
+                    // An opened record replaced before its link-count check has no name, so it is refused.
+                    Err(error) => assert_eq!(error.kind(), ErrorKind::PermissionDenied),
+                    Ok(None) => panic!("atomic replacement must not leave the record absent"),
+                }
             }
             writer.join().unwrap();
         });
+        let bytes = dir.read(name, Access::Private, 8192).unwrap().unwrap();
+        assert!(bytes == first || bytes == second);
         assert_eq!(
             fs::read_dir(&path).unwrap().count(),
             1,
