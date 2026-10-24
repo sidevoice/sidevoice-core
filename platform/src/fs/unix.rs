@@ -52,13 +52,13 @@ impl super::Fs for Os {
             .map_err(|error| directory_error(path, error))?;
         let parent = Held::open_with(super::parent_of(&resolved)?, None)?;
         let name = super::child_name(super::program_name(&resolved)?)?;
-        let file = open_child(parent.0.leaf().1, name)?
-            .ok_or_else(|| io::Error::from(ErrorKind::NotFound))?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || (metadata.uid() != 0 && !UserId::current().owns_file(&file)?)
-            || metadata.mode() & 0o1022 != 0
-            || metadata.mode() & 0o111 == 0
+        // fstatat requires search access to the held directory, not read access to the executable. It also
+        // avoids opening devices/FIFOs, and refuses a final link substituted after canonicalization.
+        let metadata = rfs::statat(parent.0.leaf().1, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        if rfs::FileType::from_raw_mode(metadata.st_mode) != rfs::FileType::RegularFile
+            || (metadata.st_uid != 0 && metadata.st_uid != rustix::process::geteuid().as_raw())
+            || metadata.st_mode & 0o1022 != 0
+            || metadata.st_mode & 0o111 == 0
         {
             return Err(super::denied(
                 "unsafe program owner, type or executable permissions",
@@ -135,7 +135,7 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
 /// (`fsync`). On any failure the staging name is removed.
 pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
     let dir_path = super::parent_of(path)?;
-    let dir = open_dir(dir_path, how.judged())?;
+    let dir = open_dir(dir_path, how.judged(), false)?;
     if how.judged() {
         super::judge_dir::<Os>(dir_path, &dir)?;
     }
@@ -212,7 +212,7 @@ impl Held {
                         parent,
                         path.file_name()
                             .ok_or_else(|| super::denied("invalid directory component"))?,
-                        OFlags::RDONLY
+                        directory_access(access.is_none())
                             | OFlags::DIRECTORY
                             | OFlags::CLOEXEC
                             | if no_link {
@@ -225,7 +225,7 @@ impl Held {
                     .map_err(|error| directory_error(path, error.into()))?,
                 )
             } else {
-                open_dir(path, true)?
+                open_dir(path, true, access.is_none())?
             };
             if let Some(access) = access.filter(|_| leaf) {
                 super::judge_access(&file, access, true)
@@ -326,7 +326,11 @@ pub(super) fn reopen_directory(path: &Path, leaf: bool) -> io::Result<File> {
     if !leaf {
         check_ancestor(path)?;
     }
-    open_dir(path, leaf || !fs::symlink_metadata(path)?.is_symlink())
+    open_dir(
+        path,
+        leaf || !fs::symlink_metadata(path)?.is_symlink(),
+        true,
+    )
 }
 
 /// Judge the directory actually held, as well as the spelling's system-link policy above.
@@ -351,7 +355,7 @@ pub(super) fn finish_creation(path: &Path) -> io::Result<()> {
     let (Ok(dir_path), Some(name)) = (super::parent_of(path), path.file_name()) else {
         return Ok(());
     };
-    let Ok(dir) = open_dir(dir_path, true) else {
+    let Ok(dir) = open_dir(dir_path, true, false) else {
         return Ok(());
     };
     if super::judge_dir::<Os>(dir_path, &dir).is_err() {
@@ -396,14 +400,34 @@ pub(super) fn finish_creation(path: &Path) -> io::Result<()> {
 }
 
 /// A handle on the directory `path`, for `*at` calls; with `no_link`, a link there is refused, not followed.
-fn open_dir(path: &Path, no_link: bool) -> io::Result<File> {
+fn open_dir(path: &Path, no_link: bool, search_only: bool) -> io::Result<File> {
     let no_link = if no_link {
         OFlags::NOFOLLOW
     } else {
         OFlags::empty()
     };
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | no_link;
+    let flags = directory_access(search_only) | OFlags::DIRECTORY | OFlags::CLOEXEC | no_link;
     Ok(File::from(rfs::open(path, flags, Mode::empty())?))
+}
+
+// Program validation and ancestry rechecks never list directory entries. Records retain read-capable handles
+// where their writer needs fsync. macOS O_SEARCH is O_EXEC | O_DIRECTORY (macOS 12+, below our minimum).
+fn directory_access(search_only: bool) -> OFlags {
+    if !search_only {
+        return OFlags::RDONLY;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        OFlags::PATH
+    }
+    #[cfg(target_os = "macos")]
+    {
+        OFlags::from_bits_retain(libc::O_SEARCH as _)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        OFlags::RDONLY
+    }
 }
 
 fn flags(flags: OFlags) -> i32 {

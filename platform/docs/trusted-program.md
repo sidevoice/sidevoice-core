@@ -39,8 +39,11 @@ non-executable record is refused before launch.
 
 The implementation extends the held-directory mechanism from core#190. Its internal program-directory policy checks
 system-owned leaves with the existing ancestor policy; the public `Directory`/`Access` contract is unchanged. Unix
-uses the same rustix no-follow relative child opener as records. Windows reuses handle owner/DACL checks and file
-identity; there are no new dependencies or unsafe blocks. `cap-std` was evaluated: its directory capabilities do not
+uses search-only directory descriptors (Linux `O_PATH`, macOS `O_SEARCH`) and relative no-follow `fstatat` for the
+program, so neither the executable nor its directories need read permission. Windows reuses handle owner/DACL
+checks and file identity, and validates both the original and resolved `.exe` names (including short aliases).
+The only added binding is macOS `libc::O_SEARCH`, which rustix does not name yet; all calls remain safe rustix APIs,
+with no new unsafe blocks. `cap-std` was evaluated: its directory capabilities do not
 supply Sidevoice's owner/DACL policy, and replacing the already-tested held-directory implementation adds no missing
 capability here ([Dir API](https://docs.rs/cap-std/latest/cap_std/fs/struct.Dir.html)).
 
@@ -56,3 +59,8 @@ They cover real system executables, user installs, readable parents, unsafe payl
 paths, hard links, replacements and changed links. OS-only cases cover Unix execute/sticky bits and special files,
 and Windows aliases, scripts and junctions. Existing held-directory race and record tests exercise the reused
 mechanism. These are filesystem validation tests, not proof of descriptor-bound execution or code signing.
+
+The Windows evidence fixtures require an elevated CI test process to assign short names, create a temporary
+loopback SMB share and local account, and set ownership in Program Files. They do not elevate the validator or
+production code. UNC evidence covers the local SMB server and the exported root onward, not remote-server trust
+or filesystem ancestors hidden above an exported share root.

@@ -99,13 +99,7 @@ impl super::Fs for Os {
     }
 
     fn trusted_program(path: &Path) -> io::Result<PathBuf> {
-        let name = record_name(super::program_name(path)?)?;
-        if !path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
-        {
-            return Err(super::denied("expected a native .exe program"));
-        }
+        let name = program_name(path)?;
         // Do not canonicalize before holding/checking the original ancestry: that would hide junctions.
         let parent = Held::open_with(super::parent_of(path)?, None)?;
         let path = parent.0.leaf().0.join(name);
@@ -123,6 +117,8 @@ impl super::Fs for Os {
             ));
         }
         let resolved = path.canonicalize()?;
+        // An 8.3 alias can carry a different extension from its long name. Never return a script to launch.
+        program_name(&resolved)?;
         // Verify that the returned spelling still names the opened file, with no final reparse traversal.
         let current = Self::open_read(&resolved)?;
         if Self::identity(&file)? != Self::identity(&current)? {
@@ -379,6 +375,17 @@ fn open_record(path: &Path, access: Access) -> io::Result<Option<File>> {
     };
     super::judge_access(&file, access, false)?;
     Ok(Some(file))
+}
+
+fn program_name(path: &Path) -> io::Result<&Path> {
+    let name = record_name(super::program_name(path)?)?;
+    if !name
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        return Err(super::denied("expected a native .exe program"));
+    }
+    Ok(name)
 }
 
 /// Win32 aliases must not turn an ordinary child into a device, stream or differently spelled entry.
@@ -757,4 +764,103 @@ pub(super) fn system_program() -> PathBuf {
     PathBuf::from(std::env::var_os("SystemRoot").expect("Windows directory"))
         .join("System32")
         .join("whoami.exe")
+}
+
+// Native Windows fixtures: no assertions about trust policy live here.
+#[cfg(test)]
+pub(super) fn ordinary_path(path: &Path) -> PathBuf {
+    let text = path.to_str().unwrap();
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
+}
+
+#[cfg(test)]
+pub(super) fn short_name(path: &Path, alias: &str) -> PathBuf {
+    let path = ordinary_path(path);
+    let output = std::process::Command::new("fsutil")
+        .args(["file", "setshortname"])
+        .arg(&path)
+        .arg(alias)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "setshortname: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    path.parent().unwrap().join(alias)
+}
+
+#[cfg(test)]
+pub(super) struct Share(String);
+
+#[cfg(test)]
+impl Share {
+    pub(super) fn new(path: &Path) -> Self {
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Service LanmanServer"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "start local SMB server for UNC fixture");
+        let share = Self(format!("sidevoice-p2-{}", std::process::id()));
+        let output = std::process::Command::new("net")
+            .arg("share")
+            .arg(format!("{}={}", share.0, ordinary_path(path).display()))
+            .arg(format!("/GRANT:{},FULL", UserId::name().unwrap()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "net share: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        share
+    }
+
+    pub(super) fn path(&self) -> PathBuf {
+        PathBuf::from(format!(r"\\localhost\{}", self.0))
+    }
+}
+
+#[cfg(test)]
+impl Drop for Share {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("net")
+            .args(["share", &self.0, "/DELETE", "/Y"])
+            .output();
+    }
+}
+
+#[cfg(test)]
+pub(super) struct OtherUser(pub(super) String);
+
+#[cfg(test)]
+impl OtherUser {
+    pub(super) fn new() -> Self {
+        let name = format!("svp2{}", std::process::id());
+        // Fourteen characters avoids net.exe's interactive legacy-password-length prompt.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let password = format!("Sv!{:011x}", nonce & 0xffffffffff);
+        let output = std::process::Command::new("net")
+            .args(["user", &name, &password, "/ADD"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "create test principal: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Self(name)
+    }
+}
+
+#[cfg(test)]
+impl Drop for OtherUser {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("net")
+            .args(["user", &self.0, "/DELETE"])
+            .output();
+    }
 }

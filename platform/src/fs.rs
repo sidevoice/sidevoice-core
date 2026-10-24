@@ -225,7 +225,7 @@ pub trait Fs {
     /// Validates a recorded Sidevoice program and returns the absolute path to launch. This is not for agent
     /// CLIs, PATH discovery or publisher authentication. Nothing is created, repaired or executed.
     ///
-    /// The opened regular file must belong to this user or the system (Unix root; Windows SYSTEM, Administrators
+    /// The regular file must belong to this user or the system (Unix root; Windows SYSTEM, Administrators
     /// or TrustedInstaller), with no write/takeover rights granted to other users. Its ancestry is held and checked
     /// with the same mechanism as [`Directory`], including system-owned program directories and Unix sticky parents.
     /// Unix requires an execute bit and rejects a sticky file. Windows accepts native `.exe` names, case-insensitively;
@@ -790,6 +790,31 @@ mod tests {
         assert!(refused(Files::trusted_program(&safe)));
     }
 
+    // Unix execute/search-only permissions have no equivalent mode bits on Windows. Copy a real native program:
+    // a script interpreter would need to read a mode-0111 script even though the kernel can execute a binary.
+    #[cfg(unix)]
+    #[test]
+    fn trusted_program_accepts_execute_only_binary_and_search_only_ancestry() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch();
+        let dir = root.path().join("search-only");
+        Files::create_private_dir(&dir).unwrap();
+        let path = dir.join("sidevoice");
+        fs::copy(imp::system_program(), &path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o111)).unwrap();
+        let binary = Files::trusted_program(&path);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o111)).unwrap();
+        let ancestry = Files::trusted_program(&path);
+        let executes = std::process::Command::new(&path)
+            .args(["-c", "exit 0"])
+            .status();
+        // Restore traversal for TempDir cleanup even when an assertion below fails.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(binary.unwrap(), path);
+        assert_eq!(ancestry.unwrap(), path);
+        assert!(executes.unwrap().success());
+    }
+
     // Unix mode bits and special file kinds have no Windows counterpart.
     #[cfg(unix)]
     #[test]
@@ -841,6 +866,137 @@ mod tests {
         let link = root.path().join("junction");
         imp::link_dir(&dir, &link);
         assert!(refused(Files::trusted_program(&link.join("sidevoice.exe"))));
+    }
+
+    // These spellings and ACLs are Windows-only; the assertions still use the public Fs interface.
+    #[cfg(windows)]
+    #[test]
+    fn trusted_program_checks_real_short_name_aliases() {
+        // The OS volume supports 8.3 names; explicitly assign aliases to our fixtures instead of trusting
+        // GetShortPathName, which may silently return a long name when no short name exists.
+        let root = tempfile::Builder::new()
+            .prefix("sidevoice-p2-")
+            .tempdir_in(std::env::var_os("ProgramFiles").unwrap())
+            .unwrap();
+        let dir = root.path().join("Sidevoice program directory");
+        Files::create_private_dir(&dir).unwrap();
+        let path = program(&dir, "sidevoice connector.exe");
+        let file_alias = imp::short_name(&path, "SVPROG~1.EXE");
+        let dir_alias = imp::short_name(&dir, "SVBIN~1");
+        let both_aliases = dir_alias.join("SVPROG~1.EXE");
+        let expected = Files::trusted_program(&path).unwrap();
+        for alias in [&file_alias, &both_aliases] {
+            assert_eq!(Files::trusted_program(alias).unwrap(), expected);
+        }
+        Files::let_others_change(&path);
+        assert!(refused(Files::trusted_program(&both_aliases)));
+        Files::shut_others_out(&path);
+        Files::let_others_change(&dir);
+        assert!(refused(Files::trusted_program(&both_aliases)));
+        Files::shut_others_out(&dir);
+        let script = program(&dir, "sidevoice.cmd");
+        let disguised = imp::short_name(&script, "SCRIPT~1.EXE");
+        assert!(
+            refused(Files::trusted_program(&disguised)),
+            "a native-looking alias must not return a script"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_program_checks_disk_namespaces_and_refuses_devices() {
+        let root = scratch();
+        let path = program(root.path(), "sidevoice.exe");
+        let ordinary = imp::ordinary_path(&path);
+        let verbatim = PathBuf::from(format!(r"\\?\{}", ordinary.display()));
+        let device_disk = PathBuf::from(format!(r"\\.\{}", ordinary.display()));
+        let expected = Files::trusted_program(&ordinary).unwrap();
+        for alias in [&verbatim, &device_disk] {
+            assert_eq!(Files::trusted_program(alias).unwrap(), expected);
+        }
+        Files::let_others_change(&path);
+        for alias in [&verbatim, &device_disk] {
+            assert!(refused(Files::trusted_program(alias)));
+        }
+        for device in [
+            r"\\.\NUL.exe",
+            r"\\?\GLOBALROOT\Device\Null.exe",
+            r"\\.\pipe\sidevoice-invalid.exe",
+        ] {
+            assert!(Files::trusted_program(Path::new(device)).is_err());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_program_checks_unc_and_verbatim_unc_through_a_local_share() {
+        let root = scratch();
+        Files::shut_others_out(root.path());
+        let dir = root.path().join("bin");
+        Files::create_private_dir(&dir).unwrap();
+        let path = program(&dir, "sidevoice.exe");
+        let share = imp::Share::new(root.path());
+        let unc = share.path().join("bin").join("sidevoice.exe");
+        let verbatim = PathBuf::from(format!(
+            r"\\?\UNC\{}",
+            unc.to_str().unwrap().trim_start_matches('\\')
+        ));
+        for alias in [&unc, &verbatim] {
+            let resolved = Files::trusted_program(alias).unwrap();
+            assert!(
+                Files::identity(&Files::open_read(&resolved).unwrap()).unwrap()
+                    == Files::identity(&Files::open_read(&path).unwrap()).unwrap()
+            );
+        }
+        Files::let_others_change(&path);
+        assert!(refused(Files::trusted_program(&unc)));
+        Files::shut_others_out(&path);
+        Files::let_others_change(&dir);
+        assert!(refused(Files::trusted_program(&verbatim)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_program_checks_inherited_access_under_a_user_local_appdata_root() {
+        let root = tempfile::Builder::new()
+            .prefix("sidevoice-p2-")
+            .tempdir_in(std::env::var_os("LOCALAPPDATA").unwrap())
+            .unwrap();
+        let dir = root.path().join("Sidevoice").join("install");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sidevoice.exe");
+        fs::write(&path, b"native program fixture").unwrap(); // Inherit the user's ordinary profile DACL.
+        Files::trusted_program(&path).unwrap();
+        // A grant inherited only by child files leaves the directories unchanged but makes the payload unsafe.
+        imp::icacls(root.path(), &["/grant", "*S-1-1-0:(OI)(IO)(M)"]);
+        assert!(refused(Files::trusted_program(&path)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_program_refuses_another_users_program_files_subtree() {
+        let other = imp::OtherUser::new();
+        let root = tempfile::Builder::new()
+            .prefix("sidevoice-p2-")
+            .tempdir_in(std::env::var_os("ProgramFiles").unwrap())
+            .unwrap();
+        let path = program(root.path(), "sidevoice.exe");
+        Files::trusted_program(&path).unwrap();
+        imp::icacls(
+            root.path(),
+            &["/grant", &format!("{}:(OI)(CI)(F)", other.0)],
+        );
+        assert!(
+            refused(Files::trusted_program(&path)),
+            "another account can replace the program"
+        );
+        imp::icacls(root.path(), &["/remove:g", &other.0]);
+        imp::icacls(root.path(), &["/setowner", &other.0]);
+        assert!(
+            refused(Files::trusted_program(&path)),
+            "another account owns the program directory"
+        );
+        imp::icacls(root.path(), &["/setowner", &UserId::name().unwrap()]);
     }
 
     #[test]
