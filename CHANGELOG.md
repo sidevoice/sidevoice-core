@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.0](https://github.com/sidevoice/sidevoice-core/compare/v0.10.1...v0.11.0) (2026-10-24)
+
+
+### Features
+
+* **platform:** add held directory access for shared records ([#190](https://github.com/sidevoice/sidevoice-core/issues/190)) ([77737ef](https://github.com/sidevoice/sidevoice-core/commit/77737ef35f07499b206b8ea15aaf20c408a70c2b))
+* **platform:** share child execution and bounded output ([#191](https://github.com/sidevoice/sidevoice-core/issues/191)) ([64c5a7f](https://github.com/sidevoice/sidevoice-core/commit/64c5a7ffea510862c6b77f21abca6514f5c82001))
+
 ## [0.10.1](https://github.com/sidevoice/sidevoice-core/compare/v0.10.0...v0.10.1) (2026-10-23)
 
 
