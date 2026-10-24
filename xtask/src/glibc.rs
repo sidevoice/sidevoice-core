@@ -6,7 +6,6 @@
 //! exactly the floor.
 
 use std::cmp::Ordering;
-use std::env;
 
 use crate::util::output;
 use crate::Result;
@@ -20,15 +19,6 @@ pub(crate) const FLOOR: &str = "2.28";
 /// AlmaLinux publishes this image on Quay; anonymous ECR Public pulls repeatedly exhausted their data quota in CI.
 pub(crate) const FLOOR_IMAGE: &str =
     "quay.io/almalinuxorg/almalinux:8@sha256:8e8df1bd2740624cd905cc95aefa1f0e966ac171c48feac54df3f6dc946b2c26";
-
-/// This machine's Rust target triple on Linux, the one `cargo zigbuild` builds for.
-pub(crate) fn host_triple() -> Result<&'static str> {
-    match env::consts::ARCH {
-        "x86_64" => Ok("x86_64-unknown-linux-gnu"),
-        "aarch64" => Ok("aarch64-unknown-linux-gnu"),
-        arch => Err(format!("no Linux triple for {arch}")),
-    }
-}
 
 /// "2.28" as (2, 28, 0), so versions compare by number, not by text ("2.9" is older than "2.28").
 pub(crate) fn parse(version: &str) -> Option<Vec<u32>> {

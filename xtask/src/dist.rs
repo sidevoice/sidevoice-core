@@ -11,28 +11,29 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
+use sidevoice_platform::target;
 
 use crate::glibc;
 use crate::libraries::{linux_libraries, windows_libraries};
 use crate::notices::stage_notices;
 use crate::util::*;
 use crate::verify::verify;
-use crate::{entrypoint, exe_suffix, Result, KIND, ROOT_NAME};
+use crate::{Result, ENTRYPOINT_STEM, KIND, ROOT_NAME};
 
 pub(crate) fn dist() -> Result<()> {
     let repo = repo();
-    let target = host_target()?;
+    let target = target::build_target().ok_or("unsupported build target")?;
     let source_sha = git(&["rev-parse", "HEAD"])?;
     let epoch: u64 = git(&["show", "-s", "--format=%ct", "HEAD"])?
         .parse()
         .map_err(|_| "commit time")?;
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let linux = target.starts_with("linux-");
-    let windows = target.starts_with("windows-");
-    let entrypoint = entrypoint(target);
+    let linux = target.os == "linux";
+    let windows = target.os == "windows";
+    let entrypoint = target.exe_name(ENTRYPOINT_STEM);
     let mut build = Command::new(&cargo);
     let built = if linux {
-        let triple = glibc::host_triple()?;
+        let triple = target.triple;
         build
             .args([
                 "zigbuild",
@@ -69,7 +70,7 @@ pub(crate) fn dist() -> Result<()> {
     let binary = stage.join(&entrypoint);
     write(
         &binary,
-        &read(&built.join(format!("sidevoice-core-rust{}", exe_suffix(target))))?,
+        &read(&built.join(target.exe_name("sidevoice-core-rust")))?,
     )?;
     chmod(&binary, 0o755)?;
     stage_notices(&stage.join("notices"), target)?;
@@ -88,7 +89,7 @@ pub(crate) fn dist() -> Result<()> {
         }
     }
     let count = files.len();
-    let mut inventory = json!({"schema": 1, "kind": KIND, "target": target, "source_sha": source_sha,
+    let mut inventory = json!({"schema": 1, "kind": KIND, "target": target.name, "source_sha": source_sha,
                                "entrypoint": entrypoint, "files": files});
     if linux {
         inventory["glibc"] = glibc::FLOOR.into();
@@ -99,7 +100,7 @@ pub(crate) fn dist() -> Result<()> {
     write_tar(&work.0, &raw, epoch, &entrypoint)?;
     let archive = repo
         .join("native")
-        .join(format!("sidevoice-core-{target}.tar.zst"));
+        .join(target.archive_name("sidevoice-core", None));
     mkdir(archive.parent().expect("has a parent"))?;
     run(
         "zstd",
@@ -115,7 +116,7 @@ pub(crate) fn dist() -> Result<()> {
     let bytes = read(&archive)?;
     println!(
         "{}",
-        json!({"target": target, "name": archive.file_name().map(|name| name.to_string_lossy()),
+        json!({"target": target.name, "name": archive.file_name().map(|name| name.to_string_lossy()),
                "size": bytes.len(), "sha256": sha256(&bytes), "files": count, "links_before_relocation": links})
     );
     verify(&archive, None)

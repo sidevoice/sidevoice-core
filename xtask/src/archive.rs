@@ -6,10 +6,11 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use sidevoice_platform::target;
 
 use crate::glibc;
 use crate::util::*;
-use crate::{entrypoint, Result, KIND, ROOT_NAME, TARGETS};
+use crate::{Result, ENTRYPOINT_STEM, KIND, ROOT_NAME};
 
 /// Unpacks an archive into `destination` with every bound and identity check, and returns its root and inventory.
 pub(crate) fn unpack_checked(archive: &Path, destination: &Path) -> Result<(PathBuf, Value)> {
@@ -93,7 +94,8 @@ pub(crate) fn unpack_checked(archive: &Path, destination: &Path) -> Result<(Path
         .keys()
         .map(String::as_str)
         .collect();
-    let target = inventory["target"].as_str().unwrap_or("");
+    let target = target::by_name(inventory["target"].as_str().unwrap_or(""))
+        .ok_or("wrong target or source commit")?;
     let mut expected = BTreeSet::from([
         "schema",
         "kind",
@@ -103,7 +105,7 @@ pub(crate) fn unpack_checked(archive: &Path, destination: &Path) -> Result<(Path
         "files",
     ]);
     // A Linux archive's glibc floor: the oldest C library it runs on (crate::glibc).
-    if target.starts_with("linux-") {
+    if target.os == "linux" {
         expected.insert("glibc");
         if glibc::parse(inventory["glibc"].as_str().unwrap_or("")).is_none() {
             return Err("wrong glibc floor".into());
@@ -114,11 +116,11 @@ pub(crate) fn unpack_checked(archive: &Path, destination: &Path) -> Result<(Path
     }
     if inventory["schema"] != 1
         || inventory["kind"] != KIND
-        || inventory["entrypoint"] != entrypoint(target).as_str()
+        || inventory["entrypoint"] != target.exe_name(ENTRYPOINT_STEM).as_str()
     {
         return Err("wrong native kind or entrypoint".into());
     }
-    if !TARGETS.contains(&target) || !is_commit(inventory["source_sha"].as_str().unwrap_or("")) {
+    if !is_commit(inventory["source_sha"].as_str().unwrap_or("")) {
         return Err("wrong target or source commit".into());
     }
     let records = inventory["files"].as_array().ok_or("inventory files")?;

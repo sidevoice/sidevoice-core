@@ -81,16 +81,6 @@ pub(crate) fn run(program: &str, args: &[&str]) -> Result<()> {
     output(program, args, None).map(|_| ())
 }
 
-pub(crate) fn host_target() -> Result<&'static str> {
-    match (env::consts::OS, env::consts::ARCH) {
-        ("linux", "x86_64") => Ok("linux-x86_64"),
-        ("linux", "aarch64") => Ok("linux-aarch64"),
-        ("macos", "aarch64") => Ok("macos-aarch64"),
-        ("windows", "x86_64") => Ok("windows-x86_64"),
-        (os, arch) => Err(format!("unsupported build host {os}-{arch}")),
-    }
-}
-
 pub(crate) fn git(args: &[&str]) -> Result<String> {
     Ok(output("git", args, Some(&repo()))?.trim().to_string())
 }

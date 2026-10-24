@@ -8,7 +8,7 @@ description = "Build tooling for the core: detector models, relocatable release 
 [dependencies]
 # The DLLs a Windows binary imports (libraries.rs).
 object = { version = "0.40", default-features = false, features = ["read_core", "pe", "std"] }
-# Asking the core to leave, on Windows by its stop event: the one place that name lives (platform/src/stop.rs).
+# Shared release targets and asking the core to leave (on Windows by its stop event).
 sidevoice-platform = { path = "../platform" }
 # The core's local channel, a Unix socket or a named pipe, from `verify`.
 interprocess = "2.4"

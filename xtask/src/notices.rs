@@ -4,11 +4,12 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{json, Value};
+use sidevoice_platform::target::ReleaseTarget;
 
 use crate::util::*;
 use crate::Result;
 
-pub(crate) fn stage_notices(notices: &Path, target: &str) -> Result<()> {
+pub(crate) fn stage_notices(notices: &Path, target: &ReleaseTarget) -> Result<()> {
     let metadata = parse_json(
         output(
             "cargo",
@@ -77,13 +78,13 @@ pub(crate) fn stage_notices(notices: &Path, target: &str) -> Result<()> {
         &canonical(&Value::Array(packages)),
     )?;
 
-    let linux = target.starts_with("linux-");
+    let linux = target.os == "linux";
     write(
         &notices.join("native-dependencies.json"),
         &canonical(&json!({
             "system_trust_roots": if linux {
                 "ca-certificates"
-            } else if target.starts_with("windows-") {
+            } else if target.os == "windows" {
                 "Windows system trust store"
             } else {
                 "macOS system trust store"
