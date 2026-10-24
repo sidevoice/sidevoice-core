@@ -52,12 +52,17 @@ pub trait Process {
 /// with [`Child::kill_tree`]. A tree ([`Processes::spawn_tree`]) is killed whole when its `Child` is dropped: its group
 /// (Unix; `KillOnDrop` alone kills only the leader) or its Job Object. A descendant that leaves the group (`setsid`)
 /// or the job is not contained.
-pub struct Child(Box<dyn ChildWrapper>, bool);
+pub struct Child {
+    inner: Box<dyn ChildWrapper>,
+    kill_on_drop: bool,
+    // Once cleanup starts, group/job signalling is permanently disabled before any leader reaping.
+    signal_armed: bool,
+}
 
 impl Drop for Child {
     fn drop(&mut self) {
-        if self.1 {
-            let _ = self.0.start_kill();
+        if self.kill_on_drop {
+            self.start_kill();
         }
     }
 }
@@ -65,44 +70,55 @@ impl Drop for Child {
 impl Child {
     /// The leader PID while it is available.
     pub fn id(&self) -> Option<u32> {
-        self.0.id()
+        self.inner.id()
     }
 
     /// Takes the leader's stdin (when it was piped).
     pub fn stdin(&mut self) -> Option<ChildStdin> {
-        self.0.stdin().take()
+        self.inner.stdin().take()
     }
 
     /// Takes the leader's stdout (when it was piped).
     pub fn stdout(&mut self) -> Option<ChildStdout> {
-        self.0.stdout().take()
+        self.inner.stdout().take()
     }
 
     /// Takes the leader's stderr (when it was piped).
     pub fn stderr(&mut self) -> Option<ChildStderr> {
-        self.0.stderr().take()
+        self.inner.stderr().take()
     }
 
     // The leader alone, beneath the tree's wrapper.
     fn leader(&mut self) -> &mut dyn ChildWrapper {
-        self.0.inner_mut()
+        self.inner.inner_mut()
     }
 
-    /// The leader's exit, when it has exited.
+    /// The leader's exit, when it has exited. On Unix this observes without reaping while tree signalling
+    /// is armed, reserving the leader PID/PGID until `kill_tree` or drop. Do not reap this child externally.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.leader().try_wait()
+        imp::try_wait(self)
     }
 
     /// Waits for the leader to exit. Cancel-safe; callers can apply their own Tokio deadline.
     /// This does not wait for descendants or pipe EOF; use `output` for bounded collection.
+    /// On Unix the exited leader remains unreaped until cleanup, as in `try_wait`, to prevent PGID reuse.
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.leader().wait().await
+        drop(self.stdin());
+        imp::wait(self).await
+    }
+
+    fn start_kill(&mut self) {
+        if self.signal_armed {
+            // No await between signalling and disarming: cancellation cannot leave a stale PGID armed.
+            let _ = self.inner.start_kill();
+            self.signal_armed = false;
+        }
     }
 
     /// Kills the leader and everything it started (its whole group or job, also after the leader has exited) and
     /// reaps the leader, within 2 s. For a detached Windows child there is no owned job: only its leader is killed.
     pub async fn kill_tree(&mut self) {
-        let _ = self.0.start_kill();
+        self.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(2), self.leader().wait()).await;
     }
 }
@@ -121,7 +137,13 @@ async fn spawn(mut wrap: CommandWrap, tree: bool) -> io::Result<Child> {
     let mut attempt = 0;
     loop {
         match wrap.spawn() {
-            Ok(child) => return Ok(Child(child, tree)),
+            Ok(inner) => {
+                return Ok(Child {
+                    inner,
+                    kill_on_drop: tree,
+                    signal_armed: true,
+                })
+            }
             Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy && attempt < 5 => {
                 attempt += 1;
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -175,17 +197,21 @@ impl Child {
     /// `leader_limit` for the leader, then `pipe_grace` for EOF. Keeps at most `byte_limit` bytes per stream;
     /// absent/taken streams count as empty. Returns `TimedOut` if the leader misses its deadline.
     /// Always kills the remaining tree and allows up to 2 s to reap the leader before returning (also on error).
-    /// Cancellation drops the child and readers together; no detached reader tasks remain. On a detached child,
+    /// Calling this takes cleanup ownership even for a detached child: dropping the returned future (including
+    /// before its first poll) kills it. Readers are dropped with it; no detached reader tasks remain. On a detached child,
     /// cleanup kills its group on Unix but only its leader on Windows, so use `spawn_tree` for owned commands.
-    pub async fn output(
+    pub fn output(
         mut self,
         leader_limit: Duration,
         pipe_grace: Duration,
         byte_limit: usize,
-    ) -> io::Result<Output> {
-        let result = self.collect(leader_limit, pipe_grace, byte_limit).await;
-        self.kill_tree().await;
-        result
+    ) -> impl Future<Output = io::Result<Output>> + Send {
+        self.kill_on_drop = true;
+        async move {
+            let result = self.collect(leader_limit, pipe_grace, byte_limit).await;
+            self.kill_tree().await;
+            result
+        }
     }
 
     async fn collect(
@@ -443,6 +469,7 @@ mod tests {
         let mut cmd = command("stdin");
         cmd.stdin(Stdio::piped());
         let mut child = Processes::spawn_tree(cmd).await.unwrap();
+        assert!(child.try_wait().unwrap().is_none());
         let mut input = child.stdin().unwrap();
         input.write_all(b"hello").await.unwrap();
         drop(input);
@@ -558,6 +585,150 @@ mod tests {
         assert!(tree.wait().await.unwrap().success());
         let mut detached = Processes::spawn_detached(command("console")).await.unwrap();
         assert!(detached.wait().await.unwrap().success());
+    }
+
+    #[tokio::test]
+    async fn detached_output_cancellation_kills_even_before_first_poll() {
+        for unpolled in [true, false] {
+            let child = Processes::spawn_detached(command("sleeper")).await.unwrap();
+            let pid = child.id().unwrap();
+            let output = child.output(Duration::from_secs(30), Duration::from_secs(1), 4096);
+            if unpolled {
+                drop(output);
+            } else {
+                assert!(tokio::time::timeout(Duration::from_millis(100), output)
+                    .await
+                    .is_err());
+            }
+            gone(pid).await;
+        }
+    }
+
+    async fn cancel_during_pipe_grace(mut child: Child) {
+        let (pid, _stdout) = descendant(&mut child).await;
+        assert!(child.wait().await.unwrap().success());
+        // stderr remains inherited by the descendant, so collection is in its EOF grace after leader exit.
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            child.output(Duration::from_secs(5), Duration::from_secs(30), 4096)
+        )
+        .await
+        .is_err());
+        gone(pid).await;
+    }
+
+    #[tokio::test]
+    async fn output_cancellation_during_pipe_grace_cleans_up_descendants() {
+        cancel_during_pipe_grace(Processes::spawn_tree(command("orphan")).await.unwrap()).await;
+        // Detached Windows children own no Job Object and cannot contain descendants; Unix owns a group.
+        #[cfg(unix)]
+        cancel_during_pipe_grace(Processes::spawn_detached(command("orphan")).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn wait_closes_remaining_stdin() {
+        let mut cmd = command("stdin");
+        cmd.stdin(Stdio::piped());
+        let mut child = Processes::spawn_tree(cmd).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success());
+    }
+
+    // Unix-only: WNOWAIT and numeric group identity have no Windows equivalent (jobs are owned handles).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_reserves_group_identity_until_cleanup_and_never_signals_after_reap() {
+        use process_wrap::tokio::{CommandWrapper, KillOnDrop, ProcessGroup};
+        use rustix::process::{waitid, Pid, WaitId, WaitIdOptions};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        #[derive(Debug)]
+        struct CountSignals(Arc<AtomicUsize>);
+        #[derive(Debug)]
+        struct CountedChild(Box<dyn ChildWrapper>, Arc<AtomicUsize>);
+        impl CommandWrapper for CountSignals {
+            fn wrap_child(
+                &mut self,
+                inner: Box<dyn ChildWrapper>,
+                _: &CommandWrap,
+            ) -> io::Result<Box<dyn ChildWrapper>> {
+                Ok(Box::new(CountedChild(inner, self.0.clone())))
+            }
+        }
+        impl ChildWrapper for CountedChild {
+            // Keep the same leader observation beneath the process-group wrapper.
+            fn inner(&self) -> &dyn ChildWrapper {
+                self.0.inner()
+            }
+            fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+                self.0.inner_mut()
+            }
+            fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+                self.0
+            }
+            fn start_kill(&mut self) -> io::Result<()> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                self.0.start_kill()
+            }
+        }
+
+        let signals = Arc::new(AtomicUsize::new(0));
+        let mut wrap = CommandWrap::from(command("exit"));
+        wrap.wrap(ProcessGroup::leader())
+            .wrap(KillOnDrop)
+            .wrap(CountSignals(signals.clone()));
+        let mut child = spawn(wrap, true).await.unwrap();
+        let pid = Pid::from_raw(child.id().unwrap() as i32).unwrap();
+        assert_eq!(child.wait().await.unwrap().code(), Some(7));
+        for _ in 0..2 {
+            assert_eq!(child.try_wait().unwrap().unwrap().code(), Some(7));
+        }
+        let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+        assert_eq!(
+            waitid(WaitId::Pid(pid), options)
+                .unwrap()
+                .unwrap()
+                .exit_status(),
+            Some(7)
+        );
+        assert_eq!(signals.load(Ordering::SeqCst), 0);
+        child.kill_tree().await;
+        assert_eq!(
+            waitid(WaitId::Pid(pid), options).unwrap_err(),
+            rustix::io::Errno::CHILD
+        );
+        assert_eq!(signals.load(Ordering::SeqCst), 1);
+        assert_eq!(child.wait().await.unwrap().code(), Some(7));
+        child.kill_tree().await;
+        drop(child);
+        assert_eq!(
+            signals.load(Ordering::SeqCst),
+            1,
+            "no group signal after reap"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_observed_signal_status_matches_the_reaped_status() {
+        use rustix::process::{kill_process, Pid, Signal};
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = Processes::spawn_tree(command("sleeper")).await.unwrap();
+        kill_process(
+            Pid::from_raw(child.id().unwrap() as i32).unwrap(),
+            Signal::TERM,
+        )
+        .unwrap();
+        let status = child.wait().await.unwrap();
+        assert_eq!(status.signal(), Some(Signal::TERM.as_raw()));
+        child.kill_tree().await;
+        assert_eq!(child.wait().await.unwrap(), status);
     }
 
     #[test]

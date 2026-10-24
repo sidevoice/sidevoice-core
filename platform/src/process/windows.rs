@@ -59,3 +59,12 @@ impl super::Process for Os {
         super::spawn(wrap, true).await
     }
 }
+
+// The Job Object is an owned handle, so reaping its leader does not invalidate tree identity.
+pub(super) fn try_wait(child: &mut super::Child) -> io::Result<Option<std::process::ExitStatus>> {
+    child.leader().try_wait()
+}
+
+pub(super) async fn wait(child: &mut super::Child) -> io::Result<std::process::ExitStatus> {
+    child.leader().wait().await
+}
