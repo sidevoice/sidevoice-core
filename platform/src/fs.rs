@@ -595,8 +595,12 @@ mod tests {
                 .kind(),
             ErrorKind::InvalidInput
         );
+        // PathBuf::join normalizes `..` on a Windows verbatim path; preserve the spelling under test.
+        let mut parent_component = root.path().as_os_str().to_os_string();
+        parent_component.push(std::path::MAIN_SEPARATOR_STR);
+        parent_component.push("..");
         assert_eq!(
-            HeldDirectory::open(&root.path().join(".."), Access::Private)
+            HeldDirectory::open(Path::new(&parent_component), Access::Private)
                 .err()
                 .unwrap()
                 .kind(),
