@@ -14,6 +14,9 @@
 //! record made once, given its name with nothing replaced), the directory synced; on Unix every step in the directory
 //! is taken relative to one handle open on it. Callers import both: `use sidevoice_platform::fs::{Files, Fs};` then
 //! `Files::ensure_private_dir(..)`, `Files::read_trusted(..)`.
+//!
+//! [`Fs::trusted_program`] validates Sidevoice's own programs, including system installs, through the same held
+//! ancestry. Its returned path is not descriptor-bound execution; see the method's documented launch limit.
 
 #[cfg(unix)]
 #[path = "fs/unix.rs"]
@@ -74,7 +77,8 @@ pub trait Directory: Sized {
 /// A root-to-leaf sequence, kept alive for the entire capability. Per-OS code controls how it is opened/reopened.
 struct HeldState {
     chain: Vec<(PathBuf, File)>,
-    access: Access,
+    // None applies the ancestor policy to the leaf too (a system or user program directory).
+    access: Option<Access>,
 }
 
 impl HeldState {
@@ -94,8 +98,8 @@ impl HeldState {
                     "directory replaced; reopen the verified data directory",
                 ));
             }
-            if leaf {
-                judge_access(held, self.access, true).map_err(|error| refused(path, error))?;
+            if let Some(access) = self.access.filter(|_| leaf) {
+                judge_access(held, access, true).map_err(|error| refused(path, error))?;
             } else {
                 imp::check_ancestor_handle(path, held)?;
             }
@@ -136,6 +140,15 @@ fn child_name(name: &OsStr) -> io::Result<&Path> {
         ));
     }
     Ok(path)
+}
+
+fn program_name(path: &Path) -> io::Result<&OsStr> {
+    directory_paths(path)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "expected a program file name"))?;
+    child_name(name)?;
+    Ok(name)
 }
 
 fn judge_access(file: &File, access: Access, directory: bool) -> io::Result<()> {
@@ -208,6 +221,27 @@ pub trait Fs {
     /// Opens `path` (a file or a directory) for reading: a link there is refused, not followed, and nothing is
     /// waited on (a FIFO or a device put in a file's place).
     fn open_read(path: &Path) -> io::Result<File>;
+
+    /// Validates a recorded Sidevoice program and returns the absolute path to launch. This is not for agent
+    /// CLIs, PATH discovery or publisher authentication. Nothing is created, repaired or executed.
+    ///
+    /// The opened regular file must belong to this user or the system (Unix root; Windows SYSTEM, Administrators
+    /// or TrustedInstaller), with no write/takeover rights granted to other users. Its ancestry is held and checked
+    /// with the same mechanism as [`Directory`], including system-owned program directories and Unix sticky parents.
+    /// Unix requires an execute bit and rejects a sticky file. Windows accepts native `.exe` names, case-insensitively;
+    /// it does not consult PATHEXT or invoke a shell. The OS loader still decides whether the payload can execute.
+    /// Unlike private records, programs may have hard links: they confer no write rights or secret-file access.
+    ///
+    /// Supply an absolute path without `..`. Unix resolves links first and checks the resolved ancestry and file;
+    /// launch the returned path, never the original link. Windows refuses every reparse point, including a final
+    /// link or junctioned root: reinstall in an ordinary, unredirected directory. Missing paths return `NotFound`,
+    /// unsafe files/ancestry `PermissionDenied`, invalid names `InvalidInput`; other IO failures propagate.
+    ///
+    /// **Path-launch limit:** validation releases its handles before returning. Neither Unix path execution nor
+    /// Windows CreateProcess is bound to the checked handle. Revalidate immediately before launching, but this
+    /// cannot prevent a same-user/admin replacement, in-place edit, or changed interpreter/library. Those actors
+    /// are outside the boundary; this is neither a content hash nor a signature check.
+    fn trusted_program(path: &Path) -> io::Result<PathBuf>;
 
     /// Makes what was just created, renamed or removed in the directory `dir` durable, where the OS has a way: Unix
     /// syncs the directory; Windows does nothing (NTFS journals its metadata and gives no handle to flush).
@@ -574,6 +608,239 @@ mod tests {
             HeldDirectory::open(path, access).err().unwrap().kind(),
             ErrorKind::PermissionDenied
         );
+    }
+
+    fn program(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        Files::open_private(&path, Create::NewProgram)
+            .unwrap()
+            .write_all(b"test payload; the OS loader checks its format")
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn trusted_program_accepts_user_installs_and_readable_program_directories() {
+        let root = scratch();
+        let dir = root.path().join("Sidevoice café tools");
+        Files::create_private_dir(&dir).unwrap();
+        let path = program(&dir, "sidevoice-connector.EXE");
+        Files::let_others_read(&dir);
+        Files::let_others_read(&path);
+        assert_eq!(
+            Files::trusted_program(&path).unwrap(),
+            path.canonicalize().unwrap()
+        );
+        assert_eq!(others(&dir), Others::Read, "discovery never repairs access");
+        assert_eq!(others(&path), Others::Read);
+    }
+
+    #[test]
+    fn trusted_program_preserves_long_spaced_and_non_ascii_paths() {
+        let root = scratch();
+        let mut dir = root.path().to_path_buf();
+        for _ in 0..10 {
+            dir.push("Sidevoice café installation files");
+            Files::create_private_dir(&dir).unwrap();
+            // Extended-length spelling for subsequent raw Windows creation calls.
+            dir = dir.canonicalize().unwrap();
+        }
+        let path = program(&dir, "sidevoice connector.exe");
+        assert_eq!(
+            Files::trusted_program(&path).unwrap(),
+            path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn trusted_program_accepts_a_real_system_install() {
+        // Only fixture selection differs; the same validator checks a real system-owned executable on every OS.
+        let path = imp::system_program();
+        assert_eq!(
+            Files::trusted_program(&path).unwrap(),
+            path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn trusted_program_refuses_writable_payload_and_ancestry_without_repair() {
+        let root = scratch();
+        let above = root.path().join("above");
+        Files::create_private_dir(&above).unwrap();
+        let dir = above.join("bin");
+        Files::create_private_dir(&dir).unwrap();
+        let path = program(&dir, "sidevoice.exe");
+        for unsafe_path in [&path, &dir, &above] {
+            Files::let_others_change(unsafe_path);
+            assert!(
+                refused(Files::trusted_program(&path)),
+                "{}",
+                unsafe_path.display()
+            );
+            assert_eq!(others(unsafe_path), Others::Change, "never repaired");
+            Files::shut_others_out(unsafe_path);
+        }
+        Files::trusted_program(&path).unwrap();
+    }
+
+    #[test]
+    fn trusted_program_discovery_preserves_absence_and_rejects_invalid_input() {
+        let root = scratch();
+        let absent = root.path().join("absent");
+        for path in [
+            root.path().join("missing.exe"),
+            absent.join("sidevoice.exe"),
+        ] {
+            assert_eq!(
+                Files::trusted_program(&path).unwrap_err().kind(),
+                ErrorKind::NotFound
+            );
+        }
+        assert!(!absent.exists(), "discovery never creates an install");
+        // PathBuf::join normalizes `..` away under a Windows verbatim prefix. Build the invalid spelling
+        // literally so the validator, rather than the fixture, sees and rejects the parent component.
+        let mut parent = root.path().as_os_str().to_os_string();
+        parent.push(std::path::MAIN_SEPARATOR_STR);
+        parent.push("..");
+        parent.push(std::path::MAIN_SEPARATOR_STR);
+        parent.push("sidevoice.exe");
+        for path in [PathBuf::from("sidevoice.exe"), PathBuf::from(parent)] {
+            assert_eq!(
+                Files::trusted_program(&path).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+        let directory = root.path().join("directory.exe");
+        Files::create_private_dir(&directory).unwrap();
+        assert!(refused(Files::trusted_program(&directory)));
+    }
+
+    #[test]
+    fn trusted_program_hard_links_do_not_grant_write_rights() {
+        let root = scratch();
+        let path = program(root.path(), "sidevoice.exe");
+        let alias = root.path().join("alias.exe");
+        fs::hard_link(&path, &alias).unwrap();
+        Files::trusted_program(&path).unwrap();
+        Files::trusted_program(&alias).unwrap();
+        Files::let_others_change(&alias);
+        assert!(refused(Files::trusted_program(&path)));
+        assert!(refused(Files::trusted_program(&alias)));
+    }
+
+    #[test]
+    fn trusted_program_rechecks_replaced_files_and_directories() {
+        let root = scratch();
+        let dir = root.path().join("bin");
+        Files::create_private_dir(&dir).unwrap();
+        let path = program(&dir, "sidevoice.exe");
+        let resolved = Files::trusted_program(&path).unwrap();
+        fs::rename(&path, dir.join("old.exe")).unwrap();
+        program(&dir, "sidevoice.exe");
+        Files::let_others_change(&path);
+        assert!(refused(Files::trusted_program(&resolved)));
+        fs::rename(&dir, root.path().join("old-bin")).unwrap();
+        Files::create_private_dir(&dir).unwrap();
+        program(&dir, "sidevoice.exe");
+        Files::let_others_change(&dir);
+        assert!(refused(Files::trusted_program(&resolved)));
+    }
+
+    #[test]
+    fn trusted_program_link_policy_never_returns_a_retargetable_link() {
+        let root = scratch();
+        let safe = program(root.path(), "safe.exe");
+        let unsafe_program = program(root.path(), "unsafe.exe");
+        Files::let_others_change(&unsafe_program);
+        let link = root.path().join("sidevoice.exe");
+        Files::symlink(&safe, &link);
+        // The contract deliberately differs: Unix resolves once; Windows D1=A refuses all reparse points.
+        #[cfg(unix)]
+        let resolved = Files::trusted_program(&link).unwrap();
+        #[cfg(windows)]
+        assert!(refused(Files::trusted_program(&link)));
+        fs::remove_file(&link).unwrap();
+        Files::symlink(&unsafe_program, &link);
+        assert!(refused(Files::trusted_program(&link)));
+        #[cfg(unix)]
+        {
+            assert_eq!(resolved, safe.canonicalize().unwrap());
+            Files::trusted_program(&resolved).unwrap();
+        }
+    }
+
+    #[test]
+    fn trusted_program_directory_link_policy_checks_the_target_or_refuses() {
+        let root = scratch();
+        let dir = root.path().join("bin");
+        Files::create_private_dir(&dir).unwrap();
+        let safe = program(&dir, "sidevoice.exe");
+        let link = root.path().join("linked-bin");
+        Files::symlink(&dir, &link);
+        let path = link.join("sidevoice.exe");
+        #[cfg(unix)]
+        assert_eq!(
+            Files::trusted_program(&path).unwrap(),
+            safe.canonicalize().unwrap()
+        );
+        #[cfg(windows)]
+        assert!(refused(Files::trusted_program(&path)));
+        Files::let_others_change(&dir);
+        assert!(refused(Files::trusted_program(&path)));
+        assert!(refused(Files::trusted_program(&safe)));
+    }
+
+    // Unix mode bits and special file kinds have no Windows counterpart.
+    #[cfg(unix)]
+    #[test]
+    fn trusted_program_requires_execute_bits_and_refuses_sticky_and_special_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch();
+        let path = program(root.path(), "sidevoice.exe");
+        for mode in [0o600, 0o644, 0o1700, 0o1777] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(refused(Files::trusted_program(&path)), "{mode:o}");
+        }
+        let _socket = imp::special_records(root.path());
+        for name in ["fifo", "socket"] {
+            assert!(refused(Files::trusted_program(&root.path().join(name))));
+        }
+    }
+
+    // Windows aliases, native executable names and junctions have no Unix counterpart.
+    #[cfg(windows)]
+    #[test]
+    fn trusted_program_refuses_windows_aliases_scripts_and_junctions() {
+        let root = scratch();
+        for name in [
+            "CON.exe",
+            "sidevoice.exe:payload",
+            "sidevoice.exe.",
+            "sidevoice.exe ",
+        ] {
+            assert_eq!(
+                Files::trusted_program(&root.path().join(name))
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+        for name in [
+            "sidevoice",
+            "sidevoice.cmd",
+            "sidevoice.bat",
+            "sidevoice.ps1",
+            "sidevoice.com",
+        ] {
+            let path = program(root.path(), name);
+            assert!(refused(Files::trusted_program(&path)));
+        }
+        let dir = root.path().join("bin");
+        Files::create_private_dir(&dir).unwrap();
+        program(&dir, "sidevoice.exe");
+        let link = root.path().join("junction");
+        imp::link_dir(&dir, &link);
+        assert!(refused(Files::trusted_program(&link.join("sidevoice.exe"))));
     }
 
     #[test]

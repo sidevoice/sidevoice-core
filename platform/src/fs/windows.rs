@@ -23,7 +23,7 @@ use std::io::{self, ErrorKind, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::OnceLock;
 
@@ -96,6 +96,40 @@ impl super::Fs for Os {
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                 .open(path)?,
         )
+    }
+
+    fn trusted_program(path: &Path) -> io::Result<PathBuf> {
+        let name = record_name(super::program_name(path)?)?;
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+        {
+            return Err(super::denied("expected a native .exe program"));
+        }
+        // Do not canonicalize before holding/checking the original ancestry: that would hide junctions.
+        let parent = Held::open_with(super::parent_of(path)?, None)?;
+        let path = parent.0.leaf().0.join(name);
+        let file = Self::open_read(&path).map_err(|error| match error.kind() {
+            ErrorKind::NotFound => error,
+            _ => super::refused_file(&path, error),
+        })?;
+        let judged = Judged::of(&file)?;
+        if !file.metadata()?.is_file()
+            || (!UserId::current().owns_file(&file)? && !judged.owner_is_system())
+            || judged.grants_others(CHANGES, false)
+        {
+            return Err(super::denied(
+                "unsafe program owner, type or write permissions",
+            ));
+        }
+        let resolved = path.canonicalize()?;
+        // Verify that the returned spelling still names the opened file, with no final reparse traversal.
+        let current = Self::open_read(&resolved)?;
+        if Self::identity(&file)? != Self::identity(&current)? {
+            return Err(super::denied("program replaced during validation"));
+        }
+        parent.0.verify()?;
+        Ok(resolved)
     }
 
     // NTFS journals its metadata, and a directory can be flushed only through a handle opened for writing with
@@ -259,15 +293,15 @@ fn write_whole_in(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
 /// The directory capability: no public operations beyond `Directory`.
 pub struct Held(HeldState);
 
-impl super::Directory for Held {
-    fn open(path: &Path, access: Access) -> io::Result<Self> {
+impl Held {
+    fn open_with(path: &Path, access: Option<Access>) -> io::Result<Self> {
         let paths = super::directory_paths(path)?;
         let mut chain = Vec::new();
         // Root first: each checked path remains unrenameable before opening anything beneath it.
         for (index, path) in paths.iter().enumerate() {
             let leaf = index + 1 == paths.len();
             let file = reopen_directory(path, leaf)?;
-            if leaf {
+            if let Some(access) = access.filter(|_| leaf) {
                 super::judge_access(&file, access, true)
                     .map_err(|error| super::refused(path, error))?;
             } else {
@@ -278,6 +312,12 @@ impl super::Directory for Held {
         let held = Held(HeldState { chain, access });
         held.0.verify()?;
         Ok(held)
+    }
+}
+
+impl super::Directory for Held {
+    fn open(path: &Path, access: Access) -> io::Result<Self> {
+        Self::open_with(path, Some(access))
     }
 
     fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>> {
@@ -710,4 +750,11 @@ pub(super) fn link_dir(target: &Path, link: &Path) {
         .unwrap()
         .status;
     assert!(status.success(), "mklink /J");
+}
+
+#[cfg(test)]
+pub(super) fn system_program() -> PathBuf {
+    PathBuf::from(std::env::var_os("SystemRoot").expect("Windows directory"))
+        .join("System32")
+        .join("whoami.exe")
 }
