@@ -2333,6 +2333,7 @@ dependencies = [
  "gethostname",
  "hex",
  "interprocess",
+ "libc",
  "process-wrap",
  "rustix",
  "serde",

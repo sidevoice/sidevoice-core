@@ -5,7 +5,7 @@
 //! "Private" is a protected DACL (it inherits nothing) granting full control to the owner (`OWNER RIGHTS`), SYSTEM
 //! and Administrators only, inherited by what is created inside. What others may do is read from the DACL of the
 //! handle that was opened (`GetSecurityInfo`): an allow entry for anybody but the file's owner, this user, SYSTEM,
-//! Administrators or `OWNER RIGHTS` counts; and, for whether it is private, so do a DACL that is not protected (it
+//! Administrators, TrustedInstaller or `OWNER RIGHTS` counts; and, for whether it is private, so do a DACL that is not protected (it
 //! takes whatever its parent passes down) and an entry for others that only what is created inside inherits. Who the
 //! owner is, is [`user`](crate::user)'s.
 //!
@@ -23,7 +23,7 @@ use std::io::{self, ErrorKind, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::OnceLock;
 
@@ -96,6 +96,36 @@ impl super::Fs for Os {
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                 .open(path)?,
         )
+    }
+
+    fn trusted_program(path: &Path) -> io::Result<PathBuf> {
+        let name = program_name(path)?;
+        // Do not canonicalize before holding/checking the original ancestry: that would hide junctions.
+        let parent = Held::open_with(super::parent_of(path)?, None)?;
+        let path = parent.0.leaf().0.join(name);
+        let file = Self::open_read(&path).map_err(|error| match error.kind() {
+            ErrorKind::NotFound => error,
+            _ => super::refused_file(&path, error),
+        })?;
+        let judged = Judged::of(&file)?;
+        if !file.metadata()?.is_file()
+            || (!UserId::current().owns_file(&file)? && !judged.owner_is_system())
+            || judged.grants_others(CHANGES, false)
+        {
+            return Err(super::denied(
+                "unsafe program owner, type or write permissions",
+            ));
+        }
+        let resolved = path.canonicalize()?;
+        // An 8.3 alias can carry a different extension from its long name. Never return a script to launch.
+        program_name(&resolved)?;
+        // Verify that the returned spelling still names the opened file, with no final reparse traversal.
+        let current = Self::open_read(&resolved)?;
+        if Self::identity(&file)? != Self::identity(&current)? {
+            return Err(super::denied("program replaced during validation"));
+        }
+        parent.0.verify()?;
+        Ok(resolved)
     }
 
     // NTFS journals its metadata, and a directory can be flushed only through a handle opened for writing with
@@ -259,15 +289,15 @@ fn write_whole_in(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
 /// The directory capability: no public operations beyond `Directory`.
 pub struct Held(HeldState);
 
-impl super::Directory for Held {
-    fn open(path: &Path, access: Access) -> io::Result<Self> {
+impl Held {
+    fn open_with(path: &Path, access: Option<Access>) -> io::Result<Self> {
         let paths = super::directory_paths(path)?;
         let mut chain = Vec::new();
         // Root first: each checked path remains unrenameable before opening anything beneath it.
         for (index, path) in paths.iter().enumerate() {
             let leaf = index + 1 == paths.len();
             let file = reopen_directory(path, leaf)?;
-            if leaf {
+            if let Some(access) = access.filter(|_| leaf) {
                 super::judge_access(&file, access, true)
                     .map_err(|error| super::refused(path, error))?;
             } else {
@@ -278,6 +308,12 @@ impl super::Directory for Held {
         let held = Held(HeldState { chain, access });
         held.0.verify()?;
         Ok(held)
+    }
+}
+
+impl super::Directory for Held {
+    fn open(path: &Path, access: Access) -> io::Result<Self> {
+        Self::open_with(path, Some(access))
     }
 
     fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>> {
@@ -339,6 +375,17 @@ fn open_record(path: &Path, access: Access) -> io::Result<Option<File>> {
     };
     super::judge_access(&file, access, false)?;
     Ok(Some(file))
+}
+
+fn program_name(path: &Path) -> io::Result<&Path> {
+    let name = record_name(super::program_name(path)?)?;
+    if !name
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        return Err(super::denied("expected a native .exe program"));
+    }
+    Ok(name)
 }
 
 /// Win32 aliases must not turn an ordinary child into a device, stream or differently spelled entry.
@@ -558,7 +605,7 @@ impl Judged {
 
     /// Who may hold anything in what is ours: its owner; this user, whoever the owner is (a profile folder owned by
     /// Administrators or SYSTEM that grants its user full control is a default layout); SYSTEM, Administrators and
-    /// `OWNER RIGHTS`.
+    /// TrustedInstaller (also on a user-owned directory inheriting Program Files access), and `OWNER RIGHTS`.
     fn trusted(&self, sid: PSID) -> bool {
         let p = principals();
         // SAFETY: both point at valid SIDs (null is refused first).
@@ -566,6 +613,7 @@ impl Judged {
             || p.user.is(sid)
             || p.system.is(sid)
             || p.administrators.is(sid)
+            || p.trusted_installer.is(sid)
             || p.owner_rights.is(sid)
     }
 
@@ -710,4 +758,110 @@ pub(super) fn link_dir(target: &Path, link: &Path) {
         .unwrap()
         .status;
     assert!(status.success(), "mklink /J");
+}
+
+#[cfg(test)]
+pub(super) fn system_program() -> PathBuf {
+    PathBuf::from(std::env::var_os("SystemRoot").expect("Windows directory"))
+        .join("System32")
+        .join("whoami.exe")
+}
+
+// Native Windows fixtures: no assertions about trust policy live here.
+#[cfg(test)]
+pub(super) fn ordinary_path(path: &Path) -> PathBuf {
+    let text = path.to_str().unwrap();
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
+}
+
+#[cfg(test)]
+pub(super) fn short_name(path: &Path, alias: &str) -> PathBuf {
+    let path = ordinary_path(path);
+    let output = std::process::Command::new("fsutil")
+        .args(["file", "setshortname"])
+        .arg(&path)
+        .arg(alias)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "setshortname: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    path.parent().unwrap().join(alias)
+}
+
+#[cfg(test)]
+pub(super) struct Share(String);
+
+#[cfg(test)]
+impl Share {
+    pub(super) fn new(path: &Path) -> Self {
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Service LanmanServer"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "start local SMB server for UNC fixture");
+        let share = Self(format!("sidevoice-p2-{}", std::process::id()));
+        let output = std::process::Command::new("net")
+            .arg("share")
+            .arg(format!("{}={}", share.0, ordinary_path(path).display()))
+            .arg(format!("/GRANT:{},FULL", UserId::name().unwrap()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "net share: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        share
+    }
+
+    pub(super) fn path(&self) -> PathBuf {
+        PathBuf::from(format!(r"\\localhost\{}", self.0))
+    }
+}
+
+#[cfg(test)]
+impl Drop for Share {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("net")
+            .args(["share", &self.0, "/DELETE", "/Y"])
+            .output();
+    }
+}
+
+#[cfg(test)]
+pub(super) struct OtherUser(pub(super) String);
+
+#[cfg(test)]
+impl OtherUser {
+    pub(super) fn new() -> Self {
+        let name = format!("svp2{}", std::process::id());
+        // Fourteen characters avoids net.exe's interactive legacy-password-length prompt.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let password = format!("Sv!{:011x}", nonce & 0xffffffffff);
+        let output = std::process::Command::new("net")
+            .args(["user", &name, &password, "/ADD"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "create test principal: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Self(name)
+    }
+}
+
+#[cfg(test)]
+impl Drop for OtherUser {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("net")
+            .args(["user", &self.0, "/DELETE"])
+            .output();
+    }
 }

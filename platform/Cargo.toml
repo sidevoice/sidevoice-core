@@ -37,6 +37,10 @@ tempfile = "3"
 rustix = { version = "1", features = ["process", "fs"] }
 tokio = { version = "1", features = ["signal"] }
 
+# Only the maintained constant binding: rustix does not name macOS O_SEARCH yet; calls remain safe rustix APIs.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 # Windows: this process's user and file owners (user); the pipe's security descriptor, and whether a
 # pipe peer's process is this user's (ipc); the stop event, and a channel from the thread that waits on it (stop).
 [target.'cfg(windows)'.dependencies]
