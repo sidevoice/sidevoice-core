@@ -10,6 +10,10 @@ description = "The operating-system code Sidevoice's crates share: this user, th
 # Only what the shared concerns need: whoever depends on this crate (the core by path, the connector by the git tag of
 # a core release) pulls nothing else.
 [dependencies]
+# Shared child groups/jobs and hidden Windows launches, extracted from the connector.
+process-wrap = { version = "10", default-features = false, features = ["tokio1", "process-group", "job-object", "creation-flags", "kill-on-drop"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+tokio = { version = "1", features = ["process", "io-util", "time", "macros"] }
 # The local channel (ipc): Unix sockets and Windows named pipes behind one API.
 interprocess = { version = "2.4", features = ["tokio"] }
 # The login name and the host name (user), the same on every OS.
@@ -37,8 +41,9 @@ tokio = { version = "1", features = ["signal"] }
 # pipe peer's process is this user's (ipc); the stop event, and a channel from the thread that waits on it (stop).
 [target.'cfg(windows)'.dependencies]
 widestring = "1"
+# The flags type process-wrap itself uses; no native types escape the public API.
+windows = { version = "0.62", features = ["Win32_System_Threading"] }
 tokio = { version = "1", features = ["sync"] }
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 # How many names a file has, and which file a handle is (fs): `winapi-util` (walkdir, ripgrep), no `unsafe` of ours.
 winapi-util = "0.1"
 windows-sys = { version = "0.61", features = [
@@ -47,6 +52,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
+    "Win32_System_Console",
 ] }
 
 [features]
