@@ -1,7 +1,7 @@
 //! Unix: owner and mode bits, `O_NOFOLLOW`, the descriptor judged as opened, a record written relative to a handle on
 //! its directory (`rustix`). No `unsafe` of ours.
 
-use super::{Create, FileId, Others, Publish};
+use super::{Access, Create, FileId, HeldState, Others, Publish};
 use crate::user::{User, UserId};
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -110,14 +110,19 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
 /// name (`linkat`, which replaces nothing) and its staging name removed (`unlinkat`) before the directory is synced
 /// (`fsync`). On any failure the staging name is removed.
 pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
-    let (dir_path, name) = (
-        super::parent_of(path)?,
-        path.file_name().unwrap_or_default(),
-    );
+    let dir_path = super::parent_of(path)?;
     let dir = open_dir(dir_path, how.judged())?;
     if how.judged() {
         super::judge_dir::<Os>(dir_path, &dir)?;
     }
+    write_whole_at(&dir, path, bytes, how)
+}
+
+/// The single atomic writer, also used by a held directory. `path` supplies only the staging label and leaf name;
+/// every filesystem operation is relative to `dir` (including cleanup if the directory was renamed meanwhile).
+fn write_whole_at(dir: &File, path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
+    let dir_path = super::parent_of(path)?;
+    let name = path.file_name().unwrap_or_default();
     let create =
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     // `tempfile` only names it: what it would remove on drop is removed below, relative to `dir`.
@@ -127,7 +132,7 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
         .make_in(dir_path, |temp| {
             let temp = temp.file_name().unwrap_or_default();
             Ok(File::from(rfs::openat(
-                &dir,
+                dir,
                 temp,
                 create,
                 Mode::from_raw_mode(0o600),
@@ -139,7 +144,7 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
     let written = (|| {
         file.write_all(bytes)?;
         if how == Publish::KeepAccess {
-            match rfs::statat(&dir, name, AtFlags::empty()) {
+            match rfs::statat(dir, name, AtFlags::empty()) {
                 Ok(record) => rfs::fchmod(&file, Mode::from_raw_mode(record.st_mode & 0o7777))?,
                 Err(Errno::NOENT) => (),
                 Err(error) => return Err(error.into()),
@@ -147,20 +152,155 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
         }
         file.sync_all()?;
         match how {
-            Publish::New => rfs::linkat(&dir, staged, &dir, name, AtFlags::empty()),
-            _ => rfs::renameat(&dir, staged, &dir, name),
+            Publish::New => rfs::linkat(dir, staged, dir, name, AtFlags::empty()),
+            _ => rfs::renameat(dir, staged, dir, name),
         }
         .map_err(io::Error::from)
     })();
     if written.is_err() || how == Publish::New {
-        let removed = rfs::unlinkat(&dir, staged, AtFlags::empty());
+        let removed = rfs::unlinkat(dir, staged, AtFlags::empty());
         // Gone already after a publication: a reader finishing the creation (`finish_creation`) removed it first.
         if written.is_ok() && removed != Err(Errno::NOENT) {
             removed?;
         }
     }
     written?;
-    rfs::fsync(&dir).map_err(io::Error::from)
+    rfs::fsync(dir).map_err(io::Error::from)
+}
+
+/// The directory capability: no public operations beyond `Directory`.
+pub struct Held(HeldState);
+
+impl super::Directory for Held {
+    fn open(path: &Path, access: Access) -> io::Result<Self> {
+        let paths = super::directory_paths(path)?;
+        let mut chain: Vec<(std::path::PathBuf, File)> = Vec::new();
+        for (index, path) in paths.iter().enumerate() {
+            let leaf = index + 1 == paths.len();
+            // Only an ancestor link admitted by the existing system-link policy may be followed (macOS /var).
+            if !leaf {
+                check_ancestor(path)?;
+            }
+            let no_link = leaf || !fs::symlink_metadata(path)?.is_symlink();
+            let file = if let Some((_, parent)) = chain.last() {
+                File::from(
+                    rfs::openat(
+                        parent,
+                        path.file_name()
+                            .ok_or_else(|| super::denied("invalid directory component"))?,
+                        OFlags::RDONLY
+                            | OFlags::DIRECTORY
+                            | OFlags::CLOEXEC
+                            | if no_link {
+                                OFlags::NOFOLLOW
+                            } else {
+                                OFlags::empty()
+                            },
+                        Mode::empty(),
+                    )
+                    .map_err(|error| directory_error(path, error.into()))?,
+                )
+            } else {
+                open_dir(path, true)?
+            };
+            if leaf {
+                super::judge_access(&file, access, true)
+                    .map_err(|error| super::refused(path, error))?;
+            } else {
+                check_ancestor_handle(path, &file)?;
+            }
+            chain.push((path.clone(), file));
+        }
+        let held = Held(HeldState { chain, access });
+        held.0.verify()?;
+        Ok(held)
+    }
+
+    fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>> {
+        let name = super::child_name(name)?;
+        self.0.verify()?;
+        let (path, dir) = self.0.leaf();
+        let Some(file) = open_record(dir, name, access)? else {
+            return Ok(None);
+        };
+        let bytes = super::read_bounded(file, &path.join(name), limit)?;
+        self.0.verify()?;
+        Ok(Some(bytes))
+    }
+
+    fn write(&self, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
+        let name = super::child_name(name)?;
+        self.0.verify()?;
+        let (path, dir) = self.0.leaf();
+        open_record(dir, name, Access::NotWritableByOthers)?;
+        write_whole_at(dir, &path.join(name), bytes, Publish::Vouched)
+    }
+
+    fn remove(&self, name: &OsStr) -> io::Result<()> {
+        let name = super::child_name(name)?;
+        self.0.verify()?;
+        let (_, dir) = self.0.leaf();
+        if open_record(dir, name, Access::NotWritableByOthers)?.is_none() {
+            return Ok(());
+        }
+        match rfs::unlinkat(dir, name, AtFlags::empty()) {
+            Ok(()) => rfs::fsync(dir).map_err(Into::into),
+            Err(Errno::NOENT) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn open_record(dir: &File, name: &Path, access: Access) -> io::Result<Option<File>> {
+    let flags =
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    let file = match rfs::openat(dir, name, flags, Mode::empty()) {
+        Ok(file) => File::from(file),
+        Err(Errno::NOENT) => return Ok(None),
+        Err(error) => {
+            // Some special files cannot be opened at all (a socket gives ENXIO on Linux). Classify those by
+            // no-follow metadata relative to the held directory; never turn a failed open into a usable record.
+            if rfs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|stat| {
+                rfs::FileType::from_raw_mode(stat.st_mode) != rfs::FileType::RegularFile
+            }) {
+                return Err(super::refused_file(name, "not a regular record"));
+            }
+            return Err(directory_error(name, error.into()));
+        }
+    };
+    super::judge_access(&file, access, false)?;
+    Ok(Some(file))
+}
+
+fn directory_error(path: &Path, error: io::Error) -> io::Error {
+    if matches!(error.raw_os_error(), Some(code) if code == Errno::LOOP.raw_os_error() || code == Errno::NOTDIR.raw_os_error())
+    {
+        super::refused(
+            path,
+            "not an ordinary directory or record; choose an unredirected data directory",
+        )
+    } else {
+        error
+    }
+}
+
+pub(super) fn reopen_directory(path: &Path, leaf: bool) -> io::Result<File> {
+    if !leaf {
+        check_ancestor(path)?;
+    }
+    open_dir(path, leaf || !fs::symlink_metadata(path)?.is_symlink())
+}
+
+/// Judge the directory actually held, as well as the spelling's system-link policy above.
+pub(super) fn check_ancestor_handle(path: &Path, file: &File) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_dir()
+        || (metadata.uid() != 0 && !UserId::current().owns_file(file)?)
+        || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
+    {
+        return Err(super::refused(path, "unsafe ancestor owner or permissions"));
+    }
+    Ok(())
 }
 
 /// Finishes the creation of the record at `path` its writer (`write_whole`, `Publish::New`) left with its staging
@@ -230,6 +370,20 @@ fn open_dir(path: &Path, no_link: bool) -> io::Result<File> {
 
 fn flags(flags: OFlags) -> i32 {
     flags.bits() as i32
+}
+
+/// Unix-only test fixtures: an open socket and a FIFO, neither of which is a record.
+#[cfg(test)]
+pub(super) fn special_records(dir: &Path) -> std::os::unix::net::UnixListener {
+    let socket = std::os::unix::net::UnixListener::bind(dir.join("socket")).unwrap();
+    // rustix has no mkfifo on macOS; the POSIX utility provides the fixture on both Unix hosts.
+    assert!(std::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(dir.join("fifo"))
+        .status()
+        .unwrap()
+        .success());
+    socket
 }
 
 #[cfg(any(test, feature = "test-support"))]

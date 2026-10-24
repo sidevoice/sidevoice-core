@@ -15,9 +15,9 @@
 //! from `winapi-util`; a file's identity is `FileIdInfo`, one more call. A record's staging file (a fresh name beside
 //! it, removed on failure, renamed over it or, for a record made once, renamed replacing nothing) is `tempfile`'s.
 
-use super::{Create, FileId, Fs, Others, Publish};
+use super::{Access, Create, FileId, Fs, HeldState, Others, Publish};
 use crate::user::{User, UserId};
-use std::ffi::c_void;
+use std::ffi::{c_void, OsStr};
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::os::windows::ffi::OsStrExt;
@@ -181,17 +181,23 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(dir)
         .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", dir.display())))?;
+    check_ancestor_handle(dir, &file)
+}
+
+pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
     let unsafe_dir = |why: &str| {
         io::Error::new(
             ErrorKind::PermissionDenied,
             format!("unsafe directory {}: {why}", dir.display()),
         )
     };
-    if is_link(&file)? {
-        return Err(unsafe_dir("a link on the way"));
+    if is_link(file)? || !file.metadata()?.is_dir() {
+        return Err(unsafe_dir(
+            "not an ordinary directory; choose an unredirected data directory",
+        ));
     }
-    let judged = Judged::of(&file)?;
-    if !UserId::current().owns_file(&file)? && !judged.owner_is_system() {
+    let judged = Judged::of(file)?;
+    if !UserId::current().owns_file(file)? && !judged.owner_is_system() {
         return Err(unsafe_dir("owned by another user"));
     }
     if judged.grants_others(REPLACES_ENTRIES, false) {
@@ -222,18 +228,150 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
     } else {
         None
     };
+    write_whole_in(path, bytes, how)
+}
+
+/// The single staging/publication implementation; held-directory callers keep the entire checked ancestry alive.
+fn write_whole_in(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
+    // std supplies the extended-length spelling required by raw CreateFileW and tempfile's MoveFileExW, without
+    // relying on a process manifest opting into long paths. Resolve only the already-checked (or vouched-for)
+    // parent, never the record: a final link must not be followed. Held callers retain the original ancestry for
+    // identity checks and keep it unrenameable throughout this conversion and publication.
+    let dir = super::parent_of(path)?.canonicalize()?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "a record must have a file name"))?;
+    let path = dir.join(name);
     let mut staged = tempfile::Builder::new()
-        .prefix(&super::staging_prefix(path))
+        .prefix(&super::staging_prefix(&path))
         .rand_bytes(super::STAGING_RANDOM)
-        .make_in(dir, |temp| Os::open_private(temp, Create::New))?;
+        .make_in(&dir, |temp| Os::open_private(temp, Create::New))?;
     staged.write_all(bytes)?;
     staged.as_file().sync_all()?;
     match how {
-        Publish::New => staged.persist_noclobber(path),
-        _ => staged.persist(path),
+        Publish::New => staged.persist_noclobber(&path),
+        _ => staged.persist(&path),
     }
     .map(drop)
     .map_err(|error| error.error)
+}
+
+/// The directory capability: no public operations beyond `Directory`.
+pub struct Held(HeldState);
+
+impl super::Directory for Held {
+    fn open(path: &Path, access: Access) -> io::Result<Self> {
+        let paths = super::directory_paths(path)?;
+        let mut chain = Vec::new();
+        // Root first: each checked path remains unrenameable before opening anything beneath it.
+        for (index, path) in paths.iter().enumerate() {
+            let leaf = index + 1 == paths.len();
+            let file = reopen_directory(path, leaf)?;
+            if leaf {
+                super::judge_access(&file, access, true)
+                    .map_err(|error| super::refused(path, error))?;
+            } else {
+                check_ancestor_handle(path, &file)?;
+            }
+            chain.push((path.clone(), file));
+        }
+        let held = Held(HeldState { chain, access });
+        held.0.verify()?;
+        Ok(held)
+    }
+
+    fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>> {
+        let name = record_name(name)?;
+        self.0.verify()?;
+        let path = self.0.leaf().0.join(name);
+        let Some(file) = open_record(&path, access)? else {
+            return Ok(None);
+        };
+        let bytes = super::read_bounded(file, &path, limit)?;
+        self.0.verify()?;
+        Ok(Some(bytes))
+    }
+
+    fn write(&self, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
+        let name = record_name(name)?;
+        self.0.verify()?;
+        let path = self.0.leaf().0.join(name);
+        open_record(&path, Access::NotWritableByOthers)?;
+        write_whole_in(&path, bytes, Publish::Vouched)
+    }
+
+    fn remove(&self, name: &OsStr) -> io::Result<()> {
+        let name = record_name(name)?;
+        self.0.verify()?;
+        let path = self.0.leaf().0.join(name);
+        if open_record(&path, Access::NotWritableByOthers)?.is_none() {
+            return Ok(());
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+pub(super) fn reopen_directory(path: &Path, _: bool) -> io::Result<File> {
+    let file = OpenOptions::new()
+        // A metadata-only access mask does not participate in Windows sharing checks.
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    if is_link(&file)? || !file.metadata()?.is_dir() {
+        return Err(super::refused(
+            path,
+            "not an ordinary directory; choose an unredirected data directory",
+        ));
+    }
+    Ok(file)
+}
+
+fn open_record(path: &Path, access: Access) -> io::Result<Option<File>> {
+    let file = match Os::open_read(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(super::refused_file(path, error)),
+    };
+    super::judge_access(&file, access, false)?;
+    Ok(Some(file))
+}
+
+/// Win32 aliases must not turn an ordinary child into a device, stream or differently spelled entry.
+fn record_name(name: &OsStr) -> io::Result<&Path> {
+    let path = super::child_name(name)?;
+    let text = name.to_string_lossy();
+    let stem = text
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_uppercase();
+    let device = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    });
+    if device
+        || text.ends_with(['.', ' '])
+        || text.chars().any(|c| c < ' ' || "<>:\"|?*".contains(c))
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "expected an ordinary Windows child name",
+        ));
+    }
+    Ok(path)
 }
 
 /// Nothing to finish (`Fs::open_created_file`): `write_whole` gives a record made once its name by a rename that
