@@ -19,6 +19,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use sidevoice_platform::target;
+
 use crate::util::*;
 use crate::Result;
 
@@ -35,20 +37,19 @@ pub(crate) fn compat() -> Result<()> {
     let mut checks: Vec<(&str, String)> = Vec::new();
     if let Some(tag) = release(CONNECTOR, "SIDEVOICE_COMPAT_CONNECTOR_TAG")? {
         let assets = dir.0.join("connector");
-        let suffix = format!("-{}.tar.zst", host_target()?);
+        let target = target::build_target().ok_or("unsupported build target")?;
+        let pattern = target.archive_name("sidevoice-connector", Some("*"));
+        let (prefix, suffix) = pattern.split_once('*').expect("wildcard version label");
         fetch(
             CONNECTOR,
             &tag,
             &assets,
-            &[
-                &format!("sidevoice-connector-*{suffix}"),
-                "attestation.sigstore.json",
-            ],
+            &[&pattern, "attestation.sigstore.json"],
         )?;
-        let archive = asset(&assets, "sidevoice-connector-", &suffix)?;
+        let archive = asset(&assets, prefix, suffix)?;
         attested(&archive, &assets)?;
         unpack_zstd(&archive, &assets)?;
-        let binary = assets.join(CONNECTOR_ENTRYPOINT);
+        let binary = assets.join(target.exe_name(CONNECTOR_ENTRYPOINT));
         if !binary.is_file() {
             return Err(format!(
                 "{CONNECTOR} {tag}: no {CONNECTOR_ENTRYPOINT} in {}",

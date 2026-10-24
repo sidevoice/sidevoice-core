@@ -38,31 +38,10 @@ use verify::{verify, verify_tree};
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
-pub(crate) const TARGETS: [&str; 4] = [
-    "linux-aarch64",
-    "linux-x86_64",
-    "macos-aarch64",
-    "windows-x86_64",
-];
 pub(crate) const ROOT_NAME: &str = "sidevoice-core-rust";
-/// The core's program inside its archive, without the suffix a target may add ([`entrypoint`]).
+/// The core's program inside its archive; the shared target adds the executable suffix.
 pub(crate) const ENTRYPOINT_STEM: &str = "bin/sidevoice-core-rust";
 
-/// The core's program inside the archive for `target`: `bin/sidevoice-core-rust`, `.exe` on Windows. The inventory's
-/// `entrypoint` names it, and the connector (which bundles this archive) reads that name.
-pub(crate) fn entrypoint(target: &str) -> String {
-    format!("{ENTRYPOINT_STEM}{}", exe_suffix(target))
-}
-
-/// What a program of `target` is named with after its stem: `.exe` on Windows, nothing elsewhere. Of the target, not
-/// of the machine running xtask (`manifest` reads every target's archive from any machine).
-pub(crate) fn exe_suffix(target: &str) -> &'static str {
-    if target.starts_with("windows-") {
-        ".exe"
-    } else {
-        ""
-    }
-}
 /// The archive's layout: `bin/` and `notices/` (v1 also carried the voice pipeline's models, `checks/` and `lib/`).
 pub(crate) const KIND: &str = "rust-native-v2";
 

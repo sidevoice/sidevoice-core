@@ -15,12 +15,13 @@ use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
 use serde_json::{json, Value};
 use sidevoice_platform::fs::{Files, Fs};
 use sidevoice_platform::stop::{StopRequest, StopRequests};
+use sidevoice_platform::target;
 
 use crate::archive::unpack_checked;
 use crate::glibc;
 use crate::libraries::{windows_libraries, LINUX_SYSTEM};
 use crate::util::*;
-use crate::{entrypoint, Result, ENTRYPOINT_STEM};
+use crate::{Result, ENTRYPOINT_STEM};
 
 /// Where `verify-floor` mounts the unpacked archive, and the xtask that starts it, in the container.
 const CONTAINER_ROOT: &str = "/opt/sidevoice-core-rust";
@@ -42,16 +43,18 @@ const CA_BUNDLES: [&str; 2] = [
 pub(crate) fn verify(archive: &Path, image: Option<&str>) -> Result<()> {
     let work = TempDir::new_in(&scratch_base(), "sidevoice relocated tree")?;
     let (root, inventory) = unpack_checked(archive, &work.0)?;
-    let target = inventory["target"].as_str().unwrap_or("");
-    let entrypoint = entrypoint(target);
-    if target != host_target()? {
+    let target = target::by_name(inventory["target"].as_str().unwrap_or(""))
+        .ok_or("unsupported archive target")?;
+    let build = target::build_target().ok_or("unsupported build target")?;
+    let entrypoint = target.exe_name(ENTRYPOINT_STEM);
+    if target.name != build.name {
         return Err(format!(
-            "the archive is for {target}, this machine is {}",
-            host_target()?
+            "the archive is for {}, this xtask was built for {}",
+            target.name, build.name
         ));
     }
     // A Windows binary may import only the system's DLLs, and not the Visual C++ runtime (it links it statically).
-    let imports = if target.starts_with("windows-") {
+    let imports = if target.os == "windows" {
         Some(windows_libraries(&root.join(&entrypoint))?)
     } else {
         None
@@ -97,7 +100,8 @@ fn check_floor(root: &Path, floor: &str) -> Result<String> {
 /// `verify-tree ROOT`: the start of an already unpacked and checked tree, as `verify-floor` runs
 /// them in its container.
 pub(crate) fn verify_tree(root: &Path) -> Result<()> {
-    println!("{}", start(root, &entrypoint(host_target()?))?);
+    let target = target::build_target().ok_or("unsupported build target")?;
+    println!("{}", start(root, &target.exe_name(ENTRYPOINT_STEM))?);
     Ok(())
 }
 
@@ -154,7 +158,9 @@ fn in_container(image: &str, root: &Path, floor: &str) -> Result<Value> {
 
 /// This xtask, built with `cargo zigbuild` against the glibc floor so it runs in the floor's container.
 fn floor_xtask() -> Result<PathBuf> {
-    let triple = glibc::host_triple()?;
+    let triple = target::build_target()
+        .ok_or("unsupported build target")?
+        .triple;
     let manifest = repo().join("xtask/Cargo.toml");
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let target = format!("{triple}.{}", glibc::FLOOR);

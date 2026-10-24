@@ -2,7 +2,7 @@
 //!
 //! This is data, not an OS backend: one table, with names projected from it. The triples are the canonical release
 //! build targets (Linux GNU, Windows MSVC), not a claim about the ABI of a caller compiled for the same OS/CPU.
-//! [`host`] selects by the OS/CPU this binary was compiled for, as the connector runtime does.
+//! [`build_target`] selects by the OS/CPU this binary was compiled for, as the connector runtime does.
 //! Actual package availability at a particular version still comes from npm's `optionalDependencies`.
 
 /// One published release platform. Names use Rust's `std::env::consts` except for npm's OS and CPU names.
@@ -67,8 +67,10 @@ pub fn for_platform(os: &str, arch: &str) -> Option<&'static ReleaseTarget> {
         .find(|target| target.os == os && target.arch == arch)
 }
 
-/// The release platform this binary was compiled for (not the machine running a cross-compilation).
-pub fn host() -> Option<&'static ReleaseTarget> {
+/// The release platform for this binary's compiled OS/CPU, not the native machine it runs on.
+/// An x64 Windows binary running under emulation on ARM64 Windows returns `windows-x86_64`.
+/// This does not probe the native architecture or the compiler's target ABI.
+pub fn build_target() -> Option<&'static ReleaseTarget> {
     for_platform(std::env::consts::OS, std::env::consts::ARCH)
 }
 
@@ -82,7 +84,7 @@ pub fn by_triple(triple: &str) -> Option<&'static ReleaseTarget> {
     TARGETS.iter().find(|target| target.triple == triple)
 }
 
-/// A program's file name on the compiled host, even when it has no release target. `stem` has no executable suffix.
+/// A program's file name for this binary's build OS, even when it has no release target. `stem` has no executable suffix.
 pub fn exe_name(stem: &str) -> String {
     format!("{stem}{}", std::env::consts::EXE_SUFFIX)
 }
@@ -230,20 +232,20 @@ mod tests {
     }
 
     #[test]
-    fn host_names_follow_the_compilation_platform() {
-        let host = host();
+    fn build_target_names_follow_the_compilation_platform() {
+        let build = build_target();
         let expected = for_platform(std::env::consts::OS, std::env::consts::ARCH);
         assert_eq!(
-            host.map(|target| target.name),
+            build.map(|target| target.name),
             expected.map(|target| target.name)
         );
         assert_eq!(
             exe_name("sidevoice-connector"),
             format!("sidevoice-connector{}", std::env::consts::EXE_SUFFIX)
         );
-        if let Some(host) = host {
+        if let Some(build) = build {
             assert_eq!(
-                host.exe_name("sidevoice-connector"),
+                build.exe_name("sidevoice-connector"),
                 exe_name("sidevoice-connector")
             );
         }
