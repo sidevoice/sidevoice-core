@@ -7,10 +7,12 @@
 //! Each concern has one shape: `<concern>.rs` declares a `pub` trait, documented once, with the tests written
 //! against it; one `pub` type per OS in `<concern>/{unix,windows}.rs` implements it, and `<concern>.rs` re-exports
 //! the one compiled in. Callers import the trait and the type (`use sidevoice_platform::user::{User, UserId};`).
+//! Data-only concerns ([`data_dir`], [`target`]) need no trait or per-OS files.
 
 pub mod data_dir;
 pub mod fs;
 pub mod ipc;
 pub mod process;
 pub mod stop;
+pub mod target;
 pub mod user;
