@@ -1051,6 +1051,41 @@ mod tests {
         assert_eq!(others(&dir), Others::Change);
     }
 
+    // Unix search-only permissions have no equivalent mode bits on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn held_records_work_below_search_only_ancestors_without_repairing_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch();
+        let above = root.path().join("search-only");
+        Files::create_private_dir(&above).unwrap();
+        let path = above.join("data");
+        Files::create_private_dir(&path).unwrap();
+        let name = OsStr::new("record");
+        for mode in [0o311, 0o711] {
+            for access in [Access::Private, Access::NotWritableByOthers] {
+                Files::write_private(&path.join(name), b"existing").unwrap();
+                fs::set_permissions(&above, fs::Permissions::from_mode(mode)).unwrap();
+                let operations = (|| -> io::Result<_> {
+                    let dir = HeldDirectory::open(&path, access)?;
+                    let before = dir.read(name, Access::Private, 100)?;
+                    dir.write(name, b"replacement")?;
+                    let after = dir.read(name, Access::Private, 100)?;
+                    dir.remove(name)?;
+                    Ok((before, after, dir.read(name, Access::Private, 100)?))
+                })();
+                let unchanged = fs::metadata(&above).unwrap().permissions().mode() & 0o777;
+                // Restore listing access for TempDir cleanup even if the operation failed.
+                fs::set_permissions(&above, fs::Permissions::from_mode(0o700)).unwrap();
+                let (before, after, removed) = operations.unwrap();
+                assert_eq!(before.as_deref(), Some(b"existing".as_slice()));
+                assert_eq!(after.as_deref(), Some(b"replacement".as_slice()));
+                assert!(removed.is_none());
+                assert_eq!(unchanged, mode, "ancestor permissions must not be repaired");
+            }
+        }
+    }
+
     #[test]
     fn held_records_are_bounded_private_atomic_and_removable() {
         let root = scratch();
