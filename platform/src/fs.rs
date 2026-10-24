@@ -174,7 +174,7 @@ fn judge_access(file: &File, access: Access, directory: bool) -> io::Result<()> 
     }
 }
 
-/// What somebody other than a file's owner (and the system: root, SYSTEM, Administrators) may do with it.
+/// What somebody other than a file's owner (and the system: root, SYSTEM, Administrators, TrustedInstaller) may do with it.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Others {
     /// Nothing at all, now or through what is created in it: the file is private.
@@ -969,6 +969,17 @@ mod tests {
         Files::trusted_program(&path).unwrap();
         // A grant inherited only by child files leaves the directories unchanged but makes the payload unsafe.
         imp::icacls(root.path(), &["/grant", "*S-1-1-0:(OI)(IO)(M)"]);
+        assert!(refused(Files::trusted_program(&path)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_program_accepts_system_installer_grants_on_a_user_owned_program() {
+        let root = scratch();
+        let path = program(root.path(), "sidevoice.exe");
+        imp::icacls(&path, &["/grant", "NT SERVICE\\TrustedInstaller:(F)"]);
+        Files::trusted_program(&path).unwrap();
+        Files::let_others_change(&path);
         assert!(refused(Files::trusted_program(&path)));
     }
 

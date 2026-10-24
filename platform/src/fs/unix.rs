@@ -411,7 +411,7 @@ fn open_dir(path: &Path, no_link: bool, search_only: bool) -> io::Result<File> {
 }
 
 // Program validation and ancestry rechecks never list directory entries. Records retain read-capable handles
-// where their writer needs fsync. macOS O_SEARCH is O_EXEC | O_DIRECTORY (macOS 12+, below our minimum).
+// where their writer needs fsync. macOS O_SEARCH is O_EXEC | O_DIRECTORY (available since macOS 12).
 fn directory_access(search_only: bool) -> OFlags {
     if !search_only {
         return OFlags::RDONLY;

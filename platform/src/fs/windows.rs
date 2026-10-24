@@ -5,7 +5,7 @@
 //! "Private" is a protected DACL (it inherits nothing) granting full control to the owner (`OWNER RIGHTS`), SYSTEM
 //! and Administrators only, inherited by what is created inside. What others may do is read from the DACL of the
 //! handle that was opened (`GetSecurityInfo`): an allow entry for anybody but the file's owner, this user, SYSTEM,
-//! Administrators or `OWNER RIGHTS` counts; and, for whether it is private, so do a DACL that is not protected (it
+//! Administrators, TrustedInstaller or `OWNER RIGHTS` counts; and, for whether it is private, so do a DACL that is not protected (it
 //! takes whatever its parent passes down) and an entry for others that only what is created inside inherits. Who the
 //! owner is, is [`user`](crate::user)'s.
 //!
@@ -605,7 +605,7 @@ impl Judged {
 
     /// Who may hold anything in what is ours: its owner; this user, whoever the owner is (a profile folder owned by
     /// Administrators or SYSTEM that grants its user full control is a default layout); SYSTEM, Administrators and
-    /// `OWNER RIGHTS`.
+    /// TrustedInstaller (also on a user-owned directory inheriting Program Files access), and `OWNER RIGHTS`.
     fn trusted(&self, sid: PSID) -> bool {
         let p = principals();
         // SAFETY: both point at valid SIDs (null is refused first).
@@ -613,6 +613,7 @@ impl Judged {
             || p.user.is(sid)
             || p.system.is(sid)
             || p.administrators.is(sid)
+            || p.trusted_installer.is(sid)
             || p.owner_rights.is(sid)
     }
 
