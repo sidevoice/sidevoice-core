@@ -201,6 +201,7 @@ impl Held {
         let mut chain: Vec<(std::path::PathBuf, File)> = Vec::new();
         for (index, path) in paths.iter().enumerate() {
             let leaf = index + 1 == paths.len();
+            let search_only = !leaf || access.is_none();
             // Only an ancestor link admitted by the existing system-link policy may be followed (macOS /var).
             if !leaf {
                 check_ancestor(path)?;
@@ -212,7 +213,7 @@ impl Held {
                         parent,
                         path.file_name()
                             .ok_or_else(|| super::denied("invalid directory component"))?,
-                        directory_access(access.is_none())
+                        directory_access(search_only)
                             | OFlags::DIRECTORY
                             | OFlags::CLOEXEC
                             | if no_link {
@@ -225,7 +226,7 @@ impl Held {
                     .map_err(|error| directory_error(path, error.into()))?,
                 )
             } else {
-                open_dir(path, true, access.is_none())?
+                open_dir(path, true, search_only)?
             };
             if let Some(access) = access.filter(|_| leaf) {
                 super::judge_access(&file, access, true)
@@ -410,8 +411,8 @@ fn open_dir(path: &Path, no_link: bool, search_only: bool) -> io::Result<File> {
     Ok(File::from(rfs::open(path, flags, Mode::empty())?))
 }
 
-// Program validation and ancestry rechecks never list directory entries. Records retain read-capable handles
-// where their writer needs fsync. macOS O_SEARCH is O_EXEC | O_DIRECTORY (available since macOS 12).
+// Ancestors, program validation and ancestry rechecks never list directory entries. Record leaf directories
+// retain read-capable handles where their writer needs fsync. macOS O_SEARCH is O_EXEC | O_DIRECTORY (macOS 12+).
 fn directory_access(search_only: bool) -> OFlags {
     if !search_only {
         return OFlags::RDONLY;
