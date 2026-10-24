@@ -22,13 +22,143 @@ mod imp;
 #[path = "fs/windows.rs"]
 mod imp;
 
-pub use imp::Os as Files;
+pub use imp::{Held as HeldDirectory, Os as Files};
 
 use crate::user::{User, UserId};
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
+
+/// Required access to an existing directory or record. Checks never repair permissions.
+#[derive(Clone, Copy)]
+pub enum Access {
+    /// This user's, open to nobody else (apart from the system).
+    Private,
+    /// This user's, readable by others but never writable by them. Windows directories may also belong to the
+    /// system, as ordinary profile folders do. Files must still belong to this user and have exactly one name.
+    NotWritableByOthers,
+}
+
+/// Existing-only access through a checked directory and its held ancestry ([`HeldDirectory`]).
+///
+/// No operation creates a directory or repairs existing permissions. Links/reparse points, unsafe ownership,
+/// hard-linked records and replaced ancestors are refused with `PermissionDenied`. On Unix operations are relative
+/// to the held directory; Windows holds every ancestor without delete sharing. Same-user/admin modification is
+/// outside this boundary. Reads return `None` only for an absent child; an absent directory is `NotFound`.
+///
+/// Import both: `use sidevoice_platform::fs::{Directory, HeldDirectory, Access};`.
+pub trait Directory: Sized {
+    /// Opens an absolute existing directory, checking every ancestor. Missing directories remain missing. Windows
+    /// redirected/junction roots are refused: choose an ordinary, unredirected data directory instead. Unix retains
+    /// the system-owned ancestor-link allowance of [`Fs::ensure_private_dir`]. Parent (`..`) components are invalid.
+    fn open(path: &Path, access: Access) -> io::Result<Self>;
+
+    /// Reads a regular record from the checked handle, bounded by `limit` (`InvalidData` when exceeded).
+    /// `name` must be one ordinary child component, with no separators, NUL, `.` or `..`; Windows also refuses device
+    /// names, alternate data streams and trailing dot/space aliases. Invalid names return `InvalidInput`.
+    fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>>;
+
+    /// Atomically publishes a private record through this directory, using the same staging/sync/publication as
+    /// [`Fs::write_private`]. An existing record must satisfy `NotWritableByOthers`; unsafe state is never repaired.
+    /// Readable-but-not-writable-by-others directories are accepted. Windows has no directory flush guarantee.
+    fn write(&self, name: &OsStr, bytes: &[u8]) -> io::Result<()>;
+
+    /// Removes one regular record satisfying `NotWritableByOthers`, never a directory or link. An absent child is
+    /// success. The parent is synced where supported. Name validation is the same as for [`Directory::read`].
+    fn remove(&self, name: &OsStr) -> io::Result<()>;
+}
+
+/// A root-to-leaf sequence, kept alive for the entire capability. Per-OS code controls how it is opened/reopened.
+struct HeldState {
+    chain: Vec<(PathBuf, File)>,
+    access: Access,
+}
+
+impl HeldState {
+    fn leaf(&self) -> (&Path, &File) {
+        let (path, file) = self.chain.last().expect("an absolute directory has a root");
+        (path, file)
+    }
+
+    fn verify(&self) -> io::Result<()> {
+        for (index, (path, held)) in self.chain.iter().enumerate() {
+            let leaf = index + 1 == self.chain.len();
+            let current =
+                imp::reopen_directory(path, leaf).map_err(|error| refused(path, error))?;
+            if Files::identity(held)? != Files::identity(&current)? {
+                return Err(refused(
+                    path,
+                    "directory replaced; reopen the verified data directory",
+                ));
+            }
+            if leaf {
+                judge_access(held, self.access, true).map_err(|error| refused(path, error))?;
+            } else {
+                imp::check_ancestor_handle(path, held)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn directory_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "expected an absolute directory without '..'",
+        ));
+    }
+    let mut paths: Vec<_> = path.ancestors().map(Path::to_path_buf).collect();
+    paths.reverse();
+    Ok(paths)
+}
+
+fn child_name(name: &OsStr) -> io::Result<&Path> {
+    let path = Path::new(name);
+    let mut components = path.components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+        || name
+            .as_encoded_bytes()
+            .iter()
+            .any(|b| matches!(b, b'/' | b'\\' | 0))
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "expected one ordinary child name",
+        ));
+    }
+    Ok(path)
+}
+
+fn judge_access(file: &File, access: Access, directory: bool) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if (directory && !metadata.is_dir())
+        || (!directory && (!metadata.is_file() || imp::link_count(file)? != 1))
+    {
+        return Err(denied("not a directory or a regular record with one name"));
+    }
+    match access {
+        Access::Private => Files::check_private(file),
+        Access::NotWritableByOthers => {
+            let owner = if directory {
+                Files::owner_of_user_directory_is_trusted(file)?
+            } else {
+                UserId::current().owns_file(file)?
+            };
+            if !owner || Files::others_of(file)? == Others::Change {
+                return Err(denied("unsafe owner or writable by others"));
+            }
+            Ok(())
+        }
+    }
+}
 
 /// What somebody other than a file's owner (and the system: root, SYSTEM, Administrators) may do with it.
 #[derive(Debug, PartialEq, Eq)]
@@ -432,6 +562,410 @@ mod tests {
 
     fn refused<T: std::fmt::Debug>(result: io::Result<T>) -> bool {
         result.unwrap_err().kind() == ErrorKind::PermissionDenied
+    }
+
+    fn held(path: &Path, access: Access) -> HeldDirectory {
+        HeldDirectory::open(path, access).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    fn assert_open_refused(path: &Path, access: Access) {
+        assert_eq!(
+            HeldDirectory::open(path, access).err().unwrap().kind(),
+            ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn held_discovery_never_creates_missing_directories_or_repairs_access() {
+        let root = scratch();
+        let missing = root.path().join("missing").join("inside");
+        assert_eq!(
+            HeldDirectory::open(&missing, Access::Private)
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::NotFound
+        );
+        assert!(!root.path().join("missing").exists());
+        assert_eq!(
+            HeldDirectory::open(Path::new("relative"), Access::Private)
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            HeldDirectory::open(&root.path().join(".."), Access::Private)
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        let dir = root.path().join("data");
+        Files::create_private_dir(&dir).unwrap();
+        Files::let_others_read(&dir);
+        assert_open_refused(&dir, Access::Private);
+        let _held = held(&dir, Access::NotWritableByOthers);
+        assert_eq!(others(&dir), Others::Read);
+        Files::let_others_change(&dir);
+        assert_open_refused(&dir, Access::NotWritableByOthers);
+        assert_eq!(others(&dir), Others::Change);
+    }
+
+    #[test]
+    fn held_records_are_bounded_private_atomic_and_removable() {
+        let root = scratch();
+        let path = root.path().join("data with spaces ü");
+        Files::create_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        let name = OsStr::new("record ü.json");
+        assert!(dir.read(name, Access::Private, 100).unwrap().is_none());
+        dir.remove(name).unwrap();
+        dir.write(name, b"first").unwrap();
+        dir.write(name, b"second").unwrap();
+        assert_eq!(
+            dir.read(name, Access::Private, 6).unwrap().unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            dir.read(name, Access::Private, 5).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert!(private(&path.join(name)));
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+        dir.remove(name).unwrap();
+        dir.remove(name).unwrap();
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn held_access_preserves_readable_parents_and_checks_each_records_access() {
+        let root = scratch();
+        let path = root.path().join("readable");
+        Files::create_private_dir(&path).unwrap();
+        Files::let_others_read(&path);
+        let dir = held(&path, Access::NotWritableByOthers);
+        let name = OsStr::new("record");
+        dir.write(name, b"private").unwrap();
+        assert!(private(&path.join(name)));
+        Files::let_others_read(&path.join(name));
+        assert!(refused(dir.read(name, Access::Private, 100)));
+        assert_eq!(
+            dir.read(name, Access::NotWritableByOthers, 100)
+                .unwrap()
+                .unwrap(),
+            b"private"
+        );
+        dir.write(name, b"replacement").unwrap();
+        assert!(private(&path.join(name)));
+        assert_eq!(others(&path), Others::Read, "parent not repaired");
+        Files::let_others_change(&path.join(name));
+        assert!(refused(dir.read(name, Access::NotWritableByOthers, 100)));
+        assert!(refused(dir.write(name, b"must not repair")));
+        assert!(refused(dir.remove(name)));
+        assert_eq!(fs::read(path.join(name)).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn held_records_reject_links_hard_links_and_directories_without_touching_them() {
+        let root = scratch();
+        let path = root.path().join("data");
+        Files::create_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        dir.write(OsStr::new("target"), b"untouched").unwrap();
+        fs::hard_link(path.join("target"), path.join("hard")).unwrap();
+        Files::symlink(path.join("target"), path.join("link"));
+        Files::symlink(path.join("absent"), path.join("dangling"));
+        Files::create_private_dir(&path.join("directory")).unwrap();
+        for name in ["target", "hard", "link", "dangling", "directory"] {
+            for access in [Access::Private, Access::NotWritableByOthers] {
+                assert!(refused(dir.read(OsStr::new(name), access, 100)), "{name}");
+            }
+            assert!(refused(dir.write(OsStr::new(name), b"changed")), "{name}");
+            assert!(refused(dir.remove(OsStr::new(name))), "{name}");
+        }
+        assert_eq!(fs::read(path.join("target")).unwrap(), b"untouched");
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 5);
+    }
+
+    #[test]
+    fn held_operations_reject_non_child_names() {
+        let root = scratch();
+        let path = root.path().join("data");
+        Files::create_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        for name in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "a/b",
+            "a\\b",
+            "record/",
+            "nul\0byte",
+        ] {
+            let name = OsStr::new(name);
+            assert_eq!(
+                dir.read(name, Access::Private, 100).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                dir.write(name, b"x").unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                dir.remove(name).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn held_directories_refuse_linked_or_unsafe_ancestry() {
+        let root = scratch();
+        let parent = root.path().join("parent");
+        let path = parent.join("data");
+        Files::ensure_private_dir(&path).unwrap();
+        Files::symlink(&parent, root.path().join("link"));
+        assert_open_refused(&root.path().join("link").join("data"), Access::Private);
+        Files::symlink(&path, parent.join("leaf-link"));
+        assert_open_refused(&parent.join("leaf-link"), Access::Private);
+        Files::let_others_change(&parent);
+        assert_open_refused(&path, Access::Private);
+    }
+
+    #[test]
+    fn held_operations_recheck_permissions_changed_after_open() {
+        for ancestor in [false, true] {
+            let root = scratch();
+            let parent = root.path().join("parent");
+            let path = parent.join("data");
+            Files::ensure_private_dir(&path).unwrap();
+            let dir = held(&path, Access::Private);
+            let name = OsStr::new("record");
+            dir.write(name, b"untouched").unwrap();
+            Files::let_others_change(if ancestor { &parent } else { &path });
+            assert!(refused(dir.read(name, Access::Private, 100)));
+            assert!(refused(dir.write(name, b"changed")));
+            assert!(refused(dir.remove(name)));
+            assert_eq!(fs::read(path.join(name)).unwrap(), b"untouched");
+        }
+    }
+
+    #[test]
+    fn held_ancestry_cannot_be_retargeted_by_renaming_any_directory() {
+        // Unix refuses a changed identity; Windows prevents the rename until the capability is dropped.
+        for ancestor in [false, true] {
+            let root = scratch();
+            let parent = root.path().join("parent");
+            let path = parent.join("data");
+            Files::ensure_private_dir(&path).unwrap();
+            let dir = held(&path, Access::Private);
+            let name = OsStr::new("record");
+            dir.write(name, b"original").unwrap();
+            let moving = if ancestor { &parent } else { &path };
+            let displaced = root.path().join("displaced");
+            if fs::rename(moving, &displaced).is_ok() {
+                Files::ensure_private_dir(&path).unwrap();
+                Files::write_private(&path.join(name), b"decoy").unwrap();
+                assert!(refused(dir.read(name, Access::Private, 100)));
+                assert!(refused(dir.write(name, b"changed")));
+                assert!(refused(dir.remove(name)));
+                assert_eq!(fs::read(path.join(name)).unwrap(), b"decoy");
+                let original = if ancestor {
+                    displaced.join("data")
+                } else {
+                    displaced
+                };
+                assert_eq!(fs::read(original.join(name)).unwrap(), b"original");
+            } else {
+                assert_eq!(
+                    dir.read(name, Access::Private, 100).unwrap().unwrap(),
+                    b"original"
+                );
+                drop(dir);
+                fs::rename(moving, &displaced)
+                    .expect("rename succeeds once held handles are released");
+            }
+        }
+    }
+
+    #[test]
+    fn held_paths_support_long_spaced_and_non_ascii_names() {
+        let root = scratch();
+        let mut path = root.path().to_path_buf();
+        for _ in 0..6 {
+            path.push("a long directory name with spaces and ü characters");
+        }
+        Files::ensure_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        let name = OsStr::new("record 日本語.json");
+        dir.write(name, b"record").unwrap();
+        assert_eq!(
+            dir.read(name, Access::Private, 100).unwrap().unwrap(),
+            b"record"
+        );
+        dir.remove(name).unwrap();
+    }
+
+    #[test]
+    fn replacing_an_ancestor_is_detected_even_when_the_leaf_is_the_original_directory() {
+        let root = scratch();
+        let parent = root.path().join("parent");
+        let path = parent.join("data");
+        Files::ensure_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        let displaced = root.path().join("displaced");
+        if fs::rename(&parent, &displaced).is_ok() {
+            Files::create_private_dir(&parent).unwrap();
+            fs::rename(displaced.join("data"), &path).unwrap();
+            assert!(refused(dir.read(
+                OsStr::new("record"),
+                Access::Private,
+                100
+            )));
+            assert!(refused(dir.write(OsStr::new("record"), b"x")));
+            assert!(refused(dir.remove(OsStr::new("record"))));
+            assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+        } else {
+            drop(dir);
+            fs::rename(&parent, &displaced).unwrap();
+        }
+    }
+
+    // Win32's path-based child operations rely on rename exclusion, unlike Unix's descriptor-relative operations.
+    #[cfg(windows)]
+    #[test]
+    fn held_windows_handles_prevent_renaming_every_ancestor_until_drop() {
+        let root = scratch();
+        let parent = root.path().join("parent");
+        let path = parent.join("data");
+        Files::ensure_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        let displaced = root.path().join("displaced");
+        assert!(
+            fs::rename(&path, &displaced).is_err(),
+            "leaf must stay bound"
+        );
+        assert!(
+            fs::rename(&parent, &displaced).is_err(),
+            "ancestor must stay bound"
+        );
+        drop(dir);
+        fs::rename(&parent, &displaced).unwrap();
+    }
+
+    #[test]
+    fn held_operations_never_reach_a_decoy_during_ancestor_rename_races() {
+        let root = scratch();
+        let parent = root.path().join("parent");
+        let path = parent.join("data");
+        Files::ensure_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        let decoy = root.path().join("decoy");
+        Files::ensure_private_dir(&decoy.join("data")).unwrap();
+        Files::write_private(&decoy.join("data/record"), b"decoy").unwrap();
+        let displaced = root.path().join("displaced");
+        std::thread::scope(|scope| {
+            let renamer = scope.spawn(|| {
+                for _ in 0..64 {
+                    if fs::rename(&parent, &displaced).is_ok() {
+                        fs::rename(&decoy, &parent).unwrap();
+                        std::thread::yield_now();
+                        fs::rename(&parent, &decoy).unwrap();
+                        fs::rename(&displaced, &parent).unwrap();
+                    }
+                }
+            });
+            for _ in 0..64 {
+                let name = OsStr::new("record");
+                if let Err(error) = dir.write(name, b"original") {
+                    assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+                }
+                match dir.read(name, Access::Private, 100) {
+                    Ok(Some(bytes)) => assert_eq!(bytes, b"original"),
+                    Ok(None) => (),
+                    Err(error) => assert_eq!(error.kind(), ErrorKind::PermissionDenied),
+                }
+                if let Err(error) = dir.remove(name) {
+                    assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+                }
+            }
+            renamer.join().unwrap();
+        });
+        assert_eq!(fs::read(decoy.join("data/record")).unwrap(), b"decoy");
+        assert_eq!(fs::read_dir(decoy.join("data")).unwrap().count(), 1);
+    }
+
+    // These aliases are a Win32 namespace property, not ordinary Unix filenames.
+    #[cfg(windows)]
+    #[test]
+    fn held_windows_records_refuse_device_stream_and_trailing_aliases() {
+        let root = scratch();
+        let path = root.path().join("data");
+        Files::create_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        for name in [
+            "record:secret",
+            "record.",
+            "record ",
+            "NUL",
+            "con.txt",
+            "COM1",
+            "lpt².log",
+            "CONIN$",
+        ] {
+            let name = OsStr::new(name);
+            assert_eq!(
+                dir.read(name, Access::Private, 100).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                dir.write(name, b"x").unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                dir.remove(name).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn held_concurrent_publication_never_exposes_partial_records() {
+        let root = scratch();
+        let path = root.path().join("data");
+        Files::create_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        let name = OsStr::new("record");
+        let first = vec![b'a'; 8192];
+        let second = vec![b'b'; 8192];
+        dir.write(name, &first).unwrap();
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                for _ in 0..24 {
+                    // Windows may refuse replacement while another reader/antivirus holds the record.
+                    if let Err(error) = dir.write(name, &second) {
+                        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+                    }
+                    if let Err(error) = dir.write(name, &first) {
+                        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+                    }
+                }
+            });
+            for _ in 0..48 {
+                let bytes = dir.read(name, Access::Private, 8192).unwrap().unwrap();
+                assert!(bytes == first || bytes == second);
+            }
+            writer.join().unwrap();
+        });
+        assert_eq!(
+            fs::read_dir(&path).unwrap().count(),
+            1,
+            "no staging files left"
+        );
     }
 
     #[test]
@@ -950,6 +1484,8 @@ mod tests {
         Files::create_private_dir(&dir).unwrap();
         imp::icacls(&dir, &["/grant", "*S-1-1-0:(OI)(IO)(R)"]);
         assert_eq!(others(&dir), Others::Read);
+        assert_open_refused(&dir, Access::Private);
+        let _held = held(&dir, Access::NotWritableByOthers);
         assert!(
             refused(Files::ensure_private_dir(&dir)),
             "what is created in it would be readable by everybody"
@@ -972,6 +1508,8 @@ mod tests {
         Files::create_private_dir(&dir).unwrap();
         imp::icacls(&dir, &["/inheritance:e"]);
         assert_ne!(others(&dir), Others::Nothing);
+        assert_open_refused(&dir, Access::Private);
+        let _held = held(&dir, Access::NotWritableByOthers);
         assert!(
             refused(Files::ensure_private_dir(&dir)),
             "it takes whatever its parent passes down"
@@ -996,6 +1534,8 @@ mod tests {
         imp::icacls(&profile, &["/setowner", "*S-1-5-32-544"]);
         let dir = profile.join("AppData").join("Local").join("data");
         Files::ensure_private_dir(&dir).unwrap();
+        let _held = held(&dir, Access::Private);
+        let _profile = held(&profile, Access::NotWritableByOthers);
     }
 
     // Windows only: a junction (which needs no privilege to make) is Windows' own kind of link; the generic tests
@@ -1008,6 +1548,8 @@ mod tests {
         Files::ensure_private_dir(&dir).unwrap();
         let link = root.path().join("link");
         imp::link_dir(&dir, &link);
+        assert_open_refused(&link, Access::Private);
+        assert_open_refused(&link.join("inside"), Access::Private);
         assert!(
             refused(Files::ensure_private_dir(&link.join("inside"))),
             "a link on the way is refused, not followed"
