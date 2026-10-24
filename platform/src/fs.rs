@@ -697,10 +697,14 @@ mod tests {
             );
         }
         assert!(!absent.exists(), "discovery never creates an install");
-        for path in [
-            PathBuf::from("sidevoice.exe"),
-            root.path().join("../sidevoice.exe"),
-        ] {
+        // PathBuf::join normalizes `..` away under a Windows verbatim prefix. Build the invalid spelling
+        // literally so the validator, rather than the fixture, sees and rejects the parent component.
+        let mut parent = root.path().as_os_str().to_os_string();
+        parent.push(std::path::MAIN_SEPARATOR_STR);
+        parent.push("..");
+        parent.push(std::path::MAIN_SEPARATOR_STR);
+        parent.push("sidevoice.exe");
+        for path in [PathBuf::from("sidevoice.exe"), PathBuf::from(parent)] {
             assert_eq!(
                 Files::trusted_program(&path).unwrap_err().kind(),
                 ErrorKind::InvalidInput
