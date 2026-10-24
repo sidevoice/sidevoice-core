@@ -233,16 +233,24 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
 
 /// The single staging/publication implementation; held-directory callers keep the entire checked ancestry alive.
 fn write_whole_in(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
-    let dir = super::parent_of(path)?;
+    // std supplies the extended-length spelling required by raw CreateFileW and tempfile's MoveFileExW, without
+    // relying on a process manifest opting into long paths. Resolve only the already-checked (or vouched-for)
+    // parent, never the record: a final link must not be followed. Held callers retain the original ancestry for
+    // identity checks and keep it unrenameable throughout this conversion and publication.
+    let dir = super::parent_of(path)?.canonicalize()?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "a record must have a file name"))?;
+    let path = dir.join(name);
     let mut staged = tempfile::Builder::new()
-        .prefix(&super::staging_prefix(path))
+        .prefix(&super::staging_prefix(&path))
         .rand_bytes(super::STAGING_RANDOM)
-        .make_in(dir, |temp| Os::open_private(temp, Create::New))?;
+        .make_in(&dir, |temp| Os::open_private(temp, Create::New))?;
     staged.write_all(bytes)?;
     staged.as_file().sync_all()?;
     match how {
-        Publish::New => staged.persist_noclobber(path),
-        _ => staged.persist(path),
+        Publish::New => staged.persist_noclobber(&path),
+        _ => staged.persist(&path),
     }
     .map(drop)
     .map_err(|error| error.error)

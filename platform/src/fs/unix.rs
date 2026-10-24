@@ -257,7 +257,16 @@ fn open_record(dir: &File, name: &Path, access: Access) -> io::Result<Option<Fil
     let file = match rfs::openat(dir, name, flags, Mode::empty()) {
         Ok(file) => File::from(file),
         Err(Errno::NOENT) => return Ok(None),
-        Err(error) => return Err(directory_error(name, error.into())),
+        Err(error) => {
+            // Some special files cannot be opened at all (a socket gives ENXIO on Linux). Classify those by
+            // no-follow metadata relative to the held directory; never turn a failed open into a usable record.
+            if rfs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|stat| {
+                rfs::FileType::from_raw_mode(stat.st_mode) != rfs::FileType::RegularFile
+            }) {
+                return Err(super::refused_file(name, "not a regular record"));
+            }
+            return Err(directory_error(name, error.into()));
+        }
     };
     super::judge_access(&file, access, false)?;
     Ok(Some(file))
@@ -361,6 +370,20 @@ fn open_dir(path: &Path, no_link: bool) -> io::Result<File> {
 
 fn flags(flags: OFlags) -> i32 {
     flags.bits() as i32
+}
+
+/// Unix-only test fixtures: an open socket and a FIFO, neither of which is a record.
+#[cfg(test)]
+pub(super) fn special_records(dir: &Path) -> std::os::unix::net::UnixListener {
+    let socket = std::os::unix::net::UnixListener::bind(dir.join("socket")).unwrap();
+    // rustix has no mkfifo on macOS; the POSIX utility provides the fixture on both Unix hosts.
+    assert!(std::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(dir.join("fifo"))
+        .status()
+        .unwrap()
+        .success());
+    socket
 }
 
 #[cfg(any(test, feature = "test-support"))]

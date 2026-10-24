@@ -814,6 +814,63 @@ mod tests {
         dir.remove(name).unwrap();
     }
 
+    // Only Windows distinguishes ordinary drive paths from extended-length verbatim paths.
+    #[cfg(windows)]
+    #[test]
+    fn held_windows_long_paths_do_not_require_a_verbatim_prefix_from_the_caller() {
+        let root = scratch();
+        let mut extended = root.path().to_path_buf();
+        for _ in 0..6 {
+            extended.push("a long directory name with spaces and ü characters");
+        }
+        Files::ensure_private_dir(&extended).unwrap();
+        // Fixture creation can use the extended path; every operation under test uses the ordinary drive path.
+        let ordinary = Path::new(extended.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
+        assert!(ordinary.as_os_str().len() > 260);
+        assert!(matches!(ordinary.components().next(),
+            Some(std::path::Component::Prefix(prefix)) if matches!(prefix.kind(), std::path::Prefix::Disk(_))));
+        let dir = held(ordinary, Access::Private);
+        let name = OsStr::new("record 日本語.json");
+        dir.write(name, b"first").unwrap();
+        dir.write(name, b"replacement").unwrap();
+        assert_eq!(
+            dir.read(name, Access::Private, 100).unwrap().unwrap(),
+            b"replacement"
+        );
+        assert!(private(&ordinary.join(name)));
+        assert_eq!(
+            fs::read_dir(ordinary).unwrap().count(),
+            1,
+            "no staging files left"
+        );
+        dir.remove(name).unwrap();
+        assert!(dir.read(name, Access::Private, 100).unwrap().is_none());
+    }
+
+    // Socket/FIFO fixtures are Unix filesystem object types; the assertions still use only Directory.
+    #[cfg(unix)]
+    #[test]
+    fn held_special_records_are_permission_refusals_for_every_operation() {
+        let root = scratch();
+        let path = root.path().join("data");
+        Files::create_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        let _socket = imp::special_records(&path);
+        for name in ["socket", "fifo"] {
+            let name = OsStr::new(name);
+            for access in [Access::Private, Access::NotWritableByOthers] {
+                assert!(refused(dir.read(name, access, 100)), "{name:?}");
+            }
+            assert!(refused(dir.write(name, b"must not replace")), "{name:?}");
+            assert!(refused(dir.remove(name)), "{name:?}");
+            assert!(
+                fs::symlink_metadata(path.join(name)).is_ok(),
+                "entry preserved"
+            );
+        }
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 2);
+    }
+
     #[test]
     fn replacing_an_ancestor_is_detected_even_when_the_leaf_is_the_original_directory() {
         let root = scratch();
