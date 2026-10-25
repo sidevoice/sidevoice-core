@@ -286,8 +286,8 @@ fn write_whole_in(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
     .map_err(|error| error.error)
 }
 
-/// The directory capability: no public operations beyond `Directory`.
-pub struct Held(HeldState);
+/// The held directory capability; public operations are declared in the shared interfaces.
+pub struct Held(pub(crate) HeldState);
 
 impl Held {
     fn open_with(path: &Path, access: Option<Access>) -> io::Result<Self> {
@@ -389,7 +389,7 @@ fn program_name(path: &Path) -> io::Result<&Path> {
 }
 
 /// Win32 aliases must not turn an ordinary child into a device, stream or differently spelled entry.
-fn record_name(name: &OsStr) -> io::Result<&Path> {
+pub(crate) fn record_name(name: &OsStr) -> io::Result<&Path> {
     let path = super::child_name(name)?;
     let text = name.to_string_lossy();
     let stem = text

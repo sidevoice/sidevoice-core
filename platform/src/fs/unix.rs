@@ -192,8 +192,8 @@ fn write_whole_at(dir: &File, path: &Path, bytes: &[u8], how: Publish) -> io::Re
     rfs::fsync(dir).map_err(io::Error::from)
 }
 
-/// The directory capability: no public operations beyond `Directory`.
-pub struct Held(HeldState);
+/// The held directory capability; public operations are declared in the shared interfaces.
+pub struct Held(pub(crate) HeldState);
 
 impl Held {
     fn open_with(path: &Path, access: Option<Access>) -> io::Result<Self> {
