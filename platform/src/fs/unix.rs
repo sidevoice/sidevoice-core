@@ -139,12 +139,18 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
     if how.judged() {
         super::judge_dir::<Os>(dir_path, &dir)?;
     }
-    write_whole_at(&dir, path, bytes, how)
+    write_whole_at(&dir, path, bytes, how, || Ok(()))
 }
 
 /// The single atomic writer, also used by a held directory. `path` supplies only the staging label and leaf name;
 /// every filesystem operation is relative to `dir` (including cleanup if the directory was renamed meanwhile).
-fn write_whole_at(dir: &File, path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
+fn write_whole_at(
+    dir: &File,
+    path: &Path,
+    bytes: &[u8],
+    how: Publish,
+    before_publish: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     let dir_path = super::parent_of(path)?;
     let name = path.file_name().unwrap_or_default();
     let create =
@@ -175,6 +181,7 @@ fn write_whole_at(dir: &File, path: &Path, bytes: &[u8], how: Publish) -> io::Re
             }
         }
         file.sync_all()?;
+        before_publish()?;
         match how {
             Publish::New => rfs::linkat(dir, staged, dir, name, AtFlags::empty()),
             _ => rfs::renameat(dir, staged, dir, name),
@@ -264,7 +271,9 @@ impl super::Directory for Held {
         self.0.verify()?;
         let (path, dir) = self.0.leaf();
         open_record(dir, name, Access::NotWritableByOthers)?;
-        write_whole_at(dir, &path.join(name), bytes, Publish::Vouched)
+        write_whole_at(dir, &path.join(name), bytes, Publish::Vouched, || {
+            self.0.before_publish()
+        })
     }
 
     fn remove(&self, name: &OsStr) -> io::Result<()> {
