@@ -108,15 +108,7 @@ mod tests {
         let (_temp, root, held) = fixture();
         put(&root.join("selected"));
         held.remove_contents(&[]).unwrap();
-        for invalid in [
-            "",
-            ".",
-            "..",
-            "../outside",
-            "nested/child",
-            "nested\\child",
-            "bad\0name",
-        ] {
+        for invalid in ["", ".", "..", "../outside", "nested/child", "bad\0name"] {
             assert_eq!(
                 held.remove_contents(&[OsStr::new("selected"), OsStr::new(invalid)])
                     .unwrap_err()
@@ -125,6 +117,28 @@ mod tests {
             );
             assert!(root.join("selected").exists());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_removes_literal_backslash_names_without_treating_them_as_paths() {
+        let (_temp, root, held) = fixture();
+        Files::create_private_dir(&root.join("session")).unwrap();
+        put(&root.join("session/backup"));
+        let tree = root.join(r"session\backup");
+        Files::create_private_dir(&tree).unwrap();
+        put(&tree.join(r"nested\payload"));
+        put(&root.join(r"record\backup"));
+        let allowed = [OsStr::new(r"session\backup"), OsStr::new(r"record\backup")];
+        held.check_contents(&allowed).unwrap();
+        assert!(tree.join(r"nested\payload").exists());
+        held.remove_contents(&allowed).unwrap();
+        assert!(!tree.exists());
+        assert!(!root.join(r"record\backup").exists());
+        assert_eq!(
+            fs::read(root.join("session/backup")).unwrap(),
+            b"keep contents intact"
+        );
     }
 
     #[test]
@@ -445,7 +459,12 @@ mod tests {
     fn windows_aliases_are_rejected_before_removal() {
         let (_temp, root, held) = fixture();
         put(&root.join("payload"));
+        Files::create_private_dir(&root.join("nested")).unwrap();
+        put(&root.join("nested/child"));
         for name in [
+            r"nested\child",
+            r"\payload",
+            r"nested\",
             "payload:stream",
             "payload.",
             "payload ",
@@ -457,6 +476,7 @@ mod tests {
                 .remove_contents(&[OsStr::new("payload"), OsStr::new(name)])
                 .is_err());
             assert!(root.join("payload").exists());
+            assert!(root.join("nested/child").exists());
         }
     }
 }

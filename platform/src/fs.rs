@@ -62,8 +62,9 @@ pub trait Directory: Sized {
 
     /// Reads a regular record from the checked handle, bounded by `limit` (`InvalidData` when exceeded).
     /// Concurrent replacement can be refused if the opened record loses its name before the checks finish.
-    /// `name` must be one ordinary child component, with no separators, NUL, `.` or `..`; Windows also refuses device
-    /// names, alternate data streams and trailing dot/space aliases. Invalid names return `InvalidInput`.
+    /// `name` must be one ordinary child component, with no native separators, NUL, `.` or `..`.
+    /// Backslash is ordinary on Unix; Windows also refuses device names, alternate data streams and trailing
+    /// dot/space aliases. Invalid names return `InvalidInput`.
     fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>>;
 
     /// Atomically publishes a private record through this directory, using the same staging/sync/publication as
@@ -134,7 +135,7 @@ pub(crate) fn child_name(name: &OsStr) -> io::Result<&Path> {
         || name
             .as_encoded_bytes()
             .iter()
-            .any(|b| matches!(b, b'/' | b'\\' | 0))
+            .any(|&b| b == 0 || std::path::is_separator(char::from(b)))
     {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -1170,16 +1171,7 @@ mod tests {
         let path = root.path().join("data");
         Files::create_private_dir(&path).unwrap();
         let dir = held(&path, Access::Private);
-        for name in [
-            "",
-            ".",
-            "..",
-            "../outside",
-            "a/b",
-            "a\\b",
-            "record/",
-            "nul\0byte",
-        ] {
+        for name in ["", ".", "..", "../outside", "a/b", "record/", "nul\0byte"] {
             let name = OsStr::new(name);
             assert_eq!(
                 dir.read(name, Access::Private, 100).unwrap_err().kind(),
@@ -1195,6 +1187,35 @@ mod tests {
             );
         }
         assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_unix_records_accept_ordinary_unix_filename_bytes() {
+        let root = scratch();
+        let path = root.path().join("data");
+        Files::create_private_dir(&path).unwrap();
+        let dir = held(&path, Access::Private);
+        for name in [
+            r"session\backup",
+            r"\",
+            r"..\backup",
+            r"backup\",
+            "record:stream",
+            "NUL",
+            "record.",
+            "record ",
+        ] {
+            let name = OsStr::new(name);
+            dir.write(name, b"literal name").unwrap();
+            assert_eq!(
+                dir.read(name, Access::Private, 100).unwrap().unwrap(),
+                b"literal name"
+            );
+            assert_eq!(fs::read(path.join(name)).unwrap(), b"literal name");
+            dir.remove(name).unwrap();
+            assert!(!path.join(name).exists());
+        }
     }
 
     #[test]
@@ -1440,6 +1461,9 @@ mod tests {
         Files::create_private_dir(&path).unwrap();
         let dir = held(&path, Access::Private);
         for name in [
+            r"nested\child",
+            r"\record",
+            r"record\",
             "record:secret",
             "record.",
             "record ",
