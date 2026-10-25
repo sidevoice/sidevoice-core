@@ -1,11 +1,12 @@
 //! Held ancestry excludes rename/delete. Descendants are opened no-follow and deleted by handle, including reparse
-//! entries. The only own binding is disposition: std cannot delete an already checked handle or preserve read-only
-//! hard-link attributes. Existing fs owns identity, owner and ACL checks.
+//! entries. Own bindings cover disposition and the normalized name of an already checked handle: std exposes
+//! neither. Existing fs owns identity, owner and ACL checks.
 use crate::fs::{Files, Fs, HeldState, Others};
 use crate::user::{User, UserId};
-use std::ffi::{c_void, OsStr};
+use std::ffi::{c_void, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
@@ -13,12 +14,12 @@ use windows_sys::Win32::Foundation::{
     ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, GENERIC_READ,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FileDispositionInfo, FileDispositionInfoEx, SetFileInformationByHandle, DELETE,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+    FileDispositionInfo, FileDispositionInfoEx, GetFinalPathNameByHandleW,
+    SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    READ_CONTROL,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, READ_CONTROL, VOLUME_NAME_NONE,
 };
 
 pub(super) fn contents(root: &HeldState, allowed: &[&OsStr], remove: bool) -> io::Result<()> {
@@ -52,6 +53,11 @@ fn visit(root: &HeldState, path: &Path, remove: bool, depth: usize) -> io::Resul
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
+    if depth == 0 {
+        // Syntactic validation cannot distinguish a literal name from an NTFS 8.3 alias. Check the opened,
+        // unrenameable entry's normalized long name, both during whole-list preflight and again at deletion.
+        require_exact_name(&file, path.file_name().expect("validated child name"))?;
+    }
     let meta = file.metadata()?;
     if Files::identity(&file)?.volume != Files::identity(root.leaf().1)?.volume {
         return Err(super::refused("removal crosses a volume boundary"));
@@ -73,6 +79,41 @@ fn visit(root: &HeldState, path: &Path, remove: bool, depth: usize) -> io::Resul
         delete(&file)?;
     }
     Ok(())
+}
+
+fn require_exact_name(file: &File, allowed: &OsStr) -> io::Result<()> {
+    let mut name = vec![0u16; 512];
+    loop {
+        // SAFETY: file is held open without delete sharing; name is writable for the number of WCHARs passed.
+        // NORMALIZED expands 8.3 names. NONE avoids requiring a DOS drive letter for this volume.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                name.as_mut_ptr(),
+                name.len() as u32,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_NONE,
+            )
+        } as usize;
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length >= name.len() {
+            if length > 32768 {
+                return Err(super::refused(
+                    "removal entry name exceeds the Windows path limit",
+                ));
+            }
+            name.resize(length + 1, 0);
+            continue;
+        }
+        let actual = OsString::from_wide(&name[..length]);
+        if Path::new(&actual).file_name() != Some(allowed) {
+            return Err(super::refused(
+                "removal allowlist must use the exact on-disk name, not an alias",
+            ));
+        }
+        return Ok(());
+    }
 }
 
 fn delete(file: &File) -> io::Result<()> {

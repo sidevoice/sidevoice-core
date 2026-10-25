@@ -25,7 +25,8 @@ use std::io;
 /// Import `Removal` alongside `Directory` and `HeldDirectory`; there is no second root-opening implementation.
 pub trait Removal: Directory {
     /// Checks the selected trees without deleting anything. All names must be single ordinary child components
-    /// (the same syntax as `Directory::read`); the whole list is validated before walking. Directories must belong
+    /// (the same syntax as `Directory::read`); Windows also requires the exact on-disk long name, rejecting 8.3
+    /// aliases and case variants. The whole list is validated before deletion. Directories must belong
     /// to this user and not be writable by others. Checks are repeated during removal; preflight is not a lease.
     /// A live writer can cause a refusal; the caller decides whether to retry after stopping it.
     fn check_contents(&self, allowed: &[&OsStr]) -> io::Result<()>;
@@ -374,10 +375,81 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_short_name_cannot_authorize_an_unlisted_long_name() {
+        let (_temp, root, held) = fixture();
+        let long = root.join("Models backup");
+        Files::create_private_dir(&long).unwrap();
+        put(&long.join("payload"));
+        put(&root.join("first"));
+        let ordinary = long
+            .to_str()
+            .unwrap()
+            .strip_prefix(r"\\?\")
+            .unwrap_or(long.to_str().unwrap());
+        let output = std::process::Command::new("fsutil")
+            .args(["file", "setshortname", ordinary, "MODELS~1"])
+            .output()
+            .unwrap();
+        if !output.status.success() {
+            let message = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("disabled") || lower.contains("not enabled") {
+                eprintln!("skipping 8.3 alias fixture: short names are disabled on this volume: {message}");
+                return;
+            }
+            panic!("cannot create 8.3 alias fixture: {message}");
+        }
+        // Prove the fixture really resolves through an 8.3 alias before asserting it is refused.
+        assert_eq!(
+            fs::read(root.join("MODELS~1/payload")).unwrap(),
+            b"keep contents intact"
+        );
+        assert_eq!(
+            held.check_contents(&[OsStr::new("MODELS~1")])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            held.remove_contents(&[OsStr::new("first"), OsStr::new("MODELS~1")])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(root.join("first").exists());
+        assert_eq!(
+            fs::read(long.join("payload")).unwrap(),
+            b"keep contents intact"
+        );
+        // Exact long names work; a literal tilde in an ordinary filename is not itself an alias.
+        put(&root.join("literal~1"));
+        held.remove_contents(&[
+            OsStr::new("first"),
+            OsStr::new("Models backup"),
+            OsStr::new("literal~1"),
+        ])
+        .unwrap();
+        assert!(!long.exists());
+        assert!(!root.join("literal~1").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_aliases_are_rejected_before_removal() {
         let (_temp, root, held) = fixture();
         put(&root.join("payload"));
-        for name in ["payload:stream", "payload.", "payload ", "NUL", "COM1"] {
+        for name in [
+            "payload:stream",
+            "payload.",
+            "payload ",
+            "NUL",
+            "COM1",
+            "PAYLOAD",
+        ] {
             assert!(held
                 .remove_contents(&[OsStr::new("payload"), OsStr::new(name)])
                 .is_err());

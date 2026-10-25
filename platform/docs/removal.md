@@ -19,8 +19,9 @@ directory.remove_contents(&allowed)?;
 ```
 
 The list authorizes immediate child entries and their subtrees, in order. Every name is validated before any
-mutation; every tree is preflighted, then rechecked during deletion. Unlisted siblings and the root stay. A missing
-selected entry is success; a directory appearing concurrently or a failure can leave partial progress. Callers keep
+mutation; every tree is preflighted, then rechecked during deletion. On Windows each selected opened handle must
+report the exact allowlisted long name: 8.3 aliases and case variants cannot authorize an unlisted entry. Unlisted
+siblings and the root stay. A missing selected entry is success; a directory appearing concurrently or a failure can leave partial progress. Callers keep
 their recovery state until the operation succeeds and can repeat the same list. A live writer may make preflight
 fail; the caller owns bounded retry and service shutdown. Preflight itself never claims or writes anything.
 
@@ -61,16 +62,18 @@ No new dependency. Maintained `rustix` replaces the connector's raw Unix calls; 
 and `windows-sys` for identity and ACLs. `cap-std::Dir` was evaluated: its relative operations are useful, but its
 recursive remover does not supply Sidevoice's ownership, no-mount-crossing and replaced-ancestor refusal contract.
 `std::fs::remove_dir_all` similarly provides symlink-race protection but not those additional checks. Keep the policy
-walk over existing bindings rather than add a second directory abstraction. Windows' one narrowly scoped unsafe
-operation is `SetFileInformationByHandle`: std has no deletion method for an already checked file handle and no
-option to ignore read-only attributes without changing an external hard link.
+walk over existing bindings rather than add a second directory abstraction. Windows' narrowly scoped unsafe
+operations are `SetFileInformationByHandle` and `GetFinalPathNameByHandleW`: std has no checked-handle name or
+deletion method and no option to ignore read-only attributes without changing an external hard link.
 
 References: [cap-std directory API](https://docs.rs/cap-std/latest/cap_std/fs/struct.Dir.html),
 [std recursive removal](https://doc.rust-lang.org/std/fs/fn.remove_dir_all.html),
-[Windows handle disposition](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle).
+[Windows handle disposition](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle),
+[Windows normalized handle name](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew).
 
 Tests live in `removal.rs` and run in the existing Linux/macOS/Windows workspace CI matrix. They cover allowlist and
 name validation, preflight without mutations, retry, retained recovery/locks, links, external hard links, read-only
 attributes and replaced ancestry. Windows-only fixtures exercise junctions, denied delete sharing and alias names
-through the same public interface. Tests do not claim to simulate every filesystem's delete-pending timing or
+through the same public interface. The 8.3 alias fixture skips with an explicit reason only when the volume
+reports short names disabled. Tests do not claim to simulate every filesystem's delete-pending timing or
 require privileged mount creation.

@@ -286,7 +286,7 @@ fn write_whole_in(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
     .map_err(|error| error.error)
 }
 
-/// The directory capability: no public operations beyond `Directory`.
+/// The held directory capability; public operations are declared in the shared interfaces.
 pub struct Held(pub(crate) HeldState);
 
 impl Held {
