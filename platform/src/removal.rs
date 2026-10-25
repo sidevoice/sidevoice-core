@@ -397,7 +397,9 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             let lower = message.to_ascii_lowercase();
-            if lower.contains("disabled") || lower.contains("not enabled") {
+            if std::env::var_os("SIDEVOICE_REQUIRE_8DOT3").is_none()
+                && (lower.contains("disabled") || lower.contains("not enabled"))
+            {
                 eprintln!("skipping 8.3 alias fixture: short names are disabled on this volume: {message}");
                 return;
             }
@@ -435,6 +437,7 @@ mod tests {
         .unwrap();
         assert!(!long.exists());
         assert!(!root.join("literal~1").exists());
+        eprintln!("8.3 removal regression executed: MODELS~1 resolved to Models backup; alias refused before sibling deletion; exact long name removed");
     }
 
     #[cfg(windows)]

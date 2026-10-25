@@ -48,7 +48,27 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - if: runner.os == 'Windows'
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Enable short names on the Windows test volume
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Use the same explicit temp directory for Rust and for the volume configuration below.
+          $testTemp = [System.IO.Path]::GetTempPath()
+          $volume = [System.IO.Path]::GetPathRoot($testTemp).TrimEnd('\')
+          # Hosted runners are disposable admins. Per-volume mode makes the setting below authoritative.
+          fsutil 8dot3name set 2
+          if ($LASTEXITCODE -ne 0) { throw "Cannot enable per-volume 8.3 configuration" }
+          fsutil 8dot3name set $volume 0
+          if ($LASTEXITCODE -ne 0) { throw "Cannot enable 8.3 names on $volume" }
+          fsutil 8dot3name query $volume
+          if ($LASTEXITCODE -ne 0) { throw "Cannot verify 8.3 configuration on $volume" }
+          "TMP=$testTemp" >> $env:GITHUB_ENV
+          "TEMP=$testTemp" >> $env:GITHUB_ENV
+          "SIDEVOICE_REQUIRE_8DOT3=1" >> $env:GITHUB_ENV
       - run: cargo test --locked --workspace --all-features
+      - name: Prove Windows 8.3 removal alias rejection
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p sidevoice-platform --all-features removal::tests::windows_short_name_cannot_authorize_an_unlisted_long_name -- --exact --nocapture
       - run: cargo test --locked --manifest-path xtask/Cargo.toml
       - run: cargo xtask dist
       # The Linux archive on the oldest distribution it supports (glibc floor, xtask/src/glibc.rs).

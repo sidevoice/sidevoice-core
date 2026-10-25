@@ -74,6 +74,8 @@ References: [cap-std directory API](https://docs.rs/cap-std/latest/cap_std/fs/st
 Tests live in `removal.rs` and run in the existing Linux/macOS/Windows workspace CI matrix. They cover allowlist and
 name validation, preflight without mutations, retry, retained recovery/locks, links, external hard links, read-only
 attributes and replaced ancestry. Windows-only fixtures exercise junctions, denied delete sharing and alias names
-through the same public interface. The 8.3 alias fixture skips with an explicit reason only when the volume
-reports short names disabled. Tests do not claim to simulate every filesystem's delete-pending timing or
+through the same public interface. Windows CI enables 8.3 names on the test temp volume and sets
+`SIDEVOICE_REQUIRE_8DOT3=1`, making an unavailable alias fixture a failure. A dedicated `--nocapture` step prints
+an evidence line after all alias assertions pass. Locally, with that variable absent, the fixture can skip with an
+explicit reason when the volume reports short names disabled. Tests do not claim to simulate every filesystem's delete-pending timing or
 require privileged mount creation.
