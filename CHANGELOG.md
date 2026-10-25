@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.2](https://github.com/sidevoice/sidevoice-core/compare/v0.12.1...v0.12.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **platform:** recheck held ancestry before publishing writes ([#204](https://github.com/sidevoice/sidevoice-core/issues/204)) ([132331f](https://github.com/sidevoice/sidevoice-core/commit/132331fbe2e5df00b10a32dc328983d3d22fd6d4))
+
 ## [0.12.1](https://github.com/sidevoice/sidevoice-core/compare/v0.12.0...v0.12.1) (2026-10-25)
 
 
