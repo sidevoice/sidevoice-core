@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "sidevoice-platform"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "dirs",
  "gethostname",

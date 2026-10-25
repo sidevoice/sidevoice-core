@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/sidevoice/sidevoice-core/compare/v0.12.0...v0.12.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **platform:** accept native Unix child filenames ([#202](https://github.com/sidevoice/sidevoice-core/issues/202)) ([84f6c32](https://github.com/sidevoice/sidevoice-core/commit/84f6c32aacf29e83be401e0ad43dcdabd6f5b1cf))
+
 ## [0.12.0](https://github.com/sidevoice/sidevoice-core/compare/v0.11.1...v0.12.0) (2026-10-25)
 
 
