@@ -25,6 +25,8 @@ mod imp;
 #[path = "fs/windows.rs"]
 mod imp;
 
+#[cfg(windows)]
+pub(crate) use imp::record_name;
 pub use imp::{Held as HeldDirectory, Os as Files};
 
 use crate::user::{User, UserId};
@@ -75,19 +77,19 @@ pub trait Directory: Sized {
 }
 
 /// A root-to-leaf sequence, kept alive for the entire capability. Per-OS code controls how it is opened/reopened.
-struct HeldState {
+pub(crate) struct HeldState {
     chain: Vec<(PathBuf, File)>,
     // None applies the ancestor policy to the leaf too (a system or user program directory).
     access: Option<Access>,
 }
 
 impl HeldState {
-    fn leaf(&self) -> (&Path, &File) {
+    pub(crate) fn leaf(&self) -> (&Path, &File) {
         let (path, file) = self.chain.last().expect("an absolute directory has a root");
         (path, file)
     }
 
-    fn verify(&self) -> io::Result<()> {
+    pub(crate) fn verify(&self) -> io::Result<()> {
         for (index, (path, held)) in self.chain.iter().enumerate() {
             let leaf = index + 1 == self.chain.len();
             let current =
@@ -124,7 +126,7 @@ fn directory_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn child_name(name: &OsStr) -> io::Result<&Path> {
+pub(crate) fn child_name(name: &OsStr) -> io::Result<&Path> {
     let path = Path::new(name);
     let mut components = path.components();
     if !matches!(components.next(), Some(std::path::Component::Normal(_)))
@@ -204,7 +206,7 @@ pub enum Create {
 /// took its path (a rotation, a replacement). Compared only with another reading on this machine; holds nothing open.
 #[derive(PartialEq)]
 pub struct FileId {
-    volume: u64,
+    pub(crate) volume: u64,
     index: u128,
 }
 

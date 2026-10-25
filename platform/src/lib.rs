@@ -13,6 +13,7 @@ pub mod data_dir;
 pub mod fs;
 pub mod ipc;
 pub mod process;
+pub mod removal;
 pub mod stop;
 pub mod target;
 pub mod user;

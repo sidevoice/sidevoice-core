@@ -193,7 +193,7 @@ fn write_whole_at(dir: &File, path: &Path, bytes: &[u8], how: Publish) -> io::Re
 }
 
 /// The directory capability: no public operations beyond `Directory`.
-pub struct Held(HeldState);
+pub struct Held(pub(crate) HeldState);
 
 impl Held {
     fn open_with(path: &Path, access: Option<Access>) -> io::Result<Self> {
