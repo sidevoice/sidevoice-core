@@ -258,11 +258,16 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
     } else {
         None
     };
-    write_whole_in(path, bytes, how)
+    write_whole_in(path, bytes, how, || Ok(()))
 }
 
 /// The single staging/publication implementation; held-directory callers keep the entire checked ancestry alive.
-fn write_whole_in(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
+fn write_whole_in(
+    path: &Path,
+    bytes: &[u8],
+    how: Publish,
+    before_publish: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     // std supplies the extended-length spelling required by raw CreateFileW and tempfile's MoveFileExW, without
     // relying on a process manifest opting into long paths. Resolve only the already-checked (or vouched-for)
     // parent, never the record: a final link must not be followed. Held callers retain the original ancestry for
@@ -278,6 +283,7 @@ fn write_whole_in(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
         .make_in(&dir, |temp| Os::open_private(temp, Create::New))?;
     staged.write_all(bytes)?;
     staged.as_file().sync_all()?;
+    before_publish()?;
     match how {
         Publish::New => staged.persist_noclobber(&path),
         _ => staged.persist(&path),
@@ -333,7 +339,7 @@ impl super::Directory for Held {
         self.0.verify()?;
         let path = self.0.leaf().0.join(name);
         open_record(&path, Access::NotWritableByOthers)?;
-        write_whole_in(&path, bytes, Publish::Vouched)
+        write_whole_in(&path, bytes, Publish::Vouched, || self.0.before_publish())
     }
 
     fn remove(&self, name: &OsStr) -> io::Result<()> {

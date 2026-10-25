@@ -69,7 +69,9 @@ pub trait Directory: Sized {
 
     /// Atomically publishes a private record through this directory, using the same staging/sync/publication as
     /// [`Fs::write_private`]. An existing record must satisfy `NotWritableByOthers`; unsafe state is never repaired.
-    /// Readable-but-not-writable-by-others directories are accepted. Windows has no directory flush guarantee.
+    /// Ancestry is checked again after staging/sync, immediately before publication; on refusal the staged file
+    /// is removed. Readable-but-not-writable-by-others directories are accepted. Windows has no directory flush
+    /// guarantee.
     fn write(&self, name: &OsStr, bytes: &[u8]) -> io::Result<()>;
 
     /// Removes one regular record satisfying `NotWritableByOthers`, never a directory or link. An absent child is
@@ -88,6 +90,14 @@ impl HeldState {
     pub(crate) fn leaf(&self) -> (&Path, &File) {
         let (path, file) = self.chain.last().expect("an absolute directory has a root");
         (path, file)
+    }
+
+    // Called after the staged file is synced, immediately before publication. The writer retains responsibility
+    // for removing the staging file if this check fails (relative to the held directory on Unix).
+    fn before_publish(&self) -> io::Result<()> {
+        #[cfg(test)]
+        tests::before_publish();
+        self.verify()
     }
 
     pub(crate) fn verify(&self) -> io::Result<()> {
@@ -575,6 +585,17 @@ pub trait TestFiles {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        static BEFORE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn before_publish() {
+        let hook = BEFORE_PUBLISH.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     use super::*;
     use std::io::Write;
 
@@ -1285,6 +1306,118 @@ mod tests {
                 fs::rename(moving, &displaced)
                     .expect("rename succeeds once held handles are released");
             }
+        }
+    }
+
+    #[test]
+    fn held_write_rechecks_ancestry_after_staging_before_publication() {
+        for ancestor in [false, true] {
+            let root = scratch();
+            let parent = root.path().join("parent");
+            let path = parent.join("data");
+            Files::ensure_private_dir(&path).unwrap();
+            let dir = held(&path, Access::Private);
+            dir.write(OsStr::new("record"), b"original").unwrap();
+            let moving = if ancestor {
+                parent.clone()
+            } else {
+                path.clone()
+            };
+            let displaced = root.path().join("displaced");
+            let hook_path = path.clone();
+            let hook_moving = moving.clone();
+            let hook_displaced = displaced.clone();
+            BEFORE_PUBLISH.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    assert_eq!(fs::read(hook_path.join("record")).unwrap(), b"original");
+                    let staged = fs::read_dir(&hook_path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .find(|entry| {
+                            is_staging_name(OsStr::new("record"), entry.file_name().unwrap())
+                        })
+                        .expect("hook runs after staging, before publication");
+                    assert_eq!(fs::read(staged).unwrap(), b"replacement");
+                    let renamed = fs::rename(&hook_moving, &hook_displaced);
+                    if cfg!(windows) {
+                        assert!(
+                            renamed.is_err(),
+                            "held Windows ancestry must prevent replacement"
+                        );
+                    } else {
+                        renamed.unwrap();
+                        Files::ensure_private_dir(&hook_path).unwrap();
+                        Files::write_private(&hook_path.join("record"), b"decoy").unwrap();
+                    }
+                }));
+            });
+            let result = dir.write(OsStr::new("record"), b"replacement");
+            assert!(
+                BEFORE_PUBLISH.with(|slot| slot.borrow().is_none()),
+                "hook ran"
+            );
+            if cfg!(windows) {
+                result.unwrap();
+                assert_eq!(fs::read(path.join("record")).unwrap(), b"replacement");
+                assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+                drop(dir);
+                fs::rename(&moving, &displaced).expect("rename works after held handles close");
+            } else {
+                assert!(refused(result));
+                let original = if ancestor {
+                    displaced.join("data")
+                } else {
+                    displaced
+                };
+                assert_eq!(fs::read(original.join("record")).unwrap(), b"original");
+                assert_eq!(
+                    fs::read_dir(original).unwrap().count(),
+                    1,
+                    "staging file removed from displaced directory"
+                );
+                assert_eq!(fs::read(path.join("record")).unwrap(), b"decoy");
+                assert_eq!(
+                    fs::read_dir(path).unwrap().count(),
+                    1,
+                    "replacement directory untouched"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn held_write_refuses_post_staging_permission_changes_and_cleans_up() {
+        // Windows prevents ancestor renames; changed access exercises refusal and staging cleanup on every OS.
+        for ancestor in [false, true] {
+            let root = scratch();
+            let parent = root.path().join("parent");
+            let path = parent.join("data");
+            Files::ensure_private_dir(&path).unwrap();
+            let dir = held(&path, Access::Private);
+            dir.write(OsStr::new("record"), b"original").unwrap();
+            let changed = if ancestor { parent } else { path.clone() };
+            let hook_path = path.clone();
+            BEFORE_PUBLISH.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    assert_eq!(
+                        fs::read_dir(&hook_path).unwrap().count(),
+                        2,
+                        "record and staged file"
+                    );
+                    Files::let_others_change(&changed);
+                }));
+            });
+            assert!(refused(dir.write(OsStr::new("record"), b"replacement")));
+            assert!(
+                BEFORE_PUBLISH.with(|slot| slot.borrow().is_none()),
+                "hook ran"
+            );
+            assert_eq!(fs::read(path.join("record")).unwrap(), b"original");
+            assert_eq!(
+                fs::read_dir(path).unwrap().count(),
+                1,
+                "staging file removed"
+            );
         }
     }
 
