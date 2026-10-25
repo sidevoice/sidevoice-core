@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/sidevoice/sidevoice-core/compare/v0.11.1...v0.12.0) (2026-10-25)
+
+
+### Features
+
+* **platform:** add allowlisted held-root tree removal ([#200](https://github.com/sidevoice/sidevoice-core/issues/200)) ([6d285ba](https://github.com/sidevoice/sidevoice-core/commit/6d285bae304745764b77b7ee592d5e372de4c9ab))
+
 ## [0.11.1](https://github.com/sidevoice/sidevoice-core/compare/v0.11.0...v0.11.1) (2026-10-24)
 
 
