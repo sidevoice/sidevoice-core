@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.4](https://github.com/sidevoice/sidevoice-core/compare/v0.12.3...v0.12.4) (2026-10-26)
+
+
+### Bug Fixes
+
+* **platform:** read an open file's macOS ACL by its descriptor ([#209](https://github.com/sidevoice/sidevoice-core/issues/209)) ([23cdcad](https://github.com/sidevoice/sidevoice-core/commit/23cdcad30c683a2d89baf002ebdbb7f850584397))
+
 ## [0.12.3](https://github.com/sidevoice/sidevoice-core/compare/v0.12.2...v0.12.3) (2026-10-26)
 
 
