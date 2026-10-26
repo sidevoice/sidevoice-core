@@ -28,8 +28,13 @@ mod imp;
 #[path = "fs/windows.rs"]
 mod imp;
 
+pub(crate) use imp::mount_of;
+#[cfg(all(test, windows))]
+pub(crate) use imp::set_junction;
+#[cfg(unix)]
+pub(crate) use imp::Mount;
 #[cfg(windows)]
-pub(crate) use imp::record_name;
+pub(crate) use imp::{open_relative, record_name};
 pub use imp::{Held as HeldDirectory, Os as Files};
 
 use crate::user::{User, UserId};
@@ -67,18 +72,22 @@ pub trait Directory: Sized {
     fn open(path: &Path, access: Access) -> io::Result<Self>;
 
     /// Opens an existing directory beneath this one without following any link: `relative` is descended one
-    /// component at a time from the held handle, each step opened relative to the one before it with no link resolved
-    /// (Unix: `openat` with `O_NOFOLLOW | O_DIRECTORY`; Windows: beneath ancestors held without delete sharing, with
-    /// `OPEN_REPARSE_POINT`). A link, junction or other reparse point at any component, a component on another
-    /// device or volume, and an unsafe directory on the way are refused with `PermissionDenied`; a missing one is
-    /// `NotFound` and is never created. Use it to reach a directory that must be the one beneath an already held
-    /// root, instead of checking a path and then opening it ([`Directory::open`] follows trusted links).
+    /// component at a time from the held handle, each step opened relative to the handle before it, never by path,
+    /// with no link resolved (Unix: `openat` with `O_NOFOLLOW | O_DIRECTORY`; Windows: `NtCreateFile` with the
+    /// parent handle as `RootDirectory` and `FILE_OPEN_REPARSE_POINT`). A link, junction or other reparse point at
+    /// any component, a component on another device, volume or mount (a same-device bind mount included), and an
+    /// unsafe directory on the way are refused with `PermissionDenied`; a missing one is `NotFound` and is never
+    /// created. This directory may itself be a mount point: its own device and mount are the boundary. Use it to
+    /// reach a directory that must be the one beneath an already held root, instead of checking a path and then
+    /// opening it ([`Directory::open`] follows trusted links, so how this directory was selected is the caller's).
     ///
     /// `relative` is one or more ordinary child names joined by separators, each with the same syntax as a
-    /// [`Directory::read`] name; an empty, absolute or prefixed path, `.`, `..` and empty components are
-    /// `InvalidInput`. `access` applies to the new leaf; every directory above it, this one included, must pass the
-    /// ancestor rule. The result holds this directory's ancestry plus the new components, so it verifies and removes
-    /// like one returned by [`Directory::open`]. This directory stays held and usable.
+    /// [`Directory::read`] name (Windows case and 8.3 aliases name the same child and are not refused); an empty,
+    /// absolute or prefixed path, `.`, `..` and empty components are `InvalidInput`. `access` applies to the new
+    /// leaf; every directory above it, this one included, must pass the ancestor rule. The result holds this
+    /// directory's ancestry plus the new components and is verified before it is returned; later re-verification
+    /// re-resolves paths and compares identities, which detects stable replacement but is not an atomic snapshot.
+    /// It removes like one returned by [`Directory::open`]. This directory stays held and usable.
     fn open_beneath(&self, relative: &Path, access: Access) -> io::Result<Self>;
 
     /// Reads a regular record from the checked handle, bounded by `limit` (`InvalidData` when exceeded).
@@ -122,11 +131,13 @@ impl HeldState {
     }
 
     /// The chain [`Directory::open_beneath`] holds: this one's handles (duplicated), then each name of `relative`
-    /// opened by `imp::open_subdirectory` relative to the handle before it, on this leaf's volume; verified whole.
+    /// opened by `imp::open_subdirectory` relative to the handle before it, on this leaf's device and mount; verified
+    /// whole. This leaf may itself be a mount point (it was opened explicitly); a mount met below it is refused.
     pub(crate) fn beneath(&self, relative: &Path, access: Access) -> io::Result<Self> {
         let names = relative_names(relative)?;
         self.verify()?;
-        let volume = Files::identity(self.leaf().1)?.volume;
+        let start = self.leaf().1;
+        let boundary = (Files::identity(start)?.volume, mount_of(start)?);
         let mut chain = self
             .chain
             .iter()
@@ -136,10 +147,14 @@ impl HeldState {
             let leaf = index + 1 == names.len();
             let (parent_path, parent) = chain.last().expect("a held directory has a root");
             let path = parent_path.join(name);
+            #[cfg(test)]
+            tests::before_descent();
             let file = imp::open_subdirectory(parent, &path, !leaf)?;
-            if Files::identity(&file)?.volume != volume {
-                return Err(refused(&path, "on another device or volume"));
-            }
+            same_boundary(
+                &boundary,
+                &(Files::identity(&file)?.volume, mount_of(&file)?),
+                &path,
+            )?;
             if leaf {
                 judge_access(&file, access, true).map_err(|error| refused(&path, error))?;
             } else {
@@ -305,6 +320,18 @@ fn record_path(path: &Path, how: Publish) -> io::Result<PathBuf> {
         .file_name()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "a record must have a file name"))?;
     Ok(resolve_links(parent_of(path)?)?.join(name))
+}
+
+/// Whether a directory met in [`Directory::open_beneath`] is on the starting directory's device (Windows: volume)
+/// and mount. A same-device bind mount has the same device but another mount: refused too.
+fn same_boundary<M: PartialEq>(start: &(u64, M), here: &(u64, M), path: &Path) -> io::Result<()> {
+    if start.0 != here.0 {
+        return Err(refused(path, "on another device or volume"));
+    }
+    if start.1 != here.1 {
+        return Err(refused(path, "on another mount"));
+    }
+    Ok(())
 }
 
 /// The names of `relative` for [`Directory::open_beneath`]: each one ordinary child name (on Windows also free of
@@ -799,6 +826,19 @@ mod tests {
 
     pub(super) fn before_publish() {
         let hook = BEFORE_PUBLISH.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    thread_local! {
+        static BEFORE_DESCENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    // Runs once, after the starting chain is verified and before the next component is opened: where a held
+    // directory can change under a descent.
+    pub(super) fn before_descent() {
+        let hook = BEFORE_DESCENT.with(|slot| slot.borrow_mut().take());
         if let Some(hook) = hook {
             hook();
         }
@@ -1416,6 +1456,134 @@ mod tests {
             .unwrap();
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("another device"), "{error}");
+    }
+
+    // The decision behind descent's boundary: a same-device bind mount differs only in its mount.
+    #[test]
+    fn descent_boundary_refuses_another_device_and_another_mount_on_the_same_device() {
+        let path = Path::new("component");
+        assert!(same_boundary(&(1, 10), &(1, 10), path).is_ok());
+        let device = same_boundary(&(1, 10), &(2, 10), path).unwrap_err();
+        assert!(device.to_string().contains("another device"), "{device}");
+        let mount = same_boundary(&(1, 10), &(1, 11), path).unwrap_err();
+        assert_eq!(mount.kind(), ErrorKind::PermissionDenied);
+        assert!(mount.to_string().contains("another mount"), "{mount}");
+    }
+
+    /// Directory mount points on the same device as the mount holding their parent (bind mounts), from
+    /// `/proc/self/mountinfo` (field 3: `major:minor`, field 5: the mount point; `\040` and the like left escaped).
+    #[cfg(target_os = "linux")]
+    fn same_device_bind_mounts() -> Vec<PathBuf> {
+        let info = fs::read_to_string("/proc/self/mountinfo").unwrap();
+        let mounts: Vec<(&str, PathBuf)> = info
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<_> = line.split(' ').collect();
+                Some((*fields.get(2)?, PathBuf::from(fields.get(4)?)))
+            })
+            .collect();
+        let device_of = |path: &Path| {
+            mounts
+                .iter()
+                .filter(|(_, point)| path.starts_with(point))
+                .max_by_key(|(_, point)| point.components().count())
+                .map(|(device, _)| *device)
+        };
+        mounts
+            .iter()
+            .filter(|(device, point)| {
+                point
+                    .parent()
+                    .is_some_and(|parent| device_of(parent) == Some(*device))
+                    && fs::symlink_metadata(point).is_ok_and(|m| m.is_dir())
+            })
+            .map(|(_, point)| point.clone())
+            .collect()
+    }
+
+    // Making a bind mount needs privileges the tests do not have; where the host already has one (a container's
+    // read-only `/proc/sys`, for one) it is used, otherwise the decision test above stands for it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_beneath_refuses_a_same_device_bind_mount_but_not_a_mounted_start() {
+        let mut checked = false;
+        let binds = same_device_bind_mounts();
+        for point in &binds {
+            let (Some(parent), Some(name)) = (point.parent(), point.file_name()) else {
+                continue;
+            };
+            let Ok(above) = HeldDirectory::open(parent, Access::NotWritableByOthers) else {
+                continue;
+            };
+            let error = above
+                .open_beneath(Path::new(name), Access::NotWritableByOthers)
+                .err()
+                .unwrap_or_else(|| panic!("{}: a bind mount was descended into", point.display()));
+            assert!(
+                error.to_string().contains("another mount"),
+                "{}: {error}",
+                point.display()
+            );
+            // The mount opened explicitly is a valid start; what is below it, on the same mount, is descended.
+            if let Ok(start) = HeldDirectory::open(point, Access::NotWritableByOthers) {
+                let inner = fs::read_dir(point)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .find(|entry| {
+                        entry.file_type().is_ok_and(|kind| kind.is_dir())
+                            && !binds.contains(&entry.path())
+                    });
+                if let Some(inner) = inner {
+                    let below = start
+                        .open_beneath(Path::new(&inner.file_name()), Access::NotWritableByOthers);
+                    assert!(
+                        below
+                            .as_ref()
+                            .map_or_else(|e| !e.to_string().contains("mount"), |_| true),
+                        "{}: {:?}",
+                        inner.path().display(),
+                        below.err()
+                    );
+                }
+            }
+            checked = true;
+            break;
+        }
+        if !checked {
+            eprintln!("no reachable same-device bind mount on this host: covered by the boundary decision test");
+        }
+    }
+
+    // The P1 race on Windows: an empty held directory becomes a junction in place after the chain was verified and
+    // before the next component is opened. Opened relative to the held handle, the child is looked up in the held
+    // directory itself (empty: `NotFound`); a path-based open would have reached the junction's target.
+    #[cfg(windows)]
+    #[test]
+    fn open_beneath_never_traverses_a_junction_set_on_a_held_directory() {
+        use std::os::windows::fs::MetadataExt;
+        let temp = scratch();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        for dir in [&root, &outside, &outside.join("c")] {
+            Files::create_private_dir(dir).unwrap();
+        }
+        let held = held(&root, Access::Private);
+        let (junction, target) = (root.clone(), outside.clone());
+        BEFORE_DESCENT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || set_junction(&junction, &target)));
+        });
+        let error = held
+            .open_beneath(Path::new("c"), Access::Private)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), ErrorKind::NotFound, "{error}");
+        assert!(fs::symlink_metadata(&root).unwrap().file_attributes() & 0x400 != 0);
+        // The capability's next use sees the junction and refuses.
+        assert!(refused(held.write(OsStr::new("record"), b"redirected")));
+        assert!(!outside.join("record").exists());
+        assert!(fs::read_dir(outside.join("c")).unwrap().next().is_none());
     }
 
     #[cfg(windows)]

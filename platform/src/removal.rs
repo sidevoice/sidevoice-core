@@ -356,6 +356,21 @@ mod tests {
         assert!(root.join("recovery").exists());
     }
 
+    // An empty held root turned into a junction in place: removal opens entries relative to the held handle and
+    // rechecks the root, so the junction's target is never reached.
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_set_on_a_held_root_never_redirects_removal() {
+        let (temp, root, held) = fixture();
+        let outside = temp.path().join("outside");
+        Files::create_private_dir(&outside).unwrap();
+        Files::create_private_dir(&outside.join("blobs")).unwrap();
+        put(&outside.join("blobs").join("payload"));
+        crate::fs::set_junction(&root, &outside);
+        assert!(held.remove_contents(&[OsStr::new("blobs")]).is_err());
+        assert!(outside.join("blobs").join("payload").exists());
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_junction_is_removed_without_touching_its_target() {

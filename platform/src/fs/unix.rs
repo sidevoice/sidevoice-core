@@ -850,6 +850,31 @@ fn directory_error(path: &Path, error: io::Error) -> io::Error {
     }
 }
 
+/// Which mount a handle is on. Linux: the mount ID from `/proc/self/fdinfo`, which tells bind mounts apart even on
+/// one device (kept over `statx`'s `STATX_MNT_ID` for kernels before 5.8); macOS: `fstatfs`'s mounted-at path.
+/// Shared by held descent and removal; an unavailable probe fails closed.
+#[derive(PartialEq, Debug)]
+pub(crate) struct Mount(
+    #[cfg(target_os = "linux")] u64,
+    #[cfg(target_os = "macos")] Vec<i8>,
+);
+
+#[cfg(target_os = "linux")]
+pub(crate) fn mount_of(file: &File) -> io::Result<Mount> {
+    use std::os::fd::AsRawFd;
+    let info = fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd()))?;
+    info.lines()
+        .find_map(|line| line.strip_prefix("mnt_id:\t"))
+        .and_then(|id| id.trim().parse().ok())
+        .map(Mount)
+        .ok_or_else(|| super::denied("cannot inspect the mount"))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn mount_of(file: &File) -> io::Result<Mount> {
+    Ok(Mount(rfs::fstatfs(file)?.f_mntonname.to_vec()))
+}
+
 pub(super) fn reopen_directory(path: &Path) -> io::Result<File> {
     open_dir(path, true, true)
 }

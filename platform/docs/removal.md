@@ -8,10 +8,18 @@ The established Unix system-owned ancestor-link allowance (for example macOS `/v
 `Directory::open` follows trusted (same-user) links, so a root validated by path and then opened can be swapped
 for a link in between. When the directory to remove from must be the one beneath an already held root, descend
 with `Directory::open_beneath(relative, access)` instead: each component is opened relative to the previous handle
-without resolving any link (Unix `openat` with `O_NOFOLLOW | O_DIRECTORY`; Windows beneath ancestors held without
-delete sharing, with `OPEN_REPARSE_POINT`), links and reparse points are refused, and every component must be on
-the held root's device or volume. The result holds the root's ancestry plus the new components, so `Removal`
-works on it unchanged.
+without resolving any link (Unix `openat` with `O_NOFOLLOW | O_DIRECTORY`; Windows `NtCreateFile` relative to the
+parent handle with `FILE_OPEN_REPARSE_POINT`), links and reparse points are refused, and every component must be
+on the held root's device and mount (Linux mount ID, macOS mounted-at path, Windows volume): a same-device bind
+mount below the root is refused, while the root itself may be a mount point. The result holds the root's ancestry
+plus the new components, so `Removal` works on it unchanged. The starting root is still selected by
+`Directory::open`; descending only removes the race below it.
+
+On Windows, removal also opens every entry relative to its held parent's handle, never by path: an empty held
+directory can become a junction in place (no share mode prevents setting a reparse point), and a path-based open
+would follow it. Listing a directory's entries is still by path; a name listed through a redirected path is
+looked up in the held parent and is simply not found there, so the directory is left non-empty and its deletion
+fails.
 
 ```rust
 use std::ffi::OsStr;
