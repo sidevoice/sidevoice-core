@@ -52,6 +52,8 @@ fn visit(
     // ordinary ancestor remains open on the recursion stack without delete sharing until its children are done.
     let access =
         GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES | if remove { DELETE } else { 0 };
+    #[cfg(test)]
+    super::tests::before_entry_open();
     let file = match crate::fs::open_relative(parent, name, access, false) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),

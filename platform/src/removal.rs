@@ -64,6 +64,20 @@ impl Removal for HeldDirectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    thread_local! {
+        static BEFORE_ENTRY_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    // Runs once, after the held root is verified and before an entry is opened beneath it (Windows walk).
+    #[cfg(windows)]
+    pub(super) fn before_entry_open() {
+        let hook = BEFORE_ENTRY_OPEN.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     use crate::fs::{Access, Create, Files, Fs, TestFiles};
     use std::fs::{self, File};
     use std::path::{Path, PathBuf};
@@ -356,8 +370,10 @@ mod tests {
         assert!(root.join("recovery").exists());
     }
 
-    // An empty held root turned into a junction in place: removal opens entries relative to the held handle and
-    // rechecks the root, so the junction's target is never reached.
+    // An empty held root turned into a junction in place after removal verified it and before the entry is opened:
+    // the entry is opened relative to the held handle, so the junction's target is never reached. The justified
+    // refusals are the relative open's `ERROR_CANT_RESOLVE_FILENAME` (1921) or, if the entry is simply not found in
+    // the held root, the final recheck seeing the junction (`PermissionDenied`).
     #[cfg(windows)]
     #[test]
     fn windows_junction_set_on_a_held_root_never_redirects_removal() {
@@ -366,8 +382,18 @@ mod tests {
         Files::create_private_dir(&outside).unwrap();
         Files::create_private_dir(&outside.join("blobs")).unwrap();
         put(&outside.join("blobs").join("payload"));
-        crate::fs::set_junction(&root, &outside);
-        assert!(held.remove_contents(&[OsStr::new("blobs")]).is_err());
+        let (junction, target) = (root.clone(), outside.clone());
+        BEFORE_ENTRY_OPEN.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                crate::fs::set_junction(&junction, &target)
+            }));
+        });
+        let error = held.remove_contents(&[OsStr::new("blobs")]).unwrap_err();
+        assert!(
+            error.kind() == io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1921),
+            "{error:?}"
+        );
+        assert!(BEFORE_ENTRY_OPEN.with(|slot| slot.borrow().is_none()));
         assert!(outside.join("blobs").join("payload").exists());
     }
 

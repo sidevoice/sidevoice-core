@@ -1557,8 +1557,11 @@ mod tests {
     }
 
     // The P1 race on Windows: an empty held directory becomes a junction in place after the chain was verified and
-    // before the next component is opened. Opened relative to the held handle, the child is looked up in the held
-    // directory itself (empty: `NotFound`); a path-based open would have reached the junction's target.
+    // before the next component is opened. The child is opened relative to the held handle, never by path, so the
+    // junction's target is never reached. Native NTFS refuses that relative open with `ERROR_CANT_RESOLVE_FILENAME`
+    // (1921, `FilesystemLoop`): the parse starts at a directory that is now a reparse point and is not resolved.
+    // `NotFound` (the child looked up in the empty held directory itself) is the other justified refusal; any other
+    // error, or success, fails the test.
     #[cfg(windows)]
     #[test]
     fn open_beneath_never_traverses_a_junction_set_on_a_held_directory() {
@@ -1578,7 +1581,10 @@ mod tests {
             .open_beneath(Path::new("c"), Access::Private)
             .err()
             .unwrap();
-        assert_eq!(error.kind(), ErrorKind::NotFound, "{error}");
+        assert!(
+            error.kind() == ErrorKind::NotFound || error.raw_os_error() == Some(1921),
+            "{error:?}"
+        );
         assert!(fs::symlink_metadata(&root).unwrap().file_attributes() & 0x400 != 0);
         // The capability's next use sees the junction and refuses.
         assert!(refused(held.write(OsStr::new("record"), b"redirected")));

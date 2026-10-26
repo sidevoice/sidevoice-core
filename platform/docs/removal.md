@@ -17,9 +17,12 @@ plus the new components, so `Removal` works on it unchanged. The starting root i
 
 On Windows, removal also opens every entry relative to its held parent's handle, never by path: an empty held
 directory can become a junction in place (no share mode prevents setting a reparse point), and a path-based open
-would follow it. Listing a directory's entries is still by path; a name listed through a redirected path is
-looked up in the held parent and is simply not found there, so the directory is left non-empty and its deletion
-fails.
+would follow it. Listing a directory's entries is still by path, so the listing is untrusted and may be stale or
+redirected; only the names it yields are used, each opened relative to the held parent. Removal therefore stays
+contained beneath the allowlisted subtree whatever the listing says: a listed name that also exists in the held
+directory opens and deletes the real child there, never the redirected one; a name that does not exist there is
+skipped. An unreliable listing can omit real entries, leaving partial progress (a directory left non-empty, whose
+own deletion then fails); retry with the same allowlist.
 
 ```rust
 use std::ffi::OsStr;
