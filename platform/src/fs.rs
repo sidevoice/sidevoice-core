@@ -2189,6 +2189,51 @@ mod tests {
         }
     }
 
+    // Unix only, as the test above. An ACL that passes access down to what is created in a directory (Linux: a default
+    // ACL; macOS: `file_inherit`) must never reach a published record: on Linux the mode a record is created with
+    // bounds it, and the record is private; on macOS it would not be, so nothing is staged there at all. Either way, no
+    // record anybody else may read or write, new or replacing one, is ever published.
+    #[cfg(unix)]
+    #[test]
+    fn an_acl_passing_access_down_never_reaches_a_published_record() {
+        for whom in [imp::Grantee::User, imp::Grantee::Group] {
+            for write in [false, true] {
+                let root = scratch();
+                let dir = root.path().join("passing-down");
+                Files::create_private_dir(&dir).unwrap();
+                let held = held(&dir, Access::NotWritableByOthers);
+                held.write(OsStr::new("existing"), b"before").unwrap();
+                imp::pass_down_by_acl(&dir, whom, write);
+                for name in ["existing", "new"] {
+                    match held.write(OsStr::new(name), b"secret") {
+                        Ok(()) => assert!(private(&dir.join(name)), "{whom:?} {write} {name}"),
+                        Err(error) => assert_eq!(error.kind(), ErrorKind::PermissionDenied),
+                    }
+                    match Files::write_private(&dir.join(name), b"secret") {
+                        Ok(()) => assert!(private(&dir.join(name)), "{whom:?} {write} {name}"),
+                        Err(error) => assert_eq!(error.kind(), ErrorKind::PermissionDenied),
+                    }
+                }
+                assert!(private(&dir.join("existing")), "{whom:?} {write}");
+                let mut names: Vec<_> = fs::read_dir(&dir)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                names.sort();
+                assert!(
+                    names == ["existing"] || names == ["existing", "new"],
+                    "nothing staged is left: {names:?}"
+                );
+                #[cfg(target_os = "macos")]
+                assert_eq!(
+                    fs::read(dir.join("existing")).unwrap(),
+                    b"before",
+                    "refused before staging"
+                );
+            }
+        }
+    }
+
     // Unix only, as the test above: only there can a creation be left unfinished.
     #[cfg(unix)]
     #[test]

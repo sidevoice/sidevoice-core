@@ -336,16 +336,11 @@ fn acl_others(object: Object<'_>, mode: u32) -> io::Result<Others> {
 /// only take away) and applies to the object itself (not only to what is created inside) lets its user or group write
 /// when it grants any change (data, entries, attributes, security, owner); that is somebody untrusted writing unless
 /// the user may own what is on the way ([`trusted_owner`]) or the group may write there ([`trusted_group`]). One that
-/// names nobody this machine knows is untrusted. An allow entry for anybody but this user is somebody else reading.
+/// names nobody this machine knows is untrusted. An allow entry for anybody but this user is somebody else reading,
+/// one only what is created inside inherits too: what is made in it would not be private ([`check_inherited`]).
 #[cfg(target_os = "macos")]
 fn acl_others(object: Object<'_>, _mode: u32) -> io::Result<Others> {
-    use exacl::{AclEntryKind, AclOption, Flag, Perm};
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-    let path = match object {
-        Object::Open(file) => PathBuf::from(OsString::from_vec(rfs::getpath(file)?.into_bytes())),
-        Object::Entry(path) => path.to_owned(),
-    };
+    use exacl::{Flag, Perm};
     let changes = Perm::WRITE
         | Perm::APPEND
         | Perm::DELETE
@@ -354,10 +349,48 @@ fn acl_others(object: Object<'_>, _mode: u32) -> io::Result<Others> {
         | Perm::WRITEEXTATTR
         | Perm::WRITESECURITY
         | Perm::CHOWN;
-    let me = Uid::effective();
     let mut others = Others::Nothing;
+    for Granted {
+        entry,
+        trusted,
+        mine,
+    } in granted(object)?
+    {
+        if entry.perms.intersects(changes) && !trusted && !entry.flags.contains(Flag::ONLY_INHERIT)
+        {
+            return Ok(Others::Change);
+        }
+        if !mine {
+            others = Others::Read;
+        }
+    }
+    Ok(others)
+}
+
+/// An allow entry of an ACL (macOS), with whether who it names is trusted ([`trusted_owner`], [`trusted_group`]) and
+/// whether it is this user.
+#[cfg(target_os = "macos")]
+struct Granted {
+    entry: exacl::AclEntry,
+    trusted: bool,
+    mine: bool,
+}
+
+/// The allow entries of `object`'s ACL (macOS), [`Granted`]; deny entries only take away. A held handle's ACL is read
+/// by its path (`F_GETPATH`): `exacl` reads none by descriptor.
+#[cfg(target_os = "macos")]
+fn granted(object: Object<'_>) -> io::Result<Vec<Granted>> {
+    use exacl::{AclEntryKind, AclOption};
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let path = match object {
+        Object::Open(file) => PathBuf::from(OsString::from_vec(rfs::getpath(file)?.into_bytes())),
+        Object::Entry(path) => path.to_owned(),
+    };
+    let me = Uid::effective();
+    let mut granted = Vec::new();
     for entry in exacl::getfacl(&path, AclOption::SYMLINK_ACL)? {
-        if !entry.allow || entry.flags.contains(Flag::ONLY_INHERIT) {
+        if !entry.allow {
             continue;
         }
         let (trusted, mine) = match entry.kind {
@@ -371,14 +404,37 @@ fn acl_others(object: Object<'_>, _mode: u32) -> io::Result<Others> {
             },
             _ => (false, false),
         };
-        if entry.perms.intersects(changes) && !trusted {
-            return Ok(Others::Change);
-        }
-        if !mine {
-            others = Others::Read;
-        }
+        granted.push(Granted {
+            entry,
+            trusted,
+            mine,
+        });
     }
-    Ok(others)
+    Ok(granted)
+}
+
+/// That a record created in the directory `dir` is given nothing for anybody untrusted on creation, before any byte of
+/// it is written. macOS: a file created in a directory takes the directory's entries marked for files to inherit
+/// (`file_inherit`), whatever its mode, so an allow entry so marked for anybody untrusted, of any right (reading too),
+/// is refused. The directory itself may still be fine for others to read: only what would be made in it is refused.
+#[cfg(target_os = "macos")]
+fn check_inherited(dir: &File) -> io::Result<()> {
+    if granted(Object::Open(dir))?
+        .iter()
+        .any(|granted| granted.entry.flags.contains(exacl::Flag::FILE_INHERIT) && !granted.trusted)
+    {
+        return Err(super::denied(
+            "its ACL passes access to what is created in it on to others",
+        ));
+    }
+    Ok(())
+}
+
+/// Linux: a default ACL's entries are bounded by the mode a record is created with (`0600`: its mask, the group bits,
+/// gives nobody named anything), so nothing it passes down reaches others. Other Unix: no ACL is read.
+#[cfg(not(target_os = "macos"))]
+fn check_inherited(_dir: &File) -> io::Result<()> {
+    Ok(())
 }
 
 /// The uid an ACL entry names (macOS): an account's name, else a decimal uid; `None` for anything else (a GUID).
@@ -491,7 +547,8 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
 }
 
 /// The single atomic writer, also used by a held directory. `path` supplies only the staging label and leaf name;
-/// every filesystem operation is relative to `dir` (including cleanup if the directory was renamed meanwhile).
+/// every filesystem operation is relative to `dir` (including cleanup if the directory was renamed meanwhile). Nothing
+/// is staged in a directory that would pass access to others on to what is created in it ([`check_inherited`]).
 fn write_whole_at(
     dir: &File,
     path: &Path,
@@ -501,6 +558,7 @@ fn write_whole_at(
 ) -> io::Result<()> {
     let dir_path = super::parent_of(path)?;
     let name = path.file_name().unwrap_or_default();
+    check_inherited(dir).map_err(|error| super::refused(dir_path, error))?;
     let create =
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     // `tempfile` only names it: what it would remove on drop is removed below, relative to `dir`.
@@ -844,6 +902,20 @@ pub(super) enum Grantee {
 /// may not have); macOS: `chmod +a`.
 #[cfg(test)]
 pub(super) fn grant_by_acl(path: &Path, whom: Grantee, write: bool) {
+    acl_for_nobody(path, whom, write, false);
+}
+
+/// Has the directory `dir` pass access on to `whom` ([`Grantee`]) in what is created inside it, through an extended
+/// ACL only, `dir` itself granting them nothing (tests): with `write`, reading and writing; without, reading. Linux:
+/// a default ACL (`system.posix_acl_default`); macOS: `chmod +a` with `file_inherit,only_inherit`.
+#[cfg(test)]
+pub(super) fn pass_down_by_acl(dir: &Path, whom: Grantee, write: bool) {
+    acl_for_nobody(dir, whom, write, true);
+}
+
+/// [`grant_by_acl`], or with `pass_down` [`pass_down_by_acl`].
+#[cfg(test)]
+fn acl_for_nobody(path: &Path, whom: Grantee, write: bool, pass_down: bool) {
     let nobody = Account::from_name("nobody")
         .unwrap()
         .expect("a nobody account");
@@ -877,7 +949,11 @@ pub(super) fn grant_by_acl(path: &Path, whom: Grantee, write: bool) {
         }
         rfs::lsetxattr(
             path,
-            "system.posix_acl_access",
+            if pass_down {
+                "system.posix_acl_default"
+            } else {
+                "system.posix_acl_access"
+            },
             &acl,
             rfs::XattrFlags::empty(),
         )
@@ -892,7 +968,7 @@ pub(super) fn grant_by_acl(path: &Path, whom: Grantee, write: bool) {
                 Group::from_gid(nobody.gid).unwrap().unwrap().name
             ),
         };
-        let rights = match (fs::metadata(path).unwrap().is_dir(), write) {
+        let rights = match (fs::metadata(path).unwrap().is_dir() && !pass_down, write) {
             (true, true) => "list,search,add_file,add_subdirectory,delete_child",
             (true, false) => "list,search",
             (false, true) => "read,write,append",
@@ -900,7 +976,11 @@ pub(super) fn grant_by_acl(path: &Path, whom: Grantee, write: bool) {
         };
         let status = std::process::Command::new("chmod")
             .arg("+a")
-            .arg(format!("{principal} allow {rights}"))
+            .arg(if pass_down {
+                format!("{principal} allow {rights},file_inherit,only_inherit")
+            } else {
+                format!("{principal} allow {rights}")
+            })
             .arg(path)
             .status()
             .unwrap();
