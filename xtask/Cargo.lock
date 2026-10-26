@@ -570,6 +570,7 @@ name = "sidevoice-platform"
 version = "0.12.2"
 dependencies = [
  "dirs",
+ "errno",
  "exacl",
  "gethostname",
  "hex",
@@ -584,7 +585,6 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
- "uzers",
  "whoami",
  "widestring",
  "winapi-util",
@@ -745,15 +745,6 @@ checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "uzers"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b8275fb1afee25b4111d2dc8b5c505dbbc4afd0b990cb96deb2d88bff8be18d"
-dependencies = [
- "libc",
 ]
 
 [[package]]

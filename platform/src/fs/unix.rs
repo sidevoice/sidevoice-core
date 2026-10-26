@@ -1,7 +1,7 @@
 //! Unix: owner and mode bits, `O_NOFOLLOW`, the descriptor judged as opened, a record written relative to a handle on
-//! its directory (`rustix`); who the administrators are, from the system's user and group databases (`nix`, `uzers`);
-//! an extended ACL (Linux: whether there is one, `rustix`; macOS: its entries, `exacl`). The only `unsafe` of ours is
-//! the walk of the user database (`uzers::all_users`, [`accounts`]).
+//! its directory (`rustix`); who the administrators are, from the system's user and group databases (`nix`, and a walk of
+//! the user database through `libc`); an extended ACL (Linux: whether there is one, `rustix`; macOS: its entries,
+//! `exacl`). The only `unsafe` of ours is that walk (`getpwent`, [`accounts`]).
 //!
 //! Who is trusted besides this user: root and the administrators, the members of [`ADMIN_GROUPS`]. They may own what
 //! is on the way to our files, and one of those groups, or this user's own private group, may write in it. Anybody else
@@ -154,7 +154,8 @@ fn is_administrator(name: &str, gid: Gid, admin_groups: &[Group]) -> bool {
 }
 
 /// Whether the group `gid` may write in what is on the way to our files: one of [`ADMIN_GROUPS`], or this user's own
-/// private group ([`is_private_group`]).
+/// private group ([`is_private_group`], judged on what [`NSSWITCH`] names and on a walk of the user database,
+/// [`accounts`]).
 fn trusted_group(gid: u32) -> io::Result<bool> {
     let Some(group) = Group::from_gid(Gid::from_raw(gid))? else {
         return Ok(false);
@@ -165,37 +166,124 @@ fn trusted_group(gid: u32) -> io::Result<bool> {
     let Some(me) = Account::from_uid(Uid::effective())? else {
         return Ok(false);
     };
-    Ok(is_private_group(&group, &me, &accounts()))
+    let nsswitch = match fs::read_to_string(NSSWITCH) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    is_private_group(&group, &me, nsswitch.as_deref(), accounts)
 }
 
-/// Every account in the system's user database, by uid with its primary group (`getpwent`, through `uzers`).
-fn accounts() -> Vec<(Uid, Gid)> {
+/// Where the system says which sources its user and group databases are read from (glibc's Name Service Switch).
+const NSSWITCH: &str = "/etc/nsswitch.conf";
+
+/// Every account in the system's user database, by uid with its primary group: `getpwent` until it reports the end
+/// ([`walk`]). An error on the way is the walk's error, never its end. `libc` directly: `uzers` takes any null
+/// `getpwent` for the end, and `nix` does not wrap it.
+fn accounts() -> io::Result<Vec<(Uid, Gid)>> {
+    /// Ends the walk however it ends.
+    struct End;
+    impl Drop for End {
+        fn drop(&mut self) {
+            // SAFETY: ends the walk `setpwent` began, under the same lock; no record of it is held past this point.
+            unsafe { libc::endpwent() }
+        }
+    }
     static WALK: Mutex<()> = Mutex::new(());
     let _walk = WALK.lock().unwrap_or_else(PoisonError::into_inner);
-    // SAFETY: `getpwent` walks process-wide state, not thread-safe; this lock keeps our walks from interleaving, and
-    // nothing else in this process walks the user database.
-    unsafe { uzers::all_users() }
-        .map(|account| {
-            (
-                Uid::from_raw(account.uid()),
-                Gid::from_raw(account.primary_group_id()),
-            )
-        })
-        .collect()
+    // SAFETY: `setpwent`, `getpwent` and `endpwent` walk process-wide state and are not thread-safe: this lock keeps
+    // our walks from interleaving, and nothing else in this process walks the user database.
+    unsafe { libc::setpwent() };
+    let _end = End;
+    walk(|| {
+        // `getpwent` returns null both at the end and on an error; only `errno`, cleared first, tells them apart.
+        errno::set_errno(errno::Errno(0));
+        // SAFETY: as for `setpwent` above.
+        let entry = unsafe { libc::getpwent() };
+        if entry.is_null() {
+            return match errno::errno().0 {
+                // `ENOENT` is how glibc's sources report their end (`getpwent_r`).
+                0 | libc::ENOENT => Ok(None),
+                code => Err(io::Error::from_raw_os_error(code)),
+            };
+        }
+        // SAFETY: a non-null result points at a record valid until the next call; two integers are copied out.
+        let entry = unsafe { &*entry };
+        Ok(Some((
+            Uid::from_raw(entry.pw_uid),
+            Gid::from_raw(entry.pw_gid),
+        )))
+    })
+}
+
+/// Every account `next` gives, until it gives none; its first error is the walk's.
+fn walk(mut next: impl FnMut() -> io::Result<Option<(Uid, Gid)>>) -> io::Result<Vec<(Uid, Gid)>> {
+    let mut accounts = Vec::new();
+    while let Some(account) = next()? {
+        accounts.push(account);
+    }
+    Ok(accounts)
+}
+
+/// Whether the sources `nsswitch` (the text of [`NSSWITCH`]) names for accounts (`passwd`) and groups (`group`) list
+/// every account and member they know when walked: local files (`files`) and systemd's (`systemd`), nothing else. Any
+/// other source (`sss`, `ldap`, `winbind`, `nis`, `compat`...) may resolve accounts a walk never lists (SSSD does not
+/// enumerate by default), and a database with no line of its own is not known either. An action (`[NOTFOUND=return]`)
+/// is no source.
+fn lists_every_account(nsswitch: &str) -> bool {
+    let mut seen = [false; 2];
+    for line in nsswitch.lines() {
+        let line = line.split('#').next().unwrap_or_default();
+        let Some((database, sources)) = line.split_once(':') else {
+            continue;
+        };
+        let Some(index) = ["passwd", "group"]
+            .iter()
+            .position(|name| *name == database.trim())
+        else {
+            continue;
+        };
+        let mut sources = sources.to_owned();
+        while let Some(start) = sources.find('[') {
+            let Some(end) = sources[start..].find(']') else {
+                return false;
+            };
+            sources.replace_range(start..=start + end, " ");
+        }
+        let mut sources = sources.split_whitespace().peekable();
+        if sources.peek().is_none() || !sources.all(|source| matches!(source, "files" | "systemd"))
+        {
+            return false;
+        }
+        seen[index] = true;
+    }
+    seen == [true, true]
 }
 
 /// Whether `group` is the private group of the account `me` (Linux's user private groups, with umask `002`): named as
-/// it, its primary group, listing nobody else as a member and nobody else's primary group among `accounts` (the user
-/// database, [`accounts`]: a primary group's members are not listed in the group). A walk that does not even find `me`
-/// is incomplete, and proves nothing.
-fn is_private_group(group: &Group, me: &Account, accounts: &[(Uid, Gid)]) -> bool {
-    group.gid == me.gid
-        && group.name == me.name
-        && group.mem.iter().all(|member| *member == me.name)
-        && accounts.iter().any(|(uid, _)| *uid == me.uid)
+/// it, its primary group, listing nobody else as a member, and nobody else's primary group among the accounts the user
+/// database lists (a primary group's members are not listed in the group). Only a walk known to list every account
+/// shows that: `nsswitch` (the text of [`NSSWITCH`]; `None` where there is none, as on macOS) names only sources that
+/// do ([`lists_every_account`]), and `accounts` walks them to the end without an error, finding `me` too. Otherwise
+/// somebody unlisted may share the group: it is not private, and an error on the way is the answer.
+fn is_private_group(
+    group: &Group,
+    me: &Account,
+    nsswitch: Option<&str>,
+    accounts: impl FnOnce() -> io::Result<Vec<(Uid, Gid)>>,
+) -> io::Result<bool> {
+    if group.gid != me.gid
+        || group.name != me.name
+        || group.mem.iter().any(|member| *member != me.name)
+        || !nsswitch.is_some_and(lists_every_account)
+    {
+        return Ok(false);
+    }
+    let accounts = accounts()?;
+    Ok(accounts.iter().any(|(uid, _)| *uid == me.uid)
         && accounts
             .iter()
-            .all(|(uid, gid)| *gid != group.gid || *uid == me.uid)
+            .all(|(uid, gid)| *gid != group.gid || *uid == me.uid))
 }
 
 /// Whether somebody untrusted may write in what has group `gid` and permission bits `mode`: everybody (`o+w`), or a
@@ -832,7 +920,6 @@ pub(super) struct TestGroups {
 
 #[cfg(test)]
 pub(super) fn test_groups() -> TestGroups {
-    let me = Account::from_uid(Uid::effective()).unwrap().unwrap();
     let output = std::process::Command::new("id").arg("-G").output().unwrap();
     assert!(output.status.success(), "id -G");
     let mut groups = TestGroups {
@@ -847,7 +934,7 @@ pub(super) fn test_groups() -> TestGroups {
         };
         let slot = if ADMIN_GROUPS.contains(&group.name.as_str()) {
             &mut groups.admin
-        } else if is_private_group(&group, &me, &accounts()) {
+        } else if trusted_group(gid).unwrap() {
             &mut groups.private
         } else {
             &mut groups.other
@@ -901,8 +988,10 @@ mod tests {
         };
         let (me, bob) = (ana.uid, Uid::from_raw(ana.uid.as_raw() + 1));
         let alone = [(me, Gid::from_raw(1000)), (bob, Gid::from_raw(1001))];
-        let private =
-            |group: &Group, accounts: &[(Uid, Gid)]| is_private_group(group, &ana, accounts);
+        let files = "passwd: files\ngroup: files\n";
+        let private = |group: &Group, accounts: &[(Uid, Gid)]| {
+            is_private_group(group, &ana, Some(files), || Ok(accounts.to_vec())).unwrap()
+        };
         assert!(private(&group("ana", 1000, &[]), &alone));
         assert!(private(&group("ana", 1000, &["ana"]), &alone));
         assert!(
@@ -928,6 +1017,68 @@ mod tests {
             !private(&group("ana", 1000, &[]), &[(bob, Gid::from_raw(1001))]),
             "incomplete"
         );
+    }
+
+    #[test]
+    fn a_user_database_walk_that_fails_after_finding_this_account_is_an_error_not_a_private_group()
+    {
+        let ana = Account::from_uid(Uid::effective()).unwrap().unwrap();
+        let ana = Account {
+            name: "ana".into(),
+            gid: Gid::from_raw(1000),
+            ..ana
+        };
+        let mut entries = vec![
+            Ok(Some((ana.uid, ana.gid))),
+            Err(io::Error::from_raw_os_error(libc::EIO)),
+            Ok(Some((Uid::from_raw(ana.uid.as_raw() + 1), ana.gid))),
+            Ok(None),
+        ]
+        .into_iter();
+        let walked = walk(|| entries.next().unwrap());
+        assert_eq!(walked.as_ref().unwrap_err().raw_os_error(), Some(libc::EIO));
+        let decided = is_private_group(
+            &group("ana", 1000, &[]),
+            &ana,
+            Some("passwd: files\ngroup: files\n"),
+            || walked,
+        );
+        assert_eq!(decided.unwrap_err().raw_os_error(), Some(libc::EIO));
+    }
+
+    // A source that resolves accounts without listing them (SSSD, LDAP): the walk below finds this account alone, as
+    // it would there, and proves nothing.
+    #[test]
+    fn a_private_group_needs_sources_that_list_every_account() {
+        let ana = Account::from_uid(Uid::effective()).unwrap().unwrap();
+        let ana = Account {
+            name: "ana".into(),
+            gid: Gid::from_raw(1000),
+            ..ana
+        };
+        let only_me = || Ok(vec![(ana.uid, ana.gid)]);
+        let private = |nsswitch: Option<&str>| {
+            is_private_group(&group("ana", 1000, &[]), &ana, nsswitch, only_me).unwrap()
+        };
+        for whole in [
+            "passwd: files\ngroup: files\n",
+            "# comment\npasswd:  files systemd\ngroup: files [SUCCESS=merge] systemd # local\n",
+        ] {
+            assert!(private(Some(whole)), "{whole}");
+        }
+        for partial in [
+            "passwd: files sss systemd\ngroup: files sss systemd\n",
+            "passwd: files\ngroup: files ldap\n",
+            "passwd: compat\ngroup: compat\n",
+            "passwd: files [NOTFOUND=return] winbind\ngroup: files\n",
+            "passwd: files\n",
+            "passwd:\ngroup: files\n",
+            "passwd: files [NOTFOUND=return\ngroup: files\n",
+            "",
+        ] {
+            assert!(!private(Some(partial)), "{partial}");
+        }
+        assert!(!private(None), "no nsswitch.conf (macOS)");
     }
 
     #[test]
