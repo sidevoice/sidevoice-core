@@ -270,20 +270,18 @@ struct Granted {
     mine: bool,
 }
 
-/// The allow entries of `object`'s ACL (macOS), [`Granted`]; deny entries only take away. A held handle's ACL is read
-/// by its path (`F_GETPATH`): `exacl` reads none by descriptor.
+/// The allow entries of `object`'s ACL (macOS), [`Granted`]; deny entries only take away. An open file's ACL is read
+/// by its path ([`acl_of_open`]).
 #[cfg(target_os = "macos")]
 fn granted(object: Object<'_>) -> io::Result<Vec<Granted>> {
     use exacl::{AclEntryKind, AclOption};
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-    let path = match object {
-        Object::Open(file) => PathBuf::from(OsString::from_vec(rfs::getpath(file)?.into_bytes())),
-        Object::Entry(path) => path.to_owned(),
+    let entries = match object {
+        Object::Open(file) => acl_of_open(file)?,
+        Object::Entry(path) => exacl::getfacl(path, AclOption::SYMLINK_ACL)?,
     };
     let me = Uid::effective();
     let mut granted = Vec::new();
-    for entry in exacl::getfacl(&path, AclOption::SYMLINK_ACL)? {
+    for entry in entries {
         if !entry.allow {
             continue;
         }
@@ -305,6 +303,45 @@ fn granted(object: Object<'_>) -> io::Result<Vec<Granted>> {
         });
     }
     Ok(granted)
+}
+
+/// How many times [`acl_of_open`] looks an open file's path up afresh before refusing it.
+#[cfg(target_os = "macos")]
+const ACL_PATH_ATTEMPTS: usize = 16;
+
+/// The ACL entries of the open `file` (macOS), read by its path (`F_GETPATH`): `exacl` reads none by descriptor. That
+/// path is the file's only while it names it: one that names the same file (device and inode, no link followed)
+/// both before and after the read is taken; one moved or removed meanwhile (an ancestor renamed, or the other name of
+/// a file with two removed, as a creation is finished) is looked up afresh, and a file no name stays on is refused,
+/// never reported missing. Swapping a name away and back during the read takes renaming along the path, which the
+/// checks of every directory on the way leave to nobody untrusted.
+#[cfg(target_os = "macos")]
+fn acl_of_open(file: &File) -> io::Result<Vec<exacl::AclEntry>> {
+    use exacl::AclOption;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let stat = rfs::fstat(file)?;
+    let names_it = |path: &Path| matches!(rfs::lstat(path), Ok(found) if found.st_dev == stat.st_dev && found.st_ino == stat.st_ino);
+    for _ in 0..ACL_PATH_ATTEMPTS {
+        let path = match rfs::getpath(file) {
+            Ok(path) => PathBuf::from(OsString::from_vec(path.into_bytes())),
+            Err(Errno::NOENT) => {
+                std::thread::yield_now();
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if names_it(&path) {
+            match exacl::getfacl(&path, AclOption::SYMLINK_ACL) {
+                Ok(entries) if names_it(&path) => return Ok(entries),
+                Ok(_) => (),
+                Err(error) if error.kind() == ErrorKind::NotFound => (),
+                Err(error) => return Err(error),
+            }
+        }
+        std::thread::yield_now();
+    }
+    Err(super::denied("no name stays on it to read its ACL by"))
 }
 
 /// That a record created in the directory `dir` is given nothing for anybody untrusted on creation, before any byte of
