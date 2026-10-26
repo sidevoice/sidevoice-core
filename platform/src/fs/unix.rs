@@ -1,6 +1,7 @@
 //! Unix: owner and mode bits, `O_NOFOLLOW`, the descriptor judged as opened, a record written relative to a handle on
 //! its directory (`rustix`); who the administrators are, from the system's user and group databases (`nix`); an extended
-//! ACL (Linux: whether there is one, `rustix`; macOS: its entries, `exacl`). No `unsafe` of ours.
+//! ACL (Linux: whether there is one, `rustix`; macOS: its entries, `exacl`, and an open file's by its descriptor,
+//! [`acl_by_fd`], the only `unsafe` here).
 //!
 //! Who is trusted besides this user: root and the administrators, the members of [`ADMIN_GROUPS`]. They may own what
 //! is on the way to our files, and one of those groups, or this user's own private group, may write in it. Anybody else
@@ -245,13 +246,13 @@ fn acl_others(object: Object<'_>, _mode: u32) -> io::Result<Others> {
         | Perm::CHOWN;
     let mut others = Others::Nothing;
     for Granted {
-        entry,
+        perms,
+        flags,
         trusted,
         mine,
     } in granted(object)?
     {
-        if entry.perms.intersects(changes) && !trusted && !entry.flags.contains(Flag::ONLY_INHERIT)
-        {
+        if perms.intersects(changes) && !trusted && !flags.contains(Flag::ONLY_INHERIT) {
             return Ok(Others::Change);
         }
         if !mine {
@@ -261,43 +262,71 @@ fn acl_others(object: Object<'_>, _mode: u32) -> io::Result<Others> {
     Ok(others)
 }
 
+/// Who an ACL entry names (macOS): a user or a group by id, or anybody this machine does not know (a GUID it cannot
+/// map).
+#[cfg(target_os = "macos")]
+enum Who {
+    User(u32),
+    Group(u32),
+    Unknown,
+}
+
+/// An allow entry of an ACL (macOS): who it names, what it grants and how it is inherited.
+#[cfg(target_os = "macos")]
+struct Allowed {
+    who: Who,
+    perms: exacl::Perm,
+    flags: exacl::Flag,
+}
+
 /// An allow entry of an ACL (macOS), with whether who it names is trusted ([`trusted_owner`], [`trusted_group`]) and
 /// whether it is this user.
 #[cfg(target_os = "macos")]
 struct Granted {
-    entry: exacl::AclEntry,
+    perms: exacl::Perm,
+    flags: exacl::Flag,
     trusted: bool,
     mine: bool,
 }
 
 /// The allow entries of `object`'s ACL (macOS), [`Granted`]; deny entries only take away. An open file's ACL is read
-/// by its path ([`acl_of_open`]).
+/// by its descriptor ([`acl_by_fd::allowed`]), never by a name of it; an entry's by its path, not following a link.
 #[cfg(target_os = "macos")]
 fn granted(object: Object<'_>) -> io::Result<Vec<Granted>> {
     use exacl::{AclEntryKind, AclOption};
-    let entries = match object {
-        Object::Open(file) => acl_of_open(file)?,
-        Object::Entry(path) => exacl::getfacl(path, AclOption::SYMLINK_ACL)?,
+    let allowed = match object {
+        Object::Open(file) => acl_by_fd::allowed(file)?,
+        Object::Entry(path) => {
+            let mut allowed = Vec::new();
+            for entry in exacl::getfacl(path, AclOption::SYMLINK_ACL)? {
+                if !entry.allow {
+                    continue;
+                }
+                let who = match entry.kind {
+                    AclEntryKind::User => account_id(&entry.name)?.map_or(Who::Unknown, Who::User),
+                    AclEntryKind::Group => group_id(&entry.name)?.map_or(Who::Unknown, Who::Group),
+                    _ => Who::Unknown,
+                };
+                allowed.push(Allowed {
+                    who,
+                    perms: entry.perms,
+                    flags: entry.flags,
+                });
+            }
+            allowed
+        }
     };
     let me = Uid::effective();
     let mut granted = Vec::new();
-    for entry in entries {
-        if !entry.allow {
-            continue;
-        }
-        let (trusted, mine) = match entry.kind {
-            AclEntryKind::User => match account_id(&entry.name)? {
-                Some(uid) => (trusted_owner(uid)?, uid == me.as_raw()),
-                None => (false, false),
-            },
-            AclEntryKind::Group => match group_id(&entry.name)? {
-                Some(gid) => (trusted_group(gid), false),
-                None => (false, false),
-            },
-            _ => (false, false),
+    for Allowed { who, perms, flags } in allowed {
+        let (trusted, mine) = match who {
+            Who::User(uid) => (trusted_owner(uid)?, uid == me.as_raw()),
+            Who::Group(gid) => (trusted_group(gid), false),
+            Who::Unknown => (false, false),
         };
         granted.push(Granted {
-            entry,
+            perms,
+            flags,
             trusted,
             mine,
         });
@@ -305,43 +334,198 @@ fn granted(object: Object<'_>) -> io::Result<Vec<Granted>> {
     Ok(granted)
 }
 
-/// How many times [`acl_of_open`] looks an open file's path up afresh before refusing it.
+/// An open file's ACL read by its descriptor (macOS, `acl_get_fd_np`), the same libSystem calls `exacl` makes for a
+/// path, which it offers no descriptor form of. No name of the file is looked up, so none moved or removed meanwhile
+/// (an ancestor renamed, the other name of a file with two removed as a creation is finished) changes what is read,
+/// and no stale name (`F_GETPATH` keeps the one a file was created by after it is removed) can stand in for it.
+///
+/// The only `unsafe` of this module: calls into libSystem on a descriptor `file` keeps open for the call, and on an ACL
+/// it returns, freed once ([`Freed`]) after every entry, permission and flag set read from it (all owned by the ACL).
 #[cfg(target_os = "macos")]
-const ACL_PATH_ATTEMPTS: usize = 16;
+mod acl_by_fd {
+    use super::{answer, Allowed, Who};
+    use exacl::{Flag, Perm};
+    use rustix::io::Errno;
+    use std::ffi::{c_int, c_uint, c_void};
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::AsRawFd;
+    use std::ptr;
 
-/// The ACL entries of the open `file` (macOS), read by its path (`F_GETPATH`): `exacl` reads none by descriptor. That
-/// path is the file's only while it names it: one that names the same file (device and inode, no link followed)
-/// both before and after the read is taken; one moved or removed meanwhile (an ancestor renamed, or the other name of
-/// a file with two removed, as a creation is finished) is looked up afresh, and a file no name stays on is refused,
-/// never reported missing. Swapping a name away and back during the read takes renaming along the path, which the
-/// checks of every directory on the way leave to nobody untrusted.
-#[cfg(target_os = "macos")]
-fn acl_of_open(file: &File) -> io::Result<Vec<exacl::AclEntry>> {
-    use exacl::AclOption;
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-    let stat = rfs::fstat(file)?;
-    let names_it = |path: &Path| matches!(rfs::lstat(path), Ok(found) if found.st_dev == stat.st_dev && found.st_ino == stat.st_ino);
-    for _ in 0..ACL_PATH_ATTEMPTS {
-        let path = match rfs::getpath(file) {
-            Ok(path) => PathBuf::from(OsString::from_vec(path.into_bytes())),
-            Err(Errno::NOENT) => {
-                std::thread::yield_now();
+    // <sys/acl.h>, <membership.h>.
+    const ACL_TYPE_EXTENDED: c_uint = 0x100;
+    const ACL_FIRST_ENTRY: c_int = 0;
+    const ACL_NEXT_ENTRY: c_int = -1;
+    const ACL_EXTENDED_ALLOW: c_uint = 1;
+    const ID_TYPE_UID: c_int = 0;
+    const ID_TYPE_GID: c_int = 1;
+
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: c_int, kind: c_uint) -> *mut c_void;
+        fn acl_valid(acl: *mut c_void) -> c_int;
+        fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_uint) -> c_int;
+        fn acl_get_qualifier(entry: *mut c_void) -> *mut c_void;
+        fn acl_get_permset(entry: *mut c_void, permset: *mut *mut c_void) -> c_int;
+        fn acl_get_perm_np(permset: *mut c_void, perm: c_uint) -> c_int;
+        fn acl_get_flagset_np(object: *mut c_void, flagset: *mut *mut c_void) -> c_int;
+        fn acl_get_flag_np(flagset: *mut c_void, flag: c_uint) -> c_int;
+        fn acl_free(object: *mut c_void) -> c_int;
+        fn mbr_uuid_to_id(uuid: *const u8, id: *mut u32, id_type: *mut c_int) -> c_int;
+    }
+
+    /// What libSystem returned to be freed with `acl_free`: an ACL, or an entry's qualifier.
+    struct Freed(*mut c_void);
+
+    impl Drop for Freed {
+        fn drop(&mut self) {
+            // SAFETY: a non-null object libSystem allocated for `acl_free`, freed only here.
+            unsafe { acl_free(self.0) };
+        }
+    }
+
+    /// A call's result: `0` success, `-1` the error it left in `errno` ([`answer::status`]).
+    fn checked(result: c_int) -> io::Result<()> {
+        answer::status(result, io::Error::last_os_error)
+    }
+
+    /// The allow entries of the open `file`'s ACL; none without one (`ENOENT`: the descriptor is open, so it is the
+    /// ACL that is missing, never the file). Whatever else fails while it is read, the walk or any part of an entry,
+    /// is an error, never an entry, right or flag fewer: a missed one could only make the file look safer than it is.
+    pub(super) fn allowed(file: &File) -> io::Result<Vec<Allowed>> {
+        // SAFETY: the descriptor stays open for the call (borrowed from `file`).
+        let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+        if acl.is_null() {
+            let error = io::Error::last_os_error();
+            return match Errno::from_io_error(&error) {
+                Some(Errno::NOENT) => Ok(Vec::new()),
+                _ => Err(error),
+            };
+        }
+        let acl = Freed(acl);
+        // Past the last entry `acl_get_entry` fails with `EINVAL`, as it does for an invalid ACL: validated first, and
+        // asked only for the first and next entries, the ACL leaves the end as the only `EINVAL` ([`answer::entry`]).
+        // SAFETY: `acl` is live.
+        checked(unsafe { acl_valid(acl.0) })?;
+        let mut allowed = Vec::new();
+        let mut which = ACL_FIRST_ENTRY;
+        loop {
+            let mut entry = ptr::null_mut();
+            // SAFETY: `acl` is live; the call only writes `entry`.
+            let result = unsafe { acl_get_entry(acl.0, which, &mut entry) };
+            if !answer::entry(result, io::Error::last_os_error)? {
+                break;
+            }
+            let entry = answer::present(entry, "entry")?;
+            which = ACL_NEXT_ENTRY;
+            let mut tag = 0;
+            // SAFETY: `entry` belongs to `acl`, live for the whole walk; so do its permission and flag sets.
+            checked(unsafe { acl_get_tag_type(entry, &mut tag) })?;
+            if tag != ACL_EXTENDED_ALLOW {
                 continue;
             }
-            Err(error) => return Err(error.into()),
-        };
-        if names_it(&path) {
-            match exacl::getfacl(&path, AclOption::SYMLINK_ACL) {
-                Ok(entries) if names_it(&path) => return Ok(entries),
-                Ok(_) => (),
-                Err(error) if error.kind() == ErrorKind::NotFound => (),
-                Err(error) => return Err(error),
+            let who = who(entry)?;
+            let mut permset = ptr::null_mut();
+            // SAFETY: as above.
+            checked(unsafe { acl_get_permset(entry, &mut permset) })?;
+            let permset = answer::present(permset, "permission set")?;
+            let mut perms = Perm::empty();
+            for perm in Perm::all().iter() {
+                // SAFETY: as above.
+                let result = unsafe { acl_get_perm_np(permset, perm.bits()) };
+                if answer::bit(result, io::Error::last_os_error)? {
+                    perms |= perm;
+                }
             }
+            let mut flagset = ptr::null_mut();
+            // SAFETY: as above.
+            checked(unsafe { acl_get_flagset_np(entry, &mut flagset) })?;
+            let flagset = answer::present(flagset, "flag set")?;
+            let mut flags = Flag::empty();
+            for flag in Flag::all().iter() {
+                // SAFETY: as above.
+                let result = unsafe { acl_get_flag_np(flagset, flag.bits()) };
+                if answer::bit(result, io::Error::last_os_error)? {
+                    flags |= flag;
+                }
+            }
+            allowed.push(Allowed { who, perms, flags });
         }
-        std::thread::yield_now();
+        Ok(allowed)
     }
-    Err(super::denied("no name stays on it to read its ACL by"))
+
+    /// Who an extended entry names: its qualifier is a GUID (`guid_t`, 16 bytes), mapped to a uid or gid; one this
+    /// machine cannot map (`ENOENT`) is nobody it knows.
+    fn who(entry: *mut c_void) -> io::Result<Who> {
+        // SAFETY: `entry` is a live entry of an extended ACL; the copy returned is ours to free.
+        let guid = unsafe { acl_get_qualifier(entry) };
+        if guid.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let guid = Freed(guid);
+        let (mut id, mut kind) = (0, 0);
+        // SAFETY: `guid` points at a live 16-byte `guid_t`; the call only writes the two outputs.
+        match unsafe { mbr_uuid_to_id(guid.0.cast(), &mut id, &mut kind) } {
+            0 if kind == ID_TYPE_UID => Ok(Who::User(id)),
+            0 if kind == ID_TYPE_GID => Ok(Who::Group(id)),
+            0 => Ok(Who::Unknown),
+            error if error == Errno::NOENT.raw_os_error() => Ok(Who::Unknown),
+            error => Err(io::Error::from_raw_os_error(error)),
+        }
+    }
+}
+
+/// What a libSystem ACL call answered ([`acl_by_fd`]), decided apart from the calls so it is tested anywhere. Only an
+/// answer a call documents is a result; any other is an error, so nothing failed or unexpected reads as "not granted".
+#[cfg(any(target_os = "macos", test))]
+mod answer {
+    use rustix::io::Errno;
+    use std::ffi::c_int;
+    use std::io;
+
+    /// A call returning `0` on success, `-1` with the error in `errno` (`error`) on failure.
+    pub(super) fn status(result: c_int, error: impl FnOnce() -> io::Error) -> io::Result<()> {
+        match result {
+            0 => Ok(()),
+            -1 => Err(error()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// `acl_get_entry`: `0` an entry (`true`); `-1` with `EINVAL` past the last one of a valid ACL (`false`); any other
+    /// failure an error.
+    pub(super) fn entry(result: c_int, error: impl FnOnce() -> io::Error) -> io::Result<bool> {
+        match status(result, error) {
+            Ok(()) => Ok(true),
+            Err(error) if result == -1 && Errno::from_io_error(&error) == Some(Errno::INVAL) => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `acl_get_perm_np`, `acl_get_flag_np`: `1` set, `0` not set, `-1` with the error in `errno` (`error`) neither.
+    pub(super) fn bit(result: c_int, error: impl FnOnce() -> io::Error) -> io::Result<bool> {
+        match result {
+            1 => Ok(true),
+            0 => Ok(false),
+            -1 => Err(error()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// What a successful call wrote (`what`), never null.
+    pub(super) fn present<T>(pointer: *mut T, what: &str) -> io::Result<*mut T> {
+        if pointer.is_null() {
+            Err(io::Error::other(format!("an ACL call gave a null {what}")))
+        } else {
+            Ok(pointer)
+        }
+    }
+
+    fn unexpected(result: c_int) -> io::Error {
+        io::Error::other(format!("an ACL call returned {result}"))
+    }
 }
 
 /// That a record created in the directory `dir` is given nothing for anybody untrusted on creation, before any byte of
@@ -352,7 +536,7 @@ fn acl_of_open(file: &File) -> io::Result<Vec<exacl::AclEntry>> {
 fn check_inherited(dir: &File) -> io::Result<()> {
     if granted(Object::Open(dir))?
         .iter()
-        .any(|granted| granted.entry.flags.contains(exacl::Flag::FILE_INHERIT) && !granted.trusted)
+        .any(|granted| granted.flags.contains(exacl::Flag::FILE_INHERIT) && !granted.trusted)
     {
         return Err(super::denied(
             "its ACL passes access to what is created in it on to others",
@@ -963,6 +1147,45 @@ pub(super) fn test_groups() -> TestGroups {
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    fn errno(errno: rustix::io::Errno) -> impl FnOnce() -> io::Error {
+        move || io::Error::from_raw_os_error(errno.raw_os_error())
+    }
+
+    #[test]
+    fn an_acl_call_failing_or_answering_what_it_never_does_is_an_error() {
+        use rustix::io::Errno;
+        assert!(answer::status(0, errno(Errno::INVAL)).is_ok());
+        assert!(answer::status(-1, errno(Errno::NOMEM)).is_err());
+        assert!(answer::status(1, errno(Errno::INVAL)).is_err());
+    }
+
+    #[test]
+    fn only_einval_ends_the_entries_any_other_failure_is_an_error() {
+        use rustix::io::Errno;
+        assert!(answer::entry(0, errno(Errno::INVAL)).unwrap());
+        assert!(!answer::entry(-1, errno(Errno::INVAL)).unwrap());
+        assert!(answer::entry(-1, errno(Errno::NOMEM)).is_err());
+        assert!(answer::entry(-1, errno(Errno::NOENT)).is_err());
+        assert!(answer::entry(1, errno(Errno::INVAL)).is_err());
+        assert!(answer::entry(-2, errno(Errno::INVAL)).is_err());
+    }
+
+    #[test]
+    fn a_permission_or_flag_is_set_not_set_or_an_error_never_not_set_by_failing() {
+        use rustix::io::Errno;
+        assert!(answer::bit(1, errno(Errno::INVAL)).unwrap());
+        assert!(!answer::bit(0, errno(Errno::INVAL)).unwrap());
+        assert!(answer::bit(-1, errno(Errno::INVAL)).is_err());
+        assert!(answer::bit(2, errno(Errno::INVAL)).is_err());
+    }
+
+    #[test]
+    fn a_null_entry_or_set_from_a_successful_call_is_an_error() {
+        let mut value = 0u8;
+        assert!(answer::present(&raw mut value, "entry").is_ok());
+        assert!(answer::present(std::ptr::null_mut::<u8>(), "entry").is_err());
+    }
 
     fn group(name: &str, gid: u32, members: &[&str]) -> Group {
         Group {
