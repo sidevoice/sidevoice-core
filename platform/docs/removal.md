@@ -5,6 +5,14 @@ required `Access`. The capability retains all ancestors and refuses replacements
 reached through Windows junctions/redirected profiles are refused: choose an ordinary unredirected directory.
 The established Unix system-owned ancestor-link allowance (for example macOS `/var`) is unchanged.
 
+`Directory::open` follows trusted (same-user) links, so a root validated by path and then opened can be swapped
+for a link in between. When the directory to remove from must be the one beneath an already held root, descend
+with `Directory::open_beneath(relative, access)` instead: each component is opened relative to the previous handle
+without resolving any link (Unix `openat` with `O_NOFOLLOW | O_DIRECTORY`; Windows beneath ancestors held without
+delete sharing, with `OPEN_REPARSE_POINT`), links and reparse points are refused, and every component must be on
+the held root's device or volume. The result holds the root's ancestry plus the new components, so `Removal`
+works on it unchanged.
+
 ```rust
 use std::ffi::OsStr;
 use sidevoice_platform::fs::{Access, Directory, HeldDirectory};

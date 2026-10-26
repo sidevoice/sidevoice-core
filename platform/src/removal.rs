@@ -104,6 +104,29 @@ mod tests {
     }
 
     #[test]
+    fn removal_through_a_descended_directory_deletes_only_inside_it() {
+        let (_temp, root, held) = fixture();
+        let models = root.join("Models");
+        Files::create_private_dir(&models).unwrap();
+        for dir in [&models.join("blobs"), &root.join("blobs")] {
+            Files::create_private_dir(dir).unwrap();
+            put(&dir.join("payload"));
+        }
+        put(&models.join("keep"));
+        let beneath = held
+            .open_beneath(Path::new("Models"), Access::Private)
+            .unwrap();
+        beneath.remove_contents(&[OsStr::new("blobs")]).unwrap();
+        assert!(!models.join("blobs").exists());
+        assert!(models.join("keep").exists());
+        assert!(root.join("blobs").join("payload").exists());
+        // The root stays usable, and so does the descended directory.
+        held.check_contents(&[OsStr::new("blobs")]).unwrap();
+        beneath.remove_contents(&[OsStr::new("keep")]).unwrap();
+        assert!(!models.join("keep").exists());
+    }
+
+    #[test]
     fn empty_allowlist_does_nothing_and_all_names_validate_before_deletion() {
         let (_temp, root, held) = fixture();
         put(&root.join("selected"));

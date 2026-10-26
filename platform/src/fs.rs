@@ -66,6 +66,21 @@ pub trait Directory: Sized {
     /// [`Fs::ensure_private_dir`], and the directory it leads to is held. Parent (`..`) components are invalid.
     fn open(path: &Path, access: Access) -> io::Result<Self>;
 
+    /// Opens an existing directory beneath this one without following any link: `relative` is descended one
+    /// component at a time from the held handle, each step opened relative to the one before it with no link resolved
+    /// (Unix: `openat` with `O_NOFOLLOW | O_DIRECTORY`; Windows: beneath ancestors held without delete sharing, with
+    /// `OPEN_REPARSE_POINT`). A link, junction or other reparse point at any component, a component on another
+    /// device or volume, and an unsafe directory on the way are refused with `PermissionDenied`; a missing one is
+    /// `NotFound` and is never created. Use it to reach a directory that must be the one beneath an already held
+    /// root, instead of checking a path and then opening it ([`Directory::open`] follows trusted links).
+    ///
+    /// `relative` is one or more ordinary child names joined by separators, each with the same syntax as a
+    /// [`Directory::read`] name; an empty, absolute or prefixed path, `.`, `..` and empty components are
+    /// `InvalidInput`. `access` applies to the new leaf; every directory above it, this one included, must pass the
+    /// ancestor rule. The result holds this directory's ancestry plus the new components, so it verifies and removes
+    /// like one returned by [`Directory::open`]. This directory stays held and usable.
+    fn open_beneath(&self, relative: &Path, access: Access) -> io::Result<Self>;
+
     /// Reads a regular record from the checked handle, bounded by `limit` (`InvalidData` when exceeded).
     /// Concurrent replacement can be refused if the opened record loses its name before the checks finish.
     /// `name` must be one ordinary child component, with no native separators, NUL, `.` or `..`.
@@ -104,6 +119,40 @@ impl HeldState {
         #[cfg(test)]
         tests::before_publish();
         self.verify()
+    }
+
+    /// The chain [`Directory::open_beneath`] holds: this one's handles (duplicated), then each name of `relative`
+    /// opened by `imp::open_subdirectory` relative to the handle before it, on this leaf's volume; verified whole.
+    pub(crate) fn beneath(&self, relative: &Path, access: Access) -> io::Result<Self> {
+        let names = relative_names(relative)?;
+        self.verify()?;
+        let volume = Files::identity(self.leaf().1)?.volume;
+        let mut chain = self
+            .chain
+            .iter()
+            .map(|(path, file)| Ok((path.clone(), file.try_clone()?)))
+            .collect::<io::Result<Vec<_>>>()?;
+        for (index, name) in names.iter().enumerate() {
+            let leaf = index + 1 == names.len();
+            let (parent_path, parent) = chain.last().expect("a held directory has a root");
+            let path = parent_path.join(name);
+            let file = imp::open_subdirectory(parent, &path, !leaf)?;
+            if Files::identity(&file)?.volume != volume {
+                return Err(refused(&path, "on another device or volume"));
+            }
+            if leaf {
+                judge_access(&file, access, true).map_err(|error| refused(&path, error))?;
+            } else {
+                imp::check_ancestor_handle(&path, &file)?;
+            }
+            chain.push((path, file));
+        }
+        let held = HeldState {
+            chain,
+            access: Some(access),
+        };
+        held.verify()?;
+        Ok(held)
     }
 
     pub(crate) fn verify(&self) -> io::Result<()> {
@@ -256,6 +305,38 @@ fn record_path(path: &Path, how: Publish) -> io::Result<PathBuf> {
         .file_name()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "a record must have a file name"))?;
     Ok(resolve_links(parent_of(path)?)?.join(name))
+}
+
+/// The names of `relative` for [`Directory::open_beneath`]: each one ordinary child name (on Windows also free of
+/// the aliases `record_name` refuses). `Path::components` silently drops `.` and empty components after the first,
+/// so their count is compared with the separator-delimited segments: whatever it normalized away is refused.
+fn relative_names(relative: &Path) -> io::Result<Vec<&OsStr>> {
+    let invalid = || {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "expected ordinary child names beneath the held directory",
+        )
+    };
+    let mut names = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(invalid());
+        };
+        #[cfg(windows)]
+        record_name(name)?;
+        #[cfg(not(windows))]
+        child_name(name)?;
+        names.push(name);
+    }
+    let segments = relative
+        .as_os_str()
+        .as_encoded_bytes()
+        .split(|&b| std::path::is_separator(char::from(b)))
+        .count();
+    if names.is_empty() || names.len() != segments {
+        return Err(invalid());
+    }
+    Ok(names)
 }
 
 pub(crate) fn child_name(name: &OsStr) -> io::Result<&Path> {
@@ -1169,6 +1250,203 @@ mod tests {
             "another account owns the program directory"
         );
         imp::icacls(root.path(), &["/setowner", &UserId::name().unwrap()]);
+    }
+
+    /// A private root holding the private directories `a/b`, and a private directory `outside` beside it with a
+    /// record, for what a link beneath the root must never reach.
+    fn beneath_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = scratch();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        for dir in [&root, &root.join("a"), &root.join("a").join("b"), &outside] {
+            Files::create_private_dir(dir).unwrap();
+        }
+        Files::write_private(&outside.join("record"), b"outside").unwrap();
+        (temp, root, outside)
+    }
+
+    fn beneath_kind(held: &HeldDirectory, relative: impl AsRef<Path>) -> ErrorKind {
+        held.open_beneath(relative.as_ref(), Access::Private)
+            .err()
+            .unwrap()
+            .kind()
+    }
+
+    #[test]
+    fn open_beneath_descends_and_holds_the_whole_chain() {
+        let (_temp, root, _) = beneath_fixture();
+        let held = held(&root, Access::Private);
+        let leaf = held
+            .open_beneath(&Path::new("a").join("b"), Access::Private)
+            .unwrap();
+        let name = OsStr::new("record");
+        leaf.write(name, b"inside").unwrap();
+        assert_eq!(
+            fs::read(root.join("a").join("b").join(name)).unwrap(),
+            b"inside"
+        );
+        assert_eq!(
+            leaf.read(name, Access::Private, 100).unwrap().unwrap(),
+            b"inside"
+        );
+        // One component at a time gives the same directory; the root stays held and usable.
+        let step = held
+            .open_beneath(Path::new("a"), Access::Private)
+            .and_then(|a| a.open_beneath(Path::new("b"), Access::Private))
+            .unwrap();
+        assert!(step.read(name, Access::Private, 100).unwrap().is_some());
+        held.write(name, b"root").unwrap();
+        // Missing components are reported, never created.
+        assert_eq!(
+            beneath_kind(&held, Path::new("a").join("missing").join("c")),
+            ErrorKind::NotFound
+        );
+        assert!(!root.join("a").join("missing").exists());
+        // Access applies to the leaf: a leaf others can read is not private.
+        Files::let_others_read(&root.join("a").join("b"));
+        assert_eq!(
+            beneath_kind(&held, Path::new("a").join("b")),
+            ErrorKind::PermissionDenied
+        );
+        held.open_beneath(&Path::new("a").join("b"), Access::NotWritableByOthers)
+            .unwrap();
+    }
+
+    #[test]
+    fn open_beneath_refuses_links_at_the_leaf_and_on_the_way() {
+        let (_temp, root, outside) = beneath_fixture();
+        Files::create_private_dir(&outside.join("sub")).unwrap();
+        Files::symlink(&outside, root.join("leaf-link"));
+        Files::symlink(&outside, root.join("a").join("link"));
+        let held = held(&root, Access::Private);
+        for relative in [
+            Path::new("leaf-link").to_path_buf(),
+            Path::new("leaf-link").join("sub"),
+            Path::new("a").join("link"),
+            Path::new("a").join("link").join("sub"),
+        ] {
+            assert_eq!(
+                beneath_kind(&held, &relative),
+                ErrorKind::PermissionDenied,
+                "{relative:?}"
+            );
+        }
+        assert_eq!(fs::read(outside.join("record")).unwrap(), b"outside");
+    }
+
+    // The desktop race: a directory checked by path is swapped for a link before it is opened. Descending from the
+    // held root never reaches the link's target. (Windows refuses renaming a held directory; Unix shows the swap.)
+    #[cfg(unix)]
+    #[test]
+    fn open_beneath_refuses_a_directory_swapped_for_a_link_and_a_held_chain_sees_the_swap() {
+        let (temp, root, outside) = beneath_fixture();
+        let held = held(&root, Access::Private);
+        let b = held
+            .open_beneath(&Path::new("a").join("b"), Access::Private)
+            .unwrap();
+        fs::rename(root.join("a"), temp.path().join("a-moved")).unwrap();
+        Files::symlink(temp.path().join("a-moved"), root.join("a"));
+        assert_eq!(
+            beneath_kind(&held, Path::new("a").join("b")),
+            ErrorKind::PermissionDenied
+        );
+        // The chain opened before the swap includes `a`: its next use is refused, not redirected.
+        assert!(refused(b.write(OsStr::new("record"), b"redirected")));
+        fs::remove_file(root.join("a")).unwrap();
+        Files::symlink(&outside, root.join("a"));
+        assert_eq!(
+            beneath_kind(&held, Path::new("a")),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(fs::read(outside.join("record")).unwrap(), b"outside");
+        assert!(!temp
+            .path()
+            .join("a-moved")
+            .join("b")
+            .join("record")
+            .exists());
+    }
+
+    #[test]
+    fn open_beneath_accepts_only_ordinary_child_names() {
+        let (_temp, root, _) = beneath_fixture();
+        let held = held(&root, Access::Private);
+        let sep = std::path::MAIN_SEPARATOR_STR;
+        let absolute = root.join("a");
+        let mut invalid = vec![
+            String::new(),
+            ".".into(),
+            "..".into(),
+            format!("a{sep}.."),
+            format!("a{sep}..{sep}a"),
+            format!("a{sep}.{sep}b"),
+            format!(".{sep}a"),
+            format!("a{sep}{sep}b"),
+            format!("a{sep}"),
+            format!("{sep}a"),
+            absolute.to_string_lossy().into_owned(),
+        ];
+        if cfg!(windows) {
+            invalid.extend(["C:a", "a/./b", "a:stream", "CON", "a."].map(String::from));
+        }
+        for relative in invalid {
+            assert_eq!(
+                beneath_kind(&held, &relative),
+                ErrorKind::InvalidInput,
+                "{relative:?}"
+            );
+        }
+    }
+
+    // A mount point needs privileges to make; `/proc` is one under `/` wherever Linux runs the tests.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_beneath_refuses_another_device() {
+        use std::os::unix::fs::MetadataExt;
+        let root = held(Path::new("/"), Access::NotWritableByOthers);
+        let proc = fs::metadata("/proc").unwrap();
+        assert_ne!(
+            proc.dev(),
+            fs::metadata("/").unwrap().dev(),
+            "/proc is not a mount"
+        );
+        let error = root
+            .open_beneath(Path::new("proc"), Access::NotWritableByOthers)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("another device"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn open_beneath_refuses_junctions() {
+        let (_temp, root, outside) = beneath_fixture();
+        Files::create_private_dir(&outside.join("sub")).unwrap();
+        for junction in [root.join("junction"), root.join("a").join("junction")] {
+            assert!(std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&junction)
+                .arg(&outside)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        let held = held(&root, Access::Private);
+        for relative in [
+            Path::new("junction").to_path_buf(),
+            Path::new("junction").join("sub"),
+            Path::new("a").join("junction"),
+            Path::new("a").join("junction").join("sub"),
+        ] {
+            assert_eq!(
+                beneath_kind(&held, &relative),
+                ErrorKind::PermissionDenied,
+                "{relative:?}"
+            );
+        }
+        assert_eq!(fs::read(outside.join("record")).unwrap(), b"outside");
     }
 
     #[test]

@@ -732,19 +732,7 @@ impl Held {
             let leaf = index + 1 == paths.len();
             let search_only = !leaf || access.is_none();
             let file = if let Some((_, parent)) = chain.last() {
-                File::from(
-                    rfs::openat(
-                        parent,
-                        path.file_name()
-                            .ok_or_else(|| super::denied("invalid directory component"))?,
-                        directory_access(search_only)
-                            | OFlags::DIRECTORY
-                            | OFlags::CLOEXEC
-                            | OFlags::NOFOLLOW,
-                        Mode::empty(),
-                    )
-                    .map_err(|error| directory_error(path, error.into()))?,
-                )
+                open_subdirectory(parent, path, search_only)?
             } else {
                 open_dir(path, true, search_only)?
             };
@@ -765,6 +753,10 @@ impl Held {
 impl super::Directory for Held {
     fn open(path: &Path, access: Access) -> io::Result<Self> {
         Self::open_with(path, Some(access))
+    }
+
+    fn open_beneath(&self, relative: &Path, access: Access) -> io::Result<Self> {
+        self.0.beneath(relative, access).map(Held)
     }
 
     fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>> {
@@ -802,6 +794,19 @@ impl super::Directory for Held {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// The directory named by `path`'s last component, opened relative to `parent` (`openat`) without following a link
+/// there (`O_NOFOLLOW | O_DIRECTORY`: a link, or anything but a directory, is refused).
+pub(super) fn open_subdirectory(parent: &File, path: &Path, search_only: bool) -> io::Result<File> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| super::denied("invalid directory component"))?;
+    let flags =
+        directory_access(search_only) | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    rfs::openat(parent, name, flags, Mode::empty())
+        .map(File::from)
+        .map_err(|error| directory_error(path, error.into()))
 }
 
 fn open_record(dir: &File, name: &Path, access: Access) -> io::Result<Option<File>> {

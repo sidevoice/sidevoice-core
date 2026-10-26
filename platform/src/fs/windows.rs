@@ -378,6 +378,10 @@ impl super::Directory for Held {
         Self::open_with(path, Some(access))
     }
 
+    fn open_beneath(&self, relative: &Path, access: Access) -> io::Result<Self> {
+        self.0.beneath(relative, access).map(Held)
+    }
+
     fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>> {
         let name = record_name(name)?;
         self.0.verify()?;
@@ -411,6 +415,18 @@ impl super::Directory for Held {
             Err(error) => Err(error),
         }
     }
+}
+
+/// The directory `path` names beneath `parent`. `parent` and every directory above it are held without delete
+/// sharing, so none of them can be renamed, removed or replaced meanwhile and `path` resolves through exactly those
+/// directories. The child itself is opened with `OPEN_REPARSE_POINT` and refused if it is a reparse point
+/// ([`reopen_directory`]); its handle, like theirs, is then held without delete sharing.
+pub(super) fn open_subdirectory(
+    _parent: &File,
+    path: &Path,
+    _search_only: bool,
+) -> io::Result<File> {
+    reopen_directory(path)
 }
 
 pub(super) fn reopen_directory(path: &Path) -> io::Result<File> {
