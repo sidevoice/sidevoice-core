@@ -343,7 +343,7 @@ fn granted(object: Object<'_>) -> io::Result<Vec<Granted>> {
 /// it returns, freed once ([`Freed`]) after every entry, permission and flag set read from it (all owned by the ACL).
 #[cfg(target_os = "macos")]
 mod acl_by_fd {
-    use super::{Allowed, Who};
+    use super::{answer, Allowed, Who};
     use exacl::{Flag, Perm};
     use rustix::io::Errno;
     use std::ffi::{c_int, c_uint, c_void};
@@ -362,6 +362,7 @@ mod acl_by_fd {
 
     unsafe extern "C" {
         fn acl_get_fd_np(fd: c_int, kind: c_uint) -> *mut c_void;
+        fn acl_valid(acl: *mut c_void) -> c_int;
         fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
         fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_uint) -> c_int;
         fn acl_get_qualifier(entry: *mut c_void) -> *mut c_void;
@@ -383,17 +384,14 @@ mod acl_by_fd {
         }
     }
 
-    /// `0` from a call is success; anything else is the error it left in `errno`.
+    /// A call's result: `0` success, `-1` the error it left in `errno` ([`answer::status`]).
     fn checked(result: c_int) -> io::Result<()> {
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        answer::status(result, io::Error::last_os_error)
     }
 
     /// The allow entries of the open `file`'s ACL; none without one (`ENOENT`: the descriptor is open, so it is the
-    /// ACL that is missing, never the file).
+    /// ACL that is missing, never the file). Whatever else fails while it is read, the walk or any part of an entry,
+    /// is an error, never an entry, right or flag fewer: a missed one could only make the file look safer than it is.
     pub(super) fn allowed(file: &File) -> io::Result<Vec<Allowed>> {
         // SAFETY: the descriptor stays open for the call (borrowed from `file`).
         let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
@@ -405,11 +403,20 @@ mod acl_by_fd {
             };
         }
         let acl = Freed(acl);
+        // Past the last entry `acl_get_entry` fails with `EINVAL`, as it does for an invalid ACL: validated first, and
+        // asked only for the first and next entries, the ACL leaves the end as the only `EINVAL` ([`answer::entry`]).
+        // SAFETY: `acl` is live.
+        checked(unsafe { acl_valid(acl.0) })?;
         let mut allowed = Vec::new();
-        let mut entry = ptr::null_mut();
         let mut which = ACL_FIRST_ENTRY;
-        // SAFETY: `acl` is live; past its last entry the call fails (`EINVAL`), which ends the walk.
-        while unsafe { acl_get_entry(acl.0, which, &mut entry) } == 0 {
+        loop {
+            let mut entry = ptr::null_mut();
+            // SAFETY: `acl` is live; the call only writes `entry`.
+            let result = unsafe { acl_get_entry(acl.0, which, &mut entry) };
+            if !answer::entry(result, io::Error::last_os_error)? {
+                break;
+            }
+            let entry = answer::present(entry, "entry")?;
             which = ACL_NEXT_ENTRY;
             let mut tag = 0;
             // SAFETY: `entry` belongs to `acl`, live for the whole walk; so do its permission and flag sets.
@@ -421,20 +428,24 @@ mod acl_by_fd {
             let mut permset = ptr::null_mut();
             // SAFETY: as above.
             checked(unsafe { acl_get_permset(entry, &mut permset) })?;
+            let permset = answer::present(permset, "permission set")?;
             let mut perms = Perm::empty();
             for perm in Perm::all().iter() {
                 // SAFETY: as above.
-                if unsafe { acl_get_perm_np(permset, perm.bits()) } == 1 {
+                let result = unsafe { acl_get_perm_np(permset, perm.bits()) };
+                if answer::bit(result, io::Error::last_os_error)? {
                     perms |= perm;
                 }
             }
             let mut flagset = ptr::null_mut();
             // SAFETY: as above.
             checked(unsafe { acl_get_flagset_np(entry, &mut flagset) })?;
+            let flagset = answer::present(flagset, "flag set")?;
             let mut flags = Flag::empty();
             for flag in Flag::all().iter() {
                 // SAFETY: as above.
-                if unsafe { acl_get_flag_np(flagset, flag.bits()) } == 1 {
+                let result = unsafe { acl_get_flag_np(flagset, flag.bits()) };
+                if answer::bit(result, io::Error::last_os_error)? {
                     flags |= flag;
                 }
             }
@@ -461,6 +472,59 @@ mod acl_by_fd {
             error if error == Errno::NOENT.raw_os_error() => Ok(Who::Unknown),
             error => Err(io::Error::from_raw_os_error(error)),
         }
+    }
+}
+
+/// What a libSystem ACL call answered ([`acl_by_fd`]), decided apart from the calls so it is tested anywhere. Only an
+/// answer a call documents is a result; any other is an error, so nothing failed or unexpected reads as "not granted".
+#[cfg(any(target_os = "macos", test))]
+mod answer {
+    use rustix::io::Errno;
+    use std::ffi::c_int;
+    use std::io;
+
+    /// A call returning `0` on success, `-1` with the error in `errno` (`error`) on failure.
+    pub(super) fn status(result: c_int, error: impl FnOnce() -> io::Error) -> io::Result<()> {
+        match result {
+            0 => Ok(()),
+            -1 => Err(error()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// `acl_get_entry`: `0` an entry (`true`); `-1` with `EINVAL` past the last one of a valid ACL (`false`); any other
+    /// failure an error.
+    pub(super) fn entry(result: c_int, error: impl FnOnce() -> io::Error) -> io::Result<bool> {
+        match status(result, error) {
+            Ok(()) => Ok(true),
+            Err(error) if result == -1 && Errno::from_io_error(&error) == Some(Errno::INVAL) => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `acl_get_perm_np`, `acl_get_flag_np`: `1` set, `0` not set, `-1` with the error in `errno` (`error`) neither.
+    pub(super) fn bit(result: c_int, error: impl FnOnce() -> io::Error) -> io::Result<bool> {
+        match result {
+            1 => Ok(true),
+            0 => Ok(false),
+            -1 => Err(error()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// What a successful call wrote (`what`), never null.
+    pub(super) fn present<T>(pointer: *mut T, what: &str) -> io::Result<*mut T> {
+        if pointer.is_null() {
+            Err(io::Error::other(format!("an ACL call gave a null {what}")))
+        } else {
+            Ok(pointer)
+        }
+    }
+
+    fn unexpected(result: c_int) -> io::Error {
+        io::Error::other(format!("an ACL call returned {result}"))
     }
 }
 
@@ -1083,6 +1147,45 @@ pub(super) fn test_groups() -> TestGroups {
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    fn errno(errno: rustix::io::Errno) -> impl FnOnce() -> io::Error {
+        move || io::Error::from_raw_os_error(errno.raw_os_error())
+    }
+
+    #[test]
+    fn an_acl_call_failing_or_answering_what_it_never_does_is_an_error() {
+        use rustix::io::Errno;
+        assert!(answer::status(0, errno(Errno::INVAL)).is_ok());
+        assert!(answer::status(-1, errno(Errno::NOMEM)).is_err());
+        assert!(answer::status(1, errno(Errno::INVAL)).is_err());
+    }
+
+    #[test]
+    fn only_einval_ends_the_entries_any_other_failure_is_an_error() {
+        use rustix::io::Errno;
+        assert!(answer::entry(0, errno(Errno::INVAL)).unwrap());
+        assert!(!answer::entry(-1, errno(Errno::INVAL)).unwrap());
+        assert!(answer::entry(-1, errno(Errno::NOMEM)).is_err());
+        assert!(answer::entry(-1, errno(Errno::NOENT)).is_err());
+        assert!(answer::entry(1, errno(Errno::INVAL)).is_err());
+        assert!(answer::entry(-2, errno(Errno::INVAL)).is_err());
+    }
+
+    #[test]
+    fn a_permission_or_flag_is_set_not_set_or_an_error_never_not_set_by_failing() {
+        use rustix::io::Errno;
+        assert!(answer::bit(1, errno(Errno::INVAL)).unwrap());
+        assert!(!answer::bit(0, errno(Errno::INVAL)).unwrap());
+        assert!(answer::bit(-1, errno(Errno::INVAL)).is_err());
+        assert!(answer::bit(2, errno(Errno::INVAL)).is_err());
+    }
+
+    #[test]
+    fn a_null_entry_or_set_from_a_successful_call_is_an_error() {
+        let mut value = 0u8;
+        assert!(answer::present(&raw mut value, "entry").is_ok());
+        assert!(answer::present(std::ptr::null_mut::<u8>(), "entry").is_err());
+    }
 
     fn group(name: &str, gid: u32, members: &[&str]) -> Group {
         Group {
