@@ -1,14 +1,17 @@
-//! Private directories and files: the file-system half of the trust boundary, the OS user. What keeps another user
-//! out is that every directory on the way to our files is this user's (or the system's) and nobody else can replace
-//! what is in it, that our own directories and records are open to nobody else and have no second name, and that a
-//! link planted in their place is never followed. Anything that fails a check is refused (`PermissionDenied`), never
-//! repaired behind the person's back and never used.
+//! Private directories and files: the file-system half of the trust boundary, the OS user. It keeps out the other
+//! users who are not administrators; root, this user and the administrators (Unix: the admin groups; Windows: SYSTEM,
+//! Administrators, TrustedInstaller) are trusted. What keeps another user out is that every directory on the way to our
+//! files belongs to somebody trusted and nobody else can replace what is in it, that our own directories and records
+//! are open to nobody else and have no second name, and that a link planted in their place is never followed. A link
+//! on the way to a directory is followed only where nobody untrusted can retarget it, and what it leads to is judged in
+//! full (`resolve_links`). Anything that fails a check is refused (`PermissionDenied`), never repaired behind the
+//! person's back and never used.
 //!
 //! The interface is the [`Fs`] trait; [`Files`] is the one OS implementation compiled in, chosen below. What differs
-//! per OS is only how access is set and read: Unix mode bits and `O_NOFOLLOW`; on Windows a protected DACL set when a
-//! file or directory is created, read back from the handle (one that is not protected, or that passes access down to
-//! others, is not private), and reparse points (links, junctions, mount points) refused, at the path and on the way to
-//! it. Who owns something is [`user`](crate::user)'s (`UserId::current().owns_path/owns_file`). Everything else has one
+//! per OS is only how access is set and read: Unix owner, group and mode bits and `O_NOFOLLOW`; on Windows a protected
+//! DACL set when a file or directory is created, read back from the handle (one that is not protected, or that passes
+//! access down to others, is not private), and reparse points (links, junctions, mount points) refused at the path
+//! itself. Who owns something is [`user`](crate::user)'s (`UserId::current().owns_path/owns_file`). Everything else has one
 //! body for every OS, the trait's default methods. Records are written whole: a temporary file beside the record
 //! (`.<record>.<random>`, the name `tempfile` picks), private from its creation, synced, renamed over it (or, for a
 //! record made once, given its name with nothing replaced), the directory synced; on Unix every step in the directory
@@ -41,23 +44,26 @@ use std::path::{Path, PathBuf};
 pub enum Access {
     /// This user's, open to nobody else (apart from the system).
     Private,
-    /// This user's, readable by others but never writable by them. Windows directories may also belong to the
-    /// system, as ordinary profile folders do. Files must still belong to this user and have exactly one name.
+    /// This user's, readable by others but never writable by them (Unix: an admin group or this user's own private
+    /// group writing is not "others"). Directories may also belong to the system (Windows: as ordinary profile
+    /// folders do; Unix: root or an administrator). Files must still belong to this user and have exactly one name.
     NotWritableByOthers,
 }
 
 /// Existing-only access through a checked directory and its held ancestry ([`HeldDirectory`]).
 ///
-/// No operation creates a directory or repairs existing permissions. Links/reparse points, unsafe ownership,
-/// hard-linked records and replaced ancestors are refused with `PermissionDenied`. On Unix operations are relative
+/// No operation creates a directory or repairs existing permissions. Links on the way to the directory (the directory
+/// itself too) are followed as `resolve_links` allows and the directory they lead to is the one held; untrusted
+/// links, links and reparse points at a record, unsafe ownership, hard-linked records and replaced ancestors are
+/// refused with `PermissionDenied`. On Unix operations are relative
 /// to the held directory; Windows holds every ancestor without delete sharing. Same-user/admin modification is
 /// outside this boundary. Reads return `None` only for an absent child; an absent directory is `NotFound`.
 ///
 /// Import both: `use sidevoice_platform::fs::{Directory, HeldDirectory, Access};`.
 pub trait Directory: Sized {
-    /// Opens an absolute existing directory, checking every ancestor. Missing directories remain missing. Windows
-    /// redirected/junction roots are refused: choose an ordinary, unredirected data directory instead. Unix retains
-    /// the system-owned ancestor-link allowance of [`Fs::ensure_private_dir`]. Parent (`..`) components are invalid.
+    /// Opens an absolute existing directory, checking every ancestor. Missing directories remain missing. A link on
+    /// the way or at the directory (Windows: a symlink, junction or mount point) is followed where trusted, as for
+    /// [`Fs::ensure_private_dir`], and the directory it leads to is held. Parent (`..`) components are invalid.
     fn open(path: &Path, access: Access) -> io::Result<Self>;
 
     /// Reads a regular record from the checked handle, bounded by `limit` (`InvalidData` when exceeded).
@@ -103,8 +109,7 @@ impl HeldState {
     pub(crate) fn verify(&self) -> io::Result<()> {
         for (index, (path, held)) in self.chain.iter().enumerate() {
             let leaf = index + 1 == self.chain.len();
-            let current =
-                imp::reopen_directory(path, leaf).map_err(|error| refused(path, error))?;
+            let current = imp::reopen_directory(path).map_err(|error| refused(path, error))?;
             if Files::identity(held)? != Files::identity(&current)? {
                 return Err(refused(
                     path,
@@ -135,6 +140,122 @@ fn directory_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
     let mut paths: Vec<_> = path.ancestors().map(Path::to_path_buf).collect();
     paths.reverse();
     Ok(paths)
+}
+
+/// [`directory_paths`] of what `path` really names (`resolve_links`): `path` is validated as given, then resolved.
+fn real_directory_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
+    directory_paths(path)?;
+    directory_paths(&resolve_links(path)?)
+}
+
+/// The path the absolute `path` really names, each link on the way followed only where nobody untrusted can retarget
+/// it: the directory holding the link passes the ancestor rule (`imp::check_ancestor`), as does every directory above
+/// it, and so does the link itself (`imp::check_link`). A link is a symbolic link, or on Windows also a junction or a
+/// mount point; any other reparse point is left as it is, for the checks that follow to refuse. A root that only
+/// stands for another directory (`imp::backing_directory`: a Windows `subst` drive) is replaced by that directory,
+/// and a root whose directories cannot be checked (a network share) is refused. From the first missing component on,
+/// the path is kept as written (created or reported missing later).
+///
+/// What is returned has no link on the way: callers hold and judge it in full, as any path, and work in it, so the
+/// target is what is checked and what is used, never the link. A link is replaced only by whoever may write the
+/// directory holding it, who is trusted, so the result names the same directory for as long as that holds.
+fn resolve_links(path: &Path) -> io::Result<PathBuf> {
+    // Links followed before giving up, as Linux's `MAXSYMLINKS`.
+    const MAX_LINKS: usize = 40;
+    let mut pending = parts(path);
+    pending.reverse();
+    let mut resolved = PathBuf::new();
+    let mut links = 0;
+    while let Some(part) = pending.pop() {
+        let name = match part {
+            Part::Root(root) => {
+                resolved.push(root);
+                // A whole root that is another directory's alias (Windows: `subst`) is replaced by that directory,
+                // whose every ancestor is then judged as any path's.
+                if !matches!(pending.last(), Some(Part::Root(_))) {
+                    if let Some(backing) = imp::backing_directory(&resolved)? {
+                        links += 1;
+                        if links > MAX_LINKS {
+                            return Err(refused(path, "too many links on the way"));
+                        }
+                        resolved = PathBuf::new();
+                        pending.extend(parts(&backing).into_iter().rev());
+                    }
+                }
+                continue;
+            }
+            Part::Up => {
+                resolved.pop();
+                continue;
+            }
+            Part::Name(name) => name,
+        };
+        // Every directory entered is judged before what is in it is trusted, links included.
+        imp::check_ancestor(&resolved)?;
+        let next = resolved.join(&name);
+        match fs::symlink_metadata(&next) {
+            Ok(metadata) if metadata.is_symlink() => {
+                links += 1;
+                if links > MAX_LINKS {
+                    return Err(refused(path, "too many links on the way"));
+                }
+                imp::check_link(&next)?;
+                let target = fs::read_link(&next)?;
+                if target.is_absolute() {
+                    resolved = PathBuf::new();
+                }
+                pending.extend(parts(&target).into_iter().rev());
+            }
+            Ok(_) => resolved = next,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                resolved = next;
+                for part in pending.drain(..).rev() {
+                    match part {
+                        Part::Root(root) => resolved.push(root),
+                        Part::Up => {
+                            resolved.pop();
+                        }
+                        Part::Name(name) => resolved.push(name),
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(resolved)
+}
+
+/// One step of a path for `resolve_links`: its root (a Windows prefix, the root directory), `..`, or a name.
+enum Part {
+    Root(std::ffi::OsString),
+    Up,
+    Name(std::ffi::OsString),
+}
+
+fn parts(path: &Path) -> Vec<Part> {
+    use std::path::Component;
+    path.components()
+        .filter_map(|component| match component {
+            Component::Prefix(_) | Component::RootDir => {
+                Some(Part::Root(component.as_os_str().to_owned()))
+            }
+            Component::CurDir => None,
+            Component::ParentDir => Some(Part::Up),
+            Component::Normal(name) => Some(Part::Name(name.to_owned())),
+        })
+        .collect()
+}
+
+/// Where `imp::write_whole` writes the record `path`: for a directory it judges ([`Publish::judged`]), in the one its
+/// parent really names (`resolve_links`), the record's own name kept and never followed; as written otherwise.
+fn record_path(path: &Path, how: Publish) -> io::Result<PathBuf> {
+    if !how.judged() {
+        return Ok(path.to_path_buf());
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "a record must have a file name"))?;
+    Ok(resolve_links(parent_of(path)?)?.join(name))
 }
 
 pub(crate) fn child_name(name: &OsStr) -> io::Result<&Path> {
@@ -188,6 +309,7 @@ fn judge_access(file: &File, access: Access, directory: bool) -> io::Result<()> 
 }
 
 /// What somebody other than a file's owner (and the system: root, SYSTEM, Administrators, TrustedInstaller) may do with it.
+/// On Unix an admin group or this user's own private group writing is `Read`, never `Change`: not private, not others.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Others {
     /// Nothing at all, now or through what is created in it: the file is private.
@@ -238,16 +360,17 @@ pub trait Fs {
     /// Validates a recorded Sidevoice program and returns the absolute path to launch. This is not for agent
     /// CLIs, PATH discovery or publisher authentication. Nothing is created, repaired or executed.
     ///
-    /// The regular file must belong to this user or the system (Unix root; Windows SYSTEM, Administrators
-    /// or TrustedInstaller), with no write/takeover rights granted to other users. Its ancestry is held and checked
-    /// with the same mechanism as [`Directory`], including system-owned program directories and Unix sticky parents.
+    /// The regular file must belong to this user or the system (Unix root or an administrator; Windows SYSTEM,
+    /// Administrators or TrustedInstaller), with no write/takeover rights granted to other users (Unix: an admin group
+    /// or this user's private group may write). Its ancestry is held and checked with the same mechanism as
+    /// [`Directory`], including system-owned program directories and Unix sticky parents.
     /// Unix requires an execute bit and rejects a sticky file. Windows accepts native `.exe` names, case-insensitively;
     /// it does not consult PATHEXT or invoke a shell. The OS loader still decides whether the payload can execute.
     /// Unlike private records, programs may have hard links: they confer no write rights or secret-file access.
     ///
-    /// Supply an absolute path without `..`. Unix resolves links first and checks the resolved ancestry and file;
-    /// launch the returned path, never the original link. Windows refuses every reparse point, including a final
-    /// link or junctioned root: reinstall in an ordinary, unredirected directory. Missing paths return `NotFound`,
+    /// Supply an absolute path without `..`. Links (Windows: symlinks, junctions, mount points), the final one too,
+    /// are resolved first where trusted, as for [`Fs::ensure_private_dir`], and the resolved ancestry and file are
+    /// checked; launch the returned path, never the original link. Missing paths return `NotFound`,
     /// unsafe files/ancestry `PermissionDenied`, invalid names `InvalidInput`; other IO failures propagate.
     ///
     /// **Path-launch limit:** validation releases its handles before returning. Neither Unix path execution nor
@@ -264,8 +387,8 @@ pub trait Fs {
     fn others_of(file: &File) -> io::Result<Others>;
 
     /// Whether a directory of the person's (a home, an agent's configuration) behind an open handle has an owner we
-    /// accept: this user (Unix); this user or the system (Windows: a profile folder `C:\Users\<name>` is owned by
-    /// SYSTEM or Administrators and grants its user full control, the default layout).
+    /// accept: this user or the system (Unix: root or an administrator; Windows: a profile folder `C:\Users\<name>` is
+    /// owned by SYSTEM or Administrators and grants its user full control, the default layout).
     fn owner_of_user_directory_is_trusted(dir: &File) -> io::Result<bool>;
 
     /// Which file is behind an open handle (Unix: device and inode; Windows: volume serial number and the 128-bit
@@ -274,15 +397,21 @@ pub trait Fs {
     fn identity(file: &File) -> io::Result<FileId>;
 
     /// A private directory at the absolute `path`, made (with any missing parents, each private) when it does not
-    /// exist, then checked with every directory on the way to it. The directory itself (a link to one is not) must be
-    /// this user's and open to nobody else; each directory on the way this user's or the system's with nobody else
-    /// able to replace what is in it. Only the path as written is judged, never where a link on the way leads, so a
-    /// link on the way is refused unless the system made it: Unix judges each entry itself, owned by this user or
-    /// root, not writable by group or others unless sticky (`/tmp`), and a link only when root's (macOS's `/var`,
-    /// `/tmp`; Linux gives every link mode `0777`, so none passes there). Windows refuses any reparse point on the way
-    /// (junction, symlink, mount point) and judges each directory: owned by this user, SYSTEM, Administrators or
-    /// TrustedInstaller, nobody but this user and the system allowed to delete or rename what is in it or to take it
-    /// over. An existing directory with the wrong owner or access is refused, not repaired.
+    /// exist, then checked with every directory on the way to it. The directory itself must be this user's and open
+    /// to nobody else; each directory on the way owned by somebody trusted, with nobody else able to replace what is
+    /// in it.
+    ///
+    /// A link on the way, or at the directory itself (one moved to another disk), is followed only when the directory
+    /// holding it passes that rule, with everything above it, and so does the link: Unix, a link owned by root, this
+    /// user or an administrator (its mode means nothing); Windows, a symlink, junction or mount point judged as a
+    /// directory on the way is. Then what it leads to is judged in full, as any path; it is the directory checked.
+    ///
+    /// Unix judges each directory itself: owned by root, this user or an administrator (a member of an admin group),
+    /// writable only by an admin group or this user's own private group, by anybody else only under the sticky bit
+    /// (`/tmp`). Windows judges each directory: owned by this user, SYSTEM, Administrators or TrustedInstaller, nobody
+    /// but this user and the system allowed to delete or rename what is in it or to take it over (a volume root, which
+    /// cannot itself be deleted or renamed, does not count `DELETE` on it: `D:\` grants Authenticated Users Modify). An
+    /// existing directory with the wrong owner or access is refused, not repaired.
     fn ensure_private_dir(path: &Path) -> io::Result<()> {
         if !path.is_absolute() {
             return Err(io::Error::new(
@@ -291,15 +420,13 @@ pub trait Fs {
             ));
         }
         create_all::<Self>(path)?;
+        // Every directory above what it really names is judged on the way there.
+        let path = &resolve_links(path)?;
         let dir = Self::open_read(path).map_err(|error| refused(path, error))?;
         if !dir.metadata()?.is_dir() {
             return Err(refused(path, "not a directory"));
         }
-        Self::check_private(&dir).map_err(|error| refused(path, error))?;
-        for ancestor in path.ancestors().skip(1) {
-            imp::check_ancestor(ancestor)?;
-        }
-        Ok(())
+        Self::check_private(&dir).map_err(|error| refused(path, error))
     }
 
     /// That what is behind `file` is private: this user's and open to nobody else; a regular file also has no
@@ -778,19 +905,20 @@ mod tests {
         Files::let_others_change(&unsafe_program);
         let link = root.path().join("sidevoice.exe");
         Files::symlink(&safe, &link);
-        // The contract deliberately differs: Unix resolves once; Windows D1=A refuses all reparse points.
-        #[cfg(unix)]
         let resolved = Files::trusted_program(&link).unwrap();
-        #[cfg(windows)]
-        assert!(refused(Files::trusted_program(&link)));
+        assert_eq!(resolved, safe.canonicalize().unwrap());
+        Files::trusted_program(&resolved).unwrap();
         fs::remove_file(&link).unwrap();
         Files::symlink(&unsafe_program, &link);
         assert!(refused(Files::trusted_program(&link)));
-        #[cfg(unix)]
-        {
-            assert_eq!(resolved, safe.canonicalize().unwrap());
-            Files::trusted_program(&resolved).unwrap();
-        }
+        // A link others could retarget is not followed, even to a safe program.
+        let loose = root.path().join("loose");
+        Files::create_private_dir(&loose).unwrap();
+        Files::symlink(&safe, loose.join("sidevoice.exe"));
+        Files::let_others_change(&loose);
+        assert!(refused(Files::trusted_program(
+            &loose.join("sidevoice.exe")
+        )));
     }
 
     #[test]
@@ -802,13 +930,10 @@ mod tests {
         let link = root.path().join("linked-bin");
         Files::symlink(&dir, &link);
         let path = link.join("sidevoice.exe");
-        #[cfg(unix)]
         assert_eq!(
             Files::trusted_program(&path).unwrap(),
             safe.canonicalize().unwrap()
         );
-        #[cfg(windows)]
-        assert!(refused(Files::trusted_program(&path)));
         Files::let_others_change(&dir);
         assert!(refused(Files::trusted_program(&path)));
         assert!(refused(Files::trusted_program(&safe)));
@@ -859,7 +984,7 @@ mod tests {
     // Windows aliases, native executable names and junctions have no Unix counterpart.
     #[cfg(windows)]
     #[test]
-    fn trusted_program_refuses_windows_aliases_scripts_and_junctions() {
+    fn trusted_program_refuses_windows_aliases_and_scripts_and_follows_trusted_junctions() {
         let root = scratch();
         for name in [
             "CON.exe",
@@ -889,7 +1014,17 @@ mod tests {
         program(&dir, "sidevoice.exe");
         let link = root.path().join("junction");
         imp::link_dir(&dir, &link);
-        assert!(refused(Files::trusted_program(&link.join("sidevoice.exe"))));
+        assert_eq!(
+            Files::trusted_program(&link.join("sidevoice.exe")).unwrap(),
+            dir.join("sidevoice.exe").canonicalize().unwrap()
+        );
+        let loose = root.path().join("loose");
+        Files::create_private_dir(&loose).unwrap();
+        imp::link_dir(&dir, &loose.join("junction"));
+        Files::let_others_change(&loose);
+        assert!(refused(Files::trusted_program(
+            &loose.join("junction").join("sidevoice.exe")
+        )));
     }
 
     // These spellings and ACLs are Windows-only; the assertions still use the public Fs interface.
@@ -951,14 +1086,17 @@ mod tests {
         }
     }
 
+    // A share's directories, even this machine's own, are reached through a server: what is above the shared
+    // directory cannot be checked from the path, so nothing reached through a share is trusted.
     #[cfg(windows)]
     #[test]
-    fn trusted_program_checks_unc_and_verbatim_unc_through_a_local_share() {
+    fn trusted_program_and_held_directories_refuse_unc_and_verbatim_unc_through_a_local_share() {
         let root = scratch();
         Files::shut_others_out(root.path());
         let dir = root.path().join("bin");
         Files::create_private_dir(&dir).unwrap();
         let path = program(&dir, "sidevoice.exe");
+        Files::trusted_program(&path).unwrap();
         let share = imp::Share::new(root.path());
         let unc = share.path().join("bin").join("sidevoice.exe");
         let verbatim = PathBuf::from(format!(
@@ -966,17 +1104,16 @@ mod tests {
             unc.to_str().unwrap().trim_start_matches('\\')
         ));
         for alias in [&unc, &verbatim] {
-            let resolved = Files::trusted_program(alias).unwrap();
             assert!(
-                Files::identity(&Files::open_read(&resolved).unwrap()).unwrap()
-                    == Files::identity(&Files::open_read(&path).unwrap()).unwrap()
+                refused(Files::trusted_program(alias)),
+                "{}",
+                alias.display()
             );
+            assert_open_refused(alias.parent().unwrap(), Access::Private);
+            assert!(refused(Files::ensure_private_dir(
+                &alias.parent().unwrap().join("data")
+            )));
         }
-        Files::let_others_change(&path);
-        assert!(refused(Files::trusted_program(&unc)));
-        Files::shut_others_out(&path);
-        Files::let_others_change(&dir);
-        assert!(refused(Files::trusted_program(&verbatim)));
     }
 
     #[cfg(windows)]
@@ -1240,17 +1377,30 @@ mod tests {
     }
 
     #[test]
-    fn held_directories_refuse_linked_or_unsafe_ancestry() {
+    fn held_directories_follow_trusted_links_and_refuse_unsafe_ancestry() {
         let root = scratch();
         let parent = root.path().join("parent");
         let path = parent.join("data");
         Files::ensure_private_dir(&path).unwrap();
         Files::symlink(&parent, root.path().join("link"));
-        assert_open_refused(&root.path().join("link").join("data"), Access::Private);
+        held(&root.path().join("link").join("data"), Access::Private)
+            .write(OsStr::new("through-ancestor"), b"1")
+            .unwrap();
         Files::symlink(&path, parent.join("leaf-link"));
-        assert_open_refused(&parent.join("leaf-link"), Access::Private);
+        held(&parent.join("leaf-link"), Access::Private)
+            .write(OsStr::new("through-leaf"), b"2")
+            .unwrap();
+        assert_eq!(fs::read(path.join("through-ancestor")).unwrap(), b"1");
+        assert_eq!(fs::read(path.join("through-leaf")).unwrap(), b"2");
+        // A link others could retarget is not followed, wherever it leads.
+        let loose = root.path().join("loose");
+        Files::create_private_dir(&loose).unwrap();
+        Files::symlink(&path, loose.join("link"));
+        Files::let_others_change(&loose);
+        assert_open_refused(&loose.join("link"), Access::Private);
         Files::let_others_change(&parent);
         assert_open_refused(&path, Access::Private);
+        assert_open_refused(&root.path().join("link").join("data"), Access::Private);
     }
 
     #[test]
@@ -1712,18 +1862,21 @@ mod tests {
     }
 
     #[test]
-    fn a_file_and_a_link_are_not_private_directories() {
+    fn a_file_is_not_a_private_directory_and_a_link_is_judged_by_where_it_leads() {
         let root = scratch();
         let file = root.path().join("file");
         fs::write(&file, b"").unwrap();
         assert!(Files::ensure_private_dir(&file).is_err());
         let target = root.path().join("target");
         Files::ensure_private_dir(&target).unwrap();
+        // A data directory moved elsewhere, a link of this user's left in its place.
         let link = root.path().join("link");
         Files::symlink(&target, &link);
+        Files::ensure_private_dir(&link).unwrap();
+        Files::let_others_read(&target);
         assert!(
             refused(Files::ensure_private_dir(&link)),
-            "a link is not the directory it leads to"
+            "the directory it leads to must be private"
         );
     }
 
@@ -1745,17 +1898,27 @@ mod tests {
     }
 
     #[test]
-    fn a_private_directory_reached_through_a_link_on_the_way_is_refused() {
+    fn a_link_on_the_way_is_followed_only_where_nobody_else_can_retarget_it() {
         let root = scratch();
         let dir = root.path().join("private");
         Files::ensure_private_dir(&dir).unwrap();
         let link = root.path().join("link");
         Files::symlink(&dir, &link);
         Files::create_private_dir(&dir.join("inside")).unwrap();
-        assert!(
-            refused(Files::ensure_private_dir(&link.join("inside"))),
-            "a link of this user's on the way is refused, not followed"
-        );
+        Files::ensure_private_dir(&link.join("inside")).unwrap();
+        Files::ensure_private_dir(&link.join("made")).unwrap();
+        assert!(private(&dir.join("made")), "made where it leads");
+        // The same link in a directory others can change: they could point it anywhere.
+        let loose = root.path().join("loose");
+        Files::create_private_dir(&loose).unwrap();
+        Files::symlink(&dir, loose.join("link"));
+        Files::let_others_change(&loose);
+        assert!(refused(Files::ensure_private_dir(
+            &loose.join("link").join("inside")
+        )));
+        // A trusted link into a directory others can change leads to an unsafe ancestry.
+        Files::let_others_change(&dir);
+        assert!(refused(Files::ensure_private_dir(&link.join("inside"))));
     }
 
     #[test]
@@ -1913,14 +2076,162 @@ mod tests {
         Files::let_others_change(&open);
         assert!(refused(Files::open_created_file(&shared)));
         assert!(open.join(".identity.json.j1K2l3").exists());
-        // Nor through a link to the directory.
-        let link = root.path().join("link");
+        // Nor through a link others could retarget; through a trusted one, in the directory it leads to.
         Files::shut_others_out(&open);
-        Files::symlink(&open, &link);
+        let loose = root.path().join("loose");
+        Files::create_private_dir(&loose).unwrap();
+        Files::symlink(&open, loose.join("link"));
+        Files::let_others_change(&loose);
         assert!(refused(Files::open_created_file(
-            &link.join("identity.json")
+            &loose.join("link").join("identity.json")
         )));
         assert!(open.join(".identity.json.j1K2l3").exists());
+        let link = root.path().join("link");
+        Files::symlink(&open, &link);
+        Files::open_created_file(&link.join("identity.json")).unwrap();
+        assert!(!open.join(".identity.json.j1K2l3").exists());
+    }
+
+    // Unix only: group write bits have no Windows counterpart (grants to Administrators are judged by the Windows tests).
+    // Each kind of group is tried where this host makes this user a member of one: this user's private group (most
+    // Linux), an admin group (a macOS administrator), any other (macOS `staff`, a shared Linux group).
+    #[cfg(unix)]
+    #[test]
+    fn group_write_is_trusted_only_from_an_admin_group_or_this_users_private_group() {
+        use std::os::unix::fs::{chown, PermissionsExt};
+        let mode = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
+        };
+        let groups = imp::test_groups();
+        for (gid, trusted) in [
+            (groups.admin, true),
+            (groups.private, true),
+            (groups.other, false),
+        ] {
+            let Some(gid) = gid else { continue };
+            let root = scratch();
+            let shared = root.path().join("shared");
+            Files::create_private_dir(&shared).unwrap();
+            let path = program(&shared, "sidevoice");
+            chown(&shared, None, Some(gid)).unwrap();
+            mode(&shared, 0o2775);
+            // On the way, as the checked directory, and above a program.
+            assert_eq!(
+                Files::ensure_private_dir(&shared.join("data")).is_ok(),
+                trusted,
+                "{gid}"
+            );
+            assert_eq!(
+                HeldDirectory::open(&shared, Access::NotWritableByOthers).is_ok(),
+                trusted,
+                "{gid}"
+            );
+            assert_eq!(Files::trusted_program(&path).is_ok(), trusted, "{gid}");
+            assert_open_refused(&shared, Access::Private);
+            // The program itself.
+            mode(&shared, 0o700);
+            chown(&path, None, Some(gid)).unwrap();
+            mode(&path, 0o770);
+            assert_eq!(Files::trusted_program(&path).is_ok(), trusted, "{gid}");
+            // Everybody writing is refused whatever the group, as before.
+            mode(&shared, 0o777);
+            assert!(refused(Files::ensure_private_dir(&shared.join("data"))));
+        }
+    }
+
+    // Unix only: an extended ACL beside the mode bits is Unix's (a Windows DACL is the whole of its access, judged in
+    // every test). Its grants to another user or group are judged as the mode's are, whatever the bits show.
+    #[cfg(unix)]
+    #[test]
+    fn an_acl_letting_another_user_or_group_write_is_refused_and_one_letting_them_read_is_not() {
+        for whom in [imp::Grantee::User, imp::Grantee::Group] {
+            let root = scratch();
+            let dir = |name: &str| {
+                let dir = root.path().join(name);
+                Files::create_private_dir(&dir).unwrap();
+                dir
+            };
+            // Reading: not a writer, but not private either.
+            let reading = dir("reading");
+            let path = program(&reading, "sidevoice");
+            imp::grant_by_acl(&reading, whom, false);
+            imp::grant_by_acl(&path, whom, false);
+            assert_eq!(others(&path), Others::Read, "{whom:?}");
+            assert!(Files::trusted_program(&path).is_ok(), "{whom:?}");
+            Files::ensure_private_dir(&reading.join("data")).unwrap();
+            let _held = held(&reading, Access::NotWritableByOthers);
+            assert_open_refused(&reading, Access::Private);
+            // Writing the program.
+            let program_dir = dir("program");
+            let path = program(&program_dir, "sidevoice");
+            imp::grant_by_acl(&path, whom, true);
+            assert_eq!(others(&path), Others::Change, "{whom:?}");
+            assert!(refused(Files::trusted_program(&path)), "{whom:?}");
+            // Writing a directory on the way, above a private program, directory and record.
+            let ancestor = dir("ancestor");
+            let path = program(&ancestor, "sidevoice");
+            Files::ensure_private_dir(&ancestor.join("data")).unwrap();
+            imp::grant_by_acl(&ancestor, whom, true);
+            assert!(refused(Files::trusted_program(&path)), "{whom:?}");
+            assert!(refused(Files::ensure_private_dir(&ancestor.join("data"))));
+            assert_open_refused(&ancestor.join("data"), Access::Private);
+            assert_open_refused(&ancestor, Access::NotWritableByOthers);
+            // Writing the directory that holds a link on the way: it could retarget it.
+            let target = dir("target");
+            let holder = dir("holder");
+            Files::symlink(&target, holder.join("link"));
+            Files::ensure_private_dir(&holder.join("link").join("inside")).unwrap();
+            imp::grant_by_acl(&holder, whom, true);
+            assert!(refused(Files::ensure_private_dir(
+                &holder.join("link").join("inside")
+            )));
+            assert_open_refused(&holder.join("link"), Access::Private);
+        }
+    }
+
+    // Unix only, as the test above. An ACL that passes access down to what is created in a directory (Linux: a default
+    // ACL; macOS: `file_inherit`) must never reach a published record: on Linux the mode a record is created with
+    // bounds it, and the record is private; on macOS it would not be, so nothing is staged there at all. Either way, no
+    // record anybody else may read or write, new or replacing one, is ever published.
+    #[cfg(unix)]
+    #[test]
+    fn an_acl_passing_access_down_never_reaches_a_published_record() {
+        for whom in [imp::Grantee::User, imp::Grantee::Group] {
+            for write in [false, true] {
+                let root = scratch();
+                let dir = root.path().join("passing-down");
+                Files::create_private_dir(&dir).unwrap();
+                let held = held(&dir, Access::NotWritableByOthers);
+                held.write(OsStr::new("existing"), b"before").unwrap();
+                imp::pass_down_by_acl(&dir, whom, write);
+                for name in ["existing", "new"] {
+                    match held.write(OsStr::new(name), b"secret") {
+                        Ok(()) => assert!(private(&dir.join(name)), "{whom:?} {write} {name}"),
+                        Err(error) => assert_eq!(error.kind(), ErrorKind::PermissionDenied),
+                    }
+                    match Files::write_private(&dir.join(name), b"secret") {
+                        Ok(()) => assert!(private(&dir.join(name)), "{whom:?} {write} {name}"),
+                        Err(error) => assert_eq!(error.kind(), ErrorKind::PermissionDenied),
+                    }
+                }
+                assert!(private(&dir.join("existing")), "{whom:?} {write}");
+                let mut names: Vec<_> = fs::read_dir(&dir)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                names.sort();
+                assert!(
+                    names == ["existing"] || names == ["existing", "new"],
+                    "nothing staged is left: {names:?}"
+                );
+                #[cfg(target_os = "macos")]
+                assert_eq!(
+                    fs::read(dir.join("existing")).unwrap(),
+                    b"before",
+                    "refused before staging"
+                );
+            }
+        }
     }
 
     // Unix only, as the test above: only there can a creation be left unfinished.
@@ -1968,15 +2279,39 @@ mod tests {
     }
 
     #[test]
-    fn a_private_write_through_a_link_to_a_private_directory_is_refused() {
+    fn a_private_write_follows_only_a_link_nobody_else_can_retarget() {
         let root = scratch();
         let dir = root.path().join("private");
         Files::create_private_dir(&dir).unwrap();
+        let loose = root.path().join("loose");
+        Files::create_private_dir(&loose).unwrap();
+        Files::symlink(&dir, loose.join("link"));
+        Files::let_others_change(&loose);
+        let untrusted = loose.join("link");
+        assert!(refused(Files::write_private(
+            &untrusted.join("state.json"),
+            b"secret"
+        )));
+        assert!(refused(Files::create_private(
+            &untrusted.join("identity.json"),
+            b"secret"
+        )));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "nothing written");
         let link = root.path().join("link");
         Files::symlink(&dir, &link);
-        assert!(Files::write_private(&link.join("state.json"), b"secret").is_err());
-        assert!(Files::create_private(&link.join("identity.json"), b"secret").is_err());
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "nothing written");
+        Files::write_private(&link.join("state.json"), b"secret").unwrap();
+        Files::create_private(&link.join("identity.json"), b"made").unwrap();
+        assert_eq!(fs::read(dir.join("state.json")).unwrap(), b"secret");
+        assert!(
+            private(&dir.join("identity.json")),
+            "written where it leads"
+        );
+        // What it leads to is still judged.
+        Files::let_others_read(&dir);
+        assert!(refused(Files::write_private(
+            &link.join("state.json"),
+            b"later"
+        )));
     }
 
     #[test]
@@ -2238,17 +2573,109 @@ mod tests {
     // above cover symbolic links on every OS.
     #[cfg(windows)]
     #[test]
-    fn a_junction_on_the_way_to_a_private_directory_is_refused() {
+    fn a_junction_on_the_way_is_followed_only_where_nobody_else_can_retarget_it() {
         let root = scratch();
         let dir = root.path().join("private");
         Files::ensure_private_dir(&dir).unwrap();
+        // A profile folder moved to another disk, a junction left in its place.
         let link = root.path().join("link");
         imp::link_dir(&dir, &link);
-        assert_open_refused(&link, Access::Private);
-        assert_open_refused(&link.join("inside"), Access::Private);
-        assert!(
-            refused(Files::ensure_private_dir(&link.join("inside"))),
-            "a link on the way is refused, not followed"
+        Files::ensure_private_dir(&link.join("inside")).unwrap();
+        assert!(private(&dir.join("inside")), "made where it leads");
+        held(&link, Access::Private)
+            .write(OsStr::new("record"), b"through")
+            .unwrap();
+        assert_eq!(fs::read(dir.join("record")).unwrap(), b"through");
+        // In a directory others can change, or itself changeable by others, it could be pointed anywhere.
+        let loose = root.path().join("loose");
+        Files::create_private_dir(&loose).unwrap();
+        imp::link_dir(&dir, &loose.join("link"));
+        Files::let_others_change(&loose);
+        assert_open_refused(&loose.join("link"), Access::Private);
+        assert!(refused(Files::ensure_private_dir(
+            &loose.join("link").join("inside")
+        )));
+        let open_link = root.path().join("open-link");
+        imp::link_dir(&dir, &open_link);
+        imp::icacls(&open_link, &["/grant", "*S-1-1-0:(F)", "/L"]);
+        assert_open_refused(&open_link, Access::Private);
+    }
+
+    // Windows only: a volume root is a Windows notion (Unix has one root, owned by root). Only a local fixed volume's
+    // root is one: `subst` gives a directory a drive letter, but it stays a directory others may rename through its
+    // real path, so Modify on it is refused under either name.
+    #[cfg(windows)]
+    #[test]
+    fn only_a_local_fixed_volume_root_may_let_others_modify_it() {
+        let root = scratch();
+        let mut system = std::env::var_os("SystemDrive").unwrap();
+        system.push(r"\");
+        let system = PathBuf::from(system);
+        assert!(imp::is_local_volume_root(
+            &imp::reopen_directory(&system).unwrap()
+        ));
+        let volume = root.path().join("volume");
+        fs::create_dir(&volume).unwrap();
+        assert!(!imp::is_local_volume_root(
+            &imp::reopen_directory(&volume).unwrap()
+        ));
+        // Authenticated Users: Modify, on the directory and passed down to what is made below it.
+        imp::icacls(&volume, &["/grant", "*S-1-5-11:(OI)(CI)(M)"]);
+        let drive = imp::Drive::new(&volume);
+        assert!(!imp::is_local_volume_root(
+            &imp::reopen_directory(&drive.root()).unwrap()
+        ));
+        assert!(refused(Files::ensure_private_dir(
+            &drive.root().join("Sidevoice")
+        )));
+        assert!(refused(Files::ensure_private_dir(
+            &volume.join("Sidevoice")
+        )));
+        // Without the grant, the aliased directory is judged as any other and passes.
+        imp::icacls(&volume, &["/remove:g", "*S-1-5-11"]);
+        let data = drive.root().join("Sidevoice");
+        Files::ensure_private_dir(&data).unwrap();
+        let _held = held(&data, Access::Private);
+    }
+
+    // Windows only, as above. A `subst` drive's directory grants nobody else anything, but the directory above it may
+    // let others delete what is in it (`FILE_DELETE_CHILD`): they could rename the drive's directory away and put
+    // their own in its place. What is reached through the drive is judged through its real path, that parent too.
+    #[cfg(windows)]
+    #[test]
+    fn a_subst_drive_is_refused_when_others_can_replace_the_directory_behind_it() {
+        let root = scratch();
+        let shared = root.path().join("shared");
+        Files::create_private_dir(&shared).unwrap();
+        let volume = shared.join("volume");
+        Files::create_private_dir(&volume).unwrap();
+        let bin = volume.join("bin");
+        Files::create_private_dir(&bin).unwrap();
+        let path = program(&bin, "sidevoice.exe");
+        Files::ensure_private_dir(&volume.join("data")).unwrap();
+        let drive = imp::Drive::new(&volume);
+        let aliased = |path: &Path| drive.root().join(path.strip_prefix(&volume).unwrap());
+        // Authenticated Users: delete child, on the parent only.
+        imp::icacls(&shared, &["/grant", "*S-1-5-11:(DC)"]);
+        assert_eq!(others(&volume), Others::Nothing, "nothing granted on it");
+        assert!(refused(Files::trusted_program(&aliased(&path))));
+        assert!(refused(Files::ensure_private_dir(&aliased(
+            &volume.join("data")
+        ))));
+        assert_open_refused(&drive.root(), Access::NotWritableByOthers);
+        assert_open_refused(&aliased(&volume.join("data")), Access::Private);
+        // Once nobody else can, the drive leads to the real path, which is what is held and returned.
+        imp::icacls(&shared, &["/remove:g", "*S-1-5-11"]);
+        assert_eq!(
+            Files::trusted_program(&aliased(&path)).unwrap(),
+            path.canonicalize().unwrap()
+        );
+        held(&aliased(&volume.join("data")), Access::Private)
+            .write(OsStr::new("record"), b"through the drive")
+            .unwrap();
+        assert_eq!(
+            fs::read(volume.join("data").join("record")).unwrap(),
+            b"through the drive"
         );
     }
 }

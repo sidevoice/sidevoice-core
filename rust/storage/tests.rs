@@ -65,23 +65,28 @@ fn a_file_is_not_a_directory() {
 }
 
 // Unix only: a symlink needs no privilege there; on Windows a link is a junction or a privileged symlink, and the
-// refusal is tested on every OS against the interface (`sidevoice-platform`, fs tests).
+// rule is tested on every OS against the interface (`sidevoice-platform`, fs tests: a link is followed only where
+// nobody else can retarget it). A report directory is still judged as the entry itself.
 #[cfg(unix)]
 #[test]
-fn a_link_to_a_directory_is_not_the_directory() {
+fn a_link_of_this_users_leads_to_the_private_directory_but_is_not_a_report_directory() {
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("elsewhere");
     PrivateDir::open(&target).unwrap();
     let link = root.path().join("core");
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    assert!(PrivateDir::open(&link).is_err());
+    let through = PrivateDir::open(&link).unwrap();
+    through
+        .write_json("state.json", &serde_json::json!({}))
+        .unwrap();
+    assert!(target.join("state.json").exists());
     assert!(ReportDir::open(&link).is_err());
 }
 
 #[cfg(unix)]
 #[test]
-#[ignore = "known gap: a trailing `/`, `/.` or `//` on a symlinked data directory is followed (lstat resolves it)"]
-fn a_link_is_refused_however_it_is_spelled() {
+#[ignore = "known gap: a trailing `/`, `/.` or `//` on a symlinked report directory is followed (lstat resolves it)"]
+fn a_link_is_not_a_report_directory_however_it_is_spelled() {
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("elsewhere");
     PrivateDir::open(&target).unwrap();
@@ -89,7 +94,6 @@ fn a_link_is_refused_however_it_is_spelled() {
     std::os::unix::fs::symlink(&target, &link).unwrap();
     for suffix in ["/", "/.", "//"] {
         let spelled = PathBuf::from(format!("{}{suffix}", link.display()));
-        assert!(PrivateDir::open(&spelled).is_err(), "core{suffix}");
         assert!(ReportDir::open(&spelled).is_err(), "core{suffix}");
     }
 }

@@ -246,8 +246,12 @@ mod tests {
         let missing = temp.path().join("missing");
         assert!(HeldDirectory::open(&missing, Access::Private).is_err());
         assert!(!missing.exists());
-        Files::symlink(&root, temp.path().join("redirected"));
-        assert!(HeldDirectory::open(&temp.path().join("redirected"), Access::Private).is_err());
+        // A link is followed only where nobody untrusted could retarget it (the fs rule): not from a loose directory.
+        let loose = temp.path().join("loose");
+        Files::create_private_dir(&loose).unwrap();
+        Files::symlink(&root, loose.join("redirected"));
+        Files::let_others_change(&loose);
+        assert!(HeldDirectory::open(&loose.join("redirected"), Access::Private).is_err());
         drop(held);
     }
 

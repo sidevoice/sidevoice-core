@@ -1,6 +1,7 @@
 //! Windows: a protected DACL set when a file or directory is created (a record too: staged under that DACL, then
-//! renamed over the record), read back from the handle; reparse points (links, junctions, mount points) refused, at
-//! the path and on the way to it.
+//! renamed over the record), read back from the handle; reparse points (links, junctions, mount points) refused at
+//! the path itself. A symlink, junction or mount point on the way to a directory is followed only where nobody
+//! untrusted can retarget it (`super::resolve_links`, [`check_link`]); what it leads to is then judged in full.
 //!
 //! "Private" is a protected DACL (it inherits nothing) granting full control to the owner (`OWNER RIGHTS`), SYSTEM
 //! and Administrators only, inherited by what is created inside. What others may do is read from the DACL of the
@@ -40,11 +41,13 @@ use windows_sys::Win32::Security::{
     OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, FileIdInfo, GetFileInformationByHandleEx, CREATE_NEW,
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_128, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, READ_CONTROL,
+    CreateDirectoryW, CreateFileW, FileIdInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_128, FILE_ID_INFO,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
+    READ_CONTROL, VOLUME_NAME_GUID,
 };
+use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
 
 /// This OS's files.
 pub struct Os;
@@ -99,8 +102,10 @@ impl super::Fs for Os {
     }
 
     fn trusted_program(path: &Path) -> io::Result<PathBuf> {
+        program_name(path)?;
+        // Links on the way, the final one too, are followed only where trusted; the result has none left to hide.
+        let path = &super::resolve_links(path)?;
         let name = program_name(path)?;
-        // Do not canonicalize before holding/checking the original ancestry: that would hide junctions.
         let parent = Held::open_with(super::parent_of(path)?, None)?;
         let path = parent.0.leaf().0.join(name);
         let file = Self::open_read(&path).map_err(|error| match error.kind() {
@@ -199,19 +204,63 @@ pub(super) fn link_count(file: &File) -> io::Result<u64> {
 
 /// A directory on the way to something private: this user's or the system's, nobody but this user and the system able
 /// to delete or rename what is in it, or to take it over. Entries only what is created inside inherits are not judged
-/// here (`C:\` passes Modify down to Authenticated Users): what is ours is created with its own DACL. A reparse point
-/// on the way (junction, symlink, mount point, a redirected folder) is refused, not followed: only the path as written
-/// is judged, and one leading into a directory others can change would hide it. A default profile has none on the way
-/// to its folders (`C:\Users\<name>\AppData\Local`, `C:\Users\<name>\.sidevoice`): the legacy junctions
-/// (`Application Data`, `Local Settings`, `C:\Documents and Settings`) sit beside that path, not on it. Adding entries
-/// is not judged: there is no sticky bit, and `C:\` lets every user add folders.
+/// here (`C:\` passes Modify down to Authenticated Users): what is ours is created with its own DACL. The root of a
+/// local fixed volume (`D:\`, [`is_local_volume_root`]) cannot itself be deleted or renamed, so `DELETE` on it is not
+/// counted: a second drive's root grants Authenticated Users Modify, which a directory below it that inherits it is
+/// still refused for. Any other volume's root (a removable disk) is judged as any directory; a `subst` drive's root is
+/// never one here, nor a share's ([`backing_directory`]: replaced by its real path, refused). A reparse point
+/// here is refused: links are followed before the checks (`super::resolve_links`), so one that is still on the way is
+/// not a link, or not one we follow (a redirected or cloud folder). Adding entries is not judged: there is no sticky
+/// bit, and `C:\` lets every user add folders.
 pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
-    let file = OpenOptions::new()
+    check_ancestor_handle(dir, &open_entry(dir)?)
+}
+
+/// A symlink, junction or mount point on the way, in a directory that passed [`check_ancestor`]: followed only when
+/// whoever may change it is trusted, as for a directory on the way (this user's or the system's, nobody else granted
+/// any change to it), since whoever may write it may retarget it.
+pub(super) fn check_link(link: &Path) -> io::Result<()> {
+    let file = open_entry(link)?;
+    let judged = Judged::of(&file)?;
+    if (!UserId::current().owns_file(&file)? && !judged.owner_is_system())
+        || judged.grants_others(CHANGES, false)
+    {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!("unsafe link {}: others can change it", link.display()),
+        ));
+    }
+    Ok(())
+}
+
+/// The directory the root `root` (`X:\`, `\\server\share\`) stands for when it is not a volume's own root: a drive
+/// letter `subst` gives a directory (`Z:\` for `C:\Shared\volume`), whose real path's ancestors (`C:\Shared`) can
+/// rename or replace it however protected it is, so they are judged too, through that path. `None` for a local
+/// volume's own root. The real path is the one the root's handle resolves to (`canonicalize`). A root on a network
+/// (a share, a mapped drive) is refused: the directories behind it are on another machine, out of reach of any check
+/// here.
+pub(super) fn backing_directory(root: &Path) -> io::Result<Option<PathBuf>> {
+    use std::path::{Component, Prefix};
+    let backing = root.canonicalize()?;
+    if !matches!(
+        backing.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+    ) {
+        return Err(super::refused(
+            root,
+            "a network or shared drive; the directories behind it cannot be checked",
+        ));
+    }
+    Ok(backing.parent().is_some().then_some(backing))
+}
+
+/// The entry `path` itself (a reparse point not followed), opened only to read its attributes and security.
+fn open_entry(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
         .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(dir)
-        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", dir.display())))?;
-    check_ancestor_handle(dir, &file)
+        .open(path)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))
 }
 
 pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
@@ -230,7 +279,12 @@ pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
     if !UserId::current().owns_file(file)? && !judged.owner_is_system() {
         return Err(unsafe_dir("owned by another user"));
     }
-    if judged.grants_others(REPLACES_ENTRIES, false) {
+    let replaces = if dir.parent().is_none() && is_local_volume_root(file) {
+        REPLACES_ENTRIES & !DELETE
+    } else {
+        REPLACES_ENTRIES
+    };
+    if judged.grants_others(replaces, false) {
         return Err(unsafe_dir("others can replace what is in it"));
     }
     Ok(())
@@ -244,6 +298,7 @@ pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
 /// meanwhile, so the paths below name it. An existing file's DACL is not carried over to its replacement, which is
 /// private like everything `open_private` creates. The directory is not synced (`Fs::sync_dir`).
 pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
+    let path = &super::record_path(path, how)?;
     let dir = super::parent_of(path)?;
     let _held = if how.judged() {
         let held = not_a_link(
@@ -297,12 +352,13 @@ pub struct Held(pub(crate) HeldState);
 
 impl Held {
     fn open_with(path: &Path, access: Option<Access>) -> io::Result<Self> {
-        let paths = super::directory_paths(path)?;
+        // Links were followed where trusted (`super::resolve_links`): a reparse point left on the way is refused.
+        let paths = super::real_directory_paths(path)?;
         let mut chain = Vec::new();
         // Root first: each checked path remains unrenameable before opening anything beneath it.
         for (index, path) in paths.iter().enumerate() {
             let leaf = index + 1 == paths.len();
-            let file = reopen_directory(path, leaf)?;
+            let file = reopen_directory(path)?;
             if let Some(access) = access.filter(|_| leaf) {
                 super::judge_access(&file, access, true)
                     .map_err(|error| super::refused(path, error))?;
@@ -357,7 +413,7 @@ impl super::Directory for Held {
     }
 }
 
-pub(super) fn reopen_directory(path: &Path, _: bool) -> io::Result<File> {
+pub(super) fn reopen_directory(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()
         // A metadata-only access mask does not participate in Windows sharing checks.
         .read(true)
@@ -469,6 +525,34 @@ const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
 const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 11;
 /// The entry grants nothing to the object itself, only to what is created in it.
 const INHERIT_ONLY_ACE: u8 = 0x08;
+
+/// Whether the directory held by `dir` is the root of a local fixed volume, judged from the handle, not the path's
+/// spelling: its final path by volume GUID is that volume's root (`\\?\Volume{…}\`), and the volume is a fixed disk.
+/// A drive letter given to a directory (`subst`) names a directory on another volume, a mapped drive or a share has no
+/// local volume, and a removable one may be someone else's: none of them is a root nobody can rename.
+pub(super) fn is_local_volume_root(dir: &File) -> bool {
+    let mut path = [0u16; 128];
+    // SAFETY: the handle is open for the call; the buffer's length is passed with it.
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            dir.as_raw_handle() as HANDLE,
+            path.as_mut_ptr(),
+            path.len() as u32,
+            VOLUME_NAME_GUID,
+        )
+    } as usize;
+    // 0 is a failure (a remote file has no volume GUID); a length beyond the buffer is no volume root's.
+    if length == 0 || length >= path.len() {
+        return false;
+    }
+    let name = String::from_utf16_lossy(&path[..length]);
+    let root = name
+        .strip_prefix(r"\\?\Volume{")
+        .and_then(|rest| rest.strip_suffix(r"}\"))
+        .is_some_and(|guid| !guid.contains('\\'));
+    // SAFETY: a NUL-terminated wide string that outlives the call.
+    root && unsafe { GetDriveTypeW(wide(Path::new(&name)).as_ptr()) } == DRIVE_FIXED
+}
 
 /// The private descriptor: protected, full control to the owner, SYSTEM and Administrators, inherited by what is
 /// created inside. The owner is left to the system: the token's default owner, this user.
@@ -833,6 +917,45 @@ impl Drop for Share {
     fn drop(&mut self) {
         let _ = std::process::Command::new("net")
             .args(["share", &self.0, "/DELETE", "/Y"])
+            .output();
+    }
+}
+
+/// A free drive letter given to a directory with `subst` (tests), removed on drop: the directory is that drive's root.
+#[cfg(test)]
+pub(super) struct Drive(String);
+
+#[cfg(test)]
+impl Drive {
+    pub(super) fn new(path: &Path) -> Self {
+        let letter = ('G'..='Z')
+            .rev()
+            .map(|letter| format!("{letter}:"))
+            .find(|drive| !Path::new(&format!(r"{drive}\")).exists())
+            .expect("a free drive letter");
+        let output = std::process::Command::new("subst")
+            .arg(&letter)
+            .arg(ordinary_path(path))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "subst: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        Self(letter)
+    }
+
+    pub(super) fn root(&self) -> PathBuf {
+        PathBuf::from(format!(r"{}\", self.0))
+    }
+}
+
+#[cfg(test)]
+impl Drop for Drive {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("subst")
+            .args([&self.0, "/D"])
             .output();
     }
 }
