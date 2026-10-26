@@ -158,6 +158,18 @@ fn names(path: &Path) -> Vec<String> {
     names
 }
 
+/// A link `core` to `target`, in a directory under `root` that everybody may change (mode `0777`, no sticky bit).
+#[cfg(unix)]
+fn loose_link(root: &Path, target: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let loose = root.join("loose");
+    private_dir(&loose);
+    let link = loose.join("core");
+    std::os::unix::fs::symlink(target, &link).unwrap();
+    fs::set_permissions(&loose, fs::Permissions::from_mode(0o777)).unwrap();
+    link
+}
+
 /// An HTTP/1.1 request with `Connection: close`.
 fn request(method: &str, path: &str, host: &str) -> Vec<u8> {
     let body = if method == "POST" { "{}" } else { "" };
@@ -811,16 +823,22 @@ fn a_directory_other_users_may_enter() {
     );
 }
 
+// A link is followed only where nobody else could retarget it (`sidevoice-platform` fs tests): not from a directory
+// others can change.
 #[cfg(unix)]
 #[test]
-fn a_data_directory_that_is_a_link_is_not_written_through() {
+fn a_data_directory_that_is_a_link_others_could_retarget_is_not_written_through() {
     let root = support::private_tempdir();
     let elsewhere = root.path().join("elsewhere");
     private_dir(&elsewhere);
     fs::write(elsewhere.join("core-failure.json"), "somebody else's").unwrap();
-    let data = root.path().join("core");
-    std::os::unix::fs::symlink(&elsewhere, &data).unwrap();
-    let (status, stderr) = run_core(data.to_str().unwrap(), &[]);
+    let data = loose_link(root.path(), &elsewhere);
+    // The log beside it would be refused first, in the same loose directory.
+    let log = root.path().join("core.log");
+    let (status, stderr) = run_core(
+        data.to_str().unwrap(),
+        &["--log-file", log.to_str().unwrap()],
+    );
     assert_eq!(status.code(), Some(0));
     assert!(stderr.contains("identity.unsafe-directory"), "{stderr}");
     assert_eq!(
@@ -838,15 +856,19 @@ fn a_data_directory_that_is_a_link_is_not_written_through() {
 #[cfg(unix)]
 #[test]
 #[ignore = "known gap: a symlinked data directory spelled `core/`, `core/.` or `core//` is followed and written through"]
-fn a_data_directory_that_is_a_link_is_not_written_through_however_it_is_spelled() {
+fn a_data_directory_that_is_a_link_others_could_retarget_is_not_written_through_however_it_is_spelled(
+) {
     for suffix in ["/", "/.", "//"] {
         let root = support::private_tempdir();
         let elsewhere = root.path().join("elsewhere");
         private_dir(&elsewhere);
         fs::write(elsewhere.join("core-failure.json"), "somebody else's").unwrap();
-        let data = root.path().join("core");
-        std::os::unix::fs::symlink(&elsewhere, &data).unwrap();
-        let (status, stderr) = run_core(&format!("{}{suffix}", data.display()), &[]);
+        let data = loose_link(root.path(), &elsewhere);
+        let log = root.path().join("core.log");
+        let (status, stderr) = run_core(
+            &format!("{}{suffix}", data.display()),
+            &["--log-file", log.to_str().unwrap()],
+        );
         assert_eq!(status.code(), Some(0), "core{suffix}");
         assert!(
             stderr.contains("identity.unsafe-directory"),

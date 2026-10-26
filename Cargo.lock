@@ -2334,6 +2334,7 @@ dependencies = [
  "hex",
  "interprocess",
  "libc",
+ "nix",
  "process-wrap",
  "rustix",
  "serde",

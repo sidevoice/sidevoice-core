@@ -36,6 +36,9 @@ tempfile = "3"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process", "fs"] }
 tokio = { version = "1", features = ["signal"] }
+# Who the administrators are (fs): an owner's account and the admin groups with their members, read from the system's
+# user and group databases (`getpwuid_r`, `getgrnam_r`, `getgrgid_r`), never `/etc/group` parsed by hand.
+nix = { version = "0.31", default-features = false, features = ["user"] }
 
 # Only the maintained constant binding: rustix does not name macOS O_SEARCH yet; calls remain safe rustix APIs.
 [target.'cfg(target_os = "macos")'.dependencies]
