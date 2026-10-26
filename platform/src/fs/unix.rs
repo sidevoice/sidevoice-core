@@ -1,10 +1,12 @@
 //! Unix: owner and mode bits, `O_NOFOLLOW`, the descriptor judged as opened, a record written relative to a handle on
-//! its directory (`rustix`); who the administrators are, from the system's user and group databases (`nix`). No
-//! `unsafe` of ours.
+//! its directory (`rustix`); who the administrators are, from the system's user and group databases (`nix`, `uzers`);
+//! an extended ACL (Linux: whether there is one, `rustix`; macOS: its entries, `exacl`). The only `unsafe` of ours is
+//! the walk of the user database (`uzers::all_users`, [`accounts`]).
 //!
 //! Who is trusted besides this user: root and the administrators, the members of [`ADMIN_GROUPS`]. They may own what
 //! is on the way to our files, and one of those groups, or this user's own private group, may write in it. Anybody else
-//! able to write there (another group, everybody) makes it unsafe, unless the sticky bit keeps them to their own entries.
+//! able to write there (another group, everybody, anybody an extended ACL lets write: [`acl_others`]) makes it unsafe,
+//! unless the sticky bit keeps them to their own entries (an ACL's writers are refused even then).
 
 use super::{Access, Create, FileId, HeldState, Others, Publish};
 use crate::user::{User, UserId};
@@ -15,6 +17,7 @@ use std::io::{self, ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use rustix::fs::{self as rfs, AtFlags, Mode, OFlags};
 use rustix::io::Errno;
@@ -62,7 +65,13 @@ impl super::Fs for Os {
         if rfs::FileType::from_raw_mode(metadata.st_mode) != rfs::FileType::RegularFile
             || metadata.st_mode & 0o1000 != 0
             || metadata.st_mode & 0o111 == 0
-            || untrusted(metadata.st_uid, metadata.st_gid, metadata.st_mode)?.is_some()
+            || untrusted(
+                metadata.st_uid,
+                metadata.st_gid,
+                metadata.st_mode,
+                Object::Entry(&resolved),
+            )?
+            .is_some()
         {
             return Err(super::denied(
                 "unsafe program owner, type or executable permissions",
@@ -84,13 +93,16 @@ impl super::Fs for Os {
     fn others_of(file: &File) -> io::Result<Others> {
         let metadata = file.metadata()?;
         let mode = metadata.mode();
-        Ok(if others_can_write(metadata.gid(), mode)? {
-            Others::Change
-        } else if mode & 0o077 != 0 {
-            Others::Read
-        } else {
-            Others::Nothing
-        })
+        let acl = acl_others(Object::Open(file), mode)?;
+        Ok(
+            if acl == Others::Change || others_can_write(metadata.gid(), mode)? {
+                Others::Change
+            } else if mode & 0o077 != 0 || acl == Others::Read {
+                Others::Read
+            } else {
+                Others::Nothing
+            },
+        )
     }
 
     fn identity(file: &File) -> io::Result<FileId> {
@@ -153,30 +165,178 @@ fn trusted_group(gid: u32) -> io::Result<bool> {
     let Some(me) = Account::from_uid(Uid::effective())? else {
         return Ok(false);
     };
-    Ok(is_private_group(&group, &me.name, me.gid))
+    Ok(is_private_group(&group, &me, &accounts()))
 }
 
-/// Whether `group` is the private group of the account `name` whose primary group is `gid` (Linux's user private
-/// groups, with umask `002`): named as the account, its primary group, listing nobody else. Whether another account
-/// has it as its primary group is not visible from the group; the convention is that none does.
-fn is_private_group(group: &Group, name: &str, gid: Gid) -> bool {
-    group.gid == gid && group.name == name && group.mem.iter().all(|member| member == name)
+/// Every account in the system's user database, by uid with its primary group (`getpwent`, through `uzers`).
+fn accounts() -> Vec<(Uid, Gid)> {
+    static WALK: Mutex<()> = Mutex::new(());
+    let _walk = WALK.lock().unwrap_or_else(PoisonError::into_inner);
+    // SAFETY: `getpwent` walks process-wide state, not thread-safe; this lock keeps our walks from interleaving, and
+    // nothing else in this process walks the user database.
+    unsafe { uzers::all_users() }
+        .map(|account| {
+            (
+                Uid::from_raw(account.uid()),
+                Gid::from_raw(account.primary_group_id()),
+            )
+        })
+        .collect()
+}
+
+/// Whether `group` is the private group of the account `me` (Linux's user private groups, with umask `002`): named as
+/// it, its primary group, listing nobody else as a member and nobody else's primary group among `accounts` (the user
+/// database, [`accounts`]: a primary group's members are not listed in the group). A walk that does not even find `me`
+/// is incomplete, and proves nothing.
+fn is_private_group(group: &Group, me: &Account, accounts: &[(Uid, Gid)]) -> bool {
+    group.gid == me.gid
+        && group.name == me.name
+        && group.mem.iter().all(|member| *member == me.name)
+        && accounts.iter().any(|(uid, _)| *uid == me.uid)
+        && accounts
+            .iter()
+            .all(|(uid, gid)| *gid != group.gid || *uid == me.uid)
 }
 
 /// Whether somebody untrusted may write in what has group `gid` and permission bits `mode`: everybody (`o+w`), or a
-/// group that is not trusted ([`trusted_group`]). The sticky bit is the caller's to weigh.
+/// group that is not trusted ([`trusted_group`]). An extended ACL is [`acl_others`]'. The sticky bit is the caller's
+/// to weigh.
 fn others_can_write(gid: u32, mode: u32) -> io::Result<bool> {
     Ok(mode & 0o002 != 0 || (mode & 0o020 != 0 && !trusted_group(gid)?))
 }
 
-/// Why a directory on the way (or a program) with owner `uid`, group `gid` and `mode` is unsafe, `None` when it is
-/// not: its owner is not trusted ([`trusted_owner`]), or somebody untrusted may write in it ([`others_can_write`]),
-/// which is harmless only under the sticky bit (`/tmp`), where nobody can remove or rename what is not theirs.
-fn untrusted(uid: u32, gid: u32, mode: impl Into<u32>) -> io::Result<Option<&'static str>> {
+/// Where a judged object's extended ACL is read: an open handle (also one opened only to search, `O_PATH`), or an
+/// entry named by a path that is not followed if it is a link.
+#[derive(Clone, Copy)]
+enum Object<'a> {
+    Open(&'a File),
+    Entry(&'a Path),
+}
+
+/// What the extended ACL of `object`, whose mode is `mode`, lets anybody else do beyond the mode bits: `Change` when
+/// somebody untrusted may write it, `Read` when it grants anybody else anything, `Nothing` without one.
+///
+/// Linux (POSIX.1e): with an extended ACL the group bits are its mask, the most any named user or group (or the owning
+/// group) gets; with no write there nobody named may write. With write there, who they are is not weighed: an extended
+/// access ACL (`system.posix_acl_access`, present only when it says more than the mode) is somebody untrusted writing,
+/// as the group bit was before trusted groups. Reading is already in the mode bits.
+#[cfg(target_os = "linux")]
+fn acl_others(object: Object<'_>, mode: u32) -> io::Result<Others> {
+    use std::os::fd::AsRawFd;
+    const ACCESS_ACL: &str = "system.posix_acl_access";
+    if mode & 0o020 == 0 {
+        return Ok(Others::Nothing);
+    }
+    let size: &mut [u8] = &mut [];
+    let found = match object {
+        // A handle opened only to search (`O_PATH`) has no `fgetxattr`: its `/proc` name leads to the same inode.
+        Object::Open(file) => rfs::getxattr(
+            format!("/proc/self/fd/{}", file.as_raw_fd()),
+            ACCESS_ACL,
+            size,
+        ),
+        Object::Entry(path) => rfs::lgetxattr(path, ACCESS_ACL, size),
+    };
+    match found {
+        Ok(_) => Ok(Others::Change),
+        Err(Errno::NODATA | Errno::OPNOTSUPP) => Ok(Others::Nothing),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// macOS: an ACL's entries come on top of the mode bits, which do not show them. An entry that allows (deny entries
+/// only take away) and applies to the object itself (not only to what is created inside) lets its user or group write
+/// when it grants any change (data, entries, attributes, security, owner); that is somebody untrusted writing unless
+/// the user may own what is on the way ([`trusted_owner`]) or the group may write there ([`trusted_group`]). One that
+/// names nobody this machine knows is untrusted. An allow entry for anybody but this user is somebody else reading.
+#[cfg(target_os = "macos")]
+fn acl_others(object: Object<'_>, _mode: u32) -> io::Result<Others> {
+    use exacl::{AclEntryKind, AclOption, Flag, Perm};
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let path = match object {
+        Object::Open(file) => PathBuf::from(OsString::from_vec(rfs::getpath(file)?.into_bytes())),
+        Object::Entry(path) => path.to_owned(),
+    };
+    let changes = Perm::WRITE
+        | Perm::APPEND
+        | Perm::DELETE
+        | Perm::DELETE_CHILD
+        | Perm::WRITEATTR
+        | Perm::WRITEEXTATTR
+        | Perm::WRITESECURITY
+        | Perm::CHOWN;
+    let me = Uid::effective();
+    let mut others = Others::Nothing;
+    for entry in exacl::getfacl(&path, AclOption::SYMLINK_ACL)? {
+        if !entry.allow || entry.flags.contains(Flag::ONLY_INHERIT) {
+            continue;
+        }
+        let (trusted, mine) = match entry.kind {
+            AclEntryKind::User => match account_id(&entry.name)? {
+                Some(uid) => (trusted_owner(uid)?, uid == me.as_raw()),
+                None => (false, false),
+            },
+            AclEntryKind::Group => match group_id(&entry.name)? {
+                Some(gid) => (trusted_group(gid)?, false),
+                None => (false, false),
+            },
+            _ => (false, false),
+        };
+        if entry.perms.intersects(changes) && !trusted {
+            return Ok(Others::Change);
+        }
+        if !mine {
+            others = Others::Read;
+        }
+    }
+    Ok(others)
+}
+
+/// The uid an ACL entry names (macOS): an account's name, else a decimal uid; `None` for anything else (a GUID).
+#[cfg(target_os = "macos")]
+fn account_id(name: &str) -> io::Result<Option<u32>> {
+    Ok(match Account::from_name(name)? {
+        Some(account) => Some(account.uid.as_raw()),
+        None => name.parse().ok(),
+    })
+}
+
+/// The gid an ACL entry names (macOS), as [`account_id`].
+#[cfg(target_os = "macos")]
+fn group_id(name: &str) -> io::Result<Option<u32>> {
+    Ok(match Group::from_name(name)? {
+        Some(group) => Some(group.gid.as_raw()),
+        None => name.parse().ok(),
+    })
+}
+
+/// Other Unix: an ACL is not read, so a group's write bit (a POSIX.1e ACL's mask) is somebody untrusted writing.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn acl_others(_object: Object<'_>, mode: u32) -> io::Result<Others> {
+    Ok(if mode & 0o020 != 0 {
+        Others::Change
+    } else {
+        Others::Nothing
+    })
+}
+
+/// Why a directory on the way (or a program) `object` with owner `uid`, group `gid` and `mode` is unsafe, `None` when
+/// it is not: its owner is not trusted ([`trusted_owner`]), or somebody untrusted may write in it: through its extended
+/// ACL ([`acl_others`]), or its mode ([`others_can_write`]), which is harmless only under the sticky bit (`/tmp`),
+/// where nobody can remove or rename what is not theirs.
+fn untrusted(
+    uid: u32,
+    gid: u32,
+    mode: impl Into<u32>,
+    object: Object<'_>,
+) -> io::Result<Option<&'static str>> {
     let mode = mode.into();
     Ok(if !trusted_owner(uid)? {
         Some("owned by another user")
-    } else if mode & 0o1000 == 0 && others_can_write(gid, mode)? {
+    } else if acl_others(object, mode)? == Others::Change
+        || (mode & 0o1000 == 0 && others_can_write(gid, mode)?)
+    {
         Some("others can replace what is in it")
     } else {
         None
@@ -190,7 +350,12 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
     let why = if metadata.is_symlink() {
         Some("a link on the way")
     } else {
-        untrusted(metadata.uid(), metadata.gid(), metadata.mode())?
+        untrusted(
+            metadata.uid(),
+            metadata.gid(),
+            metadata.mode(),
+            Object::Entry(dir),
+        )?
     };
     match why {
         Some(why) => Err(unsafe_entry(dir, why)),
@@ -421,7 +586,15 @@ pub(super) fn reopen_directory(path: &Path) -> io::Result<File> {
 /// Judge the directory actually held ([`untrusted`]).
 pub(super) fn check_ancestor_handle(path: &Path, file: &File) -> io::Result<()> {
     let metadata = file.metadata()?;
-    if !metadata.is_dir() || untrusted(metadata.uid(), metadata.gid(), metadata.mode())?.is_some() {
+    if !metadata.is_dir()
+        || untrusted(
+            metadata.uid(),
+            metadata.gid(),
+            metadata.mode(),
+            Object::Open(file),
+        )?
+        .is_some()
+    {
         return Err(super::refused(path, "unsafe ancestor owner or permissions"));
     }
     Ok(())
@@ -564,6 +737,84 @@ fn set_mode(path: &Path, change: impl Fn(u32) -> u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(change(mode))).unwrap();
 }
 
+/// Who an extended ACL is given to (tests): the account `nobody`, or its primary group; neither is trusted.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Grantee {
+    User,
+    Group,
+}
+
+/// Gives `whom` ([`Grantee`]) access to `path` through an extended ACL only, the owner's mode bits kept and the owning
+/// group and everybody else given nothing (tests): with `write`, every change; without, reading (and searching).
+/// Linux: the access ACL written as the kernel's `system.posix_acl_access` attribute, as `setfacl` does (which a host
+/// may not have); macOS: `chmod +a`.
+#[cfg(test)]
+pub(super) fn grant_by_acl(path: &Path, whom: Grantee, write: bool) {
+    let nobody = Account::from_name("nobody")
+        .unwrap()
+        .expect("a nobody account");
+    assert!(
+        !trusted_owner(nobody.uid.as_raw()).unwrap()
+            && !trusted_group(nobody.gid.as_raw()).unwrap()
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let mode = fs::symlink_metadata(path).unwrap().mode();
+        let granted: u16 = if write { 0o7 } else { 0o5 };
+        let (tag, id) = match whom {
+            Grantee::User => (0x02, nobody.uid.as_raw()),
+            Grantee::Group => (0x08, nobody.gid.as_raw()),
+        };
+        // `posix_acl_xattr.h`: version 2, then (tag, permissions, id) entries ordered by tag; owner, owning group,
+        // mask and other have no id.
+        let mut entries = [
+            (0x01u16, ((mode >> 6) & 0o7) as u16, u32::MAX),
+            (tag, granted, id),
+            (0x04, 0, u32::MAX),
+            (0x10, granted, u32::MAX),
+            (0x20, 0, u32::MAX),
+        ];
+        entries.sort();
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in entries {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(perm.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        rfs::lsetxattr(
+            path,
+            "system.posix_acl_access",
+            &acl,
+            rfs::XattrFlags::empty(),
+        )
+        .unwrap();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let principal = match whom {
+            Grantee::User => format!("user:{}", nobody.name),
+            Grantee::Group => format!(
+                "group:{}",
+                Group::from_gid(nobody.gid).unwrap().unwrap().name
+            ),
+        };
+        let rights = match (fs::metadata(path).unwrap().is_dir(), write) {
+            (true, true) => "list,search,add_file,add_subdirectory,delete_child",
+            (true, false) => "list,search",
+            (false, true) => "read,write,append",
+            (false, false) => "read",
+        };
+        let status = std::process::Command::new("chmod")
+            .arg("+a")
+            .arg(format!("{principal} allow {rights}"))
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "chmod +a");
+    }
+}
+
 #[cfg(test)]
 pub(super) fn system_program() -> PathBuf {
     PathBuf::from("/bin/sh")
@@ -596,7 +847,7 @@ pub(super) fn test_groups() -> TestGroups {
         };
         let slot = if ADMIN_GROUPS.contains(&group.name.as_str()) {
             &mut groups.admin
-        } else if is_private_group(&group, &me.name, me.gid) {
+        } else if is_private_group(&group, &me, &accounts()) {
             &mut groups.private
         } else {
             &mut groups.other
@@ -641,13 +892,42 @@ mod tests {
     }
 
     #[test]
-    fn a_private_group_is_named_as_its_account_is_its_primary_group_and_lists_nobody_else() {
-        let me = |group: &Group| is_private_group(group, "ana", Gid::from_raw(1000));
-        assert!(me(&group("ana", 1000, &[])));
-        assert!(me(&group("ana", 1000, &["ana"])));
-        assert!(!me(&group("ana", 1000, &["ana", "bob"])), "another member");
-        assert!(!me(&group("staff", 1000, &[])), "a shared primary group");
-        assert!(!me(&group("ana", 1001, &[])), "not its primary group");
+    fn a_private_group_is_named_as_its_account_is_its_primary_group_and_nobody_elses() {
+        let ana = Account::from_uid(Uid::effective()).unwrap().unwrap();
+        let ana = Account {
+            name: "ana".into(),
+            gid: Gid::from_raw(1000),
+            ..ana
+        };
+        let (me, bob) = (ana.uid, Uid::from_raw(ana.uid.as_raw() + 1));
+        let alone = [(me, Gid::from_raw(1000)), (bob, Gid::from_raw(1001))];
+        let private =
+            |group: &Group, accounts: &[(Uid, Gid)]| is_private_group(group, &ana, accounts);
+        assert!(private(&group("ana", 1000, &[]), &alone));
+        assert!(private(&group("ana", 1000, &["ana"]), &alone));
+        assert!(
+            !private(&group("ana", 1000, &["ana", "bob"]), &alone),
+            "another member"
+        );
+        assert!(
+            !private(&group("staff", 1000, &[]), &alone),
+            "a shared primary group"
+        );
+        assert!(
+            !private(&group("ana", 1001, &[]), &alone),
+            "not its primary group"
+        );
+        // Another account whose primary group it is, listed in no group: a member all the same.
+        let shared = [(me, Gid::from_raw(1000)), (bob, Gid::from_raw(1000))];
+        assert!(
+            !private(&group("ana", 1000, &[]), &shared),
+            "another's primary group"
+        );
+        // A user database walk that does not even find this account proves nothing.
+        assert!(
+            !private(&group("ana", 1000, &[]), &[(bob, Gid::from_raw(1001))]),
+            "incomplete"
+        );
     }
 
     #[test]

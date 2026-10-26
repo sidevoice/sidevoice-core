@@ -2123,6 +2123,56 @@ mod tests {
         }
     }
 
+    // Unix only: an extended ACL beside the mode bits is Unix's (a Windows DACL is the whole of its access, judged in
+    // every test). Its grants to another user or group are judged as the mode's are, whatever the bits show.
+    #[cfg(unix)]
+    #[test]
+    fn an_acl_letting_another_user_or_group_write_is_refused_and_one_letting_them_read_is_not() {
+        for whom in [imp::Grantee::User, imp::Grantee::Group] {
+            let root = scratch();
+            let dir = |name: &str| {
+                let dir = root.path().join(name);
+                Files::create_private_dir(&dir).unwrap();
+                dir
+            };
+            // Reading: not a writer, but not private either.
+            let reading = dir("reading");
+            let path = program(&reading, "sidevoice");
+            imp::grant_by_acl(&reading, whom, false);
+            imp::grant_by_acl(&path, whom, false);
+            assert_eq!(others(&path), Others::Read, "{whom:?}");
+            assert!(Files::trusted_program(&path).is_ok(), "{whom:?}");
+            Files::ensure_private_dir(&reading.join("data")).unwrap();
+            let _held = held(&reading, Access::NotWritableByOthers);
+            assert_open_refused(&reading, Access::Private);
+            // Writing the program.
+            let program_dir = dir("program");
+            let path = program(&program_dir, "sidevoice");
+            imp::grant_by_acl(&path, whom, true);
+            assert_eq!(others(&path), Others::Change, "{whom:?}");
+            assert!(refused(Files::trusted_program(&path)), "{whom:?}");
+            // Writing a directory on the way, above a private program, directory and record.
+            let ancestor = dir("ancestor");
+            let path = program(&ancestor, "sidevoice");
+            Files::ensure_private_dir(&ancestor.join("data")).unwrap();
+            imp::grant_by_acl(&ancestor, whom, true);
+            assert!(refused(Files::trusted_program(&path)), "{whom:?}");
+            assert!(refused(Files::ensure_private_dir(&ancestor.join("data"))));
+            assert_open_refused(&ancestor.join("data"), Access::Private);
+            assert_open_refused(&ancestor, Access::NotWritableByOthers);
+            // Writing the directory that holds a link on the way: it could retarget it.
+            let target = dir("target");
+            let holder = dir("holder");
+            Files::symlink(&target, holder.join("link"));
+            Files::ensure_private_dir(&holder.join("link").join("inside")).unwrap();
+            imp::grant_by_acl(&holder, whom, true);
+            assert!(refused(Files::ensure_private_dir(
+                &holder.join("link").join("inside")
+            )));
+            assert_open_refused(&holder.join("link"), Access::Private);
+        }
+    }
+
     // Unix only, as the test above: only there can a creation be left unfinished.
     #[cfg(unix)]
     #[test]
@@ -2497,18 +2547,29 @@ mod tests {
     #[test]
     fn only_a_local_fixed_volume_root_may_let_others_modify_it() {
         let root = scratch();
-        let system = std::env::var_os("SystemDrive").unwrap();
-        let system = PathBuf::from(system).join(r"\");
-        assert!(imp::is_local_volume_root(&imp::reopen_directory(&system).unwrap()));
+        let mut system = std::env::var_os("SystemDrive").unwrap();
+        system.push(r"\");
+        let system = PathBuf::from(system);
+        assert!(imp::is_local_volume_root(
+            &imp::reopen_directory(&system).unwrap()
+        ));
         let volume = root.path().join("volume");
         fs::create_dir(&volume).unwrap();
-        assert!(!imp::is_local_volume_root(&imp::reopen_directory(&volume).unwrap()));
+        assert!(!imp::is_local_volume_root(
+            &imp::reopen_directory(&volume).unwrap()
+        ));
         // Authenticated Users: Modify, on the directory and passed down to what is made below it.
         imp::icacls(&volume, &["/grant", "*S-1-5-11:(OI)(CI)(M)"]);
         let drive = imp::Drive::new(&volume);
-        assert!(!imp::is_local_volume_root(&imp::reopen_directory(&drive.root()).unwrap()));
-        assert!(refused(Files::ensure_private_dir(&drive.root().join("Sidevoice"))));
-        assert!(refused(Files::ensure_private_dir(&volume.join("Sidevoice"))));
+        assert!(!imp::is_local_volume_root(
+            &imp::reopen_directory(&drive.root()).unwrap()
+        ));
+        assert!(refused(Files::ensure_private_dir(
+            &drive.root().join("Sidevoice")
+        )));
+        assert!(refused(Files::ensure_private_dir(
+            &volume.join("Sidevoice")
+        )));
         // Without the grant, the aliased directory is judged as any other and passes.
         imp::icacls(&volume, &["/remove:g", "*S-1-5-11"]);
         let data = drive.root().join("Sidevoice");

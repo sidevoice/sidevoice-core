@@ -39,10 +39,15 @@ tokio = { version = "1", features = ["signal"] }
 # Who the administrators are (fs): an owner's account and the admin groups with their members, read from the system's
 # user and group databases (`getpwuid_r`, `getgrnam_r`, `getgrgid_r`), never `/etc/group` parsed by hand.
 nix = { version = "0.31", default-features = false, features = ["user"] }
+# Every account's primary group (fs: whether this user's private group is anybody else's too), read through the
+# system's user database (`getpwent`), which `nix` does not wrap.
+uzers = { version = "0.12", default-features = false }
 
 # Only the maintained constant binding: rustix does not name macOS O_SEARCH yet; calls remain safe rustix APIs.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+# An extended ACL's entries (fs): on macOS they grant beyond the mode bits, which do not show them.
+exacl = "0.13"
 
 # Windows: this process's user and file owners (user); the pipe's security descriptor, and whether a
 # pipe peer's process is this user's (ipc); the stop event, and a channel from the thread that waits on it (stop).
