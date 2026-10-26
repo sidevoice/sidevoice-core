@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.3](https://github.com/sidevoice/sidevoice-core/compare/v0.12.2...v0.12.3) (2026-10-26)
+
+
+### Bug Fixes
+
+* **platform:** trust administrators and follow trusted links in fs checks ([#207](https://github.com/sidevoice/sidevoice-core/issues/207)) ([f34ab79](https://github.com/sidevoice/sidevoice-core/commit/f34ab794979cd19ce5aeb4fb519ef5a82d4d36ee))
+
 ## [0.12.2](https://github.com/sidevoice/sidevoice-core/compare/v0.12.1...v0.12.2) (2026-10-25)
 
 
