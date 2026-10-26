@@ -451,6 +451,11 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// The directory a root stands for (`super::resolve_links`): none on Unix, whose one root `/` is itself.
+pub(super) fn backing_directory(_root: &Path) -> io::Result<Option<PathBuf>> {
+    Ok(None)
+}
+
 /// A link on the way, in a directory that passed [`check_ancestor`]: followed only when its owner is trusted too
 /// ([`trusted_owner`]), as under a sticky bit whoever owns a link may replace it. A link's own mode means nothing.
 pub(super) fn check_link(link: &Path) -> io::Result<()> {

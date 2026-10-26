@@ -207,7 +207,8 @@ pub(super) fn link_count(file: &File) -> io::Result<u64> {
 /// here (`C:\` passes Modify down to Authenticated Users): what is ours is created with its own DACL. The root of a
 /// local fixed volume (`D:\`, [`is_local_volume_root`]) cannot itself be deleted or renamed, so `DELETE` on it is not
 /// counted: a second drive's root grants Authenticated Users Modify, which a directory below it that inherits it is
-/// still refused for. Any other root (a `subst` drive, a mapped drive, a share) is judged as any directory. A reparse point
+/// still refused for. Any other volume's root (a removable disk) is judged as any directory; a `subst` drive's root is
+/// never one here, nor a share's ([`backing_directory`]: replaced by its real path, refused). A reparse point
 /// here is refused: links are followed before the checks (`super::resolve_links`), so one that is still on the way is
 /// not a link, or not one we follow (a redirected or cloud folder). Adding entries is not judged: there is no sticky
 /// bit, and `C:\` lets every user add folders.
@@ -230,6 +231,27 @@ pub(super) fn check_link(link: &Path) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// The directory the root `root` (`X:\`, `\\server\share\`) stands for when it is not a volume's own root: a drive
+/// letter `subst` gives a directory (`Z:\` for `C:\Shared\volume`), whose real path's ancestors (`C:\Shared`) can
+/// rename or replace it however protected it is, so they are judged too, through that path. `None` for a local
+/// volume's own root. The real path is the one the root's handle resolves to (`canonicalize`). A root on a network
+/// (a share, a mapped drive) is refused: the directories behind it are on another machine, out of reach of any check
+/// here.
+pub(super) fn backing_directory(root: &Path) -> io::Result<Option<PathBuf>> {
+    use std::path::{Component, Prefix};
+    let backing = root.canonicalize()?;
+    if !matches!(
+        backing.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+    ) {
+        return Err(super::refused(
+            root,
+            "a network or shared drive; the directories behind it cannot be checked",
+        ));
+    }
+    Ok(backing.parent().is_some().then_some(backing))
 }
 
 /// The entry `path` itself (a reparse point not followed), opened only to read its attributes and security.

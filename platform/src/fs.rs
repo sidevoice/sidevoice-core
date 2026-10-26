@@ -151,8 +151,10 @@ fn real_directory_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
 /// The path the absolute `path` really names, each link on the way followed only where nobody untrusted can retarget
 /// it: the directory holding the link passes the ancestor rule (`imp::check_ancestor`), as does every directory above
 /// it, and so does the link itself (`imp::check_link`). A link is a symbolic link, or on Windows also a junction or a
-/// mount point; any other reparse point is left as it is, for the checks that follow to refuse. From the first
-/// missing component on, the path is kept as written (created or reported missing later).
+/// mount point; any other reparse point is left as it is, for the checks that follow to refuse. A root that only
+/// stands for another directory (`imp::backing_directory`: a Windows `subst` drive) is replaced by that directory,
+/// and a root whose directories cannot be checked (a network share) is refused. From the first missing component on,
+/// the path is kept as written (created or reported missing later).
 ///
 /// What is returned has no link on the way: callers hold and judge it in full, as any path, and work in it, so the
 /// target is what is checked and what is used, never the link. A link is replaced only by whoever may write the
@@ -168,6 +170,18 @@ fn resolve_links(path: &Path) -> io::Result<PathBuf> {
         let name = match part {
             Part::Root(root) => {
                 resolved.push(root);
+                // A whole root that is another directory's alias (Windows: `subst`) is replaced by that directory,
+                // whose every ancestor is then judged as any path's.
+                if !matches!(pending.last(), Some(Part::Root(_))) {
+                    if let Some(backing) = imp::backing_directory(&resolved)? {
+                        links += 1;
+                        if links > MAX_LINKS {
+                            return Err(refused(path, "too many links on the way"));
+                        }
+                        resolved = PathBuf::new();
+                        pending.extend(parts(&backing).into_iter().rev());
+                    }
+                }
                 continue;
             }
             Part::Up => {
@@ -1072,14 +1086,17 @@ mod tests {
         }
     }
 
+    // A share's directories, even this machine's own, are reached through a server: what is above the shared
+    // directory cannot be checked from the path, so nothing reached through a share is trusted.
     #[cfg(windows)]
     #[test]
-    fn trusted_program_checks_unc_and_verbatim_unc_through_a_local_share() {
+    fn trusted_program_and_held_directories_refuse_unc_and_verbatim_unc_through_a_local_share() {
         let root = scratch();
         Files::shut_others_out(root.path());
         let dir = root.path().join("bin");
         Files::create_private_dir(&dir).unwrap();
         let path = program(&dir, "sidevoice.exe");
+        Files::trusted_program(&path).unwrap();
         let share = imp::Share::new(root.path());
         let unc = share.path().join("bin").join("sidevoice.exe");
         let verbatim = PathBuf::from(format!(
@@ -1087,17 +1104,16 @@ mod tests {
             unc.to_str().unwrap().trim_start_matches('\\')
         ));
         for alias in [&unc, &verbatim] {
-            let resolved = Files::trusted_program(alias).unwrap();
             assert!(
-                Files::identity(&Files::open_read(&resolved).unwrap()).unwrap()
-                    == Files::identity(&Files::open_read(&path).unwrap()).unwrap()
+                refused(Files::trusted_program(alias)),
+                "{}",
+                alias.display()
             );
+            assert_open_refused(alias.parent().unwrap(), Access::Private);
+            assert!(refused(Files::ensure_private_dir(
+                &alias.parent().unwrap().join("data")
+            )));
         }
-        Files::let_others_change(&path);
-        assert!(refused(Files::trusted_program(&unc)));
-        Files::shut_others_out(&path);
-        Files::let_others_change(&dir);
-        assert!(refused(Files::trusted_program(&verbatim)));
     }
 
     #[cfg(windows)]
@@ -2575,5 +2591,46 @@ mod tests {
         let data = drive.root().join("Sidevoice");
         Files::ensure_private_dir(&data).unwrap();
         let _held = held(&data, Access::Private);
+    }
+
+    // Windows only, as above. A `subst` drive's directory grants nobody else anything, but the directory above it may
+    // let others delete what is in it (`FILE_DELETE_CHILD`): they could rename the drive's directory away and put
+    // their own in its place. What is reached through the drive is judged through its real path, that parent too.
+    #[cfg(windows)]
+    #[test]
+    fn a_subst_drive_is_refused_when_others_can_replace_the_directory_behind_it() {
+        let root = scratch();
+        let shared = root.path().join("shared");
+        Files::create_private_dir(&shared).unwrap();
+        let volume = shared.join("volume");
+        Files::create_private_dir(&volume).unwrap();
+        let bin = volume.join("bin");
+        Files::create_private_dir(&bin).unwrap();
+        let path = program(&bin, "sidevoice.exe");
+        Files::ensure_private_dir(&volume.join("data")).unwrap();
+        let drive = imp::Drive::new(&volume);
+        let aliased = |path: &Path| drive.root().join(path.strip_prefix(&volume).unwrap());
+        // Authenticated Users: delete child, on the parent only.
+        imp::icacls(&shared, &["/grant", "*S-1-5-11:(DC)"]);
+        assert_eq!(others(&volume), Others::Nothing, "nothing granted on it");
+        assert!(refused(Files::trusted_program(&aliased(&path))));
+        assert!(refused(Files::ensure_private_dir(&aliased(
+            &volume.join("data")
+        ))));
+        assert_open_refused(&drive.root(), Access::NotWritableByOthers);
+        assert_open_refused(&aliased(&volume.join("data")), Access::Private);
+        // Once nobody else can, the drive leads to the real path, which is what is held and returned.
+        imp::icacls(&shared, &["/remove:g", "*S-1-5-11"]);
+        assert_eq!(
+            Files::trusted_program(&aliased(&path)).unwrap(),
+            path.canonicalize().unwrap()
+        );
+        held(&aliased(&volume.join("data")), Access::Private)
+            .write(OsStr::new("record"), b"through the drive")
+            .unwrap();
+        assert_eq!(
+            fs::read(volume.join("data").join("record")).unwrap(),
+            b"through the drive"
+        );
     }
 }
