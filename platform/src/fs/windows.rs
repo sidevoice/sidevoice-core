@@ -41,11 +41,13 @@ use windows_sys::Win32::Security::{
     OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, FileIdInfo, GetFileInformationByHandleEx, CREATE_NEW,
+    CreateDirectoryW, CreateFileW, FileIdInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, CREATE_NEW, VOLUME_NAME_GUID,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_128, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, READ_CONTROL,
 };
+use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
 
 /// This OS's files.
 pub struct Os;
@@ -202,9 +204,10 @@ pub(super) fn link_count(file: &File) -> io::Result<u64> {
 
 /// A directory on the way to something private: this user's or the system's, nobody but this user and the system able
 /// to delete or rename what is in it, or to take it over. Entries only what is created inside inherits are not judged
-/// here (`C:\` passes Modify down to Authenticated Users): what is ours is created with its own DACL. A volume root
-/// (`D:\`, a share's root) cannot itself be deleted or renamed, so `DELETE` on it is not counted: a second drive's root
-/// grants Authenticated Users Modify, which a directory below it that inherits it is still refused for. A reparse point
+/// here (`C:\` passes Modify down to Authenticated Users): what is ours is created with its own DACL. The root of a
+/// local fixed volume (`D:\`, [`is_local_volume_root`]) cannot itself be deleted or renamed, so `DELETE` on it is not
+/// counted: a second drive's root grants Authenticated Users Modify, which a directory below it that inherits it is
+/// still refused for. Any other root (a `subst` drive, a mapped drive, a share) is judged as any directory. A reparse point
 /// here is refused: links are followed before the checks (`super::resolve_links`), so one that is still on the way is
 /// not a link, or not one we follow (a redirected or cloud folder). Adding entries is not judged: there is no sticky
 /// bit, and `C:\` lets every user add folders.
@@ -254,8 +257,7 @@ pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
     if !UserId::current().owns_file(file)? && !judged.owner_is_system() {
         return Err(unsafe_dir("owned by another user"));
     }
-    let volume_root = dir.parent().is_none();
-    let replaces = if volume_root {
+    let replaces = if dir.parent().is_none() && is_local_volume_root(file) {
         REPLACES_ENTRIES & !DELETE
     } else {
         REPLACES_ENTRIES
@@ -501,6 +503,34 @@ const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
 const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 11;
 /// The entry grants nothing to the object itself, only to what is created in it.
 const INHERIT_ONLY_ACE: u8 = 0x08;
+
+/// Whether the directory held by `dir` is the root of a local fixed volume, judged from the handle, not the path's
+/// spelling: its final path by volume GUID is that volume's root (`\\?\Volume{…}\`), and the volume is a fixed disk.
+/// A drive letter given to a directory (`subst`) names a directory on another volume, a mapped drive or a share has no
+/// local volume, and a removable one may be someone else's: none of them is a root nobody can rename.
+pub(super) fn is_local_volume_root(dir: &File) -> bool {
+    let mut path = [0u16; 128];
+    // SAFETY: the handle is open for the call; the buffer's length is passed with it.
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            dir.as_raw_handle() as HANDLE,
+            path.as_mut_ptr(),
+            path.len() as u32,
+            VOLUME_NAME_GUID,
+        )
+    } as usize;
+    // 0 is a failure (a remote file has no volume GUID); a length beyond the buffer is no volume root's.
+    if length == 0 || length >= path.len() {
+        return false;
+    }
+    let name = String::from_utf16_lossy(&path[..length]);
+    let root = name
+        .strip_prefix(r"\\?\Volume{")
+        .and_then(|rest| rest.strip_suffix(r"}\"))
+        .is_some_and(|guid| !guid.contains('\\'));
+    // SAFETY: a NUL-terminated wide string that outlives the call.
+    root && unsafe { GetDriveTypeW(wide(Path::new(&name)).as_ptr()) } == DRIVE_FIXED
+}
 
 /// The private descriptor: protected, full control to the owner, SYSTEM and Administrators, inherited by what is
 /// created inside. The owner is left to the system: the token's default owner, this user.

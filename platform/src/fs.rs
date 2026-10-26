@@ -2490,27 +2490,29 @@ mod tests {
         assert_open_refused(&open_link, Access::Private);
     }
 
-    // Windows only: a volume root is a Windows notion (Unix has one root, owned by root). `subst` gives a directory
-    // a drive letter, so its own DACL becomes a volume root's: here the default one of a second drive, `D:\`.
+    // Windows only: a volume root is a Windows notion (Unix has one root, owned by root). Only a local fixed volume's
+    // root is one: `subst` gives a directory a drive letter, but it stays a directory others may rename through its
+    // real path, so Modify on it is refused under either name.
     #[cfg(windows)]
     #[test]
-    fn a_volume_root_others_may_modify_is_trusted_but_not_a_directory_below_it() {
+    fn only_a_local_fixed_volume_root_may_let_others_modify_it() {
         let root = scratch();
+        let system = std::env::var_os("SystemDrive").unwrap();
+        let system = PathBuf::from(system).join(r"\");
+        assert!(imp::is_local_volume_root(&imp::reopen_directory(&system).unwrap()));
         let volume = root.path().join("volume");
         fs::create_dir(&volume).unwrap();
-        // Authenticated Users: Modify, on the root and passed down to what is made below it.
+        assert!(!imp::is_local_volume_root(&imp::reopen_directory(&volume).unwrap()));
+        // Authenticated Users: Modify, on the directory and passed down to what is made below it.
         imp::icacls(&volume, &["/grant", "*S-1-5-11:(OI)(CI)(M)"]);
         let drive = imp::Drive::new(&volume);
+        assert!(!imp::is_local_volume_root(&imp::reopen_directory(&drive.root()).unwrap()));
+        assert!(refused(Files::ensure_private_dir(&drive.root().join("Sidevoice"))));
+        assert!(refused(Files::ensure_private_dir(&volume.join("Sidevoice"))));
+        // Without the grant, the aliased directory is judged as any other and passes.
+        imp::icacls(&volume, &["/remove:g", "*S-1-5-11"]);
         let data = drive.root().join("Sidevoice");
         Files::ensure_private_dir(&data).unwrap();
         let _held = held(&data, Access::Private);
-        // The same directory, not a volume root: Modify includes deleting it.
-        assert!(refused(Files::ensure_private_dir(
-            &volume.join("Sidevoice")
-        )));
-        // Below the root, a folder that inherits Modify lets others replace what is in it.
-        let below = drive.root().join("Apps");
-        fs::create_dir(&below).unwrap();
-        assert!(refused(Files::ensure_private_dir(&below.join("Sidevoice"))));
     }
 }
