@@ -463,6 +463,16 @@ impl super::Directory for Held {
         Self::open_with(path, Some(access))
     }
 
+    fn open_identified(path: &Path, access: Access, expected: &FileId) -> io::Result<Self> {
+        let held = Self::open_with(path, Some(access))?;
+        held.0.identified(path, expected)?;
+        Ok(held)
+    }
+
+    fn identity(&self) -> io::Result<FileId> {
+        <Os as super::Fs>::identity(self.0.leaf().1)
+    }
+
     fn open_beneath(&self, relative: &Path, access: Access) -> io::Result<Self> {
         self.0.beneath(relative, access).map(Held)
     }

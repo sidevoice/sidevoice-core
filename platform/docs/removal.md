@@ -15,6 +15,13 @@ mount below the root is refused, while the root itself may be a mount point. The
 plus the new components, so `Removal` works on it unchanged. The starting root is still selected by
 `Directory::open`; descending only removes the race below it.
 
+To bind the starting root to the directory that was validated, take its identity without following a link
+(`Files::identity(&Files::open_read(root)?)`) before validating, and open it with
+`Directory::open_identified(root, access, &identity)`: the leaf handle actually held must have that identity (and,
+on Windows, be no reparse point), so a link or a junction set in place on an empty directory in between, which
+`Directory::open` would follow where trusted, is refused. `Directory::identity` reads a held directory's identity
+from its leaf handle.
+
 On Windows, removal also opens every entry relative to its held parent's handle, never by path: an empty held
 directory can become a junction in place (no share mode prevents setting a reparse point), and a path-based open
 would follow it. Listing a directory's entries is still by path, so the listing is untrusted and may be stale or

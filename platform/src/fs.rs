@@ -71,6 +71,23 @@ pub trait Directory: Sized {
     /// [`Fs::ensure_private_dir`], and the directory it leads to is held. Parent (`..`) components are invalid.
     fn open(path: &Path, access: Access) -> io::Result<Self>;
 
+    /// As [`Directory::open`], refused (`PermissionDenied`) unless the directory held is the one `expected` names:
+    /// the identity of the leaf handle actually held ([`Directory::identity`]) must equal `expected`, and the chain is
+    /// verified again after that comparison, so a leaf turned into a link in place in between is refused too (Windows:
+    /// the held leaf is no reparse point, a junction set on an empty directory included). Nothing is compared through
+    /// a path re-resolved for it.
+    ///
+    /// Use it to bind the directory held to the one already validated: take `expected` without following a link at
+    /// `path` ([`Fs::open_read`] then [`Fs::identity`]: the object itself, as a no-follow `lstat` reads it), validate,
+    /// then open with it. A link or junction swapped in at `path` (or above it) in between leads elsewhere and is
+    /// refused, where [`Directory::open`] would follow it where trusted; a link already at `path` when `expected` is
+    /// taken is refused by `open_read`. An identity names a live object: a directory deleted and recreated is another
+    /// object, though Unix may give it the same inode number.
+    fn open_identified(path: &Path, access: Access, expected: &FileId) -> io::Result<Self>;
+
+    /// Which directory is held: [`Fs::identity`] of the leaf handle itself, never of what its path names now.
+    fn identity(&self) -> io::Result<FileId>;
+
     /// Opens an existing directory beneath this one without following any link: `relative` is descended one
     /// component at a time from the held handle, each step opened relative to the handle before it, never by path,
     /// with no link resolved (Unix: `openat` with `O_NOFOLLOW | O_DIRECTORY`; Windows: `NtCreateFile` with the
@@ -168,6 +185,18 @@ impl HeldState {
         };
         held.verify()?;
         Ok(held)
+    }
+
+    /// [`Directory::open_identified`]'s check on a chain just opened at `path`: the leaf handle is `expected`, and the
+    /// chain still verifies after the comparison.
+    pub(crate) fn identified(&self, path: &Path, expected: &FileId) -> io::Result<()> {
+        if Files::identity(self.leaf().1)? != *expected {
+            return Err(refused(
+                path,
+                "not the directory validated; it was replaced or redirected",
+            ));
+        }
+        self.verify()
     }
 
     pub(crate) fn verify(&self) -> io::Result<()> {
@@ -445,7 +474,7 @@ pub enum Create {
 
 /// Which file a handle is open on ([`Fs::identity`]): equal for two handles to one file, different for a file that
 /// took its path (a rotation, a replacement). Compared only with another reading on this machine; holds nothing open.
-#[derive(PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileId {
     pub(crate) volume: u64,
     index: u128,
@@ -1610,6 +1639,81 @@ mod tests {
         assert!(refused(held.write(OsStr::new("record"), b"redirected")));
         assert!(!outside.join("record").exists());
         assert!(fs::read_dir(outside.join("c")).unwrap().next().is_none());
+    }
+
+    fn assert_identified_refused(path: &Path, expected: &FileId) {
+        assert_eq!(
+            HeldDirectory::open_identified(path, Access::Private, expected)
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+    }
+
+    /// The identity of what `path` itself names, a link not followed (`Fs::open_read`).
+    fn identity_at(path: &Path) -> FileId {
+        Files::identity(&Files::open_read(path).unwrap()).unwrap()
+    }
+
+    // The held identity is the leaf handle's: the real directory's device and inode, as `lstat` reads them.
+    #[cfg(unix)]
+    #[test]
+    fn held_identity_is_the_no_follow_identity_of_the_directory() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = scratch();
+        let home = temp.path().join("home");
+        Files::create_private_dir(&home).unwrap();
+        let lstat = fs::symlink_metadata(&home).unwrap();
+        let expected = FileId {
+            volume: lstat.dev(),
+            index: lstat.ino().into(),
+        };
+        assert_eq!(identity_at(&home), expected);
+        assert_eq!(held(&home, Access::Private).identity().unwrap(), expected);
+        let identified = HeldDirectory::open_identified(&home, Access::Private, &expected).unwrap();
+        assert_eq!(identified.identity().unwrap(), expected);
+    }
+
+    // A trusted link swapped in at the path between taking the identity and opening is followed by `open`, and
+    // refused by `open_identified`: what it leads to is another directory.
+    #[cfg(unix)]
+    #[test]
+    fn open_identified_refuses_a_link_swapped_in_after_the_identity_was_taken() {
+        let temp = scratch();
+        let home = temp.path().join("home");
+        let elsewhere = temp.path().join("elsewhere");
+        for dir in [&home, &elsewhere] {
+            Files::create_private_dir(dir).unwrap();
+        }
+        let expected = identity_at(&home);
+        fs::rename(&home, temp.path().join("moved")).unwrap();
+        Files::symlink(&elsewhere, &home);
+        assert_eq!(
+            held(&home, Access::Private).identity().unwrap(),
+            identity_at(&elsewhere)
+        );
+        assert_identified_refused(&home, &expected);
+    }
+
+    // Windows: an empty directory turned into a junction in place after its identity was taken (no entry replaced)
+    // is refused, though the junction is trusted and `open` follows it.
+    #[cfg(windows)]
+    #[test]
+    fn open_identified_refuses_a_junction_set_in_place_after_the_identity_was_taken() {
+        let temp = scratch();
+        let home = temp.path().join("home");
+        let elsewhere = temp.path().join("elsewhere");
+        for dir in [&home, &elsewhere] {
+            Files::create_private_dir(dir).unwrap();
+        }
+        let expected = identity_at(&home);
+        let identified = HeldDirectory::open_identified(&home, Access::Private, &expected).unwrap();
+        assert_eq!(identified.identity().unwrap(), expected);
+        drop(identified);
+        set_junction(&home, &elsewhere);
+        assert_identified_refused(&home, &expected);
+        assert_identified_refused(&elsewhere, &expected);
     }
 
     #[cfg(windows)]
