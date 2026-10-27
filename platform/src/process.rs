@@ -31,7 +31,8 @@ pub trait Process {
 
     /// Starts a child in its own process group, without a console on Windows or kill-on-drop on either OS.
     /// The caller owns stdio/environment. This does not escape an enclosing Windows job; use the service
-    /// manager for a service that must survive that job. A Windows stdio-inheritance setup failure is returned.
+    /// manager for a service that must survive that job. A Windows stdio-inheritance setup failure is returned, naming
+    /// the failing call and handle.
     fn spawn_detached(command: Command) -> impl Future<Output = io::Result<Child>> + Send;
 
     /// Observes a live process's start time and command line, whoever owns it; `None` for absent/zombie or
@@ -279,7 +280,8 @@ async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
     let Some(mut reader) = reader else {
         return Ok(());
     };
-    let mut scratch = [0u8; 8192];
+    // On the heap: an array here would sit inside every `output` future (17.5 KB with both streams).
+    let mut scratch = vec![0u8; 8192].into_boxed_slice();
     loop {
         let count = reader.read(&mut scratch).await?;
         if count == 0 {
@@ -380,6 +382,17 @@ mod tests {
         .expect("a killed descendant stayed alive");
     }
 
+    // Killed is not enough: the leader must be reaped (no zombie left), which `gone` (identity) cannot tell.
+    async fn reaped(pid: u32) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !imp::leader_reaped(pid) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the killed leader was never reaped");
+    }
+
     async fn descendant(child: &mut Child) -> (u32, BufReader<ChildStdout>) {
         tokio::time::timeout(Duration::from_secs(10), async {
             let mut reader = BufReader::new(child.stdout().unwrap());
@@ -410,6 +423,7 @@ mod tests {
                 assert!(child.try_wait().unwrap().is_some());
             }
             gone(pid).await;
+            reaped(pid).await;
             gone(descendant).await;
         }
     }
@@ -461,6 +475,16 @@ mod tests {
         assert!(out.complete && out.truncated);
         assert_eq!(out.stdout.len(), 512);
         assert_eq!(out.stderr.len(), 512);
+    }
+
+    // Regression: sidevoice-core#198, a 17.5 KB future overflowed a Windows main-thread stack.
+    #[tokio::test]
+    async fn output_future_keeps_its_read_buffers_off_the_stack() {
+        let child = Processes::spawn_tree(command("exit")).await.unwrap();
+        let future = child.output(Duration::from_secs(5), Duration::from_secs(1), 4096);
+        let size = std::mem::size_of_val(&future);
+        assert!(size < 4096, "the output future is {size} bytes");
+        drop(future);
     }
 
     #[tokio::test]
@@ -516,6 +540,7 @@ mod tests {
                 assert_eq!(error.kind(), io::ErrorKind::TimedOut);
             }
             gone(pid).await;
+            reaped(pid).await;
             gone(descendant).await;
         }
     }
@@ -601,10 +626,12 @@ mod tests {
                     .is_err());
             }
             gone(pid).await;
+            reaped(pid).await;
         }
     }
 
     async fn cancel_during_pipe_grace(mut child: Child) {
+        let leader = child.id().unwrap();
         let (pid, _stdout) = descendant(&mut child).await;
         assert!(child.wait().await.unwrap().success());
         // stderr remains inherited by the descendant, so collection is in its EOF grace after leader exit.
@@ -615,6 +642,7 @@ mod tests {
         .await
         .is_err());
         gone(pid).await;
+        reaped(leader).await;
     }
 
     #[tokio::test]

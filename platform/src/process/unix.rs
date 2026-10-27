@@ -66,3 +66,13 @@ pub(super) async fn wait(child: &mut super::Child) -> io::Result<std::process::E
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
+
+/// Whether the leader `pid` (a child of this process) has been reaped, not merely killed: a zombie still answers
+/// `waitid`, a reaped child is `ECHILD`.
+#[cfg(test)]
+pub(super) fn leader_reaped(pid: u32) -> bool {
+    use rustix::process::{waitid, Pid, WaitId, WaitIdOptions};
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+    let pid = Pid::from_raw(pid as i32).unwrap();
+    waitid(WaitId::Pid(pid), options) == Err(rustix::io::Errno::CHILD)
+}

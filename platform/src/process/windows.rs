@@ -20,7 +20,11 @@ use windows::Win32::System::Threading::{
 /// They are made non-inheritable first; `Stdio::inherit` duplicates what it passes on, so no later spawn is
 /// affected. Nothing maintained covers it (`std`'s handle list is unstable): own `unsafe`, three calls.
 fn keep_own_stdio_out() -> io::Result<()> {
-    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+    for (name, which) in [
+        ("stdin", STD_INPUT_HANDLE),
+        ("stdout", STD_OUTPUT_HANDLE),
+        ("stderr", STD_ERROR_HANDLE),
+    ] {
         // SAFETY: `GetStdHandle` returns this process's handle or none (skipped: nothing to close); only the inherit flag
         // of that handle changes.
         let failed = unsafe {
@@ -30,10 +34,20 @@ fn keep_own_stdio_out() -> io::Result<()> {
                 && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) == 0
         };
         if failed {
-            return Err(io::Error::last_os_error());
+            return Err(stdio_error(name, io::Error::last_os_error()));
         }
     }
     Ok(())
+}
+
+/// Names the failing call and handle; the error kind is kept.
+fn stdio_error(name: &str, source: io::Error) -> io::Error {
+    io::Error::new(
+        source.kind(),
+        format!(
+            "SetHandleInformation(HANDLE_FLAG_INHERIT) failed on this process's {name} handle: {source}"
+        ),
+    )
 }
 
 /// This OS's processes.
@@ -67,4 +81,33 @@ pub(super) fn try_wait(child: &mut super::Child) -> io::Result<Option<std::proce
 
 pub(super) async fn wait(child: &mut super::Child) -> io::Result<std::process::ExitStatus> {
     child.leader().wait().await
+}
+
+/// Whether the process `pid` can no longer be opened: no handle to it remains anywhere, as when a Unix leader is reaped.
+#[cfg(test)]
+pub(super) fn leader_reaped(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: opens a query-only handle to a pid and closes it at once; nothing else is touched.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return true;
+        }
+        CloseHandle(handle);
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdio_errors_name_the_operation_and_keep_the_kind() {
+        let error = stdio_error("stdout", io::Error::from(io::ErrorKind::PermissionDenied));
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let text = error.to_string();
+        assert!(text.contains("SetHandleInformation") && text.contains("stdout"));
+    }
 }
