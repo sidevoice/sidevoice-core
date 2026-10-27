@@ -21,6 +21,11 @@
 //! deadline has passed (a job that sat in the blocking pool's queue), whether or not anyone still awaits it. So
 //! repeated or abandoned attempts against a busy pipe never hold blocking threads past their deadlines. A Unix socket
 //! never waits for a busy server: a full backlog fails at once.
+//!
+//! [`blocking`] is the same channel for blocking code: deadlines on reads and writes, more than one handle on a
+//! connection, and ending it from any thread.
+
+pub mod blocking;
 
 #[cfg(unix)]
 #[path = "ipc/unix.rs"]
@@ -141,6 +146,14 @@ pub trait Channel {
             Ok(stream)
         }
     }
+}
+
+/// How each OS ([`Channels`], in `ipc/unix.rs` and `ipc/windows.rs`) closes a connection at once, for
+/// [`blocking::Stream::shutdown`]. Private: nothing outside this module abandons a stream.
+trait Close {
+    /// Closes `stream` now, discarding what the peer has not read, with nothing left running on its behalf (no
+    /// flush, no pending operation) that a peer which never reads could hold open.
+    fn abandon(stream: Stream);
 }
 
 /// A listening endpoint ([`Channel::listen`]).

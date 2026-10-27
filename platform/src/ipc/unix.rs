@@ -108,6 +108,13 @@ pub(super) fn connect(
     async move { Stream::connect(name?).await }
 }
 
+impl super::Close for Os {
+    /// A Unix socket closes when its descriptor does, with nothing held back for the peer.
+    fn abandon(stream: Stream) {
+        drop(stream);
+    }
+}
+
 /// Whether the process at the other end of `stream` is this user: the connection's own credentials, the peer's
 /// effective uid (`SO_PEERCRED` / `LOCAL_PEERCRED`), which the kernel vouches for (macOS gives no peer pid).
 pub(super) fn peer_is_this_user(stream: &Stream) -> io::Result<bool> {
