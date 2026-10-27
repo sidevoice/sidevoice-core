@@ -64,6 +64,20 @@ impl Removal for HeldDirectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    thread_local! {
+        static BEFORE_ENTRY_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    // Runs once, after the held root is verified and before an entry is opened beneath it (Windows walk).
+    #[cfg(windows)]
+    pub(super) fn before_entry_open() {
+        let hook = BEFORE_ENTRY_OPEN.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     use crate::fs::{Access, Create, Files, Fs, TestFiles};
     use std::fs::{self, File};
     use std::path::{Path, PathBuf};
@@ -101,6 +115,29 @@ mod tests {
             assert_eq!(fs::read(root.join(name)).unwrap(), b"keep contents intact");
         }
         held.write(OsStr::new("retry.json"), b"still held").unwrap();
+    }
+
+    #[test]
+    fn removal_through_a_descended_directory_deletes_only_inside_it() {
+        let (_temp, root, held) = fixture();
+        let models = root.join("Models");
+        Files::create_private_dir(&models).unwrap();
+        for dir in [&models.join("blobs"), &root.join("blobs")] {
+            Files::create_private_dir(dir).unwrap();
+            put(&dir.join("payload"));
+        }
+        put(&models.join("keep"));
+        let beneath = held
+            .open_beneath(Path::new("Models"), Access::Private)
+            .unwrap();
+        beneath.remove_contents(&[OsStr::new("blobs")]).unwrap();
+        assert!(!models.join("blobs").exists());
+        assert!(models.join("keep").exists());
+        assert!(root.join("blobs").join("payload").exists());
+        // The root stays usable, and so does the descended directory.
+        held.check_contents(&[OsStr::new("blobs")]).unwrap();
+        beneath.remove_contents(&[OsStr::new("keep")]).unwrap();
+        assert!(!models.join("keep").exists());
     }
 
     #[test]
@@ -331,6 +368,33 @@ mod tests {
         held.remove_contents(&[OsStr::new("first"), OsStr::new("busy")])
             .unwrap();
         assert!(root.join("recovery").exists());
+    }
+
+    // An empty held root turned into a junction in place after removal verified it and before the entry is opened:
+    // the entry is opened relative to the held handle, so the junction's target is never reached. The justified
+    // refusals are the relative open's `ERROR_CANT_RESOLVE_FILENAME` (1921) or, if the entry is simply not found in
+    // the held root, the final recheck seeing the junction (`PermissionDenied`).
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_set_on_a_held_root_never_redirects_removal() {
+        let (temp, root, held) = fixture();
+        let outside = temp.path().join("outside");
+        Files::create_private_dir(&outside).unwrap();
+        Files::create_private_dir(&outside.join("blobs")).unwrap();
+        put(&outside.join("blobs").join("payload"));
+        let (junction, target) = (root.clone(), outside.clone());
+        BEFORE_ENTRY_OPEN.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                crate::fs::set_junction(&junction, &target)
+            }));
+        });
+        let error = held.remove_contents(&[OsStr::new("blobs")]).unwrap_err();
+        assert!(
+            error.kind() == io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1921),
+            "{error:?}"
+        );
+        assert!(BEFORE_ENTRY_OPEN.with(|slot| slot.borrow().is_none()));
+        assert!(outside.join("blobs").join("payload").exists());
     }
 
     #[cfg(windows)]

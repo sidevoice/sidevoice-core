@@ -1,13 +1,13 @@
-//! Held ancestry excludes rename/delete. Descendants are opened no-follow and deleted by handle, including reparse
-//! entries. Own bindings cover disposition and the normalized name of an already checked handle: std exposes
-//! neither. Existing fs owns identity, owner and ACL checks.
+//! Held ancestry excludes rename/delete. Descendants are opened relative to their held parent's handle, no-follow,
+//! and deleted by handle, including reparse entries. Own bindings cover disposition and the normalized name of an
+//! already checked handle: std exposes neither. Existing fs owns identity, owner and ACL checks.
 use crate::fs::{Files, Fs, HeldState, Others};
 use crate::user::{User, UserId};
 use std::ffi::{c_void, OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io;
 use std::os::windows::ffi::OsStringExt;
-use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows_sys::Win32::Foundation::{
@@ -17,9 +17,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FileDispositionInfo, FileDispositionInfoEx, GetFinalPathNameByHandleW,
     SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, READ_CONTROL, VOLUME_NAME_NONE,
+    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+    READ_CONTROL, VOLUME_NAME_NONE,
 };
 
 pub(super) fn contents(root: &HeldState, allowed: &[&OsStr], remove: bool) -> io::Result<()> {
@@ -27,28 +26,35 @@ pub(super) fn contents(root: &HeldState, allowed: &[&OsStr], remove: bool) -> io
         crate::fs::record_name(name)?;
     }
     root.verify()?;
+    let (path, held) = root.leaf();
     for name in allowed {
-        visit(root, &root.leaf().0.join(name), remove, 0)?;
+        visit(root, held, name, &path.join(name), remove, 0)?;
     }
     root.verify()
 }
 
-fn visit(root: &HeldState, path: &Path, remove: bool, depth: usize) -> io::Result<()> {
+/// `name` beneath the directory `parent` is open on, opened relative to that handle (`open_relative`), never by
+/// `path`: a reparse point set meanwhile on a held directory is not traversed. `path` only names what to list
+/// (`read_dir`); a name listed through a redirected path that is not in `parent` is simply not found there.
+fn visit(
+    root: &HeldState,
+    parent: &File,
+    name: &OsStr,
+    path: &Path,
+    remove: bool,
+    depth: usize,
+) -> io::Result<()> {
     if depth > 64 {
         return Err(super::refused("removal tree is too deep"));
     }
     root.verify()?;
     // Read access participates in sharing checks; metadata-only handles would not block replacement. Every
     // ordinary ancestor remains open on the recursion stack without delete sharing until its children are done.
-    let file = match OpenOptions::new()
-        .read(true)
-        .access_mode(
-            GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES | if remove { DELETE } else { 0 },
-        )
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-    {
+    let access =
+        GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES | if remove { DELETE } else { 0 };
+    #[cfg(test)]
+    super::tests::before_entry_open();
+    let file = match crate::fs::open_relative(parent, name, access, false) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
@@ -56,7 +62,7 @@ fn visit(root: &HeldState, path: &Path, remove: bool, depth: usize) -> io::Resul
     if depth == 0 {
         // Syntactic validation cannot distinguish a literal name from an NTFS 8.3 alias. Check the opened,
         // unrenameable entry's normalized long name, both during whole-list preflight and again at deletion.
-        require_exact_name(&file, path.file_name().expect("validated child name"))?;
+        require_exact_name(&file, name)?;
     }
     let meta = file.metadata()?;
     if Files::identity(&file)?.volume != Files::identity(root.leaf().1)?.volume {
@@ -71,7 +77,15 @@ fn visit(root: &HeldState, path: &Path, remove: bool, depth: usize) -> io::Resul
             ));
         }
         for entry in fs::read_dir(path)? {
-            visit(root, &entry?.path(), remove, depth + 1)?;
+            let entry = entry?;
+            visit(
+                root,
+                &file,
+                &entry.file_name(),
+                &entry.path(),
+                remove,
+                depth + 1,
+            )?;
         }
     }
     if remove {

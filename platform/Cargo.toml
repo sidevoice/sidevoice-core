@@ -56,12 +56,16 @@ tokio = { version = "1", features = ["sync"] }
 # How many names a file has, and which file a handle is (fs): `winapi-util` (walkdir, ripgrep), no `unsafe` of ours.
 winapi-util = "0.1"
 windows-sys = { version = "0.61", features = [
+    # NtCreateFile relative to a held directory handle (fs: `open_relative`); Win32 has no handle-relative open.
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
     "Win32_System_Console",
+    "Win32_System_IO",
     "Win32_System_WindowsProgramming",
 ] }
 
