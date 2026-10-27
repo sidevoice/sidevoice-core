@@ -30,9 +30,17 @@ use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::OnceLock;
 
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    NtCreateFile, FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+    FILE_SYNCHRONOUS_IO_NONALERT,
+};
 use windows_sys::Win32::Foundation::{
     LocalFree, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_SUCCESS,
     HANDLE, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::Foundation::{
+    RtlNtStatusToDosError, ERROR_DIRECTORY, OBJ_CASE_INSENSITIVE, UNICODE_STRING,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, GetSecurityInfo,
@@ -50,7 +58,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MOVE_FILE_FLAGS,
     OPEN_ALWAYS, READ_CONTROL, VOLUME_NAME_GUID,
 };
+use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, SYNCHRONIZE};
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 /// This OS's files.
 pub struct Os;
@@ -433,6 +443,10 @@ impl super::Directory for Held {
         Self::open_with(path, Some(access))
     }
 
+    fn open_beneath(&self, relative: &Path, access: Access) -> io::Result<Self> {
+        self.0.beneath(relative, access).map(Held)
+    }
+
     fn read(&self, name: &OsStr, access: Access, limit: u64) -> io::Result<Option<Vec<u8>>> {
         let name = record_name(name)?;
         self.0.verify()?;
@@ -468,6 +482,96 @@ impl super::Directory for Held {
     }
 }
 
+/// The directory named by `path`'s last component, opened relative to the handle `parent` ([`open_relative`]): no
+/// directory above it is looked up by name again, so a reparse point set on a held directory (an empty one can
+/// become a junction in place, which no share mode prevents) is never traversed. A reparse point at the child
+/// itself is opened as itself and refused.
+pub(super) fn open_subdirectory(
+    parent: &File,
+    path: &Path,
+    _search_only: bool,
+) -> io::Result<File> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| super::denied("invalid directory component"))?;
+    let file = match open_relative(parent, name, FILE_GENERIC_READ, true) {
+        Err(error) if error.raw_os_error() == Some(ERROR_DIRECTORY as i32) => {
+            return Err(super::refused(path, "not an ordinary directory"));
+        }
+        opened => opened?,
+    };
+    ordinary_directory(path, file)
+}
+
+/// Opens the one child component `name` relative to the directory `parent` is open on: `NtCreateFile` with
+/// `RootDirectory` set to that handle (Win32 has no handle-relative open), `FILE_OPEN_REPARSE_POINT` so a reparse
+/// point there is opened itself and never followed, shared for reading and writing but never deletion, and
+/// synchronous as std expects. `directory` requires a directory (`ERROR_DIRECTORY` otherwise). A missing child is
+/// `NotFound`. `name` must already be validated as one ordinary component (`record_name`).
+pub(crate) fn open_relative(
+    parent: &File,
+    name: &OsStr,
+    access: u32,
+    directory: bool,
+) -> io::Result<File> {
+    let wide: Vec<u16> = name.encode_wide().collect();
+    let bytes = u16::try_from(wide.len() * 2)
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "name too long"))?;
+    let object_name = UNICODE_STRING {
+        Length: bytes,
+        MaximumLength: bytes,
+        Buffer: wide.as_ptr() as *mut u16,
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle() as HANDLE,
+        ObjectName: &object_name,
+        // As Win32 opens are; NTFS keeps one entry per case-insensitive name.
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let options = FILE_OPEN_REPARSE_POINT
+        | FILE_SYNCHRONOUS_IO_NONALERT
+        | if directory { FILE_DIRECTORY_FILE } else { 0 };
+    let mut handle: HANDLE = null_mut();
+    // SAFETY: an all-zero IO_STATUS_BLOCK is valid (a status and a pointer-sized value), written by the call.
+    let mut status_block: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+    // SAFETY: `parent` is open for the call; `attributes` points to `object_name`, whose buffer `wide` outlives the
+    // call; `handle` and `status_block` are writable; no allocation size or extended attributes are passed.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            access | SYNCHRONIZE,
+            &attributes,
+            &mut status_block,
+            std::ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            options,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        // SAFETY: a pure status-code translation.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    // SAFETY: the call succeeded, so `handle` is a new handle this process owns, handed to `File` to close.
+    Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
+}
+
+/// Which volume a handle is on: Windows has no mount below a volume other than a reparse point (a mount point),
+/// which descent and removal refuse as one, so a volume serial is the whole mount identity.
+#[derive(PartialEq, Debug)]
+pub(crate) struct Mount(u64);
+
+pub(crate) fn mount_of(file: &File) -> io::Result<Mount> {
+    Ok(Mount(<Os as Fs>::identity(file)?.volume))
+}
+
 pub(super) fn reopen_directory(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()
         // A metadata-only access mask does not participate in Windows sharing checks.
@@ -475,6 +579,11 @@ pub(super) fn reopen_directory(path: &Path) -> io::Result<File> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
+    ordinary_directory(path, file)
+}
+
+/// `file`, refused unless it is a directory and no reparse point (opened with `OPEN_REPARSE_POINT`).
+fn ordinary_directory(path: &Path, file: File) -> io::Result<File> {
     if is_link(&file)? || !file.metadata()?.is_dir() {
         return Err(super::refused(
             path,
@@ -878,6 +987,55 @@ impl super::TestFiles for Os {
         icacls(path, &["/inheritance:d"]);
         icacls(path, &["/remove:g", "*S-1-1-0"]);
     }
+}
+
+/// Turns the existing empty directory `dir` into a junction to `target` in place (`FSCTL_SET_REPARSE_POINT`, as
+/// any process of this user can, even while `dir` is held without delete sharing). Tests only; must succeed.
+#[cfg(test)]
+pub(crate) fn set_junction(dir: &Path, target: &Path) {
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    let target = target.to_string_lossy();
+    let target = target.strip_prefix(r"\\?\").unwrap_or(&target);
+    // The mount-point reparse buffer: tag, data length, reserved; substitute name (offset, length) and an empty print
+    // name (offset, length); then both names, each NUL-terminated.
+    let substitute: Vec<u16> = format!(r"\??\{target}").encode_utf16().collect();
+    let substitute_bytes = (substitute.len() * 2) as u16;
+    let mut names = substitute;
+    names.extend([0, 0]);
+    let mut data = Vec::new();
+    data.extend(IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    data.extend((8 + names.len() as u16 * 2).to_le_bytes());
+    data.extend(0u16.to_le_bytes());
+    data.extend(0u16.to_le_bytes());
+    data.extend(substitute_bytes.to_le_bytes());
+    data.extend((substitute_bytes + 2).to_le_bytes());
+    data.extend(0u16.to_le_bytes());
+    for unit in names {
+        data.extend(unit.to_le_bytes());
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)
+        .unwrap();
+    let mut returned = 0u32;
+    // SAFETY: the handle is open for the call; `data` is a complete reparse buffer of the length passed; no output.
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as HANDLE,
+            FSCTL_SET_REPARSE_POINT,
+            data.as_ptr() as *const c_void,
+            data.len() as u32,
+            null_mut(),
+            0,
+            &mut returned,
+            null_mut(),
+        )
+    };
+    assert!(ok != 0, "{}: {}", dir.display(), io::Error::last_os_error());
 }
 
 /// `icacls <path> <args>` (tests), which must succeed. Everyone is `S-1-1-0`.

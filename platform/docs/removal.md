@@ -5,6 +5,25 @@ required `Access`. The capability retains all ancestors and refuses replacements
 reached through Windows junctions/redirected profiles are refused: choose an ordinary unredirected directory.
 The established Unix system-owned ancestor-link allowance (for example macOS `/var`) is unchanged.
 
+`Directory::open` follows trusted (same-user) links, so a root validated by path and then opened can be swapped
+for a link in between. When the directory to remove from must be the one beneath an already held root, descend
+with `Directory::open_beneath(relative, access)` instead: each component is opened relative to the previous handle
+without resolving any link (Unix `openat` with `O_NOFOLLOW | O_DIRECTORY`; Windows `NtCreateFile` relative to the
+parent handle with `FILE_OPEN_REPARSE_POINT`), links and reparse points are refused, and every component must be
+on the held root's device and mount (Linux mount ID, macOS mounted-at path, Windows volume): a same-device bind
+mount below the root is refused, while the root itself may be a mount point. The result holds the root's ancestry
+plus the new components, so `Removal` works on it unchanged. The starting root is still selected by
+`Directory::open`; descending only removes the race below it.
+
+On Windows, removal also opens every entry relative to its held parent's handle, never by path: an empty held
+directory can become a junction in place (no share mode prevents setting a reparse point), and a path-based open
+would follow it. Listing a directory's entries is still by path, so the listing is untrusted and may be stale or
+redirected; only the names it yields are used, each opened relative to the held parent. Removal therefore stays
+contained beneath the allowlisted subtree whatever the listing says: a listed name that also exists in the held
+directory opens and deletes the real child there, never the redirected one; a name that does not exist there is
+skipped. An unreliable listing can omit real entries, leaving partial progress (a directory left non-empty, whose
+own deletion then fails); retry with the same allowlist.
+
 ```rust
 use std::ffi::OsStr;
 use sidevoice_platform::fs::{Access, Directory, HeldDirectory};
