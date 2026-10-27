@@ -314,8 +314,9 @@ pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
 /// staged file is flushed (`FlushFileBuffers`) before any name points at it; the rename is `MoveFileExW` with
 /// `MOVEFILE_WRITE_THROUGH`, which returns only once the rename is on disk; the directory is then flushed
 /// through the handle held on it ([`flush_held_dir`]), or by its path ([`flush_dir`]) only for a directory the
-/// caller vouched for and holds nothing on. A power cut before that leaves the old record (or none, for
-/// `Publish::New`), never a torn one.
+/// caller vouched for and holds nothing on. Before this returns, a crash or power cut leaves the old record (or
+/// none, for `Publish::New`) or the new one, each whole, never a torn one: once the rename has succeeded, the new
+/// record is in place. A flush error after it returns `Err` with the new record published; nothing is rolled back.
 pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
     let path = &super::record_path(path, how)?;
     let dir = super::parent_of(path)?;
@@ -532,7 +533,8 @@ pub(super) fn open_subdirectory(
 /// `RootDirectory` set to that handle (Win32 has no handle-relative open), `FILE_OPEN_REPARSE_POINT` so a reparse
 /// point there is opened itself and never followed, shared for reading and writing but never deletion, and
 /// synchronous as std expects. `directory` requires a directory (`ERROR_DIRECTORY` otherwise). A missing child is
-/// `NotFound`. `name` must already be validated as one ordinary component (`record_name`).
+/// `NotFound`. `name` must already be validated as one ordinary component (`record_name`), or be empty: an empty
+/// name reopens the directory `parent` is open on itself (`flush_held_dir`), no path resolved.
 pub(crate) fn open_relative(
     parent: &File,
     name: &OsStr,

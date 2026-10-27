@@ -100,8 +100,8 @@ pub trait Directory: Sized {
     /// Atomically publishes a private record through this directory, using the same staging/sync/publication as
     /// [`Fs::write_private`]. An existing record must satisfy `NotWritableByOthers`; unsafe state is never repaired.
     /// Ancestry is checked again after staging/sync, immediately before publication; on refusal the staged file
-    /// is removed. Readable-but-not-writable-by-others directories are accepted. Windows has no directory flush
-    /// guarantee.
+    /// is removed. Readable-but-not-writable-by-others directories are accepted. Durable as [`Fs::write_private`]
+    /// says, on Windows too: the directory is flushed through the handle held on it.
     fn write(&self, name: &OsStr, bytes: &[u8]) -> io::Result<()>;
 
     /// Removes one regular record satisfying `NotWritableByOthers`, never a directory or link. An absent child is
@@ -650,7 +650,11 @@ pub trait Fs {
     /// before any byte is in it.
     ///
     /// Durable once it returns `Ok`, as every write of a whole record here ([`Fs::create_private`], [`Fs::replace`],
-    /// [`Fs::replace_private`], [`Directory::write`]): the record survives a power cut. Unix: the temporary file is
+    /// [`Fs::replace_private`], [`Directory::write`]): the new record survives a power cut. Until it returns, a crash
+    /// or power cut leaves either the previous record (or none) or the new one, each whole, never a torn one: the
+    /// new record may already be in place before the call returns. An error after the rename (the directory flush
+    /// failing) does not undo it either: the new record stays published, and nothing is rolled back. A caller that
+    /// acts on a record must therefore tolerate it being ahead of what followed it. Unix: the temporary file is
     /// `fsync`ed, renamed over the record, then the directory `fsync`ed. Windows: the temporary file is flushed
     /// (`FlushFileBuffers`), renamed with `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` (for a
     /// record made once, `MOVEFILE_WRITE_THROUGH` alone), then the directory flushed ([`Fs::sync_dir`]).
@@ -707,8 +711,10 @@ fn create_all<F: Fs + ?Sized>(path: &Path) -> io::Result<()> {
 /// under the staging name ([`STAGING_RANDOM`]), created private before any byte is written, synced, then given the
 /// record's name, the directory synced; the staging file is removed on any failure.
 ///
-/// Durability, one contract on every OS: once the write returns `Ok`, the record survives a power cut whole; a power
-/// cut before that leaves the previous record (or none) whole, never a torn one. Unix: the staged file is `fsync`ed,
+/// Durability, one contract on every OS: once the write returns `Ok`, the new record survives a power cut whole.
+/// Before that, a crash or power cut leaves the previous record (or none) or the new one, each whole, never a torn
+/// one: the rename can reach the disk before the call returns. An error after the rename (the directory flush) leaves
+/// the new record published; nothing is rolled back. Unix: the staged file is `fsync`ed,
 /// renamed (or hard-linked) into place, then the directory is `fsync`ed. Windows: the staged file is flushed
 /// (`FlushFileBuffers`), renamed with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH` (with `MOVEFILE_REPLACE_EXISTING`
 /// unless the record is made once), then the directory is flushed ([`Fs::sync_dir`]).
