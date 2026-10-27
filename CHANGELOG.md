@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/sidevoice/sidevoice-core/compare/v0.14.0...v0.14.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **platform:** bound the Windows busy-pipe wait inside connect ([#219](https://github.com/sidevoice/sidevoice-core/issues/219)) ([e378231](https://github.com/sidevoice/sidevoice-core/commit/e37823121bafa1704917a8815dbb77e78796afd3))
+
 ## [0.14.0](https://github.com/sidevoice/sidevoice-core/compare/v0.13.0...v0.14.0) (2026-10-27)
 
 
