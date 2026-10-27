@@ -82,6 +82,9 @@ impl super::Observe for Leader {
         use rustix::process::{waitid, Pid, WaitId, WaitIdOptions};
         let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
         let pid = Pid::from_raw(self.0 as i32).unwrap();
-        matches!(waitid(WaitId::Pid(pid), options), Err(rustix::io::Errno::CHILD))
+        matches!(
+            waitid(WaitId::Pid(pid), options),
+            Err(rustix::io::Errno::CHILD)
+        )
     }
 }
