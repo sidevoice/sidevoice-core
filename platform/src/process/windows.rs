@@ -83,20 +83,46 @@ pub(super) async fn wait(child: &mut super::Child) -> io::Result<std::process::E
     child.leader().wait().await
 }
 
-/// Whether the process `pid` can no longer be opened: no handle to it remains anywhere, as when a Unix leader is reaped.
+/// A test observer of one leader, holding its own handle from before cleanup: the very process object, so neither a
+/// reused PID nor another tool's handle on it can answer for it.
 #[cfg(test)]
-pub(super) fn leader_reaped(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-    // SAFETY: opens a query-only handle to a pid and closes it at once; nothing else is touched.
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return true;
-        }
-        CloseHandle(handle);
+pub(super) struct Leader(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(test)]
+impl super::Observe for Leader {
+    /// Panics when the process cannot be opened: an unobservable leader proves nothing.
+    fn open(pid: u32) -> Self {
+        use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+        use windows_sys::Win32::System::Threading::OpenProcess;
+        // SAFETY: opens a wait-only handle to a pid; it is closed in `drop`.
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        assert!(
+            !handle.is_null(),
+            "OpenProcess({pid}): {}",
+            io::Error::last_os_error()
+        );
+        Self(handle)
     }
-    false
+
+    /// The process object is signalled: it has terminated. Any failure to ask panics rather than counting as ended.
+    fn ended(&self) -> bool {
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        // SAFETY: a zero-timeout wait on the handle this value owns.
+        match unsafe { WaitForSingleObject(self.0, 0) } {
+            WAIT_OBJECT_0 => true,
+            WAIT_TIMEOUT => false,
+            _ => panic!("WaitForSingleObject: {}", io::Error::last_os_error()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Leader {
+    fn drop(&mut self) {
+        // SAFETY: the handle was opened by `open` and is closed once.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
 }
 
 #[cfg(test)]
