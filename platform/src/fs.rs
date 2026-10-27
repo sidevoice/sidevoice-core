@@ -3024,6 +3024,13 @@ mod tests {
             Some(b"held".as_slice())
         );
         Files::sync_dir(&dir).unwrap();
+        // The held flush reopens the directory through the handle (an empty name relative to it), never by path:
+        // the same directory, with the write access a flush needs, while the held handles keep their hold.
+        let opened = Files::open_read(&dir).unwrap();
+        const FILE_WRITE_DATA: u32 = 0x0002;
+        let reopened = imp::open_relative(&opened, OsStr::new(""), FILE_WRITE_DATA, true).unwrap();
+        assert!(Files::identity(&reopened).unwrap() == Files::identity(&opened).unwrap());
+        reopened.sync_all().unwrap();
         drop(held);
         let mut names: Vec<_> = fs::read_dir(&dir)
             .unwrap()

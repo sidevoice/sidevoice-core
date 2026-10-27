@@ -16,7 +16,8 @@
 //! from `winapi-util`; a file's identity is `FileIdInfo`, one more call. A record's staging file (a fresh name beside
 //! it, removed on failure) is `tempfile`'s; it is given the record's name by our own `MoveFileExW` with
 //! `MOVEFILE_WRITE_THROUGH` (`tempfile` passes no such flag), replacing it or, for a record made once, replacing
-//! nothing, and the directory is then flushed ([`flush_dir`]).
+//! nothing, and the directory is then flushed: through the held handle on it where there is one
+//! ([`flush_held_dir`], `NtCreateFile` relative to that handle), by its path otherwise ([`flush_dir`]).
 
 use super::{Access, Create, FileId, Fs, HeldState, Others, Publish};
 use crate::user::{User, UserId};
@@ -312,11 +313,13 @@ pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
 /// Durability, as on Unix: once this returns `Ok`, the record survives a power cut whole, with the bytes written. The
 /// staged file is flushed (`FlushFileBuffers`) before any name points at it; the rename is `MoveFileExW` with
 /// `MOVEFILE_WRITE_THROUGH`, which returns only once the rename is on disk; the directory is then flushed
-/// ([`flush_dir`]). A power cut before that leaves the old record (or none, for `Publish::New`), never a torn one.
+/// through the handle held on it ([`flush_held_dir`]), or by its path ([`flush_dir`]) only for a directory the
+/// caller vouched for and holds nothing on. A power cut before that leaves the old record (or none, for
+/// `Publish::New`), never a torn one.
 pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
     let path = &super::record_path(path, how)?;
     let dir = super::parent_of(path)?;
-    let _held = if how.judged() {
+    let held = if how.judged() {
         let held = not_a_link(
             OpenOptions::new()
                 .read(true)
@@ -329,14 +332,17 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
     } else {
         None
     };
-    write_whole_in(path, bytes, how, || Ok(()))
+    write_whole_in(path, bytes, how, held.as_ref(), || Ok(()))
 }
 
 /// The single staging/publication implementation; held-directory callers keep the entire checked ancestry alive.
+/// `held` is a handle on the record's directory when the caller holds one: the directory is then flushed through it
+/// ([`flush_held_dir`]); a directory the caller only vouched for, with no handle on it, is flushed by its path.
 fn write_whole_in(
     path: &Path,
     bytes: &[u8],
     how: Publish,
+    held: Option<&File>,
     before_publish: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     // std supplies the extended-length spelling required by raw CreateFileW and tempfile's MoveFileExW, without
@@ -361,7 +367,10 @@ fn write_whole_in(
     // The staging name is gone: nothing is left for `tempfile` to remove.
     staged.disable_cleanup(true);
     drop(staged);
-    flush_dir(&dir)
+    match held {
+        Some(held) => flush_held_dir(held),
+        None => flush_dir(&dir),
+    }
 }
 
 /// The flags `write_whole_in` renames with: always `MOVEFILE_WRITE_THROUGH`, and `MOVEFILE_REPLACE_EXISTING` unless
@@ -391,13 +400,23 @@ fn move_write_through(from: &Path, to: &Path, flags: MOVE_FILE_FLAGS) -> io::Res
 /// reparse point there is refused, never flushed through. A file system that cannot flush a directory (it says the
 /// call is not supported) has nothing more to give: the write-through rename is all there is.
 fn flush_dir(dir: &Path) -> io::Result<()> {
-    let dir = not_a_link(
+    flush(&not_a_link(
         OpenOptions::new()
             .access_mode(FILE_WRITE_DATA)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(dir)?,
-    )?;
+    )?)
+}
+
+/// As [`flush_dir`], for the directory a held handle is open on: reopened through that handle, never by path
+/// ([`open_relative`] with an empty name, which `NtCreateFile` resolves to `RootDirectory` itself), so the directory
+/// flushed is the one held, whatever its path names now.
+fn flush_held_dir(held: &File) -> io::Result<()> {
+    flush(&open_relative(held, OsStr::new(""), FILE_WRITE_DATA, true)?)
+}
+
+fn flush(dir: &File) -> io::Result<()> {
     match dir.sync_all() {
         Err(error) if flush_unsupported(&error) => Ok(()),
         flushed => flushed,
@@ -464,7 +483,13 @@ impl super::Directory for Held {
         self.0.verify()?;
         let path = self.0.leaf().0.join(name);
         open_record(&path, Access::NotWritableByOthers)?;
-        write_whole_in(&path, bytes, Publish::Vouched, || self.0.before_publish())
+        write_whole_in(
+            &path,
+            bytes,
+            Publish::Vouched,
+            Some(self.0.leaf().1),
+            || self.0.before_publish(),
+        )
     }
 
     fn remove(&self, name: &OsStr) -> io::Result<()> {
