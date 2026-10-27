@@ -380,7 +380,9 @@ pub trait Fs {
     fn trusted_program(path: &Path) -> io::Result<PathBuf>;
 
     /// Makes what was just created, renamed or removed in the directory `dir` durable, where the OS has a way: Unix
-    /// syncs the directory; Windows does nothing (NTFS journals its metadata and gives no handle to flush).
+    /// syncs the directory (`fsync`); Windows flushes it (`FlushFileBuffers` on a handle opened with
+    /// `FILE_FLAG_BACKUP_SEMANTICS` and `FILE_ADD_FILE`), and a file system that cannot flush a directory is left as
+    /// it is.
     fn sync_dir(dir: &Path) -> io::Result<()>;
 
     /// What others may do with the file or directory behind an open handle.
@@ -538,6 +540,12 @@ pub trait Fs {
     /// handle that is then written through (Unix: no link followed, every step relative to it; Windows: held open so
     /// it cannot be renamed or replaced meanwhile). The temporary file it is written to is private from its creation,
     /// before any byte is in it.
+    ///
+    /// Durable once it returns `Ok`, as every write of a whole record here ([`Fs::create_private`], [`Fs::replace`],
+    /// [`Fs::replace_private`], [`Directory::write`]): the record survives a power cut. Unix: the temporary file is
+    /// `fsync`ed, renamed over the record, then the directory `fsync`ed. Windows: the temporary file is flushed
+    /// (`FlushFileBuffers`), renamed with `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` (for a
+    /// record made once, `MOVEFILE_WRITE_THROUGH` alone), then the directory flushed ([`Fs::sync_dir`]).
     fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         imp::write_whole(path, bytes, Publish::Private)
     }
@@ -590,6 +598,12 @@ fn create_all<F: Fs + ?Sized>(path: &Path) -> io::Result<()> {
 /// How `imp::write_whole` puts `bytes` in place as a record: whole or not at all, staged in a new file beside it
 /// under the staging name ([`STAGING_RANDOM`]), created private before any byte is written, synced, then given the
 /// record's name, the directory synced; the staging file is removed on any failure.
+///
+/// Durability, one contract on every OS: once the write returns `Ok`, the record survives a power cut whole; a power
+/// cut before that leaves the previous record (or none) whole, never a torn one. Unix: the staged file is `fsync`ed,
+/// renamed (or hard-linked) into place, then the directory is `fsync`ed. Windows: the staged file is flushed
+/// (`FlushFileBuffers`), renamed with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH` (with `MOVEFILE_REPLACE_EXISTING`
+/// unless the record is made once), then the directory is flushed ([`Fs::sync_dir`]).
 #[derive(Clone, Copy, PartialEq)]
 enum Publish {
     /// In a private directory, judged on the handle written through ([`judge_dir`]); renamed over the record; the
@@ -2503,6 +2517,69 @@ mod tests {
     fn a_directory_can_be_synced() {
         let root = scratch();
         Files::sync_dir(root.path()).unwrap();
+    }
+
+    // Windows: every publication renames write-through, and replaces only when the record may be replaced.
+    #[cfg(windows)]
+    #[test]
+    fn every_publication_renames_write_through() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        for how in [
+            Publish::Private,
+            Publish::New,
+            Publish::KeepAccess,
+            Publish::Vouched,
+        ] {
+            let flags = imp::publish_flags(how);
+            assert_ne!(flags & MOVEFILE_WRITE_THROUGH, 0);
+            assert_eq!(
+                flags & MOVEFILE_REPLACE_EXISTING != 0,
+                how != Publish::New,
+                "only a record made once replaces nothing"
+            );
+        }
+    }
+
+    // Windows: the write-through rename and the directory flush round-trip through every writer, a held directory's
+    // too (its handles keep their hold while the directory is flushed), and leave no staging name behind.
+    #[cfg(windows)]
+    #[test]
+    fn durable_publication_round_trips_and_leaves_only_the_record() {
+        let root = scratch();
+        let dir = root.path().join("private");
+        Files::create_private_dir(&dir).unwrap();
+        let file = dir.join("journal.json");
+        Files::write_private(&file, b"first").unwrap();
+        Files::write_private(&file, b"second").unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"second");
+        Files::replace_private(&file, b"third").unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"third");
+        let once = dir.join("once.json");
+        Files::create_private(&once, b"made once").unwrap();
+        assert_eq!(
+            Files::create_private(&once, b"again").unwrap_err().kind(),
+            ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&once).unwrap(), b"made once");
+        let held = HeldDirectory::open(&dir, Access::Private).unwrap();
+        held.write(OsStr::new("journal.json"), b"held").unwrap();
+        assert_eq!(
+            held.read(OsStr::new("journal.json"), Access::Private, 100)
+                .unwrap()
+                .as_deref(),
+            Some(b"held".as_slice())
+        );
+        Files::sync_dir(&dir).unwrap();
+        drop(held);
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["journal.json", "once.json"]);
+        assert!(private(&file) && private(&once));
     }
 
     // Windows only: an entry only what is created inside inherits, and a DACL that takes its parent's, have no Unix
