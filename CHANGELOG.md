@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.0](https://github.com/sidevoice/sidevoice-core/compare/v0.12.4...v0.13.0) (2026-10-27)
+
+
+### Features
+
+* **platform:** add HeldDirectory::open_beneath, a no-follow descent ([#212](https://github.com/sidevoice/sidevoice-core/issues/212)) ([4839412](https://github.com/sidevoice/sidevoice-core/commit/4839412f58c1eaa72e751dd1cf51843d71e52a00))
+* **platform:** make record publication durable on Windows ([#214](https://github.com/sidevoice/sidevoice-core/issues/214)) ([40a7445](https://github.com/sidevoice/sidevoice-core/commit/40a74451c19f13c8682c036ef88ea6bd39c0f2a2))
+
 ## [0.12.4](https://github.com/sidevoice/sidevoice-core/compare/v0.12.3...v0.12.4) (2026-10-26)
 
 
