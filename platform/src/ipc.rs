@@ -12,6 +12,13 @@
 //! (`TcpListener::bind(addr)`): `use sidevoice_platform::ipc::{Address, Channel, Channels, Endpoint};` then
 //! `Channels::listen(&Endpoint::new(dir, "local"))`, `Channels::connect(&endpoint).await`. Every crate computes the
 //! same pipe for the same directory and name, because they all run this one implementation.
+//!
+//! Connecting is bounded where the OS waits, not only where the caller does ([`Channel::connect_within`], and
+//! [`CONNECT_WAIT`] for [`Channel::connect`]). A Windows pipe whose every instance is taken (a stalled server, or
+//! another local user who created the name first and holds it) answers `ERROR_PIPE_BUSY`, and waiting for a free
+//! instance is a blocking `WaitNamedPipe` on one of Tokio's blocking threads. That wait gets the connect's own budget:
+//! the thread is back once the budget is spent, whether or not anyone still awaits it, so repeated attempts against a
+//! busy pipe never pile up parked threads. A Unix socket never waits for a busy server: a full backlog fails at once.
 
 #[cfg(unix)]
 #[path = "ipc/unix.rs"]
@@ -26,13 +33,18 @@ pub use imp::{Endpoint, Os as Channels};
 pub(crate) use imp::OWNER_ONLY;
 
 use interprocess::local_socket::tokio::Listener as RawListener;
-use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
+use interprocess::local_socket::traits::tokio::Listener as _;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
+
+/// How long [`Channel::connect`] waits, at most, for a server to take the connection (on Windows, for a free instance
+/// of a busy pipe). A server that is up takes it at once; this only bounds a stalled or squatted one.
+pub const CONNECT_WAIT: Duration = Duration::from_secs(5);
 
 /// One connection. `AsyncRead + AsyncWrite + Unpin`; its peer has been checked to be this user.
 pub type Stream = interprocess::local_socket::tokio::Stream;
@@ -66,7 +78,8 @@ fn endpoint_dir(runtime: Option<&Path>, dir: &Path) -> PathBuf {
 }
 
 /// What every OS implements ([`Channels`], in `ipc/unix.rs` and `ipc/windows.rs`): how a listener is made private to
-/// this user. Connecting is one body for every OS; the peer check is internal to each OS file (`peer_is_this_user`).
+/// this user. Connecting is one body for every OS around each OS file's bounded connect (`connect`); the peer check is
+/// internal to each OS file (`peer_is_this_user`).
 pub trait Channel {
     /// This user's runtime directory, where [`Address::new`] puts the endpoints' directories so a socket path stays
     /// within the OS limit (104 bytes on macOS, 108 on Linux) however long the data directory is. Linux:
@@ -87,12 +100,35 @@ pub trait Channel {
     fn listen(endpoint: &Endpoint) -> io::Result<Listener>;
 
     /// Connects to `endpoint`, refusing a server that is not this user: what is checked is the process at the other
-    /// end, once connected, not the file or pipe before. No timeout: callers bound it.
+    /// end, once connected, not the file or pipe before. Gives up after [`CONNECT_WAIT`]
+    /// ([`connect_within`](Channel::connect_within)).
     fn connect(endpoint: &Endpoint) -> impl Future<Output = io::Result<Stream>> + Send {
-        let name = endpoint.name();
+        Self::connect_within(endpoint, CONNECT_WAIT)
+    }
+
+    /// [`connect`](Channel::connect), giving up with `TimedOut` once `wait` has passed: one deadline for the whole
+    /// connect, retries included. The OS's own wait gets the same bound: on Windows, waiting for a free instance of a
+    /// busy pipe (`WaitNamedPipe`, on a Tokio blocking thread) ends within `wait`, so that thread is back by then even
+    /// if this future was dropped before; with `Duration::ZERO` it never waits (a busy pipe is `TimedOut` at once).
+    /// Unix never waits for a busy server. The peer check comes after, unchanged, and a check that has started is not
+    /// cut short. Needs a Tokio runtime with its timer enabled.
+    fn connect_within(
+        endpoint: &Endpoint,
+        wait: Duration,
+    ) -> impl Future<Output = io::Result<Stream>> + Send {
+        let connecting = imp::connect(endpoint, wait);
         let at = endpoint.to_string();
         async move {
-            let stream = Stream::connect(name?).await?;
+            let stream = match tokio::time::timeout(wait, connecting).await {
+                Ok(Err(error)) if error.kind() != io::ErrorKind::TimedOut => return Err(error),
+                Ok(Ok(stream)) => stream,
+                Ok(Err(_)) | Err(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("the server at {at} did not take the connection within {wait:?}"),
+                    ))
+                }
+            };
             if !imp::peer_is_this_user(&stream)? {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -226,6 +262,16 @@ mod tests {
         let _first = Channels::listen(&endpoint).unwrap();
         assert!(Channels::listen(&endpoint).is_err());
         Channels::connect(&endpoint).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_bounded_connect_reaches_a_listener_that_is_up() {
+        let dir = scratch();
+        let endpoint = Endpoint::new(dir.path(), "bounded");
+        let _listener = Channels::listen(&endpoint).unwrap();
+        Channels::connect_within(&endpoint, Duration::from_secs(1))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

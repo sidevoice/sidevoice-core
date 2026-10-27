@@ -4,14 +4,17 @@
 
 use super::{Listener, Stream};
 use crate::user::{User, UserId};
+use interprocess::local_socket::traits::tokio::Stream as _;
 use interprocess::local_socket::traits::Stream as SyncStream;
 use interprocess::local_socket::traits::StreamCommon as _;
 use interprocess::local_socket::{GenericFilePath, ListenerOptions, Name, ToFsName};
 use std::fmt;
+use std::future::Future;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 /// An endpoint: its socket path.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,6 +96,16 @@ impl super::Channel for Os {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         Ok(Listener(listener))
     }
+}
+
+/// Connects to `endpoint`, the peer unchecked. A Unix socket never waits for a busy server (a full backlog fails at
+/// once), so there is no OS wait for `wait` to bound; the caller's deadline covers the rest.
+pub(super) fn connect(
+    endpoint: &Endpoint,
+    _wait: Duration,
+) -> impl Future<Output = io::Result<Stream>> + Send + 'static {
+    let name = endpoint.name();
+    async move { Stream::connect(name?).await }
 }
 
 /// Whether the process at the other end of `stream` is this user: the connection's own credentials, the peer's

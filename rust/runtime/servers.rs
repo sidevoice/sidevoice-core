@@ -71,9 +71,10 @@ impl Servers {
         })
         .await?;
         await_serving(&self.local, || async move {
-            match tokio::time::timeout(PROBE_TIMEOUT, Channels::connect(endpoint)).await {
-                Ok(Ok(stream)) => probe_http(stream, "/api/local/health").await,
-                _ => false,
+            // Bounded where Windows waits for a busy pipe too, so no probe leaves a blocking thread behind.
+            match Channels::connect_within(endpoint, PROBE_TIMEOUT).await {
+                Ok(stream) => probe_http(stream, "/api/local/health").await,
+                Err(_) => false,
             }
         })
         .await?;
