@@ -13,7 +13,8 @@ description = "The operating-system code Sidevoice's crates share: this user, th
 # Shared child groups/jobs and hidden Windows launches, extracted from the connector.
 process-wrap = { version = "10", default-features = false, features = ["tokio1", "process-group", "job-object", "creation-flags", "kill-on-drop"] }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-tokio = { version = "1", features = ["process", "io-util", "time", "macros"] }
+# The blocking channel (ipc::blocking) runs its streams on a runtime of its own and ends them across threads (`sync`).
+tokio = { version = "1", features = ["process", "io-util", "time", "macros", "rt-multi-thread", "sync"] }
 # The local channel (ipc): Unix sockets and Windows named pipes behind one API.
 interprocess = { version = "2.4", features = ["tokio"] }
 # The login name and the host name (user), the same on every OS.

@@ -21,6 +21,11 @@
 //! deadline has passed (a job that sat in the blocking pool's queue), whether or not anyone still awaits it. So
 //! repeated or abandoned attempts against a busy pipe never hold blocking threads past their deadlines. A Unix socket
 //! never waits for a busy server: a full backlog fails at once.
+//!
+//! [`blocking`] is the same channel for blocking code: deadlines on reads and writes, more than one handle on a
+//! connection, and ending it from any thread.
+
+pub mod blocking;
 
 #[cfg(unix)]
 #[path = "ipc/unix.rs"]

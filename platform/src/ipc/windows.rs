@@ -153,6 +153,23 @@ fn wait_for_instance(path: &str, deadline: Instant) -> io::Result<()> {
     Err(error)
 }
 
+/// Closes `stream` at once ([`super::blocking::Stream::shutdown`]), discarding what the peer has not read. Dropping a
+/// pipe that was written to does not close it: `interprocess` hands it to its linger pool, whose thread flushes it
+/// (`FlushFileBuffers`) before closing, and the runtime's (mio's) pipe keeps a pending write going rather than cancel
+/// it. Behind a peer that never reads, both would hold the pipe open, and a thread with it. So the stream is marked
+/// flushed, and every operation pending on its handle is cancelled, before it is dropped.
+pub(super) fn abandon(stream: Stream) {
+    use std::os::windows::io::{AsHandle as _, AsRawHandle as _};
+    use windows_sys::Win32::System::IO::CancelIoEx;
+    let Stream::NamedPipe(pipe) = &stream;
+    let pipe = pipe.inner();
+    pipe.assume_flushed();
+    // SAFETY: the handle is the stream's own and stays open for the whole call; a null `OVERLAPPED` cancels every
+    // operation pending on it, whichever thread started it. Nothing pending (`ERROR_NOT_FOUND`) is no failure.
+    unsafe { CancelIoEx(pipe.as_handle().as_raw_handle(), std::ptr::null()) };
+    drop(stream);
+}
+
 /// Whether the process at the other end of `stream` is this user's: the pipe's client or server pid, as
 /// `interprocess` reports it, is a live process of this user's.
 pub(super) fn peer_is_this_user(stream: &Stream) -> io::Result<bool> {
