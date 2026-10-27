@@ -755,9 +755,9 @@ impl super::Directory for Held {
         Self::open_with(path, Some(access))
     }
 
-    fn open_identified(path: &Path, access: Access, expected: &FileId) -> io::Result<Self> {
+    fn open_identified(path: &Path, access: Access, validated: &File) -> io::Result<Self> {
         let held = Self::open_with(path, Some(access))?;
-        held.0.identified(path, expected)?;
+        held.0.identified(path, validated)?;
         Ok(held)
     }
 

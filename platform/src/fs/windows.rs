@@ -189,9 +189,13 @@ impl super::Fs for Os {
             )
         };
         if ok != 0 {
+            let index = u128::from_le_bytes(info.FileId.Identifier);
+            if index == 0 || index == u128::MAX {
+                return Err(no_unique_id());
+            }
             return Ok(FileId {
                 volume: info.VolumeSerialNumber,
-                index: u128::from_le_bytes(info.FileId.Identifier),
+                index,
             });
         }
         let error = io::Error::last_os_error();
@@ -202,11 +206,21 @@ impl super::Fs for Os {
             return Err(error);
         }
         let information = winapi_util::file::information(file)?;
+        let index = information.file_index();
+        if index == 0 || index == u64::MAX {
+            return Err(no_unique_id());
+        }
         Ok(FileId {
             volume: information.volume_serial_number(),
-            index: u128::from(information.file_index()),
+            index: u128::from(index),
         })
     }
+}
+
+/// A file system that reports a file id of 0 or all ones has none unique to the file (`FILE_INVALID_FILE_ID`):
+/// two files could not be told apart, so nothing is judged by it.
+fn no_unique_id() -> io::Error {
+    super::denied("the file system gives no unique file id")
 }
 
 /// How many names the file behind `file` has (`winapi-util`).
@@ -463,9 +477,9 @@ impl super::Directory for Held {
         Self::open_with(path, Some(access))
     }
 
-    fn open_identified(path: &Path, access: Access, expected: &FileId) -> io::Result<Self> {
+    fn open_identified(path: &Path, access: Access, validated: &File) -> io::Result<Self> {
         let held = Self::open_with(path, Some(access))?;
-        held.0.identified(path, expected)?;
+        held.0.identified(path, validated)?;
         Ok(held)
     }
 
