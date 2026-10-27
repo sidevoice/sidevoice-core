@@ -71,6 +71,25 @@ pub trait Directory: Sized {
     /// [`Fs::ensure_private_dir`], and the directory it leads to is held. Parent (`..`) components are invalid.
     fn open(path: &Path, access: Access) -> io::Result<Self>;
 
+    /// As [`Directory::open`], refused (`PermissionDenied`) unless the directory held is the very object `validated`
+    /// is open on: the identity of the leaf handle actually held ([`Directory::identity`]) must equal that of
+    /// `validated` ([`Fs::identity`]), compared while both are open, and the chain is verified again after that
+    /// comparison, so a leaf turned into a link in place in between is refused too (Windows: the held leaf is no
+    /// reparse point, a junction set on an empty directory included). Nothing is compared through a path re-resolved
+    /// for it.
+    ///
+    /// Use it to bind the directory held to the one already validated: open `path` without following a link at it
+    /// ([`Fs::open_read`]), validate through that handle, then pass it here, still open. A link or junction swapped in
+    /// at `path` (or above it) in between leads elsewhere and is refused, where [`Directory::open`] would follow it
+    /// where trusted; a link already at `path` is refused by `open_read`. The handle is what makes the identity
+    /// unique: an object with an open handle is not freed, so no directory created after it was deleted or moved away
+    /// can take its device and inode (Windows: its file id). A [`FileId`] alone, kept after its handle was closed,
+    /// binds nothing.
+    fn open_identified(path: &Path, access: Access, validated: &File) -> io::Result<Self>;
+
+    /// Which directory is held: [`Fs::identity`] of the leaf handle itself, never of what its path names now.
+    fn identity(&self) -> io::Result<FileId>;
+
     /// Opens an existing directory beneath this one without following any link: `relative` is descended one
     /// component at a time from the held handle, each step opened relative to the handle before it, never by path,
     /// with no link resolved (Unix: `openat` with `O_NOFOLLOW | O_DIRECTORY`; Windows: `NtCreateFile` with the
@@ -168,6 +187,18 @@ impl HeldState {
         };
         held.verify()?;
         Ok(held)
+    }
+
+    /// [`Directory::open_identified`]'s check on a chain just opened at `path`: the leaf handle is the object
+    /// `validated` is open on, and the chain still verifies after the comparison.
+    pub(crate) fn identified(&self, path: &Path, validated: &File) -> io::Result<()> {
+        if Files::identity(self.leaf().1)? != Files::identity(validated)? {
+            return Err(refused(
+                path,
+                "not the directory validated; it was replaced or redirected",
+            ));
+        }
+        self.verify()
     }
 
     pub(crate) fn verify(&self) -> io::Result<()> {
@@ -445,7 +476,7 @@ pub enum Create {
 
 /// Which file a handle is open on ([`Fs::identity`]): equal for two handles to one file, different for a file that
 /// took its path (a rotation, a replacement). Compared only with another reading on this machine; holds nothing open.
-#[derive(PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileId {
     pub(crate) volume: u64,
     index: u128,
@@ -1610,6 +1641,126 @@ mod tests {
         assert!(refused(held.write(OsStr::new("record"), b"redirected")));
         assert!(!outside.join("record").exists());
         assert!(fs::read_dir(outside.join("c")).unwrap().next().is_none());
+    }
+
+    fn identified(path: &Path, validated: &File) -> HeldDirectory {
+        HeldDirectory::open_identified(path, Access::Private, validated)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    fn assert_identified_refused(path: &Path, validated: &File) {
+        assert_eq!(
+            HeldDirectory::open_identified(path, Access::Private, validated)
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+    }
+
+    // The held identity is the leaf handle's: the real directory's device and inode, as `lstat` reads them.
+    #[cfg(unix)]
+    #[test]
+    fn held_identity_is_the_no_follow_identity_of_the_directory() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = scratch();
+        let home = temp.path().join("home");
+        Files::create_private_dir(&home).unwrap();
+        let lstat = fs::symlink_metadata(&home).unwrap();
+        let expected = FileId {
+            volume: lstat.dev(),
+            index: lstat.ino().into(),
+        };
+        let validated = Files::open_read(&home).unwrap();
+        assert_eq!(Files::identity(&validated).unwrap(), expected);
+        assert_eq!(held(&home, Access::Private).identity().unwrap(), expected);
+        assert_eq!(identified(&home, &validated).identity().unwrap(), expected);
+    }
+
+    // A trusted link swapped in at the path after validation is followed by `open`, and refused by
+    // `open_identified`: what it leads to is another directory.
+    #[cfg(unix)]
+    #[test]
+    fn open_identified_refuses_a_link_swapped_in_after_validation() {
+        let temp = scratch();
+        let home = temp.path().join("home");
+        let elsewhere = temp.path().join("elsewhere");
+        for dir in [&home, &elsewhere] {
+            Files::create_private_dir(dir).unwrap();
+        }
+        let validated = Files::open_read(&home).unwrap();
+        fs::rename(&home, temp.path().join("moved")).unwrap();
+        Files::symlink(&elsewhere, &home);
+        let elsewhere_id = Files::identity(&Files::open_read(&elsewhere).unwrap()).unwrap();
+        assert_eq!(
+            held(&home, Access::Private).identity().unwrap(),
+            elsewhere_id
+        );
+        assert_identified_refused(&home, &validated);
+        // The moved original is still the validated object, wherever it is now.
+        identified(&temp.path().join("moved"), &validated);
+    }
+
+    // The validated directory deleted and others created in its place, at its path and behind a link there: while
+    // the validated handle is open its inode is not freed, so none of them can take it (sidevoice-core#215 review:
+    // a bare identity was reused within tens of attempts). Each is refused.
+    #[cfg(unix)]
+    #[test]
+    fn open_identified_refuses_directories_created_after_the_validated_one_was_deleted() {
+        let temp = scratch();
+        let home = temp.path().join("home");
+        let backup = temp.path().join("backup");
+        Files::create_private_dir(&home).unwrap();
+        let validated = Files::open_read(&home).unwrap();
+        let expected = Files::identity(&validated).unwrap();
+        fs::remove_dir(&home).unwrap();
+        for _ in 0..200 {
+            Files::create_private_dir(&backup).unwrap();
+            let id = Files::identity(&Files::open_read(&backup).unwrap()).unwrap();
+            assert_ne!(id, expected);
+            fs::remove_dir(&backup).unwrap();
+        }
+        Files::create_private_dir(&home).unwrap();
+        assert_identified_refused(&home, &validated);
+        fs::remove_dir(&home).unwrap();
+        Files::create_private_dir(&backup).unwrap();
+        Files::symlink(&backup, &home);
+        assert_identified_refused(&home, &validated);
+    }
+
+    // Windows: an empty directory turned into a junction in place after validation (no entry replaced) is refused,
+    // though the junction is trusted and `open` follows it.
+    #[cfg(windows)]
+    #[test]
+    fn open_identified_refuses_a_junction_set_in_place_after_validation() {
+        let temp = scratch();
+        let home = temp.path().join("home");
+        let elsewhere = temp.path().join("elsewhere");
+        for dir in [&home, &elsewhere] {
+            Files::create_private_dir(dir).unwrap();
+        }
+        let validated = Files::open_read(&home).unwrap();
+        let expected = Files::identity(&validated).unwrap();
+        assert_eq!(identified(&home, &validated).identity().unwrap(), expected);
+        set_junction(&home, &elsewhere);
+        assert_identified_refused(&home, &validated);
+        assert_identified_refused(&elsewhere, &validated);
+    }
+
+    // Windows: the validated directory moved away and another made at its path is refused; the moved one is still
+    // the validated object.
+    #[cfg(windows)]
+    #[test]
+    fn open_identified_refuses_a_directory_made_after_the_validated_one_moved_away() {
+        let temp = scratch();
+        let home = temp.path().join("home");
+        let moved = temp.path().join("moved");
+        Files::create_private_dir(&home).unwrap();
+        let validated = Files::open_read(&home).unwrap();
+        fs::rename(&home, &moved).unwrap();
+        Files::create_private_dir(&home).unwrap();
+        assert_identified_refused(&home, &validated);
+        identified(&moved, &validated);
     }
 
     #[cfg(windows)]
