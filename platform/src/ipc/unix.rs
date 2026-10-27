@@ -152,6 +152,22 @@ mod tests {
         Endpoint(dir.join(format!("{name}.sock")))
     }
 
+    /// Waits until nothing answers on the socket file `path`: the state a dead process leaves. Dropping a listener
+    /// does not get there at once: a process spawned by a parallel test holds a copy of the descriptor from its
+    /// `fork` until its `exec` closes it (the descriptors are close-on-exec), the listener stays alive meanwhile,
+    /// and connecting succeeds. That is the test's own setup, not a socket whose owner is dead.
+    fn await_nobody_answers(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::os::unix::net::UnixStream::connect(path).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "something still answers on {}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     #[tokio::test]
     async fn a_listener_makes_its_missing_directory_private() {
         let scratch = super::super::tests::scratch();
@@ -196,6 +212,7 @@ mod tests {
         drop(std::os::unix::net::UnixListener::bind(path(&endpoint)).unwrap());
         chmod(path(&endpoint), 0o600);
         assert!(path(&endpoint).exists());
+        await_nobody_answers(path(&endpoint));
         let listener = Channels::listen(&endpoint).unwrap();
         Channels::connect(&endpoint).await.unwrap();
         drop(listener);
