@@ -113,6 +113,37 @@ fn selecting_needs_no_binding_and_shows_working_which_detach_clears() {
 }
 
 #[test]
+fn a_disconnected_conversation_is_never_working_until_it_is_back_and_reports_again() {
+    let (_directory, room, bid) = parity_room("t");
+    let working = |room: &Room| room.participants(None)[0]["working"].clone();
+    room.working("connector", &json!({"binding_id":bid,"working":true}));
+    assert_eq!(working(&room), true);
+    // The connector's link is replaced: its bindings are offline and carry no working state.
+    let (requests, _receiver) = mpsc::channel(1);
+    let (stop, _stopped) = tokio::sync::watch::channel(false);
+    room.attach(
+        "connector",
+        crate::control::room::ConnectorPeer {
+            generation: "again".into(),
+            sender: requests,
+            stop,
+        },
+    );
+    assert_eq!(room.participants(None)[0]["available"], false);
+    assert_eq!(working(&room), Value::Null);
+    // A late report from the disconnected binding changes nothing.
+    room.working("connector", &json!({"binding_id":bid,"working":true}));
+    assert_eq!(working(&room), Value::Null);
+    // Back: still not working until a fresh report.
+    room.register("connector", &json!({"thread":"t","harness":"codex"}))
+        .unwrap();
+    assert_eq!(room.participants(None)[0]["available"], true);
+    assert_eq!(working(&room), Value::Null);
+    room.working("connector", &json!({"binding_id":bid,"working":true}));
+    assert_eq!(working(&room), true);
+}
+
+#[test]
 fn a_reply_goes_out_as_text_at_once_and_a_parked_call_is_sent_nothing_until_it_is_back() {
     let (_directory, room, _) = parity_room("t");
     let (sid, mut events) = browser(&room, "t");
