@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.15.0](https://github.com/sidevoice/sidevoice-core/compare/v0.14.1...v0.15.0) (2026-10-27)
+
+
+### Features
+
+* **platform:** blocking ipc channel ([#224](https://github.com/sidevoice/sidevoice-core/issues/224)) ([b52aa24](https://github.com/sidevoice/sidevoice-core/commit/b52aa2428a8d129895a2dd4ebd4c7ada41bb85ed))
+
+
+### Bug Fixes
+
+* **platform:** box Child::output buffers and name the failing stdio operation ([#223](https://github.com/sidevoice/sidevoice-core/issues/223)) ([57a2c44](https://github.com/sidevoice/sidevoice-core/commit/57a2c44a378c9226718cf7f0ac8b76622562e4c8))
+* **room:** a disconnected conversation is never reported as working ([#221](https://github.com/sidevoice/sidevoice-core/issues/221)) ([e74eb78](https://github.com/sidevoice/sidevoice-core/commit/e74eb7899add1db0424e1e75e2c312b230059eed))
+
 ## [0.14.1](https://github.com/sidevoice/sidevoice-core/compare/v0.14.0...v0.14.1) (2026-10-27)
 
 
