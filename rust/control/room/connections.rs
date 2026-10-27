@@ -18,7 +18,6 @@ impl Room {
         if !inner.peers.detach(cid, generation) {
             return;
         }
-        inner.bindings.forget_working_of(cid);
         let ids = inner.bindings.go_offline(cid);
         inner.bindings_went_offline(&ids);
     }

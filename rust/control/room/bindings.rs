@@ -78,14 +78,14 @@ impl Bindings {
     pub(super) fn set_working(&mut self, thread: &str, working: bool) {
         self.working.insert(thread.to_owned(), working);
     }
+    /// Whether the thread is working, as its harness last said. A thread nobody can reach says nothing: disconnected
+    /// wins over any working report, and it works again only after a fresh report from a live binding.
     pub(super) fn working(&self, thread: &str) -> Option<bool> {
-        self.working.get(thread).copied()
-    }
-    /// Connector `cid` is gone: a conversation nobody can reach is not working any more.
-    pub(super) fn forget_working_of(&mut self, cid: &str) {
-        for binding in self.by_id.values().filter(|b| b.connector == cid && b.live) {
-            self.working.remove(&binding.thread);
-        }
+        self.by_id
+            .values()
+            .any(|b| b.active && b.live && b.thread == thread)
+            .then(|| self.working.get(thread).copied())
+            .flatten()
     }
     pub(super) fn get(&self, bid: &str) -> Option<&Binding> {
         self.by_id.get(bid)
@@ -149,14 +149,26 @@ impl Bindings {
     pub(super) fn go_offline(&mut self, cid: &str) -> Vec<String> {
         self.go_offline_where(|b| b.connector == cid)
     }
+    /// A binding that goes offline takes its thread's working report with it, unless another live binding keeps the thread
+    /// reachable.
     fn go_offline_where(&mut self, affected: impl Fn(&Binding) -> bool) -> Vec<String> {
-        self.by_id
+        let ids: Vec<String> = self
+            .by_id
             .values_mut()
             .filter(|b| affected(b))
             .map(|b| {
                 b.live = false;
                 b.id.clone()
             })
-            .collect()
+            .collect();
+        let gone: Vec<String> = ids
+            .iter()
+            .filter_map(|id| self.by_id.get(id).map(|b| b.thread.clone()))
+            .filter(|thread| !self.by_id.values().any(|b| b.live && &b.thread == thread))
+            .collect();
+        for thread in gone {
+            self.working.remove(&thread);
+        }
+        ids
     }
 }
