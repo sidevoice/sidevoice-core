@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/sidevoice/sidevoice-core/compare/v0.13.0...v0.14.0) (2026-10-27)
+
+
+### Features
+
+* **platform:** open a held directory bound to a validated identity ([#215](https://github.com/sidevoice/sidevoice-core/issues/215)) ([e8190d1](https://github.com/sidevoice/sidevoice-core/commit/e8190d11a349f91dc591c195c03bf3ec96bc5865))
+
 ## [0.13.0](https://github.com/sidevoice/sidevoice-core/compare/v0.12.4...v0.13.0) (2026-10-27)
 
 
