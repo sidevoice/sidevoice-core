@@ -14,7 +14,10 @@
 //! DACL grants" (`windows-acl` is unmaintained; `windows-permissions` is a thin binding with the same calls left to
 //! us), and the surface is a few calls. The link count (and the identity of a file system with no 128-bit ids) comes
 //! from `winapi-util`; a file's identity is `FileIdInfo`, one more call. A record's staging file (a fresh name beside
-//! it, removed on failure, renamed over it or, for a record made once, renamed replacing nothing) is `tempfile`'s.
+//! it, removed on failure) is `tempfile`'s; it is given the record's name by our own `MoveFileExW` with
+//! `MOVEFILE_WRITE_THROUGH` (`tempfile` passes no such flag), replacing it or, for a record made once, replacing
+//! nothing, and the directory is then flushed: through the held handle on it where there is one
+//! ([`flush_held_dir`], `NtCreateFile` relative to that handle), by its path otherwise ([`flush_dir`]).
 
 use super::{Access, Create, FileId, Fs, HeldState, Others, Publish};
 use crate::user::{User, UserId};
@@ -50,10 +53,11 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FileIdInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_128, FILE_ID_INFO,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
-    READ_CONTROL, VOLUME_NAME_GUID,
+    GetFinalPathNameByHandleW, MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_ID_128, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MOVE_FILE_FLAGS,
+    OPEN_ALWAYS, READ_CONTROL, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, SYNCHRONIZE};
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
@@ -143,10 +147,8 @@ impl super::Fs for Os {
         Ok(resolved)
     }
 
-    // NTFS journals its metadata, and a directory can be flushed only through a handle opened for writing with
-    // `FILE_FLAG_BACKUP_SEMANTICS`, which `File::open` does not ask for (it fails): nothing to do.
-    fn sync_dir(_: &Path) -> io::Result<()> {
-        Ok(())
+    fn sync_dir(dir: &Path) -> io::Result<()> {
+        flush_dir(dir)
     }
 
     fn owner_of_user_directory_is_trusted(dir: &File) -> io::Result<bool> {
@@ -306,11 +308,19 @@ pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
 /// directory, a handle on it (a reparse point refused) is judged (`super::judge_dir`) and held open, shared with no
 /// `FILE_SHARE_DELETE`, until the record is in place: the directory judged cannot be renamed, removed or replaced
 /// meanwhile, so the paths below name it. An existing file's DACL is not carried over to its replacement, which is
-/// private like everything `open_private` creates. The directory is not synced (`Fs::sync_dir`).
+/// private like everything `open_private` creates.
+///
+/// Durability, as on Unix: once this returns `Ok`, the record survives a power cut whole, with the bytes written. The
+/// staged file is flushed (`FlushFileBuffers`) before any name points at it; the rename is `MoveFileExW` with
+/// `MOVEFILE_WRITE_THROUGH`, which returns only once the rename is on disk; the directory is then flushed
+/// through the handle held on it ([`flush_held_dir`]), or by its path ([`flush_dir`]) only for a directory the
+/// caller vouched for and holds nothing on. Before this returns, a crash or power cut leaves the old record (or
+/// none, for `Publish::New`) or the new one, each whole, never a torn one: once the rename has succeeded, the new
+/// record is in place. A flush error after it returns `Err` with the new record published; nothing is rolled back.
 pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result<()> {
     let path = &super::record_path(path, how)?;
     let dir = super::parent_of(path)?;
-    let _held = if how.judged() {
+    let held = if how.judged() {
         let held = not_a_link(
             OpenOptions::new()
                 .read(true)
@@ -323,14 +333,17 @@ pub(super) fn write_whole(path: &Path, bytes: &[u8], how: Publish) -> io::Result
     } else {
         None
     };
-    write_whole_in(path, bytes, how, || Ok(()))
+    write_whole_in(path, bytes, how, held.as_ref(), || Ok(()))
 }
 
 /// The single staging/publication implementation; held-directory callers keep the entire checked ancestry alive.
+/// `held` is a handle on the record's directory when the caller holds one: the directory is then flushed through it
+/// ([`flush_held_dir`]); a directory the caller only vouched for, with no handle on it, is flushed by its path.
 fn write_whole_in(
     path: &Path,
     bytes: &[u8],
     how: Publish,
+    held: Option<&File>,
     before_publish: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     // std supplies the extended-length spelling required by raw CreateFileW and tempfile's MoveFileExW, without
@@ -347,14 +360,76 @@ fn write_whole_in(
         .rand_bytes(super::STAGING_RANDOM)
         .make_in(&dir, |temp| Os::open_private(temp, Create::New))?;
     staged.write_all(bytes)?;
+    // `FlushFileBuffers`: the bytes are on disk before any name points at them.
     staged.as_file().sync_all()?;
     before_publish()?;
-    match how {
-        Publish::New => staged.persist_noclobber(&path),
-        _ => staged.persist(&path),
+    // On failure `staged` is dropped with its staging name, which `tempfile` removes.
+    move_write_through(staged.path(), &path, publish_flags(how))?;
+    // The staging name is gone: nothing is left for `tempfile` to remove.
+    staged.disable_cleanup(true);
+    drop(staged);
+    match held {
+        Some(held) => flush_held_dir(held),
+        None => flush_dir(&dir),
     }
-    .map(drop)
-    .map_err(|error| error.error)
+}
+
+/// The flags `write_whole_in` renames with: always `MOVEFILE_WRITE_THROUGH`, and `MOVEFILE_REPLACE_EXISTING` unless
+/// the record is made once (`Publish::New`: it never replaces anything).
+pub(super) fn publish_flags(how: Publish) -> MOVE_FILE_FLAGS {
+    match how {
+        Publish::New => MOVEFILE_WRITE_THROUGH,
+        _ => MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+    }
+}
+
+/// Renames `from` to `to` (both in one directory, so on one volume), returning only once the rename is on disk.
+/// `tempfile`'s `persist` is the same call without `MOVEFILE_WRITE_THROUGH`, which leaves the new name in the cache.
+fn move_write_through(from: &Path, to: &Path, flags: MOVE_FILE_FLAGS) -> io::Result<()> {
+    let (from, to) = (wide(from), wide(to));
+    // SAFETY: both are NUL-terminated and live for the call.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), flags) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Flushes the directory `dir` (`FlushFileBuffers` on it), so what was just created, renamed or removed in it is on
+/// disk. A directory is flushed only through a handle opened with `FILE_FLAG_BACKUP_SEMANTICS` and write access,
+/// which `File::open` does not ask for: `FILE_ADD_FILE` (`FILE_WRITE_DATA`), the least write access the flush accepts
+/// and one whoever put a file in `dir` has. Shared with everything, so a held handle on `dir` keeps its hold; a
+/// reparse point there is refused, never flushed through. A file system that cannot flush a directory (it says the
+/// call is not supported) has nothing more to give: the write-through rename is all there is.
+fn flush_dir(dir: &Path) -> io::Result<()> {
+    flush(&not_a_link(
+        OpenOptions::new()
+            .access_mode(FILE_WRITE_DATA)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(dir)?,
+    )?)
+}
+
+/// As [`flush_dir`], for the directory a held handle is open on: reopened through that handle, never by path
+/// ([`open_relative`] with an empty name, which `NtCreateFile` resolves to `RootDirectory` itself), so the directory
+/// flushed is the one held, whatever its path names now.
+fn flush_held_dir(held: &File) -> io::Result<()> {
+    flush(&open_relative(held, OsStr::new(""), FILE_WRITE_DATA, true)?)
+}
+
+fn flush(dir: &File) -> io::Result<()> {
+    match dir.sync_all() {
+        Err(error) if flush_unsupported(&error) => Ok(()),
+        flushed => flushed,
+    }
+}
+
+/// Whether a flush failed only because the file system has no directory flush.
+fn flush_unsupported(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error().map(|code| code as u32),
+        Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_INVALID_PARAMETER)
+    )
 }
 
 /// The held directory capability; public operations are declared in the shared interfaces.
@@ -409,7 +484,13 @@ impl super::Directory for Held {
         self.0.verify()?;
         let path = self.0.leaf().0.join(name);
         open_record(&path, Access::NotWritableByOthers)?;
-        write_whole_in(&path, bytes, Publish::Vouched, || self.0.before_publish())
+        write_whole_in(
+            &path,
+            bytes,
+            Publish::Vouched,
+            Some(self.0.leaf().1),
+            || self.0.before_publish(),
+        )
     }
 
     fn remove(&self, name: &OsStr) -> io::Result<()> {
@@ -452,7 +533,8 @@ pub(super) fn open_subdirectory(
 /// `RootDirectory` set to that handle (Win32 has no handle-relative open), `FILE_OPEN_REPARSE_POINT` so a reparse
 /// point there is opened itself and never followed, shared for reading and writing but never deletion, and
 /// synchronous as std expects. `directory` requires a directory (`ERROR_DIRECTORY` otherwise). A missing child is
-/// `NotFound`. `name` must already be validated as one ordinary component (`record_name`).
+/// `NotFound`. `name` must already be validated as one ordinary component (`record_name`), or be empty: an empty
+/// name reopens the directory `parent` is open on itself (`flush_held_dir`), no path resolved.
 pub(crate) fn open_relative(
     parent: &File,
     name: &OsStr,
