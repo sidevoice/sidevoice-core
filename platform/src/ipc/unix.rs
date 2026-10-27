@@ -108,10 +108,11 @@ pub(super) fn connect(
     async move { Stream::connect(name?).await }
 }
 
-/// Closes `stream` at once ([`super::blocking::Stream::shutdown`]): a Unix socket closes when its descriptor does, with
-/// nothing held back for the peer.
-pub(super) fn abandon(stream: Stream) {
-    drop(stream);
+impl super::Close for Os {
+    /// A Unix socket closes when its descriptor does, with nothing held back for the peer.
+    fn abandon(stream: Stream) {
+        drop(stream);
+    }
 }
 
 /// Whether the process at the other end of `stream` is this user: the connection's own credentials, the peer's

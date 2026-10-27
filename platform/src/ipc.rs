@@ -148,6 +148,14 @@ pub trait Channel {
     }
 }
 
+/// How each OS ([`Channels`], in `ipc/unix.rs` and `ipc/windows.rs`) closes a connection at once, for
+/// [`blocking::Stream::shutdown`]. Private: nothing outside this module abandons a stream.
+trait Close {
+    /// Closes `stream` now, discarding what the peer has not read, with nothing left running on its behalf (no
+    /// flush, no pending operation) that a peer which never reads could hold open.
+    fn abandon(stream: Stream);
+}
+
 /// A listening endpoint ([`Channel::listen`]).
 pub struct Listener(RawListener);
 

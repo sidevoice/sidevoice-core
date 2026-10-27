@@ -134,17 +134,17 @@ impl Stream {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         if let Some(channel) = channel {
-            super::imp::abandon(channel);
+            <Channels as super::Close>::abandon(channel);
         }
         Ok(())
     }
 
     /// Does `op` on the connection within its deadline, unless the connection is or gets ended first. Bytes read or
-    /// written, 0 for a flush.
+    /// written.
     fn run(&self, op: Op<'_>) -> io::Result<usize> {
         let (timeout, on_end): (_, fn() -> io::Result<usize>) = match op {
             Op::Read(_) => (&self.0.read_timeout, ended_read),
-            Op::Write(_) | Op::Flush => (&self.0.write_timeout, ended_write),
+            Op::Write(_) => (&self.0.write_timeout, ended_write),
         };
         let channel = self
             .0
@@ -161,7 +161,6 @@ impl Stream {
                 match op {
                     Op::Read(buf) => channel.read(buf).await,
                     Op::Write(buf) => channel.write(buf).await,
-                    Op::Flush => channel.flush().await.map(|()| 0),
                 }
             };
             tokio::select! {
@@ -173,11 +172,10 @@ impl Stream {
     }
 }
 
-/// A read, a write or a flush ([`Stream::run`]).
+/// A read or a write ([`Stream::run`]).
 enum Op<'b> {
     Read(&'b mut [u8]),
     Write(&'b [u8]),
-    Flush,
 }
 
 /// `timeout`, unless it is zero.
@@ -234,8 +232,19 @@ impl Write for &Stream {
         self.run(Op::Write(buf))
     }
 
+    /// Nothing to wait for: a write hands its bytes to the connection, and nothing here holds any back. So a flush
+    /// never touches the connection (on Windows, `interprocess`' own pipe flush is a `FlushFileBuffers` job no
+    /// [`Stream::shutdown`] could take back): `Ok` while it is open, [`io::ErrorKind::BrokenPipe`] once ended.
     fn flush(&mut self) -> io::Result<()> {
-        self.run(Op::Flush).map(|_| ())
+        let channel = self
+            .0
+            .channel
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        match channel.as_ref() {
+            Some(_) => Ok(()),
+            None => ended_write().map(|_| ()),
+        }
     }
 }
 
@@ -499,7 +508,30 @@ mod tests {
         silent.client.shutdown().unwrap();
         joined(writing, "the blocked write");
         drop(silent.release);
-        let server = joined(silent.server, "the silent server");
+        sees_it_closed(joined(silent.server, "the silent server"));
+    }
+
+    /// A flush to a peer that does not read waits for nothing (on Windows it starts no `FlushFileBuffers` job, which
+    /// would outlive an end), and ending the connection after it still closes it at once.
+    #[test]
+    fn a_flush_to_a_stalled_peer_returns_and_ending_the_connection_still_closes_it() {
+        let silent = silent();
+        let mut client = silent.client.try_clone().unwrap();
+        client.write_all(b"never read").unwrap();
+        let flushing = thread::spawn(move || client.flush());
+        joined(flushing, "a flush to a stalled peer").unwrap();
+        silent.client.shutdown().unwrap();
+        assert_eq!(
+            (&silent.client).flush().unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        drop(silent.release);
+        sees_it_closed(joined(silent.server, "the silent server"));
+    }
+
+    /// Asserts that `server`'s peer has closed the connection within [`LIMIT`]: its writes fail, instead of filling a
+    /// buffer nobody reads (and then timing out).
+    fn sees_it_closed(server: Stream) {
         server
             .set_write_timeout(Some(Duration::from_millis(200)))
             .unwrap();
@@ -509,7 +541,7 @@ mod tests {
             match (&server).write(&chunk) {
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
-                Err(_) => break,
+                Err(_) => return,
             }
             assert!(
                 started.elapsed() < LIMIT,
