@@ -84,26 +84,55 @@ impl super::Channel for Os {
     }
 }
 
-/// Connects to `endpoint`, the peer unchecked, waiting at most `wait` for a free instance of a busy pipe.
-/// `interprocess`'s local-socket connect cannot be bounded here: on Windows it ignores `ConnectOptions::wait_mode` and
-/// waits in `WaitNamedPipe(FOREVER)` on a blocking thread. Its named-pipe connect takes a wait mode: with a timeout,
-/// each `WaitNamedPipe` on that thread gets what is left of `wait`, so the thread is back once `wait` has passed, and a
-/// pipe still busy then is `TimedOut`.
+/// Connects to `endpoint`, the peer unchecked, waiting for a free instance of a busy pipe until `wait` after this
+/// call, at most. The pipe is first opened without waiting, on this task. Only a busy pipe takes a Tokio blocking
+/// thread, and that thread works to the same absolute deadline: when the job starts (possibly after waiting in the
+/// blocking pool's queue), it waits only for what is left, and a job dequeued after the deadline does not wait at
+/// all. So an attempt its caller abandoned costs the pool no time past its deadline. `interprocess`'s own bounded
+/// connect cannot give this: on Windows its local-socket connect ignores the wait mode (`WaitNamedPipe(FOREVER)`),
+/// and its Tokio named-pipe connect starts the budget only once its blocking job runs. Its synchronous connect,
+/// given what is left, is the wait here; a pipe still busy at the deadline is `TimedOut`.
 pub(super) fn connect(
     endpoint: &Endpoint,
     wait: Duration,
 ) -> impl Future<Output = io::Result<Stream>> + Send + 'static {
     use interprocess::os::windows::named_pipe::local_socket::tokio::Stream as PipeSocket;
-    use interprocess::os::windows::named_pipe::{pipe_mode, tokio::DuplexPipeStream};
+    use interprocess::os::windows::named_pipe::{pipe_mode, tokio, DuplexPipeStream};
     use interprocess::ConnectWaitMode;
+    use std::os::windows::io::OwnedHandle;
+    use std::time::Instant;
+    // No deadline past what `Instant` can hold: then `wait` itself, from whenever the job starts.
+    let deadline = Instant::now().checked_add(wait);
     let path = endpoint.0.clone();
     async move {
-        let pipe = DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
-            path,
-            ConnectWaitMode::Timeout(wait),
-        )
-        .await?;
-        Ok(Stream::from(PipeSocket::from(pipe)))
+        let busy =
+            match tokio::DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
+                path.as_str(),
+                ConnectWaitMode::Timeout(Duration::ZERO),
+            )
+            .await
+            {
+                Ok(pipe) => return Ok(Stream::from(PipeSocket::from(pipe))),
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => error,
+                Err(error) => return Err(error),
+            };
+        let handle = ::tokio::task::spawn_blocking(move || {
+            let left = deadline.map_or(wait, |deadline| {
+                deadline.saturating_duration_since(Instant::now())
+            });
+            if left.is_zero() {
+                return Err(busy);
+            }
+            let pipe = DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
+                path.as_str(),
+                ConnectWaitMode::Timeout(left),
+            )?;
+            OwnedHandle::try_from(pipe).map_err(|_| io::Error::other("the pipe's handle is shared"))
+        })
+        .await
+        .map_err(io::Error::other)??;
+        // On this task: the handle joins the runtime's reactor here, as interprocess's own connect does.
+        Ok(Stream::from(PipeSocket::try_from(handle)?))
     }
 }
 
@@ -188,33 +217,81 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
     }
 
-    /// The caller gives up on each attempt long before its budget (its own timeout drops the future), and the
-    /// attempt's blocking wait still ends within that budget: with a single blocking thread, a wait left parked would
-    /// hold every later blocking task in the queue for good.
-    #[test]
-    fn abandoned_attempts_on_a_busy_pipe_give_their_blocking_thread_back() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+    /// A runtime with a single blocking thread: a busy-pipe wait that outlives its deadline holds every later blocking
+    /// job back, which a sentinel job then measures.
+    fn one_blocking_thread() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .max_blocking_threads(1)
             .build()
-            .unwrap();
+            .unwrap()
+    }
+
+    /// The caller gives up on each attempt long before its budget (its own timeout drops the future). The first
+    /// attempt's wait ends at its deadline; the others, queued behind it, reach the thread after theirs and do not
+    /// wait at all. Five full waits one after another would take five budgets.
+    #[test]
+    fn abandoned_attempts_on_a_busy_pipe_give_their_blocking_thread_back() {
+        let runtime = one_blocking_thread();
         runtime.block_on(async {
             let (_dir, endpoint, _listener, _holder) = busy_pipe("abandoned").await;
-            let wait = Duration::from_millis(200);
+            let wait = Duration::from_millis(500);
+            let started = Instant::now();
             for _ in 0..5 {
                 let attempt = Channels::connect_within(&endpoint, wait);
                 assert!(tokio::time::timeout(Duration::from_millis(20), attempt)
                     .await
                     .is_err());
             }
-            // The five waits run one after another on the one thread, each over within `wait`.
             tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(|| ()))
                 .await
                 .expect("an abandoned attempt still holds the blocking thread")
                 .unwrap();
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < 2 * wait,
+                "the blocking thread was back after {elapsed:?}"
+            );
             // And the pipe, still busy, is still refused within the budget.
             let error = Channels::connect_within(&endpoint, wait).await.unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        });
+        runtime.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    /// One deadline from the call, however long the attempt's blocking job waits in the queue: the only blocking
+    /// thread is held behind a gate while an attempt on a busy pipe is queued and its budget runs out. Once the gate
+    /// opens, the attempt's job finds its deadline gone and does not start a wait of its own, so a sentinel job runs
+    /// at once, not a full budget later.
+    #[test]
+    fn an_attempt_queued_past_its_deadline_does_not_wait_again() {
+        let runtime = one_blocking_thread();
+        runtime.block_on(async {
+            let (_dir, endpoint, _listener, _holder) = busy_pipe("queued").await;
+            let (open, gate) = std::sync::mpsc::channel::<()>();
+            let held = tokio::task::spawn_blocking(move || gate.recv().unwrap());
+            let wait = Duration::from_secs(2);
+            let started = Instant::now();
+            let error = Channels::connect_within(&endpoint, wait).await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+            assert!(
+                started.elapsed() < wait + Duration::from_secs(1),
+                "{:?}",
+                started.elapsed()
+            );
+            // Its job is still queued behind the gate, its deadline gone.
+            open.send(()).unwrap();
+            held.await.unwrap();
+            let released = Instant::now();
+            tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(|| ()))
+                .await
+                .expect("the queued attempt still holds the blocking thread")
+                .unwrap();
+            let elapsed = released.elapsed();
+            assert!(
+                elapsed < wait / 2,
+                "the queued attempt waited {elapsed:?} after its deadline"
+            );
         });
         runtime.shutdown_timeout(Duration::from_secs(1));
     }

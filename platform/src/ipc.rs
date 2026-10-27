@@ -16,9 +16,11 @@
 //! Connecting is bounded where the OS waits, not only where the caller does ([`Channel::connect_within`], and
 //! [`CONNECT_WAIT`] for [`Channel::connect`]). A Windows pipe whose every instance is taken (a stalled server, or
 //! another local user who created the name first and holds it) answers `ERROR_PIPE_BUSY`, and waiting for a free
-//! instance is a blocking `WaitNamedPipe` on one of Tokio's blocking threads. That wait gets the connect's own budget:
-//! the thread is back once the budget is spent, whether or not anyone still awaits it, so repeated attempts against a
-//! busy pipe never pile up parked threads. A Unix socket never waits for a busy server: a full backlog fails at once.
+//! instance is a blocking `WaitNamedPipe` on one of Tokio's blocking threads. That wait works to the connect's own
+//! deadline, counted from the call: it waits only for what is left when its job reaches a thread, not at all once the
+//! deadline has passed (a job that sat in the blocking pool's queue), whether or not anyone still awaits it. So
+//! repeated or abandoned attempts against a busy pipe never hold blocking threads past their deadlines. A Unix socket
+//! never waits for a busy server: a full backlog fails at once.
 
 #[cfg(unix)]
 #[path = "ipc/unix.rs"]
@@ -107,11 +109,12 @@ pub trait Channel {
     }
 
     /// [`connect`](Channel::connect), giving up with `TimedOut` once `wait` has passed: one deadline for the whole
-    /// connect, retries included. The OS's own wait gets the same bound: on Windows, waiting for a free instance of a
-    /// busy pipe (`WaitNamedPipe`, on a Tokio blocking thread) ends within `wait`, so that thread is back by then even
-    /// if this future was dropped before; with `Duration::ZERO` it never waits (a busy pipe is `TimedOut` at once).
-    /// Unix never waits for a busy server. The peer check comes after, unchanged, and a check that has started is not
-    /// cut short. Needs a Tokio runtime with its timer enabled.
+    /// connect, counted from this call, retries included. The OS's own wait works to the same deadline: on Windows,
+    /// waiting for a free instance of a busy pipe (`WaitNamedPipe`, on a Tokio blocking thread) waits only for what is
+    /// left when its job reaches a thread, and not at all past the deadline, even if this future was dropped before or
+    /// the job sat in the blocking pool's queue; with `Duration::ZERO` it never waits (a busy pipe is `TimedOut` at
+    /// once). Unix never waits for a busy server. The peer check comes after, unchanged, and a check that has started
+    /// is not cut short. Needs a Tokio runtime with its timer enabled.
     fn connect_within(
         endpoint: &Endpoint,
         wait: Duration,
