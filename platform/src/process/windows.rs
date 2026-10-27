@@ -20,7 +20,11 @@ use windows::Win32::System::Threading::{
 /// They are made non-inheritable first; `Stdio::inherit` duplicates what it passes on, so no later spawn is
 /// affected. Nothing maintained covers it (`std`'s handle list is unstable): own `unsafe`, three calls.
 fn keep_own_stdio_out() -> io::Result<()> {
-    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+    for (name, which) in [
+        ("stdin", STD_INPUT_HANDLE),
+        ("stdout", STD_OUTPUT_HANDLE),
+        ("stderr", STD_ERROR_HANDLE),
+    ] {
         // SAFETY: `GetStdHandle` returns this process's handle or none (skipped: nothing to close); only the inherit flag
         // of that handle changes.
         let failed = unsafe {
@@ -30,10 +34,20 @@ fn keep_own_stdio_out() -> io::Result<()> {
                 && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) == 0
         };
         if failed {
-            return Err(io::Error::last_os_error());
+            return Err(stdio_error(name, io::Error::last_os_error()));
         }
     }
     Ok(())
+}
+
+/// Names the failing call and handle; the error kind is kept.
+fn stdio_error(name: &str, source: io::Error) -> io::Error {
+    io::Error::new(
+        source.kind(),
+        format!(
+            "SetHandleInformation(HANDLE_FLAG_INHERIT) failed on this process's {name} handle: {source}"
+        ),
+    )
 }
 
 /// This OS's processes.
@@ -67,4 +81,59 @@ pub(super) fn try_wait(child: &mut super::Child) -> io::Result<Option<std::proce
 
 pub(super) async fn wait(child: &mut super::Child) -> io::Result<std::process::ExitStatus> {
     child.leader().wait().await
+}
+
+/// A test observer of one leader, holding its own handle from before cleanup: the very process object, so neither a
+/// reused PID nor another tool's handle on it can answer for it.
+#[cfg(test)]
+pub(super) struct Leader(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(test)]
+impl super::Observe for Leader {
+    /// Panics when the process cannot be opened: an unobservable leader proves nothing.
+    fn open(pid: u32) -> Self {
+        use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+        use windows_sys::Win32::System::Threading::OpenProcess;
+        // SAFETY: opens a wait-only handle to a pid; it is closed in `drop`.
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        assert!(
+            !handle.is_null(),
+            "OpenProcess({pid}): {}",
+            io::Error::last_os_error()
+        );
+        Self(handle)
+    }
+
+    /// The process object is signalled: it has terminated. Any failure to ask panics rather than counting as ended.
+    fn ended(&self) -> bool {
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        // SAFETY: a zero-timeout wait on the handle this value owns.
+        match unsafe { WaitForSingleObject(self.0, 0) } {
+            WAIT_OBJECT_0 => true,
+            WAIT_TIMEOUT => false,
+            _ => panic!("WaitForSingleObject: {}", io::Error::last_os_error()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Leader {
+    fn drop(&mut self) {
+        // SAFETY: the handle was opened by `open` and is closed once.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdio_errors_name_the_operation_and_keep_the_kind() {
+        let error = stdio_error("stdout", io::Error::from(io::ErrorKind::PermissionDenied));
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let text = error.to_string();
+        assert!(text.contains("SetHandleInformation") && text.contains("stdout"));
+    }
 }

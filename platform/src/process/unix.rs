@@ -66,3 +66,25 @@ pub(super) async fn wait(child: &mut super::Child) -> io::Result<std::process::E
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
+
+/// A test observer of one leader: reaped (not merely killed) is what ended means here.
+#[cfg(test)]
+pub(super) struct Leader(u32);
+
+#[cfg(test)]
+impl super::Observe for Leader {
+    fn open(pid: u32) -> Self {
+        Self(pid)
+    }
+
+    /// A zombie still answers `waitid`; a reaped child of ours is `ECHILD`. Any other outcome is not "ended".
+    fn ended(&self) -> bool {
+        use rustix::process::{waitid, Pid, WaitId, WaitIdOptions};
+        let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+        let pid = Pid::from_raw(self.0 as i32).unwrap();
+        matches!(
+            waitid(WaitId::Pid(pid), options),
+            Err(rustix::io::Errno::CHILD)
+        )
+    }
+}

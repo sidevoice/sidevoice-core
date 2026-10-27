@@ -31,7 +31,8 @@ pub trait Process {
 
     /// Starts a child in its own process group, without a console on Windows or kill-on-drop on either OS.
     /// The caller owns stdio/environment. This does not escape an enclosing Windows job; use the service
-    /// manager for a service that must survive that job. A Windows stdio-inheritance setup failure is returned.
+    /// manager for a service that must survive that job. A Windows stdio-inheritance setup failure is returned, naming
+    /// the failing call and handle.
     fn spawn_detached(command: Command) -> impl Future<Output = io::Result<Child>> + Send;
 
     /// Observes a live process's start time and command line, whoever owns it; `None` for absent/zombie or
@@ -181,6 +182,15 @@ fn identity_of(process: &sysinfo::Process) -> Option<Identity> {
     })
 }
 
+/// What tests observe of a leader the code under test has cleaned up; each OS answers in its own file.
+#[cfg(test)]
+trait Observe {
+    /// Starts observing the leader `pid`, while it is alive.
+    fn open(pid: u32) -> Self;
+    /// Whether the leader has ended and nothing of it lingers for this process.
+    fn ended(&self) -> bool;
+}
+
 /// Bounded captured output. Stream truncation and missing EOF are reported separately from leader success.
 pub struct Output {
     pub status: ExitStatus,
@@ -279,7 +289,8 @@ async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
     let Some(mut reader) = reader else {
         return Ok(());
     };
-    let mut scratch = [0u8; 8192];
+    // On the heap: an array here would sit inside every `output` future (17.5 KB with both streams).
+    let mut scratch = vec![0u8; 8192].into_boxed_slice();
     loop {
         let count = reader.read(&mut scratch).await?;
         if count == 0 {
@@ -380,6 +391,18 @@ mod tests {
         .expect("a killed descendant stayed alive");
     }
 
+    // Killed is not enough: the leader must have ended for us (reaped, no zombie), which `gone` (identity) cannot tell.
+    // Open the observer while the leader is alive.
+    async fn ended(leader: &imp::Leader) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !leader.ended() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the killed leader never ended");
+    }
+
     async fn descendant(child: &mut Child) -> (u32, BufReader<ChildStdout>) {
         tokio::time::timeout(Duration::from_secs(10), async {
             let mut reader = BufReader::new(child.stdout().unwrap());
@@ -396,12 +419,23 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn the_leader_observer_tells_a_live_leader_from_a_cleaned_up_one() {
+        let mut child = Processes::spawn_tree(command("sleeper")).await.unwrap();
+        let leader = imp::Leader::open(child.id().unwrap());
+        assert!(!leader.ended());
+        child.kill_tree().await;
+        drop(child);
+        ended(&leader).await;
+    }
+
     // Regression: connector platform/process.rs (including the formerly Unix-only descendant test).
     #[tokio::test]
     async fn a_tree_is_stopped_whole_and_a_dropped_tree_goes_with_its_child() {
         for drop_it in [false, true] {
             let mut child = Processes::spawn_tree(command("descendant")).await.unwrap();
             let pid = child.id().unwrap();
+            let leader = imp::Leader::open(pid);
             let (descendant, _output) = descendant(&mut child).await;
             if drop_it {
                 drop(child);
@@ -410,6 +444,7 @@ mod tests {
                 assert!(child.try_wait().unwrap().is_some());
             }
             gone(pid).await;
+            ended(&leader).await;
             gone(descendant).await;
         }
     }
@@ -463,6 +498,16 @@ mod tests {
         assert_eq!(out.stderr.len(), 512);
     }
 
+    // Regression: sidevoice-core#198, a 17.5 KB future overflowed a Windows main-thread stack.
+    #[tokio::test]
+    async fn output_future_keeps_its_read_buffers_off_the_stack() {
+        let child = Processes::spawn_tree(command("exit")).await.unwrap();
+        let future = child.output(Duration::from_secs(5), Duration::from_secs(1), 4096);
+        let size = std::mem::size_of_val(&future);
+        assert!(size < 4096, "the output future is {size} bytes");
+        drop(future);
+    }
+
     #[tokio::test]
     async fn stdin_can_be_taken_and_output_closes_remaining_stdin() {
         use tokio::io::AsyncWriteExt;
@@ -497,6 +542,7 @@ mod tests {
         for cancel in [false, true] {
             let mut child = Processes::spawn_tree(command("descendant")).await.unwrap();
             let pid = child.id().unwrap();
+            let leader = imp::Leader::open(pid);
             let (descendant, _output) = descendant(&mut child).await;
             if cancel {
                 let task = tokio::spawn(child.output(
@@ -516,6 +562,7 @@ mod tests {
                 assert_eq!(error.kind(), io::ErrorKind::TimedOut);
             }
             gone(pid).await;
+            ended(&leader).await;
             gone(descendant).await;
         }
     }
@@ -592,6 +639,7 @@ mod tests {
         for unpolled in [true, false] {
             let child = Processes::spawn_detached(command("sleeper")).await.unwrap();
             let pid = child.id().unwrap();
+            let leader = imp::Leader::open(pid);
             let output = child.output(Duration::from_secs(30), Duration::from_secs(1), 4096);
             if unpolled {
                 drop(output);
@@ -601,10 +649,12 @@ mod tests {
                     .is_err());
             }
             gone(pid).await;
+            ended(&leader).await;
         }
     }
 
     async fn cancel_during_pipe_grace(mut child: Child) {
+        let leader = imp::Leader::open(child.id().unwrap());
         let (pid, _stdout) = descendant(&mut child).await;
         assert!(child.wait().await.unwrap().success());
         // stderr remains inherited by the descendant, so collection is in its EOF grace after leader exit.
@@ -615,6 +665,7 @@ mod tests {
         .await
         .is_err());
         gone(pid).await;
+        ended(&leader).await;
     }
 
     #[tokio::test]
