@@ -15,7 +15,7 @@ use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const PREFIX: &str = r"\\.\pipe\";
 
@@ -85,55 +85,72 @@ impl super::Channel for Os {
 }
 
 /// Connects to `endpoint`, the peer unchecked, waiting for a free instance of a busy pipe until `wait` after this
-/// call, at most. The pipe is first opened without waiting, on this task. Only a busy pipe takes a Tokio blocking
-/// thread, and that thread works to the same absolute deadline: when the job starts (possibly after waiting in the
-/// blocking pool's queue), it waits only for what is left, and a job dequeued after the deadline does not wait at
-/// all. So an attempt its caller abandoned costs the pool no time past its deadline. `interprocess`'s own bounded
-/// connect cannot give this: on Windows its local-socket connect ignores the wait mode (`WaitNamedPipe(FOREVER)`),
-/// and its Tokio named-pipe connect starts the budget only once its blocking job runs. Its synchronous connect,
-/// given what is left, is the wait here; a pipe still busy at the deadline is `TimedOut`.
+/// call, at most. Opening is always `interprocess`'s Tokio connect without a wait, on the calling task, so the handle
+/// goes straight from the open to the runtime's reactor with nothing of ours owning it. Only waiting for a free
+/// instance takes a Tokio blocking job (`WaitNamedPipeW`), and that job works to the absolute deadline: when it starts,
+/// possibly after waiting in the blocking pool's queue, it waits only for what is left, and not at all once the
+/// deadline has passed. So an attempt its caller abandoned costs the pool no time past its deadline. When an instance
+/// frees up, the open is tried again (another client may take it first). A pipe still busy at the deadline is
+/// `TimedOut`. `interprocess`'s own bounded connect cannot give this: on Windows its local-socket connect ignores the
+/// wait mode (`WaitNamedPipe(FOREVER)`), and its Tokio named-pipe connect starts the budget only once its blocking job
+/// runs.
 pub(super) fn connect(
     endpoint: &Endpoint,
     wait: Duration,
 ) -> impl Future<Output = io::Result<Stream>> + Send + 'static {
     use interprocess::os::windows::named_pipe::local_socket::tokio::Stream as PipeSocket;
-    use interprocess::os::windows::named_pipe::{pipe_mode, tokio, DuplexPipeStream};
+    use interprocess::os::windows::named_pipe::{pipe_mode, tokio::DuplexPipeStream};
     use interprocess::ConnectWaitMode;
-    use std::os::windows::io::OwnedHandle;
-    use std::time::Instant;
-    // No deadline past what `Instant` can hold: then `wait` itself, from whenever the job starts.
-    let deadline = Instant::now().checked_add(wait);
+    // `WaitNamedPipeW`'s longest finite wait, about 49 days: an `Instant` that far ahead is always representable.
+    const LONGEST: Duration = Duration::from_millis(0xFFFF_FFFE);
+    let deadline = Instant::now() + wait.min(LONGEST);
     let path = endpoint.0.clone();
     async move {
-        let busy =
-            match tokio::DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
+        loop {
+            match DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
                 path.as_str(),
                 ConnectWaitMode::Timeout(Duration::ZERO),
             )
             .await
             {
                 Ok(pipe) => return Ok(Stream::from(PipeSocket::from(pipe))),
-                Err(error) if error.kind() == io::ErrorKind::TimedOut => error,
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
                 Err(error) => return Err(error),
-            };
-        let handle = ::tokio::task::spawn_blocking(move || {
-            let left = deadline.map_or(wait, |deadline| {
-                deadline.saturating_duration_since(Instant::now())
-            });
-            if left.is_zero() {
-                return Err(busy);
             }
-            let pipe = DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
-                path.as_str(),
-                ConnectWaitMode::Timeout(left),
-            )?;
-            OwnedHandle::try_from(pipe).map_err(|_| io::Error::other("the pipe's handle is shared"))
-        })
-        .await
-        .map_err(io::Error::other)??;
-        // On this task: the handle joins the runtime's reactor here, as interprocess's own connect does.
-        Ok(Stream::from(PipeSocket::try_from(handle)?))
+            if deadline <= Instant::now() {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || wait_for_instance(&path, deadline))
+                .await
+                .map_err(io::Error::other)??;
+        }
     }
+}
+
+/// Waits, on this (blocking) thread, until an instance of the pipe `path` is free or `deadline` has passed (then
+/// `TimedOut`, at once if it already has). A pipe that is gone is its own error.
+fn wait_for_instance(path: &str, deadline: Instant) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::ERROR_SEM_TIMEOUT;
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(io::Error::from(io::ErrorKind::TimedOut));
+    }
+    let path = widestring::U16CString::from_str(path).map_err(io::Error::other)?;
+    // Never 0 (the pipe's own default wait) nor 0xFFFFFFFF (forever): 1 ms to the longest finite wait.
+    let millis = u32::try_from(left.as_millis())
+        .unwrap_or(u32::MAX)
+        .clamp(1, 0xFFFF_FFFE);
+    // SAFETY: `path` is a NUL-terminated wide string that outlives the call; no handle is involved.
+    if unsafe { WaitNamedPipeW(path.as_ptr(), millis) } != 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_SEM_TIMEOUT as i32) {
+        return Err(io::Error::from(io::ErrorKind::TimedOut));
+    }
+    Err(error)
 }
 
 /// Whether the process at the other end of `stream` is this user's: the pipe's client or server pid, as
@@ -178,7 +195,6 @@ fn is_this_users_process(pid: u32) -> bool {
 mod tests {
     use super::super::{Address, Channel as _, Channels};
     use super::*;
-    use std::time::Instant;
 
     #[test]
     fn this_process_is_this_users_and_nothing_else_is() {
@@ -228,8 +244,8 @@ mod tests {
     }
 
     /// The caller gives up on each attempt long before its budget (its own timeout drops the future). The first
-    /// attempt's wait ends at its deadline; the others, queued behind it, reach the thread after theirs and do not
-    /// wait at all. Five full waits one after another would take five budgets.
+    /// attempt's wait ends at its deadline; the others, queued behind it, reach the thread at or after theirs (they
+    /// were 20 ms apart) and wait for what is left at most. Five full waits one after another would take five budgets.
     #[test]
     fn abandoned_attempts_on_a_busy_pipe_give_their_blocking_thread_back() {
         let runtime = one_blocking_thread();
@@ -294,5 +310,33 @@ mod tests {
             );
         });
         runtime.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    /// A pipe that frees up within the budget is connected, and carries bytes both ways: the server accepts the
+    /// holder's connection only after a while (which makes the next instance), then the waiting client's.
+    #[tokio::test]
+    async fn a_busy_pipe_freed_within_the_budget_connects_and_carries_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (_dir, endpoint, listener, holder) = busy_pipe("freed").await;
+        let delay = Duration::from_millis(500);
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _held = listener.accept().await.unwrap();
+            let mut stream = listener.accept().await.unwrap();
+            let mut line = [0u8; 5];
+            stream.read_exact(&mut line).await.unwrap();
+            stream.write_all(&line).await.unwrap();
+        });
+        let started = Instant::now();
+        let mut client = Channels::connect_within(&endpoint, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= delay / 2, "{:?}", started.elapsed());
+        client.write_all(b"hello").await.unwrap();
+        let mut echoed = [0u8; 5];
+        client.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"hello");
+        server.await.unwrap();
+        drop(holder);
     }
 }
