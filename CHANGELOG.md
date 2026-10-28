@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/sidevoice/sidevoice-core/compare/v0.15.0...v0.15.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **platform:** keep Windows data in a Data subfolder of the app's folder ([#227](https://github.com/sidevoice/sidevoice-core/issues/227)) ([c3d56a3](https://github.com/sidevoice/sidevoice-core/commit/c3d56a394c7172e9555ab78fc6c5ce7128f4945e))
+
 ## [0.15.0](https://github.com/sidevoice/sidevoice-core/compare/v0.14.1...v0.15.0) (2026-10-27)
 
 
