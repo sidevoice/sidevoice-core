@@ -75,9 +75,9 @@ The conversation epoch, speech admission, playback fate and common push/pull not
 ## Configuration
 
 Its data — paired devices, the machine's identity key, the conversation journal — lives in
-`SIDEVOICE_CORE_DATA_DIR`, else `core` inside the data directory all Sidevoice programs on the machine share (`SIDEVOICE_DATA_DIR`, else the OS's standard place: `~/Library/Application Support/Sidevoice` on macOS, `$XDG_DATA_HOME/sidevoice` on Linux, `%LOCALAPPDATA%\Sidevoice` on Windows; `sidevoice-platform`'s `data_dir`). Every secret file there is created owner-only (mode 0600; on Windows a protected ACL for this user, SYSTEM and Administrators).
+`SIDEVOICE_CORE_DATA_DIR`, else `core` inside the data directory all Sidevoice programs on the machine share (`SIDEVOICE_DATA_DIR`, else the OS's standard place: `~/Library/Application Support/Sidevoice` on macOS, `$XDG_DATA_HOME/sidevoice` on Linux, `%LOCALAPPDATA%\Sidevoice\Data` on Windows; `sidevoice-platform`'s `data_dir`). Every secret file there is created owner-only (mode 0600; on Windows a protected ACL for this user, SYSTEM and Administrators).
 
-The shared models (`data_dir::models_dir`: `Models` in the OS standard place, e.g. `$XDG_DATA_HOME/sidevoice/Models` on Linux) are NOT in `SIDEVOICE_DATA_DIR`: one cache for every Sidevoice instance of the user. The core never writes it and the connector never removes it.
+The shared models (`data_dir::models_dir`: `Models` in the program's folder of the OS standard place, e.g. `$XDG_DATA_HOME/sidevoice/Models` on Linux, `%LOCALAPPDATA%\Sidevoice\Models` on Windows, beside `Data`) are NOT in `SIDEVOICE_DATA_DIR`: one cache for every Sidevoice instance of the user. The core never writes it and the connector never removes it.
 
 | Variable | What it does |
 |---|---|
