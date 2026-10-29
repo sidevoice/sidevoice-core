@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.16.0](https://github.com/sidevoice/sidevoice-core/compare/v0.15.1...v0.16.0) (2026-10-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* rename the core binary to sidevoice-core ([#229](https://github.com/sidevoice/sidevoice-core/issues/229))
+
+### Code Refactoring
+
+* rename the core binary to sidevoice-core ([#229](https://github.com/sidevoice/sidevoice-core/issues/229)) ([ed10d5e](https://github.com/sidevoice/sidevoice-core/commit/ed10d5e22980524982d8b52a4d67c379199f8ac7))
+
 ## [0.15.1](https://github.com/sidevoice/sidevoice-core/compare/v0.15.0...v0.15.1) (2026-10-28)
 
 
