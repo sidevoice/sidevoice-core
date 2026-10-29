@@ -194,8 +194,8 @@ mod tests {
             "bin/sidevoice-connector.exe"
         );
         assert_eq!(
-            windows.exe_name("bin/sidevoice-core-rust"),
-            "bin/sidevoice-core-rust.exe"
+            windows.exe_name("bin/sidevoice-core"),
+            "bin/sidevoice-core.exe"
         );
         assert_eq!(
             windows.exe_name("bin/sidevoice-background"),
@@ -215,10 +215,7 @@ mod tests {
                 target.exe_name("bin/sidevoice-connector"),
                 "bin/sidevoice-connector"
             );
-            assert_eq!(
-                target.exe_name("bin/sidevoice-core-rust"),
-                "bin/sidevoice-core-rust"
-            );
+            assert_eq!(target.exe_name("bin/sidevoice-core"), "bin/sidevoice-core");
         }
         let mac = by_name("macos-aarch64").unwrap();
         assert_eq!(

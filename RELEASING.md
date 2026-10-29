@@ -55,12 +55,12 @@ supported.
 
 - `sidevoice-core-<version>-<target>.tar.zst` for `macos-aarch64`, `linux-x86_64`, `linux-aarch64` and `windows-x86_64` (on the nightly,
   `sidevoice-core-nightly-<target>.tar.zst`, fixed names whose download URLs never change): the relocatable native
-  core per target (`bin/sidevoice-core-rust`, `bin/sidevoice-core-rust.exe` on Windows, and its licence notices; archive kind `rust-native-v2`). The
+  core per target (`bin/sidevoice-core`, `bin/sidevoice-core.exe` on Windows, and its licence notices; archive kind `rust-native-v2`). The
   source commit is in the manifest and in each archive's `native-core.json`, and on Linux the glibc floor too. The
   Linux archives run on glibc 2.28 or newer, x86_64 and arm64; the macOS one on Apple silicon.
   The Windows one is built natively with MSVC and the C runtime linked statically (`.cargo/config.toml`), so it needs
   no Visual C++ Redistributable: `dist` and `verify` fail a binary that imports any DLL outside a fixed baseline of
-  Windows system libraries (`xtask/src/libraries.rs`). Its inventory names `bin/sidevoice-core-rust.exe` as the
+  Windows system libraries (`xtask/src/libraries.rs`). Its inventory names `bin/sidevoice-core.exe` as the
   `entrypoint`. It is not signed (Authenticode) and there is no installer: the archive is the whole Windows
   distribution, which the connector bundles. Nothing else is published per target (no wheel or package), so Windows
   needs nothing more here.

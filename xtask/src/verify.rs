@@ -24,7 +24,7 @@ use crate::util::*;
 use crate::{Result, ENTRYPOINT_STEM};
 
 /// Where `verify-floor` mounts the unpacked archive, and the xtask that starts it, in the container.
-const CONTAINER_ROOT: &str = "/opt/sidevoice-core-rust";
+const CONTAINER_ROOT: &str = "/opt/sidevoice-core";
 const CONTAINER_XTASK: &str = "/opt/sidevoice-xtask";
 
 /// Where a Linux system keeps its CA bundle: Debian and Ubuntu, then RHEL, AlmaLinux and Fedora.

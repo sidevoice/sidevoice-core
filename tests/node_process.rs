@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use sidevoice_core::platform::ipc::{Address, Channel, Channels, Endpoint};
 use support::{is_private, private_dir};
 
-const CORE: &str = env!("CARGO_BIN_EXE_sidevoice-core-rust");
+const CORE: &str = env!("CARGO_BIN_EXE_sidevoice-core");
 
 struct Core {
     child: Child,
