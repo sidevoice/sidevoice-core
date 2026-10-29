@@ -38,9 +38,9 @@ use verify::{verify, verify_tree};
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
-pub(crate) const ROOT_NAME: &str = "sidevoice-core-rust";
+pub(crate) const ROOT_NAME: &str = "sidevoice-core";
 /// The core's program inside its archive; the shared target adds the executable suffix.
-pub(crate) const ENTRYPOINT_STEM: &str = "bin/sidevoice-core-rust";
+pub(crate) const ENTRYPOINT_STEM: &str = "bin/sidevoice-core";
 
 /// The archive's layout: `bin/` and `notices/` (v1 also carried the voice pipeline's models, `checks/` and `lib/`).
 pub(crate) const KIND: &str = "rust-native-v2";

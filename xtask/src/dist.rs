@@ -40,18 +40,12 @@ pub(crate) fn dist() -> Result<()> {
                 "--locked",
                 "--release",
                 "--bin",
-                "sidevoice-core-rust",
+                "sidevoice-core",
             ])
             .args(["--target", &format!("{triple}.{}", glibc::FLOOR)]);
         repo.join("target").join(triple).join("release")
     } else {
-        build.args([
-            "build",
-            "--locked",
-            "--release",
-            "--bin",
-            "sidevoice-core-rust",
-        ]);
+        build.args(["build", "--locked", "--release", "--bin", "sidevoice-core"]);
         repo.join("target/release")
     };
     let status = build
@@ -70,7 +64,7 @@ pub(crate) fn dist() -> Result<()> {
     let binary = stage.join(&entrypoint);
     write(
         &binary,
-        &read(&built.join(target.exe_name("sidevoice-core-rust")))?,
+        &read(&built.join(target.exe_name("sidevoice-core")))?,
     )?;
     chmod(&binary, 0o755)?;
     stage_notices(&stage.join("notices"), target)?;
@@ -122,7 +116,7 @@ pub(crate) fn dist() -> Result<()> {
     verify(&archive, None)
 }
 
-/// A reproducible tar of `<work>/sidevoice-core-rust`: owner root, fixed time, 0755 for directories and the
+/// A reproducible tar of `<work>/sidevoice-core`: owner root, fixed time, 0755 for directories and the
 /// entrypoint, 0644 for everything else.
 pub(crate) fn write_tar(work: &Path, raw: &Path, epoch: u64, entrypoint: &str) -> Result<()> {
     let file = fs::File::create(raw).map_err(|error| error.to_string())?;

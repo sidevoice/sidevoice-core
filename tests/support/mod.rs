@@ -23,7 +23,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-pub const CORE: &str = env!("CARGO_BIN_EXE_sidevoice-core-rust");
+pub const CORE: &str = env!("CARGO_BIN_EXE_sidevoice-core");
 
 /// How long a step may take before the test says which one did not happen.
 pub const STEP: Duration = Duration::from_secs(10);

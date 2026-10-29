@@ -15,7 +15,7 @@ exclude = ["xtask"]
 path = "rust/lib.rs"
 
 [[bin]]
-name = "sidevoice-core-rust"
+name = "sidevoice-core"
 path = "rust/main.rs"
 
 # Integration tests are the files in tests/, found by Cargo. Each drives the binary as a process or the router

@@ -57,7 +57,7 @@ cargo test --locked --all-features
 cargo run --locked --release        # listens on 127.0.0.1:10829
 ```
 
-`--help` lists its options. The connector starts it as `sidevoice-core-rust --data-dir D --port P`; `D/core.json`
+`--help` lists its options. The connector starts it as `sidevoice-core --data-dir D --port P`; `D/core.json`
 (mode 0600) then says where it listens and which credential the connector links with. Its local channel, `endpoint`
 there, is a Unix socket on macOS and Linux and a named pipe on Windows, and serves only processes of the same user.
 The socket is in the user's runtime directory (Linux `$XDG_RUNTIME_DIR`, macOS the per-user `$TMPDIR`), in a private
@@ -124,7 +124,7 @@ Please report vulnerabilities privately through
 ## Layout
 
 ```
-rust/              the core: one crate, the binary sidevoice-core-rust
+rust/              the core: one crate, the binary sidevoice-core
   runtime/         process configuration, launch handshake, listeners, shutdown
   server/          the device and connector surfaces (HTTP, WebSocket, Socket.IO) and the calls they carry
   control/         conversations, devices and pairing, latency, telemetry
