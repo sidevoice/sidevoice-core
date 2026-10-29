@@ -237,7 +237,7 @@ mod released_connector {
         let said = mcp.tool(
             "voice_say",
             json!({"session_id": delivered[0]["session_id"], "revision": delivered[0]["revision"],
-            "text": "Reply through the released connector"}),
+            "epoch": delivered[0]["epoch"], "text": "Reply through the released connector"}),
         );
         assert_eq!(said["text_saved"], true, "{said}");
         assert_eq!(
@@ -342,7 +342,9 @@ async fn every_route_the_released_web_client_names_exists() {
         routes.contains("/api/presentation/ws"),
         "the bundle opens the call socket: {routes:?}"
     );
-    let root = tempfile::tempdir().unwrap();
+    // The core keeps its log beside its data directory, which must be private: as the other tests here, not a plain
+    // temporary directory.
+    let root = private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
     let missing = missing(&core, &token, &routes).await;
