@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/sidevoice/sidevoice-core/compare/v0.16.0...v0.16.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **compat:** restore the released-client checks (private data dir, voice_say epoch) ([#231](https://github.com/sidevoice/sidevoice-core/issues/231)) ([457049f](https://github.com/sidevoice/sidevoice-core/commit/457049f81d14abe49d20ee5450ce3ffbbc3d2495))
+
 ## [0.16.0](https://github.com/sidevoice/sidevoice-core/compare/v0.15.1...v0.16.0) (2026-10-29)
 
 
