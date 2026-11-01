@@ -8,12 +8,23 @@
 //! against it; one `pub` type per OS in `<concern>/{unix,windows}.rs` implements it, and `<concern>.rs` re-exports
 //! the one compiled in. Callers import the trait and the type (`use sidevoice_platform::user::{User, UserId};`).
 //! Data-only concerns ([`data_dir`], [`target`]) need no trait or per-OS files.
+//!
+//! Every concern but [`target`] is behind the `full` feature, on by default. `target` is plain data over `std`, so a
+//! dependent that only names its host or a release platform (a build tool) takes the crate with
+//! `default-features = false` and compiles none of the rest, nor any third-party dependency.
 
+#[cfg(feature = "full")]
 pub mod data_dir;
+#[cfg(feature = "full")]
 pub mod fs;
+#[cfg(feature = "full")]
 pub mod ipc;
+#[cfg(feature = "full")]
 pub mod process;
+#[cfg(feature = "full")]
 pub mod removal;
+#[cfg(feature = "full")]
 pub mod stop;
 pub mod target;
+#[cfg(feature = "full")]
 pub mod user;

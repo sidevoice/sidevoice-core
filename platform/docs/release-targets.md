@@ -1,7 +1,7 @@
 # Shared release targets
 
 `sidevoice_platform::target` owns the release-platform facts for the core, connector runtime/tooling and desktop
-installer. It adds no dependency: `std::env::consts` already supplies the binary's build OS, CPU and executable
+installer. It adds no dependency, and it is the one concern that survives `default-features = false` (every other concern is behind the default-on `full` feature), so a build tool can take it alone. `std::env::consts` already supplies the binary's build OS, CPU and executable
 suffix; a library cannot supply Sidevoice's published-platform policy. This is a data-only concern, so it needs
 neither a trait nor OS backend files.
 
@@ -11,6 +11,8 @@ neither a trait nor OS backend files.
 | `linux-x86_64` | `x86_64-unknown-linux-gnu` | `linux` / `x64` | `@sidevoice/sidevoice-linux-x64` | empty |
 | `macos-aarch64` | `aarch64-apple-darwin` | `darwin` / `arm64` | `@sidevoice/sidevoice-darwin-arm64` | empty |
 | `windows-x86_64` | `x86_64-pc-windows-msvc` | `win32` / `x64` | `@sidevoice/sidevoice-win32-x64` | `.exe` |
+
+`host()` names the OS and CPU the binary was compiled for in the same vocabulary (`Host { os, arch }`, `name()` such as `macos-x86_64`) and exists on every build host, released or not. `build_target()` is that host's release target, so it is `None` on Intel macOS and Windows ARM64; a tool that must work there anyway (picking a vendor's package for the host) asks `host()`, not `build_target()`.
 
 `TARGETS` lists exactly the connector's currently released targets, in its existing order; all four entries had
 `released: true`. `build_target()` selects by the binary's compiled OS/CPU, not the native machine architecture:
