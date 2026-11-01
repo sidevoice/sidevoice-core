@@ -27,6 +27,9 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo clippy --locked --manifest-path xtask/Cargo.toml --all-targets -- -D warnings
+      # The lean documentation links nothing that is gated out.
+      - run: cargo doc --locked -p sidevoice-platform --no-deps --no-default-features
+        env: { RUSTDOCFLAGS: -D warnings }
 
   test:
     name: Test and package (${{ matrix.target }})
@@ -66,6 +69,9 @@ jobs:
           "TEMP=$testTemp" >> $env:GITHUB_ENV
           "SIDEVOICE_REQUIRE_8DOT3=1" >> $env:GITHUB_ENV
       - run: cargo test --locked --workspace --all-features
+      # sidevoice-platform without its default feature (what the engine takes): only `target` compiles and its tests pass.
+      - run: cargo check --locked -p sidevoice-platform --no-default-features
+      - run: cargo test --locked -p sidevoice-platform --no-default-features --lib
       - name: Prove Windows 8.3 removal alias rejection
         if: runner.os == 'Windows'
         run: cargo test --locked -p sidevoice-platform --all-features removal::tests::windows_short_name_cannot_authorize_an_unlisted_long_name -- --exact --nocapture
