@@ -12,7 +12,7 @@ use super::{Inner, Room};
 /// What a call may report about a reply it was sent.
 const REPORTS: [&str; 5] = ["playing", "heard", "interrupted", "unplayed", "failed"];
 /// Why a reply stopped short, as a call may say.
-const REASONS: [&str; 9] = [
+const REASONS: [&str; 10] = [
     "user_interrupted",
     "newer_turn",
     "focus_changed",
@@ -22,6 +22,7 @@ const REASONS: [&str; 9] = [
     "voice_off",
     "connector_disconnected",
     "heard_elsewhere",
+    "closed",
 ];
 
 impl Room {

@@ -2940,3 +2940,29 @@ fn a_late_pull_of_expired_input_delivers_nothing() {
         "not_sent"
     );
 }
+
+#[test]
+fn closing_a_conversation_withdraws_its_replies_with_reason_closed() {
+    let mut c = Case::new(false);
+    c.publish("playing", 0, "Partly heard");
+    c.report("playing", "playing", None, None);
+    c.frames("voice-reply");
+    c.room.close_channel("t").unwrap();
+    let withdrawn = c.frames("voice-reply-withdrawn");
+    assert_eq!(withdrawn.len(), 1);
+    assert_eq!(withdrawn[0]["data"]["reason"], "closed");
+    assert_eq!(withdrawn[0]["data"]["utterance_ids"][0], "playing");
+    // A call accepts the reason back in its report.
+    c.report("playing", "interrupted", Some("closed"), Some(3));
+}
+
+#[test]
+fn moving_the_focus_still_withdraws_with_reason_focus_changed() {
+    let mut c = Case::new(false);
+    c.publish("playing", 0, "Partly heard");
+    c.frames("voice-reply");
+    c.room.select(&c.sid, "elsewhere").unwrap();
+    let withdrawn = c.frames("voice-reply-withdrawn");
+    assert_eq!(withdrawn.len(), 1);
+    assert_eq!(withdrawn[0]["data"]["reason"], "focus_changed");
+}
