@@ -1,4 +1,6 @@
 //! Participants: the conversations a call can talk to, and how reachable each one is.
+use std::collections::HashSet;
+
 use serde_json::{json, Value};
 
 use super::bindings::Binding;
@@ -11,23 +13,27 @@ impl Room {
     }
     /// Rows and deliberate closures are one snapshot. Missing rows alone never prove a leave.
     pub fn participant_inventory(&self, session: Option<&str>) -> Value {
-        self.participant_inventory_for(session, None)
+        self.participant_inventory_for(session, None, &HashSet::new())
     }
     /// The same snapshot as seen by `device`: it leaves out what that device removed, and the device is noted as
-    /// showing the rest.
-    pub fn participant_inventory_for(&self, session: Option<&str>, device: Option<&str>) -> Value {
+    /// showing the rest. `recent` are the paired devices seen in the last 30 days (the device registry's knowledge).
+    pub fn participant_inventory_for(
+        &self,
+        session: Option<&str>,
+        device: Option<&str>,
+        recent: &HashSet<String>,
+    ) -> Value {
         let mut guard = self.inner.lock().expect("room lock");
         let inner = &mut *guard;
         if let Some(device) = device {
             let threads: Vec<_> = inner.bindings.active().map(|b| b.thread.clone()).collect();
-            let mut changed = false;
             for thread in threads {
-                changed |= inner.shown.note(&thread, device);
+                inner.shown.note(&thread, device, recent);
             }
-            if changed {
-                // Best effort: a device seen again is noted on the next answer.
-                let _ = self.save(inner);
-            }
+        }
+        if inner.shown.dirty() {
+            // A write that fails stays dirty: the next answer, or any other save, writes it again.
+            let _ = self.save(inner);
         }
         let inner = &*inner;
         let current = session.and_then(|sid| inner.browsers.get(sid));

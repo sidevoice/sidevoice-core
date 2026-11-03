@@ -124,6 +124,21 @@ impl AppState {
             .authenticate(token)
     }
 
+    /// The paired devices seen in the last 30 days: the ones whose conversations stay open (an unpaired device is gone).
+    pub fn recent_devices(&self) -> std::collections::HashSet<String> {
+        self.registry
+            .lock()
+            .expect("registry lock")
+            .seen_within(30 * 24 * 3600)
+    }
+
+    /// Closes the conversations nobody who counts shows any more, and tells their agents.
+    pub async fn close_departed_conversations(&self) {
+        for (peer, params) in self.room.expire_departed(&self.recent_devices()) {
+            let _ = peer.send("binding.close", params).await;
+        }
+    }
+
     pub fn close_calls(&self, id: &str) {
         self.calls.close(id);
     }

@@ -37,11 +37,11 @@ pub(super) async fn participants(
     Extension(AuthenticatedDevice(device)): Extension<AuthenticatedDevice>,
     uri: Uri,
 ) -> Json<Value> {
-    Json(
-        state
-            .room
-            .participant_inventory_for(query(&uri, "session_id").as_deref(), Some(&device)),
-    )
+    Json(state.room.participant_inventory_for(
+        query(&uri, "session_id").as_deref(),
+        Some(&device),
+        &state.recent_devices(),
+    ))
 }
 
 pub(super) async fn history(

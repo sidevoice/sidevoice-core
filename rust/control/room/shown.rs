@@ -1,27 +1,20 @@
 //! Which devices still show each conversation. A device removing a conversation only removes it from itself;
-//! the room closes the conversation when no device that was seen recently shows it any more.
-use std::collections::HashMap;
+//! the room closes the conversation when no device that is still paired and was seen in the last 30 days shows it
+//! any more. Whether a device counts is the device registry's knowledge (its last contact, any request): the room is
+//! handed that set (`recent`) and keeps only the memberships.
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
-use super::util::{seconds, valid_thread};
-
-/// A device that has not been seen for this long no longer keeps a conversation open.
-const STALE_SECONDS: u64 = 30 * 24 * 3600;
-/// How often a device's last-seen time is written again; the window is days, so an hour is plenty.
-const REFRESH_SECONDS: u64 = 3600;
-
-#[derive(Clone)]
-struct Entry {
-    seen: u64,
-    /// The device removed the conversation: it stays out of the set and out of its inventory until the
-    /// conversation is closed or reopened.
-    hidden: bool,
-}
+use super::util::valid_thread;
 
 #[derive(Default)]
 pub(super) struct Shown {
-    threads: HashMap<String, HashMap<String, Entry>>,
+    /// Per conversation, each device that has it and whether that device removed it.
+    threads: HashMap<String, HashMap<String, bool>>,
+    /// A change not yet written; every later save retries it.
+    dirty: Cell<bool>,
 }
 
 impl Shown {
@@ -38,15 +31,17 @@ impl Shown {
                 .as_object()
                 .into_iter()
                 .flatten()
-                .filter_map(|(device, row)| {
-                    let seen = row.get("seen").and_then(Value::as_u64)?;
+                .map(|(device, row)| {
                     let hidden = row.get("hidden").and_then(Value::as_bool).unwrap_or(false);
-                    Some((device.clone(), Entry { seen, hidden }))
+                    (device.clone(), hidden)
                 })
                 .collect();
             threads.insert(thread.clone(), devices);
         }
-        Self { threads }
+        Self {
+            threads,
+            dirty: Cell::new(false),
+        }
     }
     pub(super) fn state(&self) -> Value {
         let threads: serde_json::Map<String, Value> = self
@@ -55,65 +50,79 @@ impl Shown {
             .map(|(thread, devices)| {
                 let devices: serde_json::Map<String, Value> = devices
                     .iter()
-                    .map(|(device, e)| {
-                        (device.clone(), json!({"seen": e.seen, "hidden": e.hidden}))
-                    })
+                    .map(|(device, hidden)| (device.clone(), json!({"hidden": hidden})))
                     .collect();
                 (thread.clone(), Value::Object(devices))
             })
             .collect();
         Value::Object(threads)
     }
-    /// `device` is looking at `thread`. True when the record changed enough to be written.
-    pub(super) fn note(&mut self, thread: &str, device: &str) -> bool {
-        let now = seconds();
-        let devices = self.threads.entry(thread.to_owned()).or_default();
-        match devices.get_mut(device) {
-            Some(entry) if entry.hidden => false,
-            Some(entry) if entry.seen + REFRESH_SECONDS > now => false,
-            Some(entry) => {
-                entry.seen = now;
-                true
-            }
-            None => {
-                devices.insert(
-                    device.to_owned(),
-                    Entry {
-                        seen: now,
-                        hidden: false,
-                    },
-                );
-                true
-            }
+    pub(super) fn dirty(&self) -> bool {
+        self.dirty.get()
+    }
+    pub(super) fn saved(&self) {
+        self.dirty.set(false);
+    }
+    /// A conversation with no record yet is shown by every device that counts: nothing is known to have removed it.
+    fn record(&mut self, thread: &str, recent: &HashSet<String>) -> &mut HashMap<String, bool> {
+        let dirty = &self.dirty;
+        self.threads.entry(thread.to_owned()).or_insert_with(|| {
+            dirty.set(true);
+            recent
+                .iter()
+                .map(|device| (device.clone(), false))
+                .collect()
+        })
+    }
+    /// `device` is looking at `thread`.
+    pub(super) fn note(&mut self, thread: &str, device: &str, recent: &HashSet<String>) {
+        let known = self.record(thread, recent);
+        if !known.contains_key(device) {
+            known.insert(device.to_owned(), false);
+            self.dirty.set(true);
         }
     }
     pub(super) fn hidden_from(&self, thread: &str, device: &str) -> bool {
         self.threads
             .get(thread)
             .and_then(|devices| devices.get(device))
-            .is_some_and(|entry| entry.hidden)
+            .copied()
+            .unwrap_or(false)
     }
     /// `device` removes `thread` from itself.
-    pub(super) fn hide(&mut self, thread: &str, device: &str) {
-        self.threads.entry(thread.to_owned()).or_default().insert(
-            device.to_owned(),
-            Entry {
-                seen: seconds(),
-                hidden: true,
-            },
-        );
+    pub(super) fn hide(&mut self, thread: &str, device: &str, recent: &HashSet<String>) {
+        self.record(thread, recent).insert(device.to_owned(), true);
+        self.dirty.set(true);
     }
-    /// Whether any device seen in the last 30 days still shows `thread`.
-    pub(super) fn any_showing(&self, thread: &str) -> bool {
-        let now = seconds();
+    /// Whether any device that counts still shows `thread`.
+    pub(super) fn any_showing(&self, thread: &str, recent: &HashSet<String>) -> bool {
         self.threads.get(thread).is_some_and(|devices| {
             devices
-                .values()
-                .any(|e| !e.hidden && e.seen + STALE_SECONDS > now)
+                .iter()
+                .any(|(device, hidden)| !hidden && recent.contains(device))
         })
     }
-    /// The conversation closed or reopened: its devices start over.
-    pub(super) fn forget(&mut self, thread: &str) -> bool {
-        self.threads.remove(thread).is_some()
+    /// Conversations with a record that no device that counts shows any more.
+    pub(super) fn departed(&self, recent: &HashSet<String>) -> Vec<String> {
+        self.threads
+            .keys()
+            .filter(|thread| !self.any_showing(thread, recent))
+            .cloned()
+            .collect()
+    }
+    /// The agent connected voice anew: every removal of the conversation is undone; who still shows it keeps doing so.
+    pub(super) fn restore(&mut self, thread: &str) {
+        if let Some(devices) = self.threads.get_mut(thread) {
+            if devices.values().any(|hidden| *hidden) {
+                devices.values_mut().for_each(|hidden| *hidden = false);
+                self.dirty.set(true);
+            }
+        }
+    }
+    /// The conversation closed: its devices start over.
+    pub(super) fn forget(&mut self, thread: &str) {
+        if self.threads.remove(thread).is_some() {
+            self.dirty.set(true);
+        }
     }
 }

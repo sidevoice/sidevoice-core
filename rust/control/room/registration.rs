@@ -44,14 +44,18 @@ impl Room {
         if !requested.is_empty() && inner.closed_threads.contains(thread) {
             return Err(RoomError::new(409, "room.binding_closed"));
         }
+        if requested.is_empty() {
+            // The agent connects voice anew: the conversation is back for every device that had removed it. It is
+            // written with the next save (this one, or the next answer to a device), never lost.
+            inner.shown.restore(thread);
+            if inner.shown.dirty() {
+                let _ = self.save(&inner);
+            }
+        }
         if requested.is_empty() && inner.closed_threads.remove(thread) && self.save(&inner).is_err()
         {
             inner.closed_threads.insert(thread.to_owned());
             return Err(RoomError::new(500, "room.state_save_failed"));
-        }
-        if requested.is_empty() {
-            // The agent connects voice anew: the conversation is back for every device that had removed it.
-            inner.shown.forget(thread);
         }
         let bid = match inner.bindings.get(requested) {
             Some(existing) if existing.connector != cid => {

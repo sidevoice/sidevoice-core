@@ -118,6 +118,21 @@ impl DeviceRegistry {
         json!({"devices": rows})
     }
 
+    /// The ids of the devices seen within the last `seconds`.
+    pub fn seen_within(&self, seconds: i64) -> std::collections::HashSet<String> {
+        let since = now() - seconds;
+        self.devices
+            .iter()
+            .filter(|(_, row)| {
+                row.get("last_seen")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
+                    >= since
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Whether device `id` is still paired.
     pub fn contains(&self, id: &str) -> bool {
         self.devices.contains_key(id)

@@ -138,7 +138,9 @@ impl Room {
         closed.sort();
         state["closed_threads"] = serde_json::json!(closed);
         state["conversation_devices"] = inner.shown.state();
-        self.dir.write_json("room-state.json", &state)
+        self.dir.write_json("room-state.json", &state)?;
+        inner.shown.saved();
+        Ok(())
     }
 }
 

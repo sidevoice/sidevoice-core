@@ -52,7 +52,11 @@ pub(super) async fn remove(
     let data = room_payload(&body, &headers)?;
     let (result, notify) = state
         .room
-        .remove_for_device(data["thread_id"].as_str().unwrap_or(""), &device)
+        .remove_for_device(
+            data["thread_id"].as_str().unwrap_or(""),
+            &device,
+            &state.recent_devices(),
+        )
         .map_err(|error| room_refusal(error, &headers))?;
     for (peer, params) in notify {
         let _ = peer.send("binding.close", params).await;
