@@ -1,5 +1,6 @@
 //! Explicit conversation leave survives a Core restart; transport loss does not become a leave.
 use serde_json::json;
+use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tokio::sync::{mpsc, watch};
@@ -282,5 +283,185 @@ fn an_agent_leave_is_not_left_listening_when_core_cannot_save_it() {
         .err()
         .map(|error| error.key),
         Some("room.binding_closed")
+    );
+}
+
+fn open_thread(room: &Room, thread: &str) {
+    attach(room);
+    room.register("connector", &json!({"thread":thread}))
+        .unwrap();
+}
+
+fn devices(ids: &[&str]) -> HashSet<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
+fn listed(room: &Room, device: &str, recent: &HashSet<String>) -> usize {
+    room.participant_inventory_for(None, Some(device), recent)
+        .unwrap()["participants"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+#[test]
+fn a_device_removing_a_conversation_keeps_it_open_for_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = Room::load(PrivateDir::open(dir.path().join("private")).unwrap()).unwrap();
+    let recent = devices(&["phone", "laptop"]);
+    open_thread(&room, "shared");
+    listed(&room, "phone", &recent);
+    let (result, notify) = room.remove_for_device("shared", "phone", &recent).unwrap();
+    assert_eq!(result["closed"], json!(false));
+    assert!(notify.is_empty());
+    assert_eq!(listed(&room, "phone", &recent), 0);
+    assert_eq!(listed(&room, "laptop", &recent), 1);
+}
+
+#[test]
+fn a_conversation_with_no_record_is_shown_by_every_device_that_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = Room::load(PrivateDir::open(dir.path().join("private")).unwrap()).unwrap();
+    open_thread(&room, "shared");
+    let recent = devices(&["phone", "laptop"]);
+    let (result, _) = room.remove_for_device("shared", "phone", &recent).unwrap();
+    assert_eq!(result["closed"], json!(false), "the laptop was never asked");
+}
+
+#[test]
+fn the_last_device_removing_a_conversation_closes_it_the_normal_way_and_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = PrivateDir::open(dir.path().join("private")).unwrap();
+    let room = Room::load(private.clone()).unwrap();
+    let recent = devices(&["phone", "laptop"]);
+    open_thread(&room, "shared");
+    listed(&room, "phone", &recent);
+    room.remove_for_device("shared", "phone", &recent).unwrap();
+    let (result, notify) = room.remove_for_device("shared", "laptop", &recent).unwrap();
+    assert_eq!(result["closed"], json!(true));
+    assert_eq!(notify.len(), 1);
+    assert_eq!(notify[0].1["reason"], "closed_from_room");
+    assert!(room.participants(None).as_array().unwrap().is_empty());
+    let restarted = Room::load(private).unwrap();
+    assert_eq!(
+        restarted.participant_inventory(None)["closed_threads"],
+        json!(["shared"])
+    );
+}
+
+#[test]
+fn a_device_that_no_longer_counts_does_not_keep_a_conversation_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = Room::load(PrivateDir::open(dir.path().join("private")).unwrap()).unwrap();
+    open_thread(&room, "shared");
+    listed(&room, "phone", &devices(&["phone", "laptop"]));
+    let (result, _) = room
+        .remove_for_device("shared", "phone", &devices(&["phone"]))
+        .unwrap();
+    assert_eq!(
+        result["closed"],
+        json!(true),
+        "the laptop is unpaired or stale"
+    );
+}
+
+#[test]
+fn the_last_viewer_aging_out_closes_the_conversation_without_any_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = Room::load(PrivateDir::open(dir.path().join("private")).unwrap()).unwrap();
+    open_thread(&room, "shared");
+    listed(&room, "laptop", &devices(&["laptop"]));
+    assert!(room.expire_departed(&devices(&["laptop"])).is_empty());
+    assert_eq!(room.participants(None).as_array().unwrap().len(), 1);
+    let notify = room.expire_departed(&devices(&[]));
+    assert_eq!(notify.len(), 1);
+    assert!(room.participants(None).as_array().unwrap().is_empty());
+    assert_eq!(
+        room.participant_inventory(None)["closed_threads"],
+        json!(["shared"])
+    );
+}
+
+#[test]
+fn connecting_voice_anew_undoes_removals_but_keeps_who_still_shows_it_and_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = PrivateDir::open(dir.path().join("private")).unwrap();
+    let room = Room::load(private.clone()).unwrap();
+    let recent = devices(&["phone", "laptop"]);
+    open_thread(&room, "shared");
+    listed(&room, "phone", &recent);
+    room.remove_for_device("shared", "phone", &recent).unwrap();
+    room.register("connector", &json!({"thread":"shared"}))
+        .unwrap();
+    assert_eq!(listed(&room, "phone", &recent), 1);
+    // After a restart the phone is back, so the laptop removing it does not close it.
+    let restarted = Room::load(private).unwrap();
+    let (result, _) = restarted
+        .remove_for_device("shared", "laptop", &recent)
+        .unwrap();
+    assert_eq!(result["closed"], json!(false));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_viewer_that_could_not_be_written_is_refused_and_written_by_the_next_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private");
+    let room = Room::load(PrivateDir::open(&path).unwrap()).unwrap();
+    let recent = devices(&["phone"]);
+    open_thread(&room, "shared");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let refused = room.participant_inventory_for(None, Some("phone"), &recent);
+    assert_eq!(refused.err().map(|e| e.key), Some("room.state_save_failed"));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(listed(&room, "phone", &recent), 1);
+    let state = std::fs::read_to_string(path.join("room-state.json")).unwrap();
+    assert!(state.contains("conversation_devices") && state.contains("phone"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reconnect_whose_undoing_could_not_be_written_is_not_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private");
+    let room = Room::load(PrivateDir::open(&path).unwrap()).unwrap();
+    let recent = devices(&["phone", "laptop"]);
+    open_thread(&room, "shared");
+    listed(&room, "phone", &recent);
+    room.remove_for_device("shared", "phone", &recent).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let refused = room.register("connector", &json!({"thread":"shared"}));
+    assert_eq!(refused.err().map(|e| e.key), Some("room.state_save_failed"));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    room.register("connector", &json!({"thread":"shared"}))
+        .unwrap();
+    assert_eq!(listed(&room, "phone", &recent), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sweep_close_that_could_not_be_written_leaves_the_conversation_for_the_next_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private");
+    let room = Room::load(PrivateDir::open(&path).unwrap()).unwrap();
+    open_thread(&room, "shared");
+    listed(&room, "laptop", &devices(&["laptop"]));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(room.expire_departed(&devices(&[])).is_empty());
+    assert_eq!(room.participants(None).as_array().unwrap().len(), 1);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(room.expire_departed(&devices(&[])).len(), 1);
+    assert!(room.participants(None).as_array().unwrap().is_empty());
+}
+
+#[test]
+fn removing_a_conversation_with_an_invalid_thread_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = Room::load(PrivateDir::open(dir.path().join("private")).unwrap()).unwrap();
+    assert_eq!(
+        room.remove_for_device("", "phone", &devices(&["phone"]))
+            .err()
+            .map(|e| e.key),
+        Some("room.thread_invalid")
     );
 }

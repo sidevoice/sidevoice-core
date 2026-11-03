@@ -44,11 +44,15 @@ impl Room {
         if !requested.is_empty() && inner.closed_threads.contains(thread) {
             return Err(RoomError::new(409, "room.binding_closed"));
         }
-        if requested.is_empty()
-            && inner.closed_threads.remove(thread)
-            && self
-                .save(&inner.credentials, &inner.closed_threads)
-                .is_err()
+        if requested.is_empty() {
+            // The agent connects voice anew: the conversation is back for every device that had removed it. It is
+            // written before the reconnect is acknowledged; a write that fails is an error and stays dirty.
+            inner.shown.restore(thread);
+            if inner.shown.dirty() && self.save(&inner).is_err() {
+                return Err(RoomError::new(500, "room.state_save_failed"));
+            }
+        }
+        if requested.is_empty() && inner.closed_threads.remove(thread) && self.save(&inner).is_err()
         {
             inner.closed_threads.insert(thread.to_owned());
             return Err(RoomError::new(500, "room.state_save_failed"));
@@ -107,9 +111,7 @@ impl Room {
                 if !other && inner.closed_threads.insert(thread.to_owned()) {
                     // This is a one-way connector notification. Keep the room closed in memory even if its
                     // private write fails; the Connector's durable leave is replayed on its next Core link.
-                    save_failed = self
-                        .save(&inner.credentials, &inner.closed_threads)
-                        .is_err();
+                    save_failed = self.save(&inner).is_err();
                 }
             }
         }

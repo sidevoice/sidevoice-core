@@ -56,6 +56,17 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         stored.room.clone(),
     ));
     let delivery_task = tokio::spawn(stored.room.pump());
+    // Conversations whose last viewer aged out or was unpaired close here, at startup and every quarter hour.
+    let departed_task = tokio::spawn({
+        let state = state.clone();
+        async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+            loop {
+                tick.tick().await;
+                state.close_departed_conversations().await;
+            }
+        }
+    });
     let mut signals = Signals::install();
     let ready = ready::document(config, port, &stored.connector_id, &stored.token);
     let mut servers = Servers::spawn(tcp, local, state.clone());
@@ -81,6 +92,7 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
     servers.join().await;
     ready::remove_own(&config.ready_file);
     delivery_task.abort();
+    departed_task.abort();
     crate::control::telemetry::shutdown().await;
     if crashed {
         Err(StartFailure::crashed())
