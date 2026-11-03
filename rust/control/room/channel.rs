@@ -75,9 +75,13 @@ impl Room {
             .collect();
         // A person's remembered card can be closed while its machine has no loaded binding after a restart.
         // Persist that intent before acknowledging the close; old binding replay must not undo it.
-        inner.shown.forget(thread);
+        let record = inner.shown.forget(thread);
         if inner.closed_threads.insert(thread.to_owned()) && self.save(inner).is_err() {
             inner.closed_threads.remove(thread);
+            // Not closed: the conversation must stay findable by the next sweep.
+            if let Some(record) = record {
+                inner.shown.put(thread, record);
+            }
             return Err(RoomError::new(500, "room.state_save_failed"));
         }
         let notify = bindings

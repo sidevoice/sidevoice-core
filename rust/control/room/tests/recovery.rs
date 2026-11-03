@@ -297,7 +297,8 @@ fn devices(ids: &[&str]) -> HashSet<String> {
 }
 
 fn listed(room: &Room, device: &str, recent: &HashSet<String>) -> usize {
-    room.participant_inventory_for(None, Some(device), recent)["participants"]
+    room.participant_inventory_for(None, Some(device), recent)
+        .unwrap()["participants"]
         .as_array()
         .unwrap()
         .len()
@@ -403,18 +404,54 @@ fn connecting_voice_anew_undoes_removals_but_keeps_who_still_shows_it_and_surviv
 
 #[cfg(unix)]
 #[test]
-fn a_membership_that_could_not_be_written_is_written_by_a_later_answer() {
+fn a_viewer_that_could_not_be_written_is_refused_and_written_by_the_next_answer() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("private");
     let room = Room::load(PrivateDir::open(&path).unwrap()).unwrap();
     let recent = devices(&["phone"]);
     open_thread(&room, "shared");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
-    listed(&room, "phone", &recent);
+    let refused = room.participant_inventory_for(None, Some("phone"), &recent);
+    assert_eq!(refused.err().map(|e| e.key), Some("room.state_save_failed"));
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    listed(&room, "phone", &recent);
+    assert_eq!(listed(&room, "phone", &recent), 1);
     let state = std::fs::read_to_string(path.join("room-state.json")).unwrap();
     assert!(state.contains("conversation_devices") && state.contains("phone"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reconnect_whose_undoing_could_not_be_written_is_not_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private");
+    let room = Room::load(PrivateDir::open(&path).unwrap()).unwrap();
+    let recent = devices(&["phone", "laptop"]);
+    open_thread(&room, "shared");
+    listed(&room, "phone", &recent);
+    room.remove_for_device("shared", "phone", &recent).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let refused = room.register("connector", &json!({"thread":"shared"}));
+    assert_eq!(refused.err().map(|e| e.key), Some("room.state_save_failed"));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    room.register("connector", &json!({"thread":"shared"}))
+        .unwrap();
+    assert_eq!(listed(&room, "phone", &recent), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sweep_close_that_could_not_be_written_leaves_the_conversation_for_the_next_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private");
+    let room = Room::load(PrivateDir::open(&path).unwrap()).unwrap();
+    open_thread(&room, "shared");
+    listed(&room, "laptop", &devices(&["laptop"]));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(room.expire_departed(&devices(&[])).is_empty());
+    assert_eq!(room.participants(None).as_array().unwrap().len(), 1);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(room.expire_departed(&devices(&[])).len(), 1);
+    assert!(room.participants(None).as_array().unwrap().is_empty());
 }
 
 #[test]

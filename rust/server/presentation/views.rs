@@ -9,7 +9,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::Value;
 
-use crate::server::refusal::{refuse, require_origin, Handled};
+use crate::server::refusal::{refuse, require_origin, room_refusal, Handled};
 use crate::server::request::query;
 use crate::server::{AppState, AuthenticatedDevice};
 
@@ -36,12 +36,17 @@ pub(super) async fn participants(
     State(state): State<Arc<AppState>>,
     Extension(AuthenticatedDevice(device)): Extension<AuthenticatedDevice>,
     uri: Uri,
-) -> Json<Value> {
-    Json(state.room.participant_inventory_for(
-        query(&uri, "session_id").as_deref(),
-        Some(&device),
-        &state.recent_devices(),
-    ))
+    headers: HeaderMap,
+) -> Handled {
+    let inventory = state
+        .room
+        .participant_inventory_for(
+            query(&uri, "session_id").as_deref(),
+            Some(&device),
+            &state.recent_devices(),
+        )
+        .map_err(|error| room_refusal(error, &headers))?;
+    Ok(Json(inventory).into_response())
 }
 
 pub(super) async fn history(

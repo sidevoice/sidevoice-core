@@ -119,10 +119,17 @@ impl Shown {
             }
         }
     }
-    /// The conversation closed: its devices start over.
-    pub(super) fn forget(&mut self, thread: &str) {
-        if self.threads.remove(thread).is_some() {
+    /// The conversation closed: its devices start over. The record is handed back so a close that fails to be written can
+    /// put it back (`put`).
+    pub(super) fn forget(&mut self, thread: &str) -> Option<HashMap<String, bool>> {
+        let record = self.threads.remove(thread);
+        if record.is_some() {
             self.dirty.set(true);
         }
+        record
+    }
+    pub(super) fn put(&mut self, thread: &str, record: HashMap<String, bool>) {
+        self.threads.insert(thread.to_owned(), record);
+        self.dirty.set(true);
     }
 }

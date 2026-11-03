@@ -46,10 +46,10 @@ impl Room {
         }
         if requested.is_empty() {
             // The agent connects voice anew: the conversation is back for every device that had removed it. It is
-            // written with the next save (this one, or the next answer to a device), never lost.
+            // written before the reconnect is acknowledged; a write that fails is an error and stays dirty.
             inner.shown.restore(thread);
-            if inner.shown.dirty() {
-                let _ = self.save(&inner);
+            if inner.shown.dirty() && self.save(&inner).is_err() {
+                return Err(RoomError::new(500, "room.state_save_failed"));
             }
         }
         if requested.is_empty() && inner.closed_threads.remove(thread) && self.save(&inner).is_err()
