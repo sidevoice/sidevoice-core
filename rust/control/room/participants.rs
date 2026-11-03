@@ -11,13 +11,31 @@ impl Room {
     }
     /// Rows and deliberate closures are one snapshot. Missing rows alone never prove a leave.
     pub fn participant_inventory(&self, session: Option<&str>) -> Value {
-        let inner = self.inner.lock().expect("room lock");
+        self.participant_inventory_for(session, None)
+    }
+    /// The same snapshot as seen by `device`: it leaves out what that device removed, and the device is noted as
+    /// showing the rest.
+    pub fn participant_inventory_for(&self, session: Option<&str>, device: Option<&str>) -> Value {
+        let mut guard = self.inner.lock().expect("room lock");
+        let inner = &mut *guard;
+        if let Some(device) = device {
+            let threads: Vec<_> = inner.bindings.active().map(|b| b.thread.clone()).collect();
+            let mut changed = false;
+            for thread in threads {
+                changed |= inner.shown.note(&thread, device);
+            }
+            if changed {
+                // Best effort: a device seen again is noted on the next answer.
+                let _ = self.save(inner);
+            }
+        }
+        let inner = &*inner;
         let current = session.and_then(|sid| inner.browsers.get(sid));
         let selected = current
             .and_then(|b| b.target.as_ref())
             .map(|t| t.thread.as_str());
         let language = current.map_or("en", |b| b.language.as_str());
-        let participants = inner.bindings.active().map(|b| {
+        let participants = inner.bindings.active().filter(|b| !device.is_some_and(|d| inner.shown.hidden_from(&b.thread, d))).map(|b| {
             let host = inner.credentials.get(&b.connector).and_then(|c| c.get("host"));
             json!({"thread_id":b.thread,"title":b.title.clone().unwrap_or_else(||default_title(&b.thread,language)),
                 "harness":b.harness,"available":b.live,"machine":{"id":b.connector,"host":host},

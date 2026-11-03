@@ -21,6 +21,7 @@ mod inflight;
 mod journal;
 mod latency_log;
 mod peers;
+mod shown;
 mod unheard;
 mod utterances;
 
@@ -64,6 +65,7 @@ use journal::Journal;
 use latency_log::LatencyLog;
 use notices::PendingNotice;
 use peers::Peers;
+use shown::Shown;
 use unheard::Unheard;
 use utterances::Utterances;
 
@@ -71,6 +73,8 @@ struct Inner {
     credentials: Credentials,
     /// A voluntary Sidevoice leave survives Core restart; a missing connector never adds a thread here.
     closed_threads: HashSet<String>,
+    /// Per conversation, the devices that still show it, each with when core last saw it.
+    shown: Shown,
     peers: Peers,
     bindings: Bindings,
     browsers: Browsers,
@@ -105,11 +109,13 @@ impl Room {
             .filter(|thread| util::valid_thread(thread))
             .map(str::to_owned)
             .collect();
+        let shown = Shown::from_state(&state);
         Ok(Self {
             dir,
             inner: Mutex::new(Inner {
                 credentials,
                 closed_threads,
+                shown,
                 peers: Peers::default(),
                 bindings: Bindings::default(),
                 browsers: Browsers::default(),
@@ -126,11 +132,12 @@ impl Room {
             }),
         })
     }
-    fn save(&self, credentials: &Credentials, closed_threads: &HashSet<String>) -> io::Result<()> {
-        let mut state = credentials.state();
-        let mut closed: Vec<_> = closed_threads.iter().cloned().collect();
+    fn save(&self, inner: &Inner) -> io::Result<()> {
+        let mut state = inner.credentials.state();
+        let mut closed: Vec<_> = inner.closed_threads.iter().cloned().collect();
         closed.sort();
         state["closed_threads"] = serde_json::json!(closed);
+        state["conversation_devices"] = inner.shown.state();
         self.dir.write_json("room-state.json", &state)
     }
 }

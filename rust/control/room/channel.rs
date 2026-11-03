@@ -6,7 +6,7 @@ use super::browsers::Target;
 use super::error::RoomError;
 use super::peers::ConnectorPeer;
 use super::util::valid_thread;
-use super::Room;
+use super::{Inner, Room};
 
 impl Room {
     pub fn close_channel(
@@ -17,7 +17,38 @@ impl Room {
             return Err(RoomError::new(400, "room.thread_invalid"));
         }
         let mut guard = self.inner.lock().expect("room lock");
+        self.close_locked(&mut guard, thread)
+    }
+
+    /// One device stops showing `thread`. The room closes the conversation, through the normal close, once no device
+    /// seen in the last 30 days still shows it; until then it stays open for the others.
+    pub fn remove_for_device(
+        &self,
+        thread: &str,
+        device: &str,
+    ) -> Result<(Value, Vec<(ConnectorPeer, Value)>), RoomError> {
+        if !valid_thread(thread) {
+            return Err(RoomError::new(400, "room.thread_invalid"));
+        }
+        let mut guard = self.inner.lock().expect("room lock");
         let inner = &mut *guard;
+        inner.shown.hide(thread, device);
+        if inner.shown.any_showing(thread) {
+            return match self.save(inner) {
+                Ok(()) => Ok((json!({"status":"removed","closed":false}), Vec::new())),
+                Err(_) => Err(RoomError::new(500, "room.state_save_failed")),
+            };
+        }
+        let (mut result, notify) = self.close_locked(inner, thread)?;
+        result["closed"] = json!(true);
+        Ok((result, notify))
+    }
+
+    fn close_locked(
+        &self,
+        inner: &mut Inner,
+        thread: &str,
+    ) -> Result<(Value, Vec<(ConnectorPeer, Value)>), RoomError> {
         let bindings: Vec<_> = inner
             .bindings
             .active()
@@ -26,11 +57,8 @@ impl Room {
             .collect();
         // A person's remembered card can be closed while its machine has no loaded binding after a restart.
         // Persist that intent before acknowledging the close; old binding replay must not undo it.
-        if inner.closed_threads.insert(thread.to_owned())
-            && self
-                .save(&inner.credentials, &inner.closed_threads)
-                .is_err()
-        {
+        inner.shown.forget(thread);
+        if inner.closed_threads.insert(thread.to_owned()) && self.save(inner).is_err() {
             inner.closed_threads.remove(thread);
             return Err(RoomError::new(500, "room.state_save_failed"));
         }

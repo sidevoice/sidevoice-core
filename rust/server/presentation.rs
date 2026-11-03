@@ -23,6 +23,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/api/presentation/select", post(focus::select))
         .route("/api/presentation/leave", post(focus::leave))
         .route("/api/presentation/close", post(focus::close))
+        .route("/api/presentation/remove", post(focus::remove))
         .route("/api/presentation/text", post(input::text))
         .route("/api/presentation/cancel-input", post(input::cancel_input))
         .route("/api/presentation/client-error", post(input::client_error))

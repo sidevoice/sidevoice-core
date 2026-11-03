@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::http::{header, HeaderMap, Uri};
 use axum::response::IntoResponse;
@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::server::refusal::{refuse, require_origin, Handled};
 use crate::server::request::query;
-use crate::server::AppState;
+use crate::server::{AppState, AuthenticatedDevice};
 
 pub(super) async fn state(State(state): State<Arc<AppState>>, uri: Uri) -> Json<Value> {
     Json(state.room.snapshot(query(&uri, "session_id").as_deref()))
@@ -32,11 +32,15 @@ pub(super) async fn admission(
     )
 }
 
-pub(super) async fn participants(State(state): State<Arc<AppState>>, uri: Uri) -> Json<Value> {
+pub(super) async fn participants(
+    State(state): State<Arc<AppState>>,
+    Extension(AuthenticatedDevice(device)): Extension<AuthenticatedDevice>,
+    uri: Uri,
+) -> Json<Value> {
     Json(
         state
             .room
-            .participant_inventory(query(&uri, "session_id").as_deref()),
+            .participant_inventory_for(query(&uri, "session_id").as_deref(), Some(&device)),
     )
 }
 

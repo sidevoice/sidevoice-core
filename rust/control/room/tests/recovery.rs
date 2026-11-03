@@ -284,3 +284,117 @@ fn an_agent_leave_is_not_left_listening_when_core_cannot_save_it() {
         Some("room.binding_closed")
     );
 }
+
+fn open_thread(room: &Room, thread: &str) {
+    attach(room);
+    room.register("connector", &json!({"thread":thread}))
+        .unwrap();
+}
+
+#[test]
+fn a_device_removing_a_conversation_keeps_it_open_for_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = Room::load(PrivateDir::open(dir.path().join("private")).unwrap()).unwrap();
+    open_thread(&room, "shared");
+    room.participant_inventory_for(None, Some("phone"));
+    room.participant_inventory_for(None, Some("laptop"));
+
+    let (result, notify) = room.remove_for_device("shared", "phone").unwrap();
+    assert_eq!(result["closed"], json!(false));
+    assert!(notify.is_empty());
+    assert_eq!(
+        room.participant_inventory_for(None, Some("phone"))["participants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let laptop = room.participant_inventory_for(None, Some("laptop"));
+    assert_eq!(laptop["participants"].as_array().unwrap().len(), 1);
+    assert_eq!(laptop["closed_threads"], json!([]));
+}
+
+#[test]
+fn the_last_device_removing_a_conversation_closes_it_the_normal_way_and_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = PrivateDir::open(dir.path().join("private")).unwrap();
+    let room = Room::load(private.clone()).unwrap();
+    open_thread(&room, "shared");
+    room.participant_inventory_for(None, Some("phone"));
+    room.participant_inventory_for(None, Some("laptop"));
+    room.remove_for_device("shared", "phone").unwrap();
+
+    let (result, notify) = room.remove_for_device("shared", "laptop").unwrap();
+    assert_eq!(result["closed"], json!(true));
+    assert_eq!(notify.len(), 1);
+    assert_eq!(notify[0].1["reason"], "closed_from_room");
+    assert!(room.participants(None).as_array().unwrap().is_empty());
+
+    let restarted = Room::load(private).unwrap();
+    assert_eq!(
+        restarted.participant_inventory(None)["closed_threads"],
+        json!(["shared"])
+    );
+}
+
+#[test]
+fn the_show_set_survives_restart_and_a_removal_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = PrivateDir::open(dir.path().join("private")).unwrap();
+    let room = Room::load(private.clone()).unwrap();
+    open_thread(&room, "shared");
+    room.participant_inventory_for(None, Some("phone"));
+    room.participant_inventory_for(None, Some("laptop"));
+
+    let restarted = Room::load(private).unwrap();
+    restarted.remove_for_device("shared", "phone").unwrap();
+    let again = restarted.remove_for_device("shared", "phone").unwrap();
+    assert_eq!(again.0["closed"], json!(false));
+}
+
+#[test]
+fn a_device_not_seen_for_30_days_does_not_keep_a_conversation_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let private = PrivateDir::open(dir.path().join("private")).unwrap();
+    private
+        .write_json(
+            "room-state.json",
+            &json!({"connectors":{},"conversation_devices":{"shared":{
+                "stale":{"seen":1,"hidden":false}}}}),
+        )
+        .unwrap();
+    let room = Room::load(private).unwrap();
+    open_thread(&room, "shared");
+    room.participant_inventory_for(None, Some("phone"));
+    let (result, _) = room.remove_for_device("shared", "phone").unwrap();
+    assert_eq!(result["closed"], json!(true));
+}
+
+#[test]
+fn connecting_voice_anew_brings_a_removed_conversation_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = Room::load(PrivateDir::open(dir.path().join("private")).unwrap()).unwrap();
+    open_thread(&room, "shared");
+    room.participant_inventory_for(None, Some("phone"));
+    room.participant_inventory_for(None, Some("laptop"));
+    room.remove_for_device("shared", "phone").unwrap();
+    room.register("connector", &json!({"thread":"shared"}))
+        .unwrap();
+    assert_eq!(
+        room.participant_inventory_for(None, Some("phone"))["participants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn removing_a_conversation_with_an_invalid_thread_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let room = Room::load(PrivateDir::open(dir.path().join("private")).unwrap()).unwrap();
+    assert_eq!(
+        room.remove_for_device("", "phone").err().map(|e| e.key),
+        Some("room.thread_invalid")
+    );
+}
