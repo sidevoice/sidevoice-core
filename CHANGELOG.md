@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/sidevoice/sidevoice-core/compare/v0.16.1...v0.17.0) (2026-11-03)
+
+
+### Features
+
+* **conversations:** per-device show set; a device removal closes the conversation when no device shows it ([#234](https://github.com/sidevoice/sidevoice-core/issues/234)) ([2708f27](https://github.com/sidevoice/sidevoice-core/commit/2708f275bbcb9ebc5cd0c13d41943e61122341c2))
+
 ## [0.16.1](https://github.com/sidevoice/sidevoice-core/compare/v0.16.0...v0.16.1) (2026-10-29)
 
 
