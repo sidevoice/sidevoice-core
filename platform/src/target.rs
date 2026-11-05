@@ -2,7 +2,8 @@
 //!
 //! This is data, not an OS backend: one table, with names projected from it. The triples are the canonical release
 //! build targets (Linux GNU, Windows MSVC), not a claim about the ABI of a caller compiled for the same OS/CPU.
-//! [`build_target`] selects by the OS/CPU this binary was compiled for, as the connector runtime does.
+//! [`host`] names the OS/CPU this binary was compiled for and always exists; [`build_target`] is the release platform
+//! of that host, as the connector runtime selects it, and is `None` where nothing is released.
 //! Actual package availability at a particular version still comes from npm's `optionalDependencies`.
 
 /// One published release platform. Names use Rust's `std::env::consts` except for npm's OS and CPU names.
@@ -60,6 +61,33 @@ pub const TARGETS: &[ReleaseTarget] = &[
     },
 ];
 
+/// The OS and CPU this binary was compiled for, named as the release table names them (Rust's `std::env::consts`).
+/// Unlike [`ReleaseTarget`] it exists for every build host, released or not: Intel macOS and Windows ARM64 have a
+/// `Host` and no release target. A tool that only needs to know where it runs (to pick a vendor's package for that
+/// host, say) asks this, never `build_target()`, whose `None` means "nothing is published here".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Host {
+    /// `std::env::consts::OS`: `linux`, `macos`, `windows`, ...
+    pub os: &'static str,
+    /// `std::env::consts::ARCH`: `x86_64`, `aarch64`, ...
+    pub arch: &'static str,
+}
+
+impl Host {
+    /// `<os>-<arch>`, such as `macos-x86_64`. For a released platform it is that [`ReleaseTarget`]'s `name`.
+    pub fn name(&self) -> String {
+        format!("{}-{}", self.os, self.arch)
+    }
+}
+
+/// The host this binary was compiled for, as for [`build_target`]: not the native machine it runs on.
+pub const fn host() -> Host {
+    Host {
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+    }
+}
+
 /// The release platform for Rust's OS and architecture names, or `None` for an unsupported combination.
 pub fn for_platform(os: &str, arch: &str) -> Option<&'static ReleaseTarget> {
     TARGETS
@@ -71,7 +99,8 @@ pub fn for_platform(os: &str, arch: &str) -> Option<&'static ReleaseTarget> {
 /// An x64 Windows binary running under emulation on ARM64 Windows returns `windows-x86_64`.
 /// This does not probe the native architecture or the compiler's target ABI.
 pub fn build_target() -> Option<&'static ReleaseTarget> {
-    for_platform(std::env::consts::OS, std::env::consts::ARCH)
+    let host = host();
+    for_platform(host.os, host.arch)
 }
 
 /// Look up an archive/inventory target name; unknown names are never assigned a default suffix or platform.
@@ -226,6 +255,35 @@ mod tests {
             mac.archive_name("sidevoice-core", Some("0.11.0-rc.1")),
             "sidevoice-core-0.11.0-rc.1-macos-aarch64.tar.zst"
         );
+    }
+
+    #[test]
+    fn host_names_the_build_platform_whether_or_not_it_is_released() {
+        let here = host();
+        assert_eq!(here.os, std::env::consts::OS);
+        assert_eq!(here.arch, std::env::consts::ARCH);
+        assert_eq!(here.name(), format!("{}-{}", here.os, here.arch));
+        // One source of truth: the release target, when there is one, is the host's own name.
+        assert_eq!(
+            build_target().map(|target| target.name.to_owned()),
+            by_name(&here.name()).map(|target| target.name.to_owned())
+        );
+        // Every release target's name is its host name, so a host name never needs its own table.
+        for target in TARGETS {
+            let named = Host {
+                os: target.os,
+                arch: target.arch,
+            };
+            assert_eq!(named.name(), target.name);
+        }
+        // The platforms with no release target still have a host name.
+        for (os, arch, name) in [
+            ("macos", "x86_64", "macos-x86_64"),
+            ("windows", "aarch64", "windows-aarch64"),
+        ] {
+            assert!(for_platform(os, arch).is_none());
+            assert_eq!(Host { os, arch }.name(), name);
+        }
     }
 
     #[test]

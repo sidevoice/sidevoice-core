@@ -11,52 +11,52 @@ description = "The operating-system code Sidevoice's crates share: this user, th
 # a core release) pulls nothing else.
 [dependencies]
 # Shared child groups/jobs and hidden Windows launches, extracted from the connector.
-process-wrap = { version = "10", default-features = false, features = ["tokio1", "process-group", "job-object", "creation-flags", "kill-on-drop"] }
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+process-wrap = { version = "10", default-features = false, features = ["tokio1", "process-group", "job-object", "creation-flags", "kill-on-drop"], optional = true }
+sysinfo = { version = "0.39", default-features = false, features = ["system"], optional = true }
 # The blocking channel (ipc::blocking) runs its streams on a runtime of its own and ends them across threads (`sync`).
-tokio = { version = "1", features = ["process", "io-util", "time", "macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["process", "io-util", "time", "macros", "rt-multi-thread", "sync"], optional = true }
 # The local channel (ipc): Unix sockets and Windows named pipes behind one API.
-interprocess = { version = "2.4", features = ["tokio"] }
+interprocess = { version = "2.4", features = ["tokio"], optional = true }
 # The login name and the host name (user), the same on every OS.
-gethostname = "1"
-whoami = "2"
+gethostname = { version = "1", optional = true }
+whoami = { version = "2", optional = true }
 # The OS's standard places for a program's data (data_dir) and this user's runtime directory (ipc: where its sockets
 # go), and the short name an endpoint's directory (Unix) or pipe (Windows) takes from its data directory.
-dirs = "7"
-hex = "0.4"
-sha2 = "0.10"
+dirs = { version = "7", optional = true }
+hex = { version = "0.4", optional = true }
+sha2 = { version = "0.10", optional = true }
 # A record written as JSON (fs: `write_json`).
-serde = "1"
-serde_json = "1"
+serde = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
 # A record's staging file (fs): a fresh name beside the record, created by `open_private`, removed on failure (the
 # rename too), renamed over it.
-tempfile = "3"
+tempfile = { version = "3", optional = true }
 
 # Unix: the effective uid (user), the open flags (fs) and sending `SIGTERM` (stop), with no `unsafe` of ours; hearing it
 # (stop), `tokio`.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process", "fs"] }
-tokio = { version = "1", features = ["signal"] }
+rustix = { version = "1", features = ["process", "fs"], optional = true }
+tokio = { version = "1", features = ["signal"], optional = true }
 # Who the administrators are (fs): an owner's account and the admin groups with their members, read from the system's
 # user and group databases (`getpwuid_r`, `getgrnam_r`, `getgrgid_r`), never `/etc/group` parsed by hand.
-nix = { version = "0.31", default-features = false, features = ["user"] }
+nix = { version = "0.31", default-features = false, features = ["user"], optional = true }
 
 # Only the maintained constant binding: rustix does not name macOS O_SEARCH yet; calls remain safe rustix APIs.
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 # An extended ACL's entries (fs): on macOS they grant beyond the mode bits, which do not show them.
-exacl = "0.13"
+exacl = { version = "0.13", optional = true }
 
 # Windows: this process's user and file owners (user); the pipe's security descriptor, and whether a
 # pipe peer's process is this user's (ipc); the stop event, and a channel from the thread that waits on it (stop).
 [target.'cfg(windows)'.dependencies]
-widestring = "1"
+widestring = { version = "1", optional = true }
 # The flags type process-wrap itself uses; no native types escape the public API.
-windows = { version = "0.62", features = ["Win32_System_Threading"] }
-tokio = { version = "1", features = ["sync"] }
+windows = { version = "0.62", features = ["Win32_System_Threading"], optional = true }
+tokio = { version = "1", features = ["sync"], optional = true }
 # How many names a file has, and which file a handle is (fs): `winapi-util` (walkdir, ripgrep), no `unsafe` of ours.
-winapi-util = "0.1"
-windows-sys = { version = "0.61", features = [
+winapi-util = { version = "0.1", optional = true }
+windows-sys = { version = "0.61", optional = true, features = [
     # NtCreateFile relative to a held directory handle (fs: `open_relative`); Win32 has no handle-relative open.
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
@@ -73,9 +73,20 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [features]
+# Everything but `target`: the user, data directory, files, local channel, stop and child-execution concerns, with the
+# dependencies they need. On by default, so every dependent that takes the crate whole (the core by path, the connector
+# and the desktop by tag) is unchanged. A dependent that needs only `target` (a build tool naming its host) sets
+# `default-features = false`, and the crate then compiles with no third-party dependency.
+default = ["full"]
+full = [
+    "dep:process-wrap", "dep:sysinfo", "dep:tokio", "dep:interprocess", "dep:gethostname", "dep:whoami", "dep:dirs",
+    "dep:hex", "dep:sha2", "dep:serde", "dep:serde_json", "dep:tempfile",
+    # Per OS: the target-specific dependencies are named too, and Cargo ignores the ones another OS has.
+    "dep:rustix", "dep:nix", "dep:libc", "dep:exacl", "dep:widestring", "dep:windows", "dep:winapi-util", "dep:windows-sys",
+]
 # What tests do to files and a program never does (fs: `TestFiles`): for a dependent's tests, through a dev-dependency
 # on this crate with this feature. Never in a release build.
-test-support = []
+test-support = ["full"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "time"] }
