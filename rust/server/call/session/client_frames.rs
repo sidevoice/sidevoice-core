@@ -28,10 +28,10 @@ impl Call {
                 self.state.room.report_client_error(&data);
             }
             Some("voice-turn-trace") => trace_turn(&self.session, &data),
-            Some("voice-user-turn") => self.once(&data, Self::user_turn).await,
-            Some("voice-playback") => self.once(&data, Self::playback).await,
-            Some("reply-hearing") => self.once(&data, Self::reply_hearing).await,
-            Some("voice-speech") => self.once(&data, Self::speech).await,
+            Some("voice-user-turn") => self.once(&data, Self::user_turn, true).await,
+            Some("voice-playback") => self.once(&data, Self::playback, false).await,
+            Some("reply-hearing") => self.once(&data, Self::reply_hearing, false).await,
+            Some("voice-speech") => self.once(&data, Self::speech, false).await,
             Some("voice-settings") => self.update_settings(&data).await,
             _ => {}
         }
@@ -39,7 +39,12 @@ impl Call {
 
     /// Takes a client message once: a repeat sent after a drop is acknowledged again and not applied.
     /// One without a `client_msg_id` is refused.
-    async fn once(&mut self, data: &Value, apply: fn(&mut Self, &Value) -> Vec<Value>) {
+    async fn once(
+        &mut self,
+        data: &Value,
+        apply: fn(&mut Self, &Value) -> Vec<Value>,
+        keeps_input: bool,
+    ) {
         let Some(id) = client_msg_id(data).map(str::to_owned) else {
             let refusal = self.refusal("room.request_invalid", None);
             self.send(refusal).await;
@@ -50,10 +55,13 @@ impl Call {
         let events = if first { apply(self, data) } else { Vec::new() };
         // Acknowledged only once everything the room has taken is kept for a restart: a page not told keeps the message
         // and says it again (found as the same message, not queued twice), until the record can be written.
+        // Only what the room keeps for a restart (the person's input) waits for the record; a report of how a reply
+        // played is acknowledged as before.
         let room = self.state.room.clone();
-        let durable = tokio::task::spawn_blocking(move || room.ensure_durable())
-            .await
-            .unwrap_or(false);
+        let durable = !keeps_input
+            || tokio::task::spawn_blocking(move || room.ensure_durable())
+                .await
+                .unwrap_or(false);
         if durable {
             self.ack(&id).await;
         } else if first {

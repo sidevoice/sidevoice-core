@@ -124,7 +124,14 @@ impl Room {
                 revision: saved["revision"].as_u64().unwrap_or(0),
                 epoch: saved["epoch"].as_u64().unwrap_or(0),
                 turn_id: saved["turn_id"].as_str().map(str::to_owned),
-                client_key: saved["client_key"].as_str().map(str::to_owned),
+                // A record written before the client's name was kept: derived from the turn, or the message's own id.
+                client_key: saved["client_key"].as_str().map(str::to_owned).or_else(|| {
+                    match (saved["turn_id"].as_str(), payload["message_id"].as_str()) {
+                        (Some(turn), _) => Some(format!("turn:{turn}")),
+                        (None, Some(message)) => Some(format!("text:{message}")),
+                        _ => None,
+                    }
+                }),
                 time: saved["time"].as_u64().unwrap_or(0),
                 status: "pending".into(),
                 offline: saved.get("offline").filter(|v| !v.is_null()).cloned(),
