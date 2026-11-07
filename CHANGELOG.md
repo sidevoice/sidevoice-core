@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/sidevoice/sidevoice-core/compare/v0.17.0...v0.17.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **room:** input waits for its agent without a deadline, in order, and survives a restart ([#238](https://github.com/sidevoice/sidevoice-core/issues/238)) ([a32d940](https://github.com/sidevoice/sidevoice-core/commit/a32d9402a1da70986fdaf42090818c7c6416cf08))
+
 ## [0.17.0](https://github.com/sidevoice/sidevoice-core/compare/v0.16.1...v0.17.0) (2026-11-03)
 
 
