@@ -105,6 +105,7 @@ impl Room {
             inner.browsers.input_receipt(&input, "not_sent");
             inner.salvage_input_notice(&input.id);
         }
+        let _ = inner.persist_pending();
         for sid in inner.browsers.ids_on_thread(thread) {
             if let Some(browser) = inner.browsers.get_mut(&sid) {
                 browser.refocus(Target::none());

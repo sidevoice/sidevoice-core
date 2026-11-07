@@ -8,21 +8,19 @@ use super::util::field;
 use super::{Inner, Room};
 
 const MAX_HISTORY: usize = 2000;
-/// How long input may wait to reach its agent before it is marked not sent, unless
-/// `VOICE_INPUT_TTL_SECONDS` says. A message nobody picks up must not hold the conversation:
-/// see `Journal::abandoned_since`.
-pub(super) const DELIVERY_DEADLINE_SECS: u64 = 10;
-
-fn input_ttl() -> u64 {
-    static TTL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+/// How long input may wait to reach its agent before it is marked not sent: by default for ever. What the person said
+/// reaches the agent, all of it and in order, however long the harness is busy, closed or unreachable (it is retried with a
+/// back-off, see `push.rs`), and while an earlier message of a conversation waits, no later one goes before it. Only
+/// `VOICE_INPUT_TTL_SECONDS` (a positive number of seconds) sets a limit, for a deployment that wants one.
+fn input_ttl() -> Option<u64> {
+    static TTL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *TTL.get_or_init(|| parse_input_ttl(std::env::var("VOICE_INPUT_TTL_SECONDS").ok().as_deref()))
 }
-pub(super) fn parse_input_ttl(value: Option<&str>) -> u64 {
+pub(super) fn parse_input_ttl(value: Option<&str>) -> Option<u64> {
     value
         .map(str::trim)
-        .filter(|v| !v.is_empty())
         .and_then(|v| v.parse().ok())
-        .unwrap_or(DELIVERY_DEADLINE_SECS)
+        .filter(|seconds| *seconds > 0)
 }
 
 #[derive(Default)]
@@ -80,14 +78,14 @@ impl Row {
     pub(super) fn message_id(&self) -> &str {
         self.payload.as_ref().map_or("", |p| field(p, "message_id"))
     }
-    /// Pending input that has waited too long to be worth delivering.
+    /// Pending input that has waited longer than the limit the deployment set, if it set one (see `input_ttl`).
     pub(super) fn expired(&self, now: u64) -> bool {
         self.role != "note"
             && self
                 .payload
                 .as_ref()
                 .is_none_or(|payload| payload.get("notice").is_none())
-            && now.saturating_sub(self.queued_at) >= input_ttl()
+            && input_ttl().is_some_and(|ttl| now.saturating_sub(self.queued_at) >= ttl)
     }
     /// Put this input back in the queue, to be delivered at the next opportunity.
     pub(super) fn requeue(&mut self) {
@@ -241,6 +239,15 @@ impl Journal {
                             .map_or(r.text.len(), |p| p.to_string().len()),
                 )
             })
+    }
+    /// The person's own input still waiting for its agent (pending, being sent, or fetched by a pull and not yet
+    /// acknowledged), oldest first.
+    pub(super) fn waiting_user_input(&self) -> impl Iterator<Item = &Row> {
+        self.rows.iter().filter(|r| {
+            r.role == "user"
+                && (matches!(r.status.as_str(), "pending" | "sending")
+                    || (r.status == "delivered" && r.pull_claimed_by.is_some()))
+        })
     }
     /// Unresolved push input in journal order, including rows waiting for their retry deadline.
     pub(super) fn unresolved_input(&mut self) -> impl Iterator<Item = &mut Row> {

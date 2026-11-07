@@ -2895,8 +2895,8 @@ fn h5_full_receipt_removes_miss_but_keeps_unexposed_empty_refusal_obligation() {
     }
 }
 
-/// Say "hello" and let it wait past the delivery deadline, as for an agent that never fetches it.
-fn expire_input(c: &Case) {
+/// Say "hello" and let it wait a long time, as for an agent that never fetches it.
+fn age_input(c: &Case) {
     let mut inner = c.room.inner.lock().unwrap();
     for row in inner.journal.input_mut("t") {
         row.queued_at = 0;
@@ -2906,18 +2906,17 @@ fn expire_input(c: &Case) {
 }
 
 #[test]
-fn input_past_the_deadline_is_not_sent_and_the_agent_speaks_again() {
+fn input_that_waits_a_long_time_is_not_given_up_and_still_gates_the_agent() {
     let c = Case::new(true);
-    let epoch = c.say("turn", Some("hello"));
+    c.say("turn", Some("hello"));
     assert_eq!(c.publish("early", 0, "Too soon")["status"], "text_only");
-    expire_input(&c);
+    age_input(&c);
     assert_eq!(
         c.room.history(Some("t"))["messages"][0]["status"],
-        "not_sent"
+        "pending",
+        "what the person said is kept for its agent, however long it waits"
     );
-    let answer = c.publish("late", 0, "Still here");
-    assert_ne!(answer["status"], "text_only", "{answer}");
-    assert_eq!(answer["epoch"], epoch);
+    assert_eq!(c.publish("late", 0, "Still here")["status"], "text_only");
 }
 
 #[test]
@@ -2925,18 +2924,14 @@ fn input_delivered_within_the_deadline_keeps_the_newer_turn_gate() {
     let c = Case::new(true);
     c.say("turn", Some("hello"));
     assert_eq!(c.pull().len(), 1);
-    expire_input(&c);
+    age_input(&c);
     assert_eq!(c.publish("old", 0, "Old answer")["status"], "text_only");
 }
 
 #[test]
-fn a_late_pull_of_expired_input_delivers_nothing() {
+fn a_late_pull_of_input_that_waited_a_long_time_still_delivers_it() {
     let c = Case::new(true);
     c.say("turn", Some("hello"));
-    expire_input(&c);
-    assert!(c.pull().is_empty());
-    assert_eq!(
-        c.room.history(Some("t"))["messages"][0]["status"],
-        "not_sent"
-    );
+    age_input(&c);
+    assert_eq!(c.pull().len(), 1);
 }

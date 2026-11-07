@@ -11,8 +11,10 @@ use super::Room;
 use crate::control::telemetry::Counted;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
-/// Seconds before another attempt, by attempts made so far.
-const RETRY_SECONDS: [u64; 4] = [2, 5, 15, 60];
+/// Seconds before another attempt, by attempts made so far: fast at first, then steady (every 15 s, for as long as it
+/// takes). A pass every 15 s per waiting conversation is trivial for the room. A message of a conversation waits for the
+/// earlier ones (`pending_delivery` takes a conversation's first unresolved row only), so a retry never lets a later one pass.
+const RETRY_SECONDS: [u64; 5] = [1, 2, 5, 10, 15];
 /// Failed attempts after which a note is given up on. Notes are exempt from expiry, so without this one
 /// nobody confirms reading would be resent forever.
 const MAX_NOTE_ATTEMPTS: usize = 5;
@@ -159,9 +161,12 @@ impl Room {
                 latency_now_micros(),
             );
         }
+        // A failed write is tried again by the pump; the row is at worst offered once more after a restart.
+        let _ = inner.persist_pending();
     }
     pub async fn pump(self: std::sync::Arc<Self>) {
         loop {
+            self.persist_pending();
             for (bid, rid, peer, data) in self.pending_delivery() {
                 let room = self.clone();
                 tokio::spawn(async move {

@@ -89,6 +89,7 @@ impl Room {
         inner.journal.transfer_claims(&thread, bid);
         let acknowledged = inner.acknowledge_pull(bid, &thread, &request.ack_ids);
         let page = inner.fetch_pull(bid, &thread, &request);
+        let _ = inner.persist_pending();
         let cursor = page
             .messages
             .last()

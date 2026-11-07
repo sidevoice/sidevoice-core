@@ -62,5 +62,6 @@ impl Room {
             LatencyEvent::Read,
             latency_now_micros(),
         );
+        let _ = inner.persist_pending();
     }
 }
