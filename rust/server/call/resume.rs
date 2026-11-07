@@ -225,6 +225,14 @@ impl SeenMessages {
         }
         true
     }
+
+    /// Lets go of a claim whose message was taken but not yet kept: its resend is then taken again.
+    pub(in crate::server) fn release(&self, device: &str, id: &str) {
+        let mut devices = self.devices.lock().expect("seen messages lock");
+        if let Some(seen) = devices.get_mut(device) {
+            seen.retain(|known| known != id);
+        }
+    }
 }
 
 /// A client message's id, when it carries a usable one.

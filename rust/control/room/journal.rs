@@ -36,6 +36,9 @@ pub(super) struct Row {
     pub(super) epoch: u64,
     /// For the words of a voice turn: the client's id for the turn.
     pub(super) turn_id: Option<String>,
+    /// The client's own name for this input (`text:<id>` of a typed message, `turn:<id>` of a spoken turn), the same on
+    /// whatever session or run of the core takes it: a resend of it is found here and never queued twice.
+    pub(super) client_key: Option<String>,
     pub(super) time: u64,
     pub(super) status: String,
     pub(super) reason: Option<String>,
@@ -156,6 +159,12 @@ impl Journal {
     pub(super) fn find(&self, id: &str) -> Option<&Row> {
         self.rows.iter().find(|r| r.id == id)
     }
+    /// The input the client named `key`, whichever session it came on.
+    pub(super) fn find_client(&self, key: &str) -> Option<&Row> {
+        self.rows
+            .iter()
+            .find(|r| r.client_key.as_deref() == Some(key))
+    }
     /// The person's message whose words are `text`.
     #[cfg(test)]
     pub(super) fn find_input(&self, text: &str) -> Option<&Row> {
@@ -259,9 +268,12 @@ impl Journal {
     }
     /// Unresolved push input in journal order, including rows waiting for their retry deadline.
     pub(super) fn unresolved_input(&mut self) -> impl Iterator<Item = &mut Row> {
-        self.rows
-            .iter_mut()
-            .filter(|r| r.is_input() && matches!(r.status.as_str(), "pending" | "sending"))
+        // A message fetched by a pull and not yet acknowledged is unresolved too: nothing later is pushed past it.
+        self.rows.iter_mut().filter(|r| {
+            r.is_input()
+                && (matches!(r.status.as_str(), "pending" | "sending")
+                    || (r.status == "delivered" && r.pull_claimed_by.is_some()))
+        })
     }
     /// Give up on pending input that waited too long.
     pub(super) fn expire_input(&mut self, now: u64) -> Vec<InputRef> {

@@ -45,6 +45,7 @@ impl Room {
         let mut guard = self.inner.lock().expect("room lock");
         let inner = &mut *guard;
         inner.materialize_due_notes();
+        let _ = inner.persist_pending();
         let now = seconds();
         for input in inner.journal.expire_input(now) {
             inner.browsers.input_receipt(&input, "not_sent");
@@ -166,7 +167,10 @@ impl Room {
     }
     pub async fn pump(self: std::sync::Arc<Self>) {
         loop {
-            self.persist_pending();
+            {
+                let room = self.clone();
+                let _ = tokio::task::spawn_blocking(move || room.persist_pending()).await;
+            }
             for (bid, rid, peer, data) in self.pending_delivery() {
                 let room = self.clone();
                 tokio::spawn(async move {

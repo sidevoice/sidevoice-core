@@ -340,3 +340,134 @@ fn a_pull_does_not_pass_a_message_still_being_pushed() {
         "\"two\" does not go before \"one\" is settled"
     );
 }
+
+/// Reloads the room from its directory, as a restarted core, with a live push binding for thread `t`.
+fn restarted(
+    directory: &tempfile::TempDir,
+    room: crate::control::room::Room,
+) -> crate::control::room::Room {
+    drop(room);
+    let reloaded = crate::control::room::Room::load(
+        crate::storage::PrivateDir::open(directory.path().join("private")).unwrap(),
+    )
+    .unwrap();
+    let (requests, _receiver) = mpsc::channel(4);
+    let (stop, _stopped) = tokio::sync::watch::channel(false);
+    reloaded.attach(
+        "connector",
+        crate::control::room::ConnectorPeer {
+            generation: crate::control::room::util::id(),
+            sender: requests,
+            stop,
+        },
+    );
+    reloaded
+        .register(
+            "connector",
+            &json!({"thread":"t","harness":"claude","capabilities":{"deliver":"supported"}}),
+        )
+        .unwrap();
+    reloaded
+}
+
+#[test]
+fn the_garage_with_a_restart_a_new_session_and_a_resend_of_the_same_client_message() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    let bid = room.snapshot(Some(&sid))["binding"]["binding_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Two typed messages said in the garage: the harness never answers.
+    for (id, text) in [("c-1", "one"), ("c-2", "two")] {
+        room.send_text(text, &sid, "t", &bid, id).unwrap();
+    }
+    let work = offered(&room);
+    room.settle_delivery(
+        &work[0].0,
+        &work[0].1,
+        &work[0].2,
+        Ok(json!({"status":"failed"})),
+    );
+    // The core restarts; the page, back on a new session, says both again: it never saw them acknowledged.
+    let reloaded = restarted(&directory, room);
+    let (events, _received) = mpsc::channel(64);
+    let sid = reloaded.join("device".into(), "en".into(), events).unwrap();
+    reloaded.select(&sid, "t").unwrap();
+    let bid = reloaded.snapshot(Some(&sid))["binding"]["binding_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (id, text) in [("c-1", "one"), ("c-2", "two")] {
+        let again = reloaded.send_text(text, &sid, "t", &bid, id).unwrap();
+        assert_eq!(
+            again["accepted"], true,
+            "said again, it is the same message"
+        );
+    }
+    let waiting = reloaded
+        .inner
+        .lock()
+        .unwrap()
+        .journal
+        .waiting_user_input()
+        .count();
+    assert_eq!(waiting, 2, "not queued a second time");
+    let mut arrived = Vec::new();
+    for _ in 0..2 {
+        let work = offered(&reloaded);
+        assert_eq!(work.len(), 1);
+        arrived.push(work[0].3["text"].as_str().unwrap().to_owned());
+        reloaded.settle_delivery(
+            &work[0].0,
+            &work[0].1,
+            &work[0].2,
+            Ok(json!({"status":"accepted"})),
+        );
+    }
+    assert_eq!(arrived, ["one", "two"], "each once, in order");
+    assert!(reloaded.pending_delivery().is_empty());
+}
+
+#[test]
+fn nothing_is_acknowledged_until_it_is_kept_for_a_restart() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    assert!(room.ensure_durable());
+    let private = directory.path().join("private");
+    std::fs::rename(&private, directory.path().join("away")).unwrap();
+    say(&room, &sid, "said while the disk fails");
+    assert!(!room.ensure_durable(), "the page is not told it was taken");
+    assert_eq!(offered(&room).len(), 1, "it is delivered all the same");
+    std::fs::rename(directory.path().join("away"), &private).unwrap();
+    assert!(
+        room.ensure_durable(),
+        "kept at last: the page's next try is acknowledged"
+    );
+}
+
+#[test]
+fn a_message_fetched_by_a_pull_holds_the_later_ones_from_a_push() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    let bid = room
+        .inner
+        .lock()
+        .unwrap()
+        .bindings
+        .delivery_target("t")
+        .unwrap()
+        .id
+        .clone();
+    // "one" is fetched by a pull whose answer is lost; "two" is said after it.
+    let fetched = room
+        .pull_input("connector", &json!({"binding_id":bid,"operation":"get"}))
+        .unwrap();
+    assert_eq!(fetched["messages"].as_array().unwrap().len(), 1);
+    say(&room, &sid, "two");
+    assert!(
+        room.pending_delivery().is_empty(),
+        "\"two\" is not pushed before \"one\" is acknowledged"
+    );
+}

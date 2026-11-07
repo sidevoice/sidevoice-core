@@ -46,14 +46,21 @@ impl Call {
             return;
         };
         // Claimed before it is applied: another call of this device sending it at the same time only acknowledges it.
-        if self.state.seen.claim(&self.device, &id) {
-            let events = apply(self, data);
+        let first = self.state.seen.claim(&self.device, &id);
+        let events = if first { apply(self, data) } else { Vec::new() };
+        // Acknowledged only once everything the room has taken is kept for a restart: a page not told keeps the message
+        // and says it again (found as the same message, not queued twice), until the record can be written.
+        let room = self.state.room.clone();
+        let durable = tokio::task::spawn_blocking(move || room.ensure_durable())
+            .await
+            .unwrap_or(false);
+        if durable {
             self.ack(&id).await;
-            for event in events {
-                self.send(event).await;
-            }
-        } else {
-            self.ack(&id).await;
+        } else if first {
+            self.state.seen.release(&self.device, &id);
+        }
+        for event in events {
+            self.send(event).await;
         }
     }
 

@@ -57,7 +57,7 @@ impl Inner {
             .waiting_user_input()
             .map(|row| {
                 json!({"id":row.id,"thread":row.thread,"role":row.role,"text":row.text,"name":row.name,"session":row.session,
-                "revision":row.revision,"epoch":row.epoch,"turn_id":row.turn_id,"time":row.time,
+                "revision":row.revision,"epoch":row.epoch,"turn_id":row.turn_id,"client_key":row.client_key,"time":row.time,
                 "offline":row.offline,"payload":row.payload,"queued_at":row.queued_at})
             })
             .collect();
@@ -69,6 +69,17 @@ impl Room {
     /// Writes the input still waiting if it changed since the last write (the pump calls it for what failed before).
     pub fn persist_pending(&self) {
         let _ = self.inner.lock().expect("room lock").persist_pending();
+    }
+
+    /// Whether everything the room has taken is kept for a restart. The call asks before it tells a page a message was
+    /// taken: a page not told keeps the message and says it again, which never silences the person and never loses the
+    /// message. Blocking (a file write): call it from a blocking task.
+    pub fn ensure_durable(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("room lock")
+            .persist_pending()
+            .is_ok()
     }
 
     /// Puts back the input a previous run of the core was still holding, as `pending`, to be delivered again.
@@ -113,6 +124,7 @@ impl Room {
                 revision: saved["revision"].as_u64().unwrap_or(0),
                 epoch: saved["epoch"].as_u64().unwrap_or(0),
                 turn_id: saved["turn_id"].as_str().map(str::to_owned),
+                client_key: saved["client_key"].as_str().map(str::to_owned),
                 time: saved["time"].as_u64().unwrap_or(0),
                 status: "pending".into(),
                 offline: saved.get("offline").filter(|v| !v.is_null()).cloned(),
