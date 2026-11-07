@@ -1,7 +1,7 @@
 //! The person's input still waiting for its agent, kept across a restart of the core.
 //!
 //! The journal is in memory, and so is everything about a call; what the person said and the room has taken must not
-//! be lost with them. The rows of the person's input that are `pending`, `sending`, or fetched by a pull and not yet
+//! be lost with them. The rows of the person's input (and the notes that wait in the same order) that are `pending`, `sending`, or fetched by a pull and not yet
 //! acknowledged are written to `pending-input.json` in the same step that changes them (a message is taken, delivered,
 //! read, cancelled), before the page is told it was taken, and read back as `pending` rows, in the order they had, when
 //! the room loads. A message taken by a pull and not acknowledged before the restart is offered again, with the same
@@ -56,7 +56,7 @@ impl Inner {
             .journal
             .waiting_user_input()
             .map(|row| {
-                json!({"id":row.id,"thread":row.thread,"text":row.text,"name":row.name,"session":row.session,
+                json!({"id":row.id,"thread":row.thread,"role":row.role,"text":row.text,"name":row.name,"session":row.session,
                 "revision":row.revision,"epoch":row.epoch,"turn_id":row.turn_id,"time":row.time,
                 "offline":row.offline,"payload":row.payload,"queued_at":row.queued_at})
             })
@@ -101,7 +101,12 @@ impl Room {
             inner.append_row(Row {
                 id: id.into(),
                 thread: thread.into(),
-                role: "user",
+                // The notes go in the same order as the words, so they are kept with them.
+                role: if saved["role"].as_str() == Some("note") {
+                    "note"
+                } else {
+                    "user"
+                },
                 text: text.into(),
                 name: saved["name"].as_str().map(str::to_owned),
                 session: saved["session"].as_str().unwrap_or("").into(),

@@ -248,11 +248,11 @@ impl Journal {
                 )
             })
     }
-    /// The person's own input still waiting for its agent (pending, being sent, or fetched by a pull and not yet
-    /// acknowledged), oldest first.
+    /// The input (the person's words, and the notes that go in the same order) still waiting for its agent: pending,
+    /// being sent, or fetched by a pull and not yet acknowledged; oldest first.
     pub(super) fn waiting_user_input(&self) -> impl Iterator<Item = &Row> {
         self.rows.iter().filter(|r| {
-            r.role == "user"
+            r.is_input()
                 && (matches!(r.status.as_str(), "pending" | "sending")
                     || (r.status == "delivered" && r.pull_claimed_by.is_some()))
         })

@@ -319,3 +319,24 @@ fn input_the_room_cannot_write_down_is_still_delivered_and_written_when_it_can()
     let written = std::fs::read_to_string(private.join("pending-input.json")).unwrap();
     assert!(written.contains("still goes"));
 }
+
+#[test]
+fn a_pull_does_not_pass_a_message_still_being_pushed() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    say(&room, &sid, "two");
+    // "one" is in flight to the harness; the binding is then read by a pull.
+    let work = offered(&room);
+    assert_eq!(work[0].3["text"], "one");
+    let fetched = room
+        .pull_input(
+            "connector",
+            &json!({"binding_id":work[0].0,"operation":"get"}),
+        )
+        .unwrap();
+    assert!(
+        fetched["messages"].as_array().unwrap().is_empty(),
+        "\"two\" does not go before \"one\" is settled"
+    );
+}
