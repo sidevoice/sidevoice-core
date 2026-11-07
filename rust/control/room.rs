@@ -37,6 +37,7 @@ mod latency;
 mod notices;
 mod pairing;
 mod participants;
+mod pending;
 mod playback;
 mod pull;
 mod push;
@@ -88,6 +89,8 @@ struct Inner {
     refusals: HashMap<String, (Value, Value)>,
     refusal_order: std::collections::VecDeque<String>,
     pending_notices: std::collections::VecDeque<PendingNotice>,
+    /// Where the person's input still waiting for its agent is kept across a restart (`pending.rs`).
+    pending_store: pending::PendingStore,
 }
 
 pub struct Room {
@@ -110,9 +113,9 @@ impl Room {
             .map(str::to_owned)
             .collect();
         let shown = Shown::from_state(&state);
-        Ok(Self {
-            dir,
+        let room = Self {
             inner: Mutex::new(Inner {
+                pending_store: pending::PendingStore::new(dir.clone()),
                 credentials,
                 closed_threads,
                 shown,
@@ -130,7 +133,10 @@ impl Room {
                 refusal_order: std::collections::VecDeque::new(),
                 pending_notices: std::collections::VecDeque::new(),
             }),
-        })
+            dir,
+        };
+        room.restore_pending()?;
+        Ok(room)
     }
     fn save(&self, inner: &Inner) -> io::Result<()> {
         let mut state = inner.credentials.state();

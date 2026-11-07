@@ -192,10 +192,12 @@ fn speech_is_limited_in_characters_and_input_ttl_is_configurable() {
         reply(&room, &sid, "t", "longer", &"é".repeat(6001))["status"],
         "rejected"
     );
-    assert_eq!(parse_input_ttl(None), 10);
-    assert_eq!(parse_input_ttl(Some("")), 10);
-    assert_eq!(parse_input_ttl(Some("45")), 45);
-    assert_eq!(parse_input_ttl(Some("soon")), 10);
+    // No limit unless a deployment sets one: what the person said waits for its agent.
+    assert_eq!(parse_input_ttl(None), None);
+    assert_eq!(parse_input_ttl(Some("")), None);
+    assert_eq!(parse_input_ttl(Some("0")), None);
+    assert_eq!(parse_input_ttl(Some("45")), Some(45));
+    assert_eq!(parse_input_ttl(Some("soon")), None);
 }
 
 #[test]

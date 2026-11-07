@@ -46,6 +46,10 @@ impl Room {
         if let Some(row) = inner.journal.find(&row_id) {
             return repeated(row, text, row.thread == thread);
         }
+        // The same message said again on another session (the call restarted, the core too): it is the same message.
+        if let Some(row) = inner.journal.find_client(&format!("text:{message_id}")) {
+            return repeated(row, text, row.thread == thread);
+        }
         let Some(c) = inner.browsers.get(sid) else {
             return Err(RoomError::new(409, "room.focus_changed"));
         };
@@ -148,6 +152,9 @@ impl Room {
         let row_id = turn_row(sid, turn_id);
         let mut inner = self.inner.lock().expect("room lock");
         if let Some(row) = inner.journal.find(&row_id) {
+            return repeated(row, text, row.thread == thread);
+        }
+        if let Some(row) = inner.journal.find_client(&format!("turn:{turn_id}")) {
             return repeated(row, text, row.thread == thread);
         }
         if inner.conversations.prior(sid, turn_id).is_some() {
@@ -346,6 +353,10 @@ impl Inner {
             revision,
             epoch,
             turn_id: turn_id.map(str::to_owned),
+            client_key: Some(match turn_id {
+                Some(turn) => format!("turn:{turn}"),
+                None => format!("text:{message_id}"),
+            }),
             time: time.unwrap_or_else(millis),
             status: "pending".into(),
             offline: offline.map(|value| json!(value)),
@@ -372,6 +383,10 @@ impl Inner {
             latency_now_micros(),
         );
         self.browsers.input_receipt(&input, "pending");
+        // Kept for a restart, notices and all, before the page is told it was taken (`Room::ensure_durable`, which the call
+        // asks before it acknowledges). A record that cannot be written does not stop the message: it is delivered all the
+        // same, and the page, never told, says it again until the record is kept.
+        let _ = self.persist_pending();
         Ok(
             json!({"accepted":true,"id":input.id,"revision":revision,"epoch":epoch,"thread_id":thread_id}),
         )

@@ -22,6 +22,12 @@ impl Conversations {
         self.epochs.get(thread).copied().unwrap_or(0)
     }
 
+    /// A restored message of epoch `epoch` makes the conversation's epoch at least that, so its reply is current.
+    pub(super) fn restore_epoch(&mut self, thread: &str, epoch: u64) {
+        let known = self.epochs.entry(thread.to_owned()).or_insert(0);
+        *known = (*known).max(epoch);
+    }
+
     pub(super) fn can_begin(&self, thread: &str) -> bool {
         self.epochs.contains_key(thread) || self.epochs.len() < MAX_EPOCH_CONTEXTS
     }

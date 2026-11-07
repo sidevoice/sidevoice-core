@@ -89,6 +89,7 @@ impl Room {
         inner.journal.transfer_claims(&thread, bid);
         let acknowledged = inner.acknowledge_pull(bid, &thread, &request.ack_ids);
         let page = inner.fetch_pull(bid, &thread, &request);
+        let _ = inner.persist_pending();
         let cursor = page
             .messages
             .last()
@@ -141,11 +142,14 @@ impl Inner {
         let now = seconds();
         let mut page = Page::default();
         let mut claimed = Vec::new();
-        for row in self
+        // An earlier message still being pushed holds the later ones: nothing new is claimed past it.
+        let pushing = self
             .journal
             .input_mut(thread)
-            .filter(|row| held(row, bid) || (row.status == "pending" && !row.expired(now)))
-        {
+            .any(|row| row.status == "sending");
+        for row in self.journal.input_mut(thread).filter(|row| {
+            held(row, bid) || (row.status == "pending" && !row.expired(now) && !pushing)
+        }) {
             page.count += 1;
             if request.get && row.seq > request.after {
                 if page.messages.len() >= PULL_PAGE {
