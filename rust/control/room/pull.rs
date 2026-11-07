@@ -89,7 +89,10 @@ impl Room {
         inner.journal.transfer_claims(&thread, bid);
         let acknowledged = inner.acknowledge_pull(bid, &thread, &request.ack_ids);
         let page = inner.fetch_pull(bid, &thread, &request);
-        let _ = inner.persist_pending();
+        // A claim that cannot be kept is told as a failure; the next fetch returns what is held again.
+        inner
+            .persist_pending()
+            .map_err(|_| RoomError::new(500, "room.state_save_failed"))?;
         let cursor = page
             .messages
             .last()

@@ -163,6 +163,12 @@ impl Journal {
             .iter()
             .find(|row| row.role == "user" && row.text == text)
     }
+    /// Takes a row back out, as if it had never been appended (an input the room could not keep).
+    pub(super) fn remove(&mut self, id: &str) {
+        if let Some(index) = self.rows.iter().position(|row| row.id == id) {
+            self.rows.remove(index);
+        }
+    }
     pub(super) fn find_mut(&mut self, id: &str) -> Option<&mut Row> {
         self.rows.iter_mut().find(|r| r.id == id)
     }

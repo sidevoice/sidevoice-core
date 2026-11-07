@@ -34,7 +34,7 @@ fn get(room: &crate::control::room::Room, bid: &str) -> serde_json::Value {
 
 #[test]
 fn accepted_injection_is_absent_from_get_messages() {
-    let (_, room, bid) = fixture(true);
+    let (_directory, room, bid) = fixture(true);
     let delivery = room.pending_delivery();
     assert_eq!(delivery.len(), 1);
     let (target, rid, peer, _) = &delivery[0];
@@ -50,7 +50,7 @@ fn accepted_injection_is_absent_from_get_messages() {
 #[test]
 fn failed_or_unavailable_injection_is_claimed_once_then_acknowledged() {
     for inject in [false, true] {
-        let (_, room, bid) = fixture(inject);
+        let (_directory, room, bid) = fixture(inject);
         if inject {
             let delivery = room.pending_delivery();
             let (target, rid, peer, _) = &delivery[0];
@@ -81,7 +81,7 @@ fn failed_or_unavailable_injection_is_claimed_once_then_acknowledged() {
 #[test]
 fn concurrent_injection_and_get_claim_one_journal_state() {
     for _ in 0..100 {
-        let (_, room, bid) = fixture(true);
+        let (_directory, room, bid) = fixture(true);
         let (delivery, claimed) = thread::scope(|scope| {
             let injection = scope.spawn(|| room.pending_delivery());
             let fetch = scope.spawn(|| get(&room, &bid));

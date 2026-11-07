@@ -199,6 +199,11 @@ fn a_restart_in_the_middle_keeps_what_waited_in_order() {
             &json!({"thread":"t","harness":"claude","capabilities":{"deliver":"supported"}}),
         )
         .unwrap();
+    assert_eq!(
+        reloaded.inner.lock().unwrap().conversations.epoch("t"),
+        3,
+        "the conversation's epoch is at least that of what it holds, so a reply to it is current"
+    );
     let mut arrived = Vec::new();
     for _ in 0..2 {
         let work = offered(&reloaded);
@@ -286,5 +291,36 @@ fn a_message_fetched_by_a_pull_and_not_acknowledged_comes_back_after_a_restart()
         texts,
         ["one", "two"],
         "offered again, in order, with the same ids"
+    );
+}
+
+#[test]
+fn input_the_room_cannot_keep_is_refused_and_leaves_nothing_behind() {
+    use crate::control::room::tests::support::BeginAtFocus;
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    // The record cannot be written: its directory is gone.
+    std::fs::remove_dir_all(directory.path().join("private")).unwrap();
+    let turn = room.begin_at_focus(&sid, "lost").unwrap();
+    let refused = room.finish_turn(
+        &sid,
+        &turn.turn_id,
+        Some("kept nowhere"),
+        &serde_json::Value::Null,
+        crate::control::room::Continuation::Standalone,
+    );
+    assert!(
+        refused.is_err(),
+        "a message that cannot be kept is not taken"
+    );
+    assert_eq!(
+        room.inner
+            .lock()
+            .unwrap()
+            .journal
+            .waiting_user_input()
+            .count(),
+        0,
+        "no phantom row that is neither delivered nor kept"
     );
 }

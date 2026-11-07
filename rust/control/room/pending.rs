@@ -92,6 +92,9 @@ impl Room {
             if !inner.journal.can_append() || inner.journal.find(id).is_some() {
                 continue;
             }
+            inner
+                .conversations
+                .restore_epoch(thread, saved["epoch"].as_u64().unwrap_or(0));
             inner.append_row(Row {
                 id: id.into(),
                 thread: thread.into(),

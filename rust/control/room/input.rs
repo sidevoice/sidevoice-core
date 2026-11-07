@@ -357,10 +357,8 @@ impl Inner {
         self.append_row(row);
         // Taken only once it is kept for a restart: the page is told it was taken after this.
         if self.persist_pending().is_err() {
-            if let Some(row) = self.journal.find_mut(&input.id) {
-                row.status = "not_sent".into();
-                row.reason = Some("state_save_failed".into());
-            }
+            // As if it had not come: said again, it is taken again.
+            self.journal.remove(&input.id);
             return Err(RoomError::new(500, "room.state_save_failed"));
         }
         if turn_id.is_some() && self.unheard.has(thread_id) {
