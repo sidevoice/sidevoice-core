@@ -355,12 +355,10 @@ impl Inner {
         };
         let input = row.input_ref();
         self.append_row(row);
-        // Taken only once it is kept for a restart: the page is told it was taken after this.
-        if self.persist_pending().is_err() {
-            // As if it had not come: said again, it is taken again.
-            self.journal.remove(&input.id);
-            return Err(RoomError::new(500, "room.state_save_failed"));
-        }
+        // Kept for a restart before the page is told it was taken. A record that cannot be written does not stop the
+        // message: it is delivered all the same, and the pump writes the record again until it can (only a restart
+        // meanwhile would lose it).
+        let _ = self.persist_pending();
         if turn_id.is_some() && self.unheard.has(thread_id) {
             self.flush_all_unheard_notes(
                 thread_id,

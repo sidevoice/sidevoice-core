@@ -8,8 +8,10 @@
 //! `message_id`. Nothing else of the journal is kept: a row already delivered is the agent's, and a restart ends the
 //! calls, so there is no session to tell about them.
 //!
-//! A message that cannot be written is not taken (`room.state_save_failed`): the page keeps it and says it again. The
-//! delivery pump also writes every 250 ms what has changed and failed to be written before.
+//! A record that cannot be written does not stop a message: it is delivered all the same (the disk failing must not
+//! silence the person), and the delivery pump writes what has changed and failed to be written before, every 250 ms, until
+//! it can. Only a restart in that time would lose it. The journal's sequence number is kept too, so a pull cursor held from
+//! before the restart still precedes what is restored.
 use std::io;
 
 use serde_json::{json, Value};
@@ -59,7 +61,7 @@ impl Inner {
                 "offline":row.offline,"payload":row.payload,"queued_at":row.queued_at})
             })
             .collect();
-        json!({"input": rows})
+        json!({"seq": self.journal.last_seq(), "input": rows})
     }
 }
 
@@ -80,6 +82,7 @@ impl Room {
         };
         let mut inner = self.inner.lock().expect("room lock");
         inner.pending_store.written = state.to_string();
+        inner.journal.resume_seq(state["seq"].as_u64().unwrap_or(0));
         for saved in state["input"].as_array().into_iter().flatten() {
             let (Some(id), Some(thread), Some(text), Some(payload)) = (
                 saved["id"].as_str(),

@@ -163,11 +163,13 @@ impl Journal {
             .iter()
             .find(|row| row.role == "user" && row.text == text)
     }
-    /// Takes a row back out, as if it had never been appended (an input the room could not keep).
-    pub(super) fn remove(&mut self, id: &str) {
-        if let Some(index) = self.rows.iter().position(|row| row.id == id) {
-            self.rows.remove(index);
-        }
+    /// The last sequence number given: a restart goes on from it, so a pull cursor held from before still precedes
+    /// what is restored.
+    pub(super) fn last_seq(&self) -> u64 {
+        self.seq
+    }
+    pub(super) fn resume_seq(&mut self, seq: u64) {
+        self.seq = self.seq.max(seq);
     }
     pub(super) fn find_mut(&mut self, id: &str) -> Option<&mut Row> {
         self.rows.iter_mut().find(|r| r.id == id)

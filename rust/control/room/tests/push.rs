@@ -199,6 +199,10 @@ fn a_restart_in_the_middle_keeps_what_waited_in_order() {
             &json!({"thread":"t","harness":"claude","capabilities":{"deliver":"supported"}}),
         )
         .unwrap();
+    assert!(
+        reloaded.inner.lock().unwrap().journal.last_seq() >= 3,
+        "the sequence goes on, so a pull cursor held from before still precedes what is restored"
+    );
     assert_eq!(
         reloaded.inner.lock().unwrap().conversations.epoch("t"),
         3,
@@ -295,32 +299,23 @@ fn a_message_fetched_by_a_pull_and_not_acknowledged_comes_back_after_a_restart()
 }
 
 #[test]
-fn input_the_room_cannot_keep_is_refused_and_leaves_nothing_behind() {
-    use crate::control::room::tests::support::BeginAtFocus;
+fn input_the_room_cannot_write_down_is_still_delivered_and_written_when_it_can() {
     let (directory, room, _) = pull_room(&["connector"]);
     let sid = garage(&directory, &room);
     // The record cannot be written: its directory is gone.
-    std::fs::remove_dir_all(directory.path().join("private")).unwrap();
-    let turn = room.begin_at_focus(&sid, "lost").unwrap();
-    let refused = room.finish_turn(
-        &sid,
-        &turn.turn_id,
-        Some("kept nowhere"),
-        &serde_json::Value::Null,
-        crate::control::room::Continuation::Standalone,
-    );
-    assert!(
-        refused.is_err(),
-        "a message that cannot be kept is not taken"
-    );
+    let private = directory.path().join("private");
+    std::fs::rename(&private, directory.path().join("away")).unwrap();
+    say(&room, &sid, "still goes");
+    let work = offered(&room);
     assert_eq!(
-        room.inner
-            .lock()
-            .unwrap()
-            .journal
-            .waiting_user_input()
-            .count(),
-        0,
-        "no phantom row that is neither delivered nor kept"
+        work.len(),
+        1,
+        "the disk failing does not silence the person"
     );
+    assert_eq!(work[0].3["text"], "still goes");
+    // The disk is back: the pump's next write keeps it.
+    std::fs::rename(directory.path().join("away"), &private).unwrap();
+    room.persist_pending();
+    let written = std::fs::read_to_string(private.join("pending-input.json")).unwrap();
+    assert!(written.contains("still goes"));
 }
