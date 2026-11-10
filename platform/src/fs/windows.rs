@@ -19,7 +19,7 @@
 //! nothing, and the directory is then flushed: through the held handle on it where there is one
 //! ([`flush_held_dir`], `NtCreateFile` relative to that handle), by its path otherwise ([`flush_dir`]).
 
-use super::{Access, Create, FileId, Fs, HeldState, Others, Publish};
+use super::{Access, Create, FileId, Fs, HeldState, Others, Publish, RefusalReason};
 use crate::user::{User, UserId};
 use std::ffi::{c_void, OsStr};
 use std::fs::{File, OpenOptions};
@@ -251,8 +251,9 @@ pub(super) fn check_link(link: &Path) -> io::Result<()> {
     if (!UserId::current().owns_file(&file)? && !judged.owner_is_system())
         || judged.grants_others(CHANGES, false)
     {
-        return Err(io::Error::new(
-            ErrorKind::PermissionDenied,
+        return Err(super::refusal(
+            link,
+            RefusalReason::Link,
             format!("unsafe link {}: others can change it", link.display()),
         ));
     }
@@ -272,8 +273,9 @@ pub(super) fn backing_directory(root: &Path) -> io::Result<Option<PathBuf>> {
         backing.components().next(),
         Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
     ) {
-        return Err(super::refused(
+        return Err(super::refused_as(
             root,
+            RefusalReason::Network,
             "a network or shared drive; the directories behind it cannot be checked",
         ));
     }
@@ -290,20 +292,25 @@ fn open_entry(path: &Path) -> io::Result<File> {
 }
 
 pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
-    let unsafe_dir = |why: &str| {
-        io::Error::new(
-            ErrorKind::PermissionDenied,
+    let unsafe_dir = |reason: RefusalReason, why: &str| {
+        super::refusal(
+            dir,
+            reason,
             format!("unsafe directory {}: {why}", dir.display()),
         )
     };
     if is_link(file)? || !file.metadata()?.is_dir() {
         return Err(unsafe_dir(
+            RefusalReason::Link,
             "not an ordinary directory; choose an unredirected data directory",
         ));
     }
     let judged = Judged::of(file)?;
     if !UserId::current().owns_file(file)? && !judged.owner_is_system() {
-        return Err(unsafe_dir("owned by another user"));
+        return Err(unsafe_dir(
+            RefusalReason::OwnedByOther,
+            "owned by another user",
+        ));
     }
     let replaces = if dir.parent().is_none() && is_local_volume_root(file) {
         REPLACES_ENTRIES & !DELETE
@@ -311,7 +318,10 @@ pub(super) fn check_ancestor_handle(dir: &Path, file: &File) -> io::Result<()> {
         REPLACES_ENTRIES
     };
     if judged.grants_others(replaces, false) {
-        return Err(unsafe_dir("others can replace what is in it"));
+        return Err(unsafe_dir(
+            RefusalReason::OthersCanReplace,
+            "others can replace what is in it",
+        ));
     }
     Ok(())
 }
@@ -546,7 +556,11 @@ pub(super) fn open_subdirectory(
         .ok_or_else(|| super::denied("invalid directory component"))?;
     let file = match open_relative(parent, name, FILE_GENERIC_READ, true) {
         Err(error) if error.raw_os_error() == Some(ERROR_DIRECTORY as i32) => {
-            return Err(super::refused(path, "not an ordinary directory"));
+            return Err(super::refused_as(
+                path,
+                RefusalReason::Link,
+                "not an ordinary directory",
+            ));
         }
         opened => opened?,
     };
@@ -636,8 +650,9 @@ pub(super) fn reopen_directory(path: &Path) -> io::Result<File> {
 /// `file`, refused unless it is a directory and no reparse point (opened with `OPEN_REPARSE_POINT`).
 fn ordinary_directory(path: &Path, file: File) -> io::Result<File> {
     if is_link(&file)? || !file.metadata()?.is_dir() {
-        return Err(super::refused(
+        return Err(super::refused_as(
             path,
+            RefusalReason::Link,
             "not an ordinary directory; choose an unredirected data directory",
         ));
     }

@@ -8,12 +8,12 @@
 //! able to write there (another group, everybody, anybody an extended ACL lets write: [`acl_others`]) makes it unsafe,
 //! unless the sticky bit keeps them to their own entries (an ACL's writers are refused even then).
 
-use super::{Access, Create, FileId, HeldState, Others, Publish};
+use super::{Access, Create, FileId, HeldState, Others, Publish, RefusalReason};
 use crate::user::{User, UserId};
 use nix::unistd::{Gid, Group, Uid, User as Account};
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -589,14 +589,17 @@ fn untrusted(
     gid: u32,
     mode: impl Into<u32>,
     object: Object<'_>,
-) -> io::Result<Option<&'static str>> {
+) -> io::Result<Option<(RefusalReason, &'static str)>> {
     let mode = mode.into();
     Ok(if !trusted_owner(uid)? {
-        Some("owned by another user")
+        Some((RefusalReason::OwnedByOther, "owned by another user"))
     } else if acl_others(object, mode)? == Others::Change
         || (mode & 0o1000 == 0 && others_can_write(gid, mode)?)
     {
-        Some("others can replace what is in it")
+        Some((
+            RefusalReason::OthersCanReplace,
+            "others can replace what is in it",
+        ))
     } else {
         None
     })
@@ -607,7 +610,7 @@ fn untrusted(
 pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(dir)?;
     let why = if metadata.is_symlink() {
-        Some("a link on the way")
+        Some((RefusalReason::Link, "a link on the way"))
     } else {
         untrusted(
             metadata.uid(),
@@ -617,7 +620,7 @@ pub(super) fn check_ancestor(dir: &Path) -> io::Result<()> {
         )?
     };
     match why {
-        Some(why) => Err(unsafe_entry(dir, why)),
+        Some((reason, why)) => Err(unsafe_entry(dir, reason, why)),
         None => Ok(()),
     }
 }
@@ -631,14 +634,19 @@ pub(super) fn backing_directory(_root: &Path) -> io::Result<Option<PathBuf>> {
 /// ([`trusted_owner`]), as under a sticky bit whoever owns a link may replace it. A link's own mode means nothing.
 pub(super) fn check_link(link: &Path) -> io::Result<()> {
     if !trusted_owner(fs::symlink_metadata(link)?.uid())? {
-        return Err(unsafe_entry(link, "a link of another user's"));
+        return Err(unsafe_entry(
+            link,
+            RefusalReason::Link,
+            "a link of another user's",
+        ));
     }
     Ok(())
 }
 
-fn unsafe_entry(path: &Path, why: &str) -> io::Error {
-    io::Error::new(
-        ErrorKind::PermissionDenied,
+fn unsafe_entry(path: &Path, reason: RefusalReason, why: &str) -> io::Error {
+    super::refusal(
+        path,
+        reason,
         format!("unsafe directory {}: {why}", path.display()),
     )
 }
@@ -851,8 +859,9 @@ fn open_child(dir: &File, name: &Path) -> io::Result<Option<File>> {
 fn directory_error(path: &Path, error: io::Error) -> io::Error {
     if matches!(error.raw_os_error(), Some(code) if code == Errno::LOOP.raw_os_error() || code == Errno::NOTDIR.raw_os_error())
     {
-        super::refused(
+        super::refused_as(
             path,
+            RefusalReason::Link,
             "not an ordinary directory or record; choose an unredirected data directory",
         )
     } else {
@@ -901,7 +910,11 @@ pub(super) fn check_ancestor_handle(path: &Path, file: &File) -> io::Result<()> 
         )?
         .is_some()
     {
-        return Err(super::refused(path, "unsafe ancestor owner or permissions"));
+        return Err(super::refused_as(
+            path,
+            RefusalReason::UnsafeAncestor,
+            "unsafe ancestor owner or permissions",
+        ));
     }
     Ok(())
 }

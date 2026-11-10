@@ -271,7 +271,11 @@ fn resolve_links(path: &Path) -> io::Result<PathBuf> {
                     if let Some(backing) = imp::backing_directory(&resolved)? {
                         links += 1;
                         if links > MAX_LINKS {
-                            return Err(refused(path, "too many links on the way"));
+                            return Err(refused_as(
+                                path,
+                                RefusalReason::Link,
+                                "too many links on the way",
+                            ));
                         }
                         resolved = PathBuf::new();
                         pending.extend(parts(&backing).into_iter().rev());
@@ -292,7 +296,11 @@ fn resolve_links(path: &Path) -> io::Result<PathBuf> {
             Ok(metadata) if metadata.is_symlink() => {
                 links += 1;
                 if links > MAX_LINKS {
-                    return Err(refused(path, "too many links on the way"));
+                    return Err(refused_as(
+                        path,
+                        RefusalReason::Link,
+                        "too many links on the way",
+                    ));
                 }
                 imp::check_link(&next)?;
                 let target = fs::read_link(&next)?;
@@ -576,10 +584,10 @@ pub trait Fs {
     fn check_private(file: &File) -> io::Result<()> {
         let metadata = file.metadata()?;
         if !UserId::current().owns_file(file)? {
-            return Err(denied("not this user's"));
+            return Err(denied_as(RefusalReason::OwnedByOther, "not this user's"));
         }
         if Self::others_of(file)? != Others::Nothing {
-            return Err(denied("open to others"));
+            return Err(denied_as(RefusalReason::OpenToOthers, "open to others"));
         }
         if !metadata.is_dir() && !(metadata.is_file() && imp::link_count(file)? == 1) {
             return Err(denied("not a directory or a regular file with one name"));
@@ -830,12 +838,100 @@ fn denied(why: impl std::fmt::Display) -> io::Error {
     io::Error::new(ErrorKind::PermissionDenied, why.to_string())
 }
 
+/// Why a private-directory check refused a directory, for a caller that reports it without reading the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RefusalReason {
+    /// The directory, or one on the way, belongs to another user.
+    OwnedByOther,
+    /// Somebody else may delete or rename what is in a directory on the way (Windows: an inherited
+    /// "Authenticated Users: Modify", as below a drive root).
+    OthersCanReplace,
+    /// The directory itself is open to others.
+    OpenToOthers,
+    /// A directory on the way has an owner or permissions the policy refuses (Unix, which does not say which).
+    UnsafeAncestor,
+    /// A link, junction, mount point or other reparse point the policy does not follow, or not an ordinary directory.
+    Link,
+    /// On a network or shared drive.
+    Network,
+    /// Refused for any other reason; the message says.
+    Other,
+}
+
+/// A private-directory check's refusal: the error's source (`io::Error::get_ref`, then `downcast_ref::<Refusal>()`) of
+/// kind `PermissionDenied`, with `reason` and the `path` refused. Its `Display` is the message the error has always
+/// had, so a caller that prints it prints the same text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The directory refused (empty when a check that does not know the path refused, before its caller adds it).
+    pub path: PathBuf,
+    pub reason: RefusalReason,
+    message: String,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+impl Refusal {
+    /// The refusal `error` carries, if it is one.
+    pub fn of(error: &io::Error) -> Option<&Refusal> {
+        error.get_ref()?.downcast_ref()
+    }
+}
+
+/// A typed refusal of kind `PermissionDenied`.
+fn refusal(path: &Path, reason: RefusalReason, message: String) -> io::Error {
+    io::Error::new(
+        ErrorKind::PermissionDenied,
+        Refusal {
+            path: path.to_path_buf(),
+            reason,
+            message,
+        },
+    )
+}
+
+/// `denied` for a check that does not know the path: typed, with the path added by whoever wraps it (`refused`).
+fn denied_as(reason: RefusalReason, why: &str) -> io::Error {
+    refusal(Path::new(""), reason, why.to_string())
+}
+
+/// What `refused` is given as its reason: an error from a check (its refusal's reason, else `Other`) or a phrase.
+trait Why: std::fmt::Display {
+    fn reason(&self) -> RefusalReason;
+}
+
+impl Why for io::Error {
+    fn reason(&self) -> RefusalReason {
+        Refusal::of(self).map_or(RefusalReason::Other, |refusal| refusal.reason)
+    }
+}
+
+impl Why for &str {
+    fn reason(&self) -> RefusalReason {
+        RefusalReason::Other
+    }
+}
+
 /// `path` refused as a private directory, saying why.
-fn refused(path: &Path, why: impl std::fmt::Display) -> io::Error {
-    denied(format!(
-        "unsafe private directory {}: {why}",
-        path.display()
-    ))
+fn refused(path: &Path, why: impl Why) -> io::Error {
+    let reason = why.reason();
+    refused_as(path, reason, why)
+}
+
+/// `path` refused as a private directory, for `reason`, saying why.
+fn refused_as(path: &Path, reason: RefusalReason, why: impl std::fmt::Display) -> io::Error {
+    refusal(
+        path,
+        reason,
+        format!("unsafe private directory {}: {why}", path.display()),
+    )
 }
 
 /// `path` refused as a private file, saying why.
@@ -2482,6 +2578,37 @@ mod tests {
         assert!(refused(Files::ensure_private_dir(&dir)));
         Files::shut_others_out(&dir);
         Files::ensure_private_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_refusal_says_why_and_where_without_its_message_being_read() {
+        let root = scratch();
+        let dir = root.path().join("data");
+        Files::ensure_private_dir(&dir).unwrap();
+        Files::let_others_read(&dir);
+        let error = Files::ensure_private_dir(&dir).unwrap_err();
+        let refusal = Refusal::of(&error).expect("a typed refusal");
+        assert_eq!(refusal.reason, RefusalReason::OpenToOthers);
+        assert_eq!(refusal.path, dir);
+        assert!(
+            error.to_string().contains("open to others"),
+            "the message text stays: {error}"
+        );
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        Files::shut_others_out(&dir);
+        let open = root.path().join("open");
+        let inside = open.join("data");
+        Files::ensure_private_dir(&inside).unwrap();
+        Files::let_others_change(&open);
+        let error = Files::ensure_private_dir(&inside).unwrap_err();
+        let refusal = Refusal::of(&error).expect("a typed refusal");
+        assert_eq!(refusal.reason, RefusalReason::OthersCanReplace);
+        assert_eq!(refusal.path, open);
+        assert!(error
+            .to_string()
+            .contains("others can replace what is in it"));
+        // A failure that is no refusal carries none.
+        assert!(Refusal::of(&io::Error::from(ErrorKind::NotFound)).is_none());
     }
 
     #[test]
