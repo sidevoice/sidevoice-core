@@ -10,7 +10,6 @@ pub(super) struct Conversations {
     open: HashMap<String, HashSet<(String, String)>>,
     completed: HashMap<(String, String), u64>,
     completed_order: VecDeque<(String, String)>,
-    empty_ends: VecDeque<(String, u64, String)>,
 }
 
 /// Process-local cap: retain every issued epoch for these conversations so a thread
@@ -83,22 +82,6 @@ impl Conversations {
     }
     pub(super) fn open_count(&self) -> usize {
         self.open.values().map(HashSet::len).sum()
-    }
-
-    pub(super) fn record_empty(&mut self, thread: &str, epoch: u64, session: &str) {
-        self.empty_ends
-            .push_back((thread.to_owned(), epoch, session.to_owned()));
-        while self.empty_ends.len() > 4096 {
-            self.empty_ends.pop_front();
-        }
-    }
-
-    pub(super) fn empty_after(&self, thread: &str, epoch: u64) -> Option<(u64, String)> {
-        self.empty_ends
-            .iter()
-            .filter(|(candidate, newer, _)| candidate == thread && *newer > epoch)
-            .min_by_key(|(_, newer, _)| *newer)
-            .map(|(_, newer, session)| (*newer, session.clone()))
     }
 }
 

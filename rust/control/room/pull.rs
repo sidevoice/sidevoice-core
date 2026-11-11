@@ -117,6 +117,7 @@ impl Inner {
             .filter(|row| held(row, bid) && ack_ids.contains(&row.message_id()))
             .map(|row| {
                 row.status = "read".into();
+                row.reason = None;
                 row.pull_claimed_by = None;
                 row.input_ref()
             })
@@ -148,9 +149,15 @@ impl Inner {
             .input_mut(thread)
             .any(|row| row.status == "sending");
         for row in self.journal.input_mut(thread).filter(|row| {
-            held(row, bid) || (row.status == "pending" && !row.expired(now) && !pushing)
+            held(row, bid)
+                || (matches!(row.status.as_str(), "pending" | "sending") && !row.expired(now))
         }) {
             page.count += 1;
+            // Being pushed, or behind one being pushed: counted, so the agent knows input is on its way, but not
+            // returned (the push may put it in the agent already, and nothing passes an earlier message).
+            if pushing && !held(row, bid) {
+                continue;
+            }
             if request.get && row.seq > request.after {
                 if page.messages.len() >= PULL_PAGE {
                     page.more = true;
@@ -170,6 +177,7 @@ impl Inner {
                     row.ever_exposed = true;
                     if row.status == "pending" {
                         row.status = "delivered".into();
+                        row.reason = None;
                         row.pull_claimed_by = Some(bid.to_owned());
                         claimed.push(row.input_ref());
                     }

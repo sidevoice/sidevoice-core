@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use super::support::BeginAtFocus;
 use super::support::{pull_room, report, say};
+use crate::control::room::unheard::opening_words;
 use crate::control::room::{ConnectorPeer, Continuation, Room};
 
 /// A room with one push binding on `thread`: the room, its binding and the connector's generation.
@@ -68,6 +69,11 @@ fn told(room: &Room, text: &str) -> Option<Value> {
     row.payload.as_ref().unwrap().get("unheard").cloned()
 }
 
+/// The first `chars` characters of `text`: what the block quotes of a cut reply.
+fn prefix(text: &str, chars: usize) -> String {
+    text.chars().take(chars).collect()
+}
+
 fn only<T>(items: Vec<T>) -> T {
     assert_eq!(items.len(), 1);
     items.into_iter().next().unwrap()
@@ -121,10 +127,11 @@ fn a_reply_spoken_over_is_cut_and_the_next_message_tells_the_agent() {
     assert_eq!(message["text"], "And the tests?");
     assert_eq!(message["unheard"]["count"], 1);
     assert_eq!(
-        message["unheard"]["replies"][0]["text"],
-        "The build is green."
+        message["unheard"]["from"],
+        opening_words("The build is green.")
     );
-    assert_eq!(message["unheard"]["replies"][0]["heard_chars"], 9);
+    assert_eq!(message["unheard"]["heard_up_to"], "The build");
+    assert!(message["unheard"].get("replies").is_none(), "no texts");
     // Told once: the next message carries nothing.
     say(&room, &sid, "Thanks.");
     assert_eq!(told(&room, "Thanks."), None);
@@ -144,13 +151,8 @@ fn replies_the_call_drops_for_a_newer_turn_are_never_played() {
     say(&room, &sid, "Wait, something else.");
     let message = only(deliveries(&room, "voice"));
     assert_eq!(message["unheard"]["count"], 2);
-    let texts: Vec<_> = message["unheard"]["replies"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| r["text"].clone())
-        .collect();
-    assert_eq!(texts, ["First.", "Second."]);
+    assert_eq!(message["unheard"]["from"], opening_words("First."));
+    assert!(message["unheard"].get("heard_up_to").is_none());
 }
 
 #[test]
@@ -173,20 +175,18 @@ fn a_reply_to_a_turn_the_person_already_followed_is_not_spoken() {
         ("text_only".into(), Some("newer_turn".into()))
     );
     confirm_not_heard(&room, &sid, "late");
-    let note = room
+    // A late receipt sends nothing on its own: the next message carries it.
+    assert!(room
         .inner
         .lock()
         .unwrap()
         .journal
         .input_mut("t")
-        .find(|row| row.role == "note")
-        .unwrap()
-        .payload
-        .clone()
-        .unwrap();
+        .all(|row| row.role != "note"));
+    say(&room, &sid, "And?");
     assert_eq!(
-        note["unheard"]["replies"][0]["text"],
-        "An answer to the old question."
+        told(&room, "And?").unwrap()["from"],
+        opening_words("An answer to the old question.")
     );
 }
 
@@ -226,12 +226,11 @@ fn what_was_published_while_away_becomes_a_bounded_note_on_return() {
     assert_eq!(note["revision"], revision(&room, &sid));
     assert_eq!(note["message_id"], note_id.as_str());
     assert_eq!(note["unheard"]["count"], 5);
-    let replies = note["unheard"]["replies"].as_array().unwrap();
-    assert_eq!(replies.len(), 5);
-    assert!(replies[0]["text"].as_str().unwrap().starts_with('0'));
-    assert!(replies
-        .iter()
-        .all(|r| r["text"].as_str().unwrap().chars().count() == 351));
+    assert_eq!(note["unheard"]["from"], opening_words(&format!("0{long}")));
+    assert!(
+        note["unheard"]["from"].as_str().unwrap().chars().count() <= 61,
+        "bounded"
+    );
     room.settle_delivery(
         &bid,
         &note_id,
@@ -295,7 +294,7 @@ fn a_reply_played_to_the_end_is_not_reported() {
     reply(&room, &sid, "t", "r1", "All good.", asked);
     report(&room, &sid, "r1", "playing");
     report(&room, &sid, "r1", "heard");
-    assert!(!room.inner.lock().unwrap().unheard.has("t"));
+    assert!(!room.inner.lock().unwrap().has_unheard("t"));
 }
 
 #[test]
@@ -317,10 +316,10 @@ fn how_far_a_cut_reply_was_heard_reaches_the_agent_when_known() {
     say(&room, &sid, "Stop.");
     let unheard = told(&room, "Stop.").unwrap();
     assert_eq!(
-        unheard["replies"][0]["text"],
-        "The build is green and deployed."
+        unheard["from"],
+        opening_words("The build is green and deployed.")
     );
-    assert_eq!(unheard["replies"][0]["heard_chars"], 12);
+    assert_eq!(unheard["heard_up_to"], "The build is");
 }
 
 #[test]
@@ -395,8 +394,8 @@ fn a_reply_cut_on_one_call_and_failed_on_another_is_told_as_cut_in_either_order(
         );
         say(&room, &a, "Go on.");
         assert_eq!(
-            told(&room, "Go on.").unwrap()["replies"][0]["heard_chars"],
-            20,
+            told(&room, "Go on.").unwrap()["heard_up_to"],
+            prefix("The build is green and deployed.", 20),
             "cut first: {cut_first}"
         );
     }
@@ -411,8 +410,8 @@ fn of_two_calls_that_cut_a_reply_the_furthest_heard_is_told_in_either_order() {
         cut(&room, &b, "r1", second);
         say(&room, &a, "Go on.");
         assert_eq!(
-            told(&room, "Go on.").unwrap()["replies"][0]["heard_chars"],
-            12,
+            told(&room, "Go on.").unwrap()["heard_up_to"],
+            prefix("The build is green and deployed.", 12),
             "{first:?} then {second:?}"
         );
     }
@@ -434,7 +433,7 @@ fn a_reply_played_through_on_one_call_is_heard_whatever_another_call_did() {
             ("playback_finished".into(), None),
             "heard first: {heard_first}"
         );
-        assert!(!room.inner.lock().unwrap().unheard.has("t"));
+        assert!(!room.inner.lock().unwrap().has_unheard("t"));
     }
 }
 
@@ -462,7 +461,8 @@ fn a_reply_that_cannot_be_handed_to_a_full_call_stays_unconfirmed() {
         ("interrupted".into(), Some("unheard".into()))
     );
     say(&room, &sid, "Anything?");
-    assert_eq!(told(&room, "Anything?"), None);
+    // Never confirmed heard, so not heard.
+    assert_eq!(told(&room, "Anything?").unwrap()["count"], 1);
     let history = room.history(Some("t"));
     assert_eq!(history["messages"][0]["hearing"], Value::Null);
     assert_eq!(history["messages"][0]["hearing_unconfirmed"], true);
@@ -482,10 +482,7 @@ fn how_far_a_reply_was_heard_cannot_pass_its_end_in_characters() {
     assert_eq!(status(&room, &sid, "r1").0, "playing", "nothing changed");
     cut(&room, &sid, "r1", Some(4));
     say(&room, &sid, "Again?");
-    assert_eq!(
-        told(&room, "Again?").unwrap()["replies"][0]["heard_chars"],
-        4
-    );
+    assert_eq!(told(&room, "Again?").unwrap()["heard_up_to"], "¿Qué");
 }
 
 #[test]
@@ -608,9 +605,9 @@ fn a_replay_heard_to_its_end_takes_the_reply_off_what_the_agent_is_told() {
         .unwrap();
     // Only started: still unheard.
     report(&room, &sid, "again", "playing");
-    assert!(room.inner.lock().unwrap().unheard.has("t"));
+    assert!(room.inner.lock().unwrap().has_unheard("t"));
     report(&room, &sid, "again", "heard");
-    assert!(!room.inner.lock().unwrap().unheard.has("t"));
+    assert!(!room.inner.lock().unwrap().has_unheard("t"));
     say(&room, &sid, "Thanks.");
     assert_eq!(told(&room, "Thanks."), None);
     // Its history row keeps how it first played.
@@ -691,8 +688,8 @@ fn a_new_turn_withdraws_the_replies_sent_before_it_that_have_not_started() {
     )
     .unwrap();
     assert_eq!(
-        told(&room, "Go on.").unwrap()["replies"][0]["text"],
-        "Not started yet."
+        told(&room, "Go on.").unwrap()["from"],
+        opening_words("Not started yet.")
     );
 }
 
@@ -798,7 +795,7 @@ fn a_reply_the_app_held_across_a_lost_session_is_confirmed_by_the_same_devices_n
     room.playback(&second, "r", "heard", None, None, &json!({}))
         .unwrap();
     assert_eq!(room.history(Some("t"))["messages"][0]["hearing"], "heard");
-    assert!(!room.inner.lock().unwrap().unheard.has("t"));
+    assert!(!room.inner.lock().unwrap().has_unheard("t"));
 }
 
 #[test]
@@ -813,7 +810,7 @@ fn a_miss_confirmed_by_the_new_session_of_the_same_device_is_told_on_return() {
         room.history(Some("t"))["messages"][0]["hearing"],
         "not_heard"
     );
-    assert!(room.inner.lock().unwrap().unheard.has("t"));
+    assert!(room.inner.lock().unwrap().has_unheard("t"));
 }
 
 #[test]
@@ -842,4 +839,51 @@ fn confirm_not_heard_of(room: &Room, sid: &str, publisher: &str, uid: &str) {
         None,
     )
     .unwrap();
+}
+
+#[test]
+fn from_the_first_reply_not_heard_in_full_every_later_one_counts_and_it_is_told_once() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    let asked = revision(&room, &sid);
+    // Heard before anything was missed: not counted.
+    reply(&room, &sid, "t", "r0", "All good so far.", asked);
+    report(&room, &sid, "r0", "playing");
+    report(&room, &sid, "r0", "heard");
+    // Cut ten characters in, then one heard in full and one never confirmed: all three count.
+    reply(
+        &room,
+        &sid,
+        "t",
+        "r1",
+        "The deploy failed on step two.",
+        asked,
+    );
+    report(&room, &sid, "r1", "playing");
+    cut(&room, &sid, "r1", Some(10));
+    reply(&room, &sid, "t", "r2", "I retried it.", asked);
+    report(&room, &sid, "r2", "playing");
+    report(&room, &sid, "r2", "heard");
+    reply(&room, &sid, "t", "r3", "It passed.", asked);
+    say(&room, &sid, "What happened?");
+    let block = told(&room, "What happened?").unwrap();
+    assert_eq!(
+        block,
+        json!({"count":3,"from":opening_words("The deploy failed on step two."),
+            "heard_up_to":"The deploy","history_id":format!("{sid}:voice:r1")})
+    );
+    let note = room
+        .inner
+        .lock()
+        .unwrap()
+        .journal
+        .find_input("What happened?")
+        .unwrap()
+        .payload
+        .clone()
+        .unwrap();
+    assert_eq!(note["notice"]["kind"], "reply_not_heard");
+    // Told once: the next words carry nothing about those replies.
+    say(&room, &sid, "Thanks.");
+    assert_eq!(told(&room, "Thanks."), None);
 }

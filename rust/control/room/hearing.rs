@@ -24,9 +24,6 @@ impl Room {
             .find(history_id)
             .filter(|row| row.role == "assistant")
             .ok_or_else(stale)?;
-        let thread = row.thread.clone();
-        let session = row.session.clone();
-        let epoch = row.epoch;
         let length = row.text.chars().count() as u64;
         // A reply sent to an earlier call of this device is heard by the same person in the same app call: this
         // call's report stands for it, so the earlier call's part is not waited for forever.
@@ -92,14 +89,13 @@ impl Room {
             } else {
                 row.heard_chars = None;
                 row.hearing = None;
-                inner.reconcile_unclaimed(&thread);
                 return Ok(());
             }
             .to_owned(),
         );
         row.heard_chars = Some(if row.globally_heard { length } else { maximum });
+        // What the agent learns of it comes later, in one block (`unheard.rs`): a receipt sends nothing on its own.
         if row.globally_heard {
-            inner.unheard.update(&thread, history_id, false, None);
             let listeners: Vec<String> = inner
                 .utterances
                 .get(original)
@@ -112,42 +108,6 @@ impl Room {
                 inner.withdraw(&listener, "heard_elsewhere", |record, (_, status)| {
                     record.row_id == history_id && status == "queued"
                 });
-            }
-        } else {
-            inner.track_unheard(history_id);
-        }
-        inner.reconcile_unclaimed(&thread);
-        // With nobody in the call, what was missed waits for the person: telling the agent now
-        // only invites a reply into the void. Their return sends it as one `user_returned` note.
-        if !inner.conversations.is_open(&thread) && inner.browsers.listener_on(&thread).is_some() {
-            let message = inner.journal.newer_spoken_message(&thread, epoch);
-            let empty = inner.conversations.empty_after(&thread, epoch);
-            match (message, empty) {
-                (Some((word_epoch, message_id)), Some((empty_epoch, _)))
-                    if word_epoch <= empty_epoch =>
-                {
-                    inner.flush_all_unheard_notes(
-                        &thread,
-                        &session,
-                        "reply_not_heard",
-                        Some(&message_id),
-                    );
-                }
-                (_, Some((_, empty_session))) => {
-                    inner.flush_all_unheard_notes(&thread, &empty_session, "reply_not_heard", None);
-                }
-                (Some((_, message_id)), None) => {
-                    inner.flush_all_unheard_notes(
-                        &thread,
-                        &session,
-                        "reply_not_heard",
-                        Some(&message_id),
-                    );
-                }
-                (None, None) if inner.conversations.epoch(&thread) > epoch => {
-                    inner.flush_all_unheard_notes(&thread, &session, "reply_not_heard", None);
-                }
-                (None, None) => {}
             }
         }
         Ok(())

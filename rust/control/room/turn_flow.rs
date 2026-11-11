@@ -53,13 +53,7 @@ impl Inner {
         };
         // Keep a retryable refusal from consuming the turn or its captured destination.
         if let Some(text) = text.filter(|_| !open.cancelled && open.thread_id.is_some()) {
-            self.room_for_bytes_with_turn_credit(
-                text.len()
-                    + self
-                        .unheard
-                        .next_batch_bytes(open.thread_id.as_deref().unwrap_or(""), &self.journal),
-                1,
-            )?;
+            self.room_for_bytes_with_turn_credit(text.len() + super::unheard::BLOCK_BYTES, 1)?;
         }
         // Nonempty merged text already contains earlier words; only empty endings transfer.
         let effective = if text.is_none() {

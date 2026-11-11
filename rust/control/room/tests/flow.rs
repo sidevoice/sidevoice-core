@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 
 use super::support::pull_room;
 use super::support::BeginAtFocus;
+use crate::control::room::unheard::opening_words;
 use crate::control::room::{Continuation, Room};
 
 struct Case {
@@ -155,7 +156,7 @@ fn text_only_reply_can_be_acknowledged_as_read_or_not_heard() {
 }
 
 #[test]
-fn unconfirmed_history_is_bounded_without_fabricating_not_heard_evidence() {
+fn unconfirmed_history_is_bounded_and_counts_as_not_heard_without_a_note() {
     let c = Case::new(true);
     {
         let mut inner = c.room.inner.lock().unwrap();
@@ -176,50 +177,10 @@ fn unconfirmed_history_is_bounded_without_fabricating_not_heard_evidence() {
         .room
         .history_resolving(Some("t"), std::slice::from_ref(&old_id));
     assert_eq!(resolved["missing_ids"], json!([old_id]));
-    assert!(!c.room.inner.lock().unwrap().unheard.has("t"));
+    // Never confirmed heard: not heard. Nothing is sent for it on its own.
+    assert!(c.room.inner.lock().unwrap().has_unheard("t"));
     assert!(c.notes().is_empty());
     assert_eq!(c.publish("fresh", 0, "Fresh answer")["status"], "queued");
-}
-
-#[test]
-fn semantic_hearing_uses_cross_device_max_and_monotonic_corrections() {
-    let c = Case::new(true);
-    let (sender, _events) = mpsc::channel(64);
-    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
-    c.room.select(&other, "t").unwrap();
-    c.publish("r", 0, "é🐙ab");
-    let id = format!("{}:voice:r", c.sid);
-    c.hearing("r", "not_heard", None);
-    c.room
-        .reply_hearing(&other, &id, "r", "not_heard", None)
-        .unwrap();
-    c.say("next", Some("Wait"));
-    let original = c.pull()[0].clone();
-    let reply = &original["unheard"]["replies"][0];
-    assert_eq!(reply["fate"], "not_heard");
-    assert_eq!(reply["heard_chars"], 0);
-    assert!(reply.get("reason").is_none());
-    assert!(reply.get("cut").is_none());
-    c.room
-        .reply_hearing(&other, &id, "r", "partial", Some(2))
-        .unwrap();
-    let first = c.pull();
-    assert_eq!(first[0], original);
-    assert_eq!(first[1]["notice"]["heard"][0]["fate"], "partial");
-    assert_eq!(first[1]["notice"]["heard"][0]["heard_chars"], 2);
-    c.hearing("r", "partial", Some(1));
-    assert_eq!(c.pull().len(), 2, "a smaller prefix adds no correction");
-    c.room
-        .reply_hearing(&other, &id, "r", "heard", None)
-        .unwrap();
-    let final_messages = c.pull();
-    assert_eq!(final_messages[2]["notice"]["heard"][0]["fate"], "heard");
-    assert_eq!(final_messages[2]["notice"]["heard"][0]["heard_chars"], 4);
-    c.hearing("r", "not_heard", None);
-    assert_eq!(c.pull().len(), 3, "late weaker evidence cannot regress");
-    let row = &c.room.history(Some("t"))["messages"][0];
-    assert_eq!(row["hearing"], "heard");
-    assert_eq!(row["heard_chars"], 4);
 }
 
 #[test]
@@ -348,7 +309,8 @@ fn h6_zero_partial_is_invalid_before_and_after_not_heard_exposure() {
     );
     c.say("turn", Some("Wait"));
     let before = c.input("Wait");
-    assert_eq!(before["unheard"]["replies"][0]["fate"], "not_heard");
+    assert_eq!(before["unheard"]["count"], 1);
+    assert!(before["unheard"].get("heard_up_to").is_none());
     assert_eq!(
         c.room
             .reply_hearing(&c.sid, &history_id, "r", "partial", Some(0))
@@ -358,7 +320,7 @@ fn h6_zero_partial_is_invalid_before_and_after_not_heard_exposure() {
     );
     let exposed = c.pull();
     assert_eq!(exposed.len(), 1);
-    assert_eq!(exposed[0]["unheard"]["replies"][0]["fate"], "not_heard");
+    assert_eq!(exposed[0]["unheard"], before["unheard"]);
     assert_eq!(
         c.room
             .reply_hearing(&c.sid, &history_id, "r", "partial", Some(0))
@@ -442,132 +404,6 @@ fn f1_recovery_returns_original_saved_or_refused_disposition() {
     );
 }
 
-fn missed_note_with_late_other_device(pull: bool) -> (Case, String) {
-    let c = Case::new(pull);
-    let (sender, _events) = mpsc::channel(64);
-    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
-    c.room.select(&other, "t").unwrap();
-    c.publish("r", 0, "Missed answer");
-    c.hearing("r", "not_heard", None);
-    c.room
-        .reply_hearing(
-            &other,
-            &format!("{}:voice:r", c.sid),
-            "r",
-            "not_heard",
-            None,
-        )
-        .unwrap();
-    c.room.park(&c.sid, true);
-    c.room.park(&other, true);
-    c.room.resume(&c.sid, &[]);
-    c.room
-        .inner
-        .lock()
-        .unwrap()
-        .unheard
-        .note_mut("t")
-        .unwrap()
-        .due = 0;
-    (c, other)
-}
-
-#[test]
-fn f4_lost_push_ack_keeps_exposed_notice_frozen_and_sends_hearing_correction() {
-    let (c, other) = missed_note_with_late_other_device(false);
-    let first = c.room.pending_delivery();
-    assert_eq!(first.len(), 1);
-    let (bid, rid, peer, offered) = &first[0];
-    let first_id = offered["message_id"].clone();
-    let first_payload = c.notes()[0].clone();
-    c.room
-        .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"failed"})));
-    assert_eq!(
-        c.room
-            .inner
-            .lock()
-            .unwrap()
-            .journal
-            .find(rid)
-            .unwrap()
-            .status,
-        "pending"
-    );
-    c.room
-        .playback(&other, "r", "heard", None, None, &Value::Null)
-        .unwrap();
-    let notes = c.notes();
-    assert_eq!(notes[0], first_payload);
-    assert_eq!(notes[1]["notice"]["kind"], "reply_heard");
-    assert_eq!(notes[1]["notice"]["corrects_message_id"], first_id);
-    assert_eq!(notes[1]["notice"]["heard"][0]["fate"], "heard");
-    {
-        let mut inner = c.room.inner.lock().unwrap();
-        inner.journal.find_mut(rid).unwrap().next_attempt = 0;
-    }
-    let retry = c.room.pending_delivery();
-    assert_eq!(retry[0].3["message_id"], first_id);
-    assert_eq!(retry[0].3["unheard"], offered["unheard"]);
-}
-
-#[test]
-fn f4_held_pull_claim_keeps_original_payload_and_corrects_partial_or_full() {
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../../docs/fixtures/conversation-flow.json"
-    ))
-    .unwrap();
-    assert_eq!(fixture["notice_correction"]["kind"], "reply_heard");
-    for outcome in ["partial", "heard"] {
-        let (c, other) = missed_note_with_late_other_device(true);
-        let first = c.pull();
-        assert_eq!(first.len(), 1);
-        let original = first[0].clone();
-        let original_payload = c.notes()[0].clone();
-        match outcome {
-            "partial" => c
-                .room
-                .playback(
-                    &other,
-                    "r",
-                    "interrupted",
-                    Some("user_interrupted"),
-                    Some(2),
-                    &Value::Null,
-                )
-                .unwrap(),
-            "heard" => c
-                .room
-                .playback(&other, "r", "heard", None, None, &Value::Null)
-                .unwrap(),
-            _ => unreachable!(),
-        }
-        assert_eq!(c.notes()[0], original_payload, "{outcome}");
-        let messages = c.pull();
-        assert_eq!(messages[0], original, "{outcome}");
-        let correction = messages
-            .iter()
-            .find(|m| m["notice"]["kind"] == "reply_heard")
-            .unwrap();
-        assert_eq!(
-            correction["notice"]["corrects_message_id"],
-            original["message_id"]
-        );
-        assert_eq!(correction["notice"]["heard"][0]["fate"], outcome);
-        if outcome == "partial" {
-            assert_eq!(correction["notice"]["heard"][0]["heard_chars"], 2);
-            c.room
-                .playback(&other, "r", "heard", None, None, &Value::Null)
-                .unwrap();
-            let after_full = c.pull();
-            assert!(after_full.iter().any(|m| {
-                m["notice"]["corrects_message_id"] == original["message_id"]
-                    && m["notice"]["heard"][0]["fate"] == "heard"
-            }));
-            assert_eq!(c.notes()[0], original_payload);
-        }
-    }
-}
-
 #[test]
 fn f2_original_reply_final_receipt_after_park_resume_updates_global_hearing() {
     let c = Case::new(true);
@@ -578,57 +414,6 @@ fn f2_original_reply_final_receipt_after_park_resume_updates_global_hearing() {
     let row = &c.room.history(Some("t"))["messages"][0];
     assert_eq!(row["globally_heard"], true);
     assert_eq!(row["heard_chars"], 14);
-}
-
-#[test]
-fn f2_manual_replay_late_semantic_receipts_after_park_resume_reconcile_original_and_notices() {
-    for (status, reason, extent, fate) in [
-        ("heard", None, None, "heard"),
-        ("interrupted", Some("user_interrupted"), Some(3), "partial"),
-    ] {
-        let c = Case::new(true);
-        c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
-        c.publish("original", 0, "Replay me");
-        c.hearing("original", "not_heard", None);
-        c.room.set_speech(&c.sid, true, None).unwrap();
-        c.room
-            .inner
-            .lock()
-            .unwrap()
-            .unheard
-            .note_mut("t")
-            .unwrap()
-            .due = 0;
-        let first = c.pull();
-        let prior = first[0]["message_id"].clone();
-        let history_id = c.room.history(Some("t"))["messages"][0]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        c.room.replay_one(&c.sid, &history_id, "manual").unwrap();
-        c.room.park(&c.sid, true);
-        c.room.resume(&c.sid, &[]);
-        assert!(c.room.inner.lock().unwrap().utterances.contains("manual"));
-        c.report("manual", status, reason, extent);
-        let row = &c.room.history(Some("t"))["messages"][0];
-        assert_eq!(row["globally_heard"], fate != "partial", "{fate}");
-        assert_eq!(
-            row["heard_chars"],
-            if fate == "partial" {
-                json!(3)
-            } else {
-                json!(9)
-            }
-        );
-        let messages = c.pull();
-        assert!(
-            messages.iter().any(|message| {
-                message["notice"]["corrects_message_id"] == prior
-                    && message["notice"]["heard"][0]["fate"] == fate
-            }),
-            "{fate}: {messages:?}"
-        );
-    }
 }
 
 #[test]
@@ -669,11 +454,9 @@ fn t01_playing_reply_cut_carries_full_unicode_evidence_with_the_words() {
     assert_eq!(c.say("turn", Some("Wait")), 1);
     let payload = c.input("Wait");
     assert_eq!(payload["notice"]["kind"], "reply_not_heard");
-    let reply = &payload["unheard"]["replies"][0];
-    assert_eq!(
-        (&reply["text"], &reply["heard_chars"], &reply["fate"]),
-        (&json!("é🐙 rest"), &json!(2), &json!("partial"))
-    );
+    assert_eq!(payload["unheard"]["count"], 1);
+    assert_eq!(payload["unheard"]["from"], "é🐙…");
+    assert_eq!(payload["unheard"]["heard_up_to"], "é🐙");
 }
 
 #[test]
@@ -694,18 +477,13 @@ fn t02a_accepted_before_start_is_withdrawn_and_attached_to_words() {
             Continuation::Standalone,
         )
         .unwrap();
-    assert_eq!(
-        c.input("Actually")["unheard"]["replies"][0]["fate"],
-        "not_heard"
-    );
-    assert!(c.input("Actually")["unheard"]["replies"][0]
-        .get("reason")
-        .is_none());
+    assert_eq!(c.input("Actually")["unheard"]["count"], 1);
+    assert!(c.input("Actually")["unheard"].get("heard_up_to").is_none());
     assert!(c.frames("voice-reply").is_empty());
 }
 
 #[test]
-fn t02b_accepted_before_start_with_empty_turn_queues_empty_notice() {
+fn t02b_accepted_before_start_with_empty_turn_tells_the_agent_nothing() {
     let c = Case::new(true);
     c.publish("r", 0, "Not played");
     c.room.begin_at_focus(&c.sid, "turn").unwrap();
@@ -713,12 +491,10 @@ fn t02b_accepted_before_start_with_empty_turn_queues_empty_notice() {
     c.room
         .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
         .unwrap();
-    let notes = c.notes();
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0]["text"], "");
-    assert_eq!(notes[0]["notice"]["kind"], "turn_empty");
-    assert_eq!(notes[0]["unheard"]["replies"][0]["text"], "Not played");
-    assert!(c.pull().iter().any(|message| message["channel"] == "note"));
+    // A turn that only cut a reply is no message: the agent is told nothing until the person's next words.
+    assert!(c.notes().is_empty());
+    c.say("words", Some("Go on"));
+    assert_eq!(c.input("Go on")["unheard"]["from"], "Not…");
 }
 
 #[test]
@@ -762,22 +538,6 @@ fn t02d_refusal_with_no_words_queues_the_said_nothing_instruction() {
 }
 
 #[test]
-fn t03_late_old_epoch_reply_stays_written_and_notifies_without_another_turn() {
-    let mut c = Case::new(false);
-    c.say("new", Some("New question"));
-    let answer = c.publish("late", 0, "Old answer");
-    assert_eq!(answer["status"], "text_only");
-    assert!(answer.get("reason").is_none());
-    assert_eq!(
-        c.room.history(Some("t"))["messages"][1]["audio_reason"],
-        "newer_turn"
-    );
-    assert!(c.frames("voice-reply").is_empty());
-    c.hearing("late", "not_heard", None);
-    assert_eq!(c.notes()[0]["unheard"]["replies"][0]["text"], "Old answer");
-}
-
-#[test]
 fn t05_checkpoint_interruption_carries_its_cut_extent() {
     let mut c = Case::new(false);
     for id in ["ack", "checkpoint", "result"] {
@@ -799,8 +559,8 @@ fn t05_checkpoint_interruption_carries_its_cut_extent() {
     );
     c.say("next", Some("Stop there"));
     assert_eq!(
-        c.input("Stop there")["unheard"]["replies"][0]["utterance_id"],
-        "checkpoint"
+        c.input("Stop there")["unheard"]["from"],
+        opening_words("checkpoint")
     );
 }
 
@@ -927,7 +687,10 @@ fn t06d_return_with_misses_creates_one_notice_after_grace_for_pull() {
     assert_eq!(first.len(), 1);
     assert_eq!(first[0]["channel"], "note");
     assert_eq!(first[0]["notice"]["kind"], "user_returned");
-    assert_eq!(first[0]["unheard"]["replies"][0]["text"], "A missed update");
+    assert_eq!(
+        first[0]["unheard"]["from"],
+        opening_words("A missed update")
+    );
     assert_eq!(c.pull()[0]["message_id"], first[0]["message_id"]);
     c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
     c.room.set_speech(&c.sid, true, None).unwrap();
@@ -951,8 +714,8 @@ fn t06f_misses_while_away_wait_for_the_return_even_after_a_late_old_epoch_receip
     c.room.set_speech(&c.sid, true, None).unwrap();
     c.say("words", Some("Last words"));
     assert_eq!(
-        c.input("Last words")["unheard"]["replies"][0]["text"],
-        "Said before the last words"
+        c.input("Last words")["unheard"]["from"],
+        opening_words("Said before the last words")
     );
     c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
     assert_eq!(
@@ -994,8 +757,8 @@ fn t06f_misses_while_away_wait_for_the_return_even_after_a_late_old_epoch_receip
     assert_eq!(notes[0]["session_id"], c.sid.as_str());
     assert_eq!(notes[0]["unheard"]["count"], 1);
     assert_eq!(
-        notes[0]["unheard"]["replies"][0]["text"],
-        "Missed while away"
+        notes[0]["unheard"]["from"],
+        opening_words("Missed while away")
     );
 }
 
@@ -1033,7 +796,7 @@ fn t07_disconnect_and_resume_never_replays_a_received_but_unstarted_reply() {
 }
 
 #[test]
-fn t08_typed_context_during_an_open_turn_preserves_epoch_and_pending_evidence() {
+fn t08_typed_context_during_an_open_turn_keeps_the_epoch_and_takes_the_block() {
     let c = Case::new(false);
     c.publish("r", 0, "Unheard");
     let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
@@ -1047,8 +810,9 @@ fn t08_typed_context_during_an_open_turn_preserves_epoch_and_pending_evidence() 
         .send_text("Aside", &c.sid, "t", &binding, "typed-1")
         .unwrap();
     assert_eq!(typed["epoch"], turn.epoch);
-    assert!(c.input("Aside").get("unheard").is_none());
-    assert!(c.room.inner.lock().unwrap().unheard.has("t"));
+    // The next message, typed or spoken, carries the block; told once.
+    assert_eq!(c.input("Aside")["unheard"]["count"], 1);
+    assert!(!c.room.inner.lock().unwrap().has_unheard("t"));
     c.room
         .finish_turn(
             &c.sid,
@@ -1058,7 +822,7 @@ fn t08_typed_context_during_an_open_turn_preserves_epoch_and_pending_evidence() 
             Continuation::Standalone,
         )
         .unwrap();
-    assert_eq!(c.input("Spoken")["unheard"]["count"], 1);
+    assert!(c.input("Spoken").get("unheard").is_none());
 }
 
 #[test]
@@ -1304,23 +1068,6 @@ fn t16_unacked_note_survives_pull_binding_replacement_with_the_same_id() {
 }
 
 #[test]
-fn t02a_late_receipt_after_the_spoken_message_becomes_a_correlated_followup() {
-    let c = Case::new(true);
-    c.publish("r", 0, "Late receipt");
-    c.say("new", Some("New words"));
-    assert!(c.input("New words").get("unheard").is_none());
-    c.report("r", "unplayed", Some("newer_turn"), None);
-    let notes = c.notes();
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0]["notice"]["kind"], "reply_not_heard");
-    assert_eq!(
-        notes[0]["notice"]["related_message_id"],
-        c.input("New words")["message_id"]
-    );
-    assert_eq!(c.pull()[1]["channel"], "note");
-}
-
-#[test]
 fn t06e_second_device_hearing_removes_the_first_devices_false_return_notice() {
     let c = Case::new(true);
     let (sender, _events) = mpsc::channel(64);
@@ -1367,72 +1114,6 @@ fn t11_one_devices_finish_does_not_close_another_devices_open_turn() {
         )
         .unwrap();
     assert_eq!((first.epoch, other.epoch), (1, 2));
-}
-
-#[test]
-fn t16_full_evidence_is_batched_eight_at_a_time_without_truncating_replies() {
-    let c = Case::new(true);
-    c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
-    for n in 0..9 {
-        let text = format!("{n}{}TAIL", "é".repeat(300));
-        assert_eq!(c.publish(&format!("r{n}"), 0, &text)["status"], "text_only");
-        c.hearing(&format!("r{n}"), "not_heard", None);
-    }
-    c.room.set_speech(&c.sid, true, None).unwrap();
-    c.room
-        .inner
-        .lock()
-        .unwrap()
-        .unheard
-        .note_mut("t")
-        .unwrap()
-        .due = 0;
-    let messages = c.pull();
-    assert_eq!(messages.len(), 2);
-    assert_eq!(
-        messages[0]["unheard"]["replies"].as_array().unwrap().len(),
-        8
-    );
-    assert_eq!(
-        messages[1]["unheard"]["replies"].as_array().unwrap().len(),
-        1
-    );
-    assert!(messages[0]["unheard"]["replies"][0]["text"]
-        .as_str()
-        .unwrap()
-        .ends_with("TAIL"));
-    assert!(messages[1]["unheard"]["replies"][0]["text"]
-        .as_str()
-        .unwrap()
-        .ends_with("TAIL"));
-}
-
-#[test]
-fn t16_evidence_batches_keep_publication_order_when_receipts_arrive_backwards() {
-    let c = Case::new(true);
-    for n in 0..9 {
-        assert_eq!(c.publish(&format!("r{n}"), 0, "Reply")["status"], "queued");
-    }
-    for n in (0..9).rev() {
-        c.report(&format!("r{n}"), "failed", None, None);
-    }
-    c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
-    c.room.set_speech(&c.sid, true, None).unwrap();
-    c.room
-        .inner
-        .lock()
-        .unwrap()
-        .unheard
-        .note_mut("t")
-        .unwrap()
-        .due = 0;
-    let ids: Vec<String> = c
-        .pull()
-        .iter()
-        .flat_map(|message| message["unheard"]["replies"].as_array().unwrap())
-        .map(|reply| reply["utterance_id"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(ids, (0..9).map(|n| format!("r{n}")).collect::<Vec<_>>());
 }
 
 #[test]
@@ -1510,19 +1191,6 @@ fn review_new_epoch_does_not_withdraw_other_conversation() {
     assert!(
         c.frames("voice-reply-withdrawn").is_empty(),
         "A's epoch must not withdraw B's reply"
-    );
-}
-
-#[test]
-fn review_late_receipt_after_empty_turn_queues_notice() {
-    let c = Case::new(true);
-    c.publish("r", 0, "Never played");
-    c.say("empty", None);
-    c.report("r", "unplayed", Some("newer_turn"), None);
-    assert_eq!(
-        c.pull().len(),
-        1,
-        "late evidence after empty turn must be delivered"
     );
 }
 
@@ -1781,31 +1449,6 @@ fn review_cancelled_turn_cannot_return_as_offline_speech() {
 }
 
 #[test]
-fn review_unclaimed_return_note_is_reconciled_when_other_device_heard() {
-    let c = Case::new(true);
-    let (sender, _events) = mpsc::channel(64);
-    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
-    c.room.select(&other, "t").unwrap();
-    c.publish("r", 0, "Heard elsewhere before notice delivery");
-    c.room.park(&c.sid, true);
-    c.room.park(&other, true);
-    c.room.resume(&c.sid, &[]);
-    {
-        let mut inner = c.room.inner.lock().unwrap();
-        inner.unheard.note_mut("t").unwrap().due = 0;
-        inner.materialize_due_notes();
-    }
-    c.room.resume(&other, &[]);
-    c.room
-        .playback(&other, "r", "heard", None, None, &Value::Null)
-        .unwrap();
-    assert!(
-        c.pull().is_empty(),
-        "a queued but unclaimed notice must not say already heard content was missed"
-    );
-}
-
-#[test]
 fn review_return_notice_uses_remaining_eligible_device() {
     let c = Case::new(true);
     c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
@@ -1870,18 +1513,10 @@ fn review_push_retry_does_not_allow_later_notice_to_overtake() {
 }
 
 fn agent_view(message: &Value) -> Value {
-    let replies: Vec<Value> = message["unheard"]["replies"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|reply| {
-            json!({"utterance_id":reply["utterance_id"],"text":reply["text"],"fate":reply["fate"],
-            "heard_chars":reply["heard_chars"]})
-        })
-        .collect();
+    let unheard = &message["unheard"];
     json!({"channel":message["channel"],"text":message["text"],"epoch":message["epoch"],
         "kind":message["notice"]["kind"],"instruction":message["notice"]["instruction"],
-        "count":message["unheard"]["count"],"replies":replies})
+        "count":unheard["count"],"from":unheard["from"],"heard_up_to":unheard["heard_up_to"]})
 }
 
 fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
@@ -2030,16 +1665,10 @@ fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
 fn t16_push_pull_notice_parity_matrix() {
     for scenario in [
         "cut_words",
-        "cut_empty_early",
-        "cut_empty_late",
         "unplayed_words",
-        "unplayed_empty_early",
-        "unplayed_empty_late",
         "refused_empty",
         "return",
-        "stale",
         "full_evidence",
-        "heard_correction",
     ] {
         assert_eq!(
             matrix_messages(false, scenario),
@@ -2096,67 +1725,6 @@ fn review_bounded_epoch_contexts_and_deferred_empty_obligations() {
 }
 
 #[test]
-fn review_terminal_push_outcomes_salvage_attached_evidence() {
-    // `unknown` is the one terminal push outcome; `unsupported` keeps the message waiting (and its evidence with it).
-    let c = Case::new(false);
-    c.publish("r", 0, "Reply evidence");
-    c.report("r", "interrupted", Some("user_interrupted"), Some(2));
-    c.say("turn", Some("Wait"));
-    let first = c.room.pending_delivery();
-    assert_eq!(first.len(), 1);
-    let (bid, rid, peer, data) = &first[0];
-    assert_eq!(data["unheard"]["count"], 1);
-    c.room
-        .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"unknown"})));
-    let next = c.room.pending_delivery();
-    assert_eq!(next.len(), 1);
-    assert_eq!(next[0].3["channel"], "note");
-    assert_eq!(next[0].3["unheard"]["replies"][0]["text"], "Reply evidence");
-    assert_eq!(
-        next[0].3["notice"]["related_message_id"],
-        data["message_id"]
-    );
-}
-
-#[test]
-fn a_note_answered_unknown_is_given_up_after_a_few_attempts() {
-    let c = Case::new(false);
-    c.publish("r", 0, "Reply evidence");
-    c.report("r", "interrupted", Some("user_interrupted"), Some(2));
-    c.say("turn", Some("Wait"));
-    let (bid, rid, peer, _) = c.room.pending_delivery().remove(0);
-    c.room.settle_delivery(
-        &bid,
-        &rid,
-        &peer.generation,
-        Ok(json!({"status":"unknown"})),
-    );
-    let mut note_id = String::new();
-    let mut sent = 0;
-    loop {
-        for row in c.room.inner.lock().unwrap().journal.unresolved_input() {
-            row.next_attempt = 0;
-        }
-        let Some((bid, rid, peer, data)) = c.room.pending_delivery().pop() else {
-            break;
-        };
-        assert_eq!(data["channel"], "note");
-        sent += 1;
-        assert!(sent < 20, "note resent without bound");
-        note_id = rid.clone();
-        c.room.settle_delivery(
-            &bid,
-            &rid,
-            &peer.generation,
-            Ok(json!({"status":"unknown"})),
-        );
-    }
-    assert!(sent > 1);
-    let inner = c.room.inner.lock().unwrap();
-    assert_eq!(inner.journal.find(&note_id).unwrap().status, "unconfirmed");
-}
-
-#[test]
 fn review_channel_close_salvages_pending_attached_evidence_for_next_binding() {
     let c = Case::new(true);
     c.publish("r", 0, "Reply evidence");
@@ -2184,162 +1752,9 @@ fn review_channel_close_salvages_pending_attached_evidence_for_next_binding() {
         original_id
     );
     assert_eq!(
-        messages["messages"][0]["unheard"]["replies"][0]["text"],
-        "Reply evidence"
+        messages["messages"][0]["unheard"]["from"],
+        opening_words("Reply evidence")
     );
-}
-
-#[test]
-fn review_claimed_unheard_notice_gets_correlated_heard_correction() {
-    let c = Case::new(true);
-    let (sender, _events) = mpsc::channel(64);
-    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
-    c.room.select(&other, "t").unwrap();
-    c.publish("r", 0, "Heard on second device");
-    c.hearing("r", "not_heard", None);
-    c.room
-        .reply_hearing(
-            &other,
-            &format!("{}:voice:r", c.sid),
-            "r",
-            "not_heard",
-            None,
-        )
-        .unwrap();
-    c.room.park(&c.sid, true);
-    c.room.park(&other, true);
-    c.room.resume(&c.sid, &[]);
-    c.room
-        .inner
-        .lock()
-        .unwrap()
-        .unheard
-        .note_mut("t")
-        .unwrap()
-        .due = 0;
-    let first = c.pull();
-    assert_eq!(first.len(), 1);
-    let prior = first[0]["message_id"].clone();
-    c.room.resume(&other, &[]);
-    c.room
-        .playback(&other, "r", "heard", None, None, &Value::Null)
-        .unwrap();
-    let messages = c.pull();
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1]["notice"]["kind"], "reply_heard");
-    assert_eq!(messages[1]["notice"]["corrects_message_id"], prior);
-    assert_eq!(messages[1]["notice"]["heard"][0]["fate"], "heard");
-}
-
-#[test]
-fn r5_late_original_receipt_cannot_reverse_replay_partial_or_correction_in_push_or_pull() {
-    for pull in [false, true] {
-        for replay_elsewhere in [false, true] {
-            let c = Case::new(pull);
-            c.publish("original", 0, "abcdefghij");
-            c.report("original", "interrupted", Some("user_interrupted"), Some(2));
-            c.say("wait", Some("Wait"));
-            let initial = if pull {
-                c.pull()
-                    .into_iter()
-                    .find(|message| message["text"] == "Wait")
-                    .unwrap()
-            } else {
-                let work = c.room.pending_delivery();
-                assert_eq!(work.len(), 1);
-                let (bid, rid, peer, data) = &work[0];
-                c.room.settle_delivery(
-                    bid,
-                    rid,
-                    &peer.generation,
-                    Ok(json!({"status":"accepted"})),
-                );
-                data.clone()
-            };
-            assert_eq!(
-                initial["unheard"]["replies"][0]["heard_chars"], 2,
-                "pull={pull} elsewhere={replay_elsewhere}: {initial}"
-            );
-            let original_id = initial["message_id"].clone();
-            let history_id = c.room.history(Some("t"))["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|row| row["role"] == "assistant")
-                .unwrap()["id"]
-                .as_str()
-                .unwrap()
-                .to_owned();
-            let mut other_events = None;
-            let other = if replay_elsewhere {
-                let (sender, events) = mpsc::channel(64);
-                other_events = Some(events);
-                let sid = c.room.join("other".into(), "en".into(), sender).unwrap();
-                c.room.select(&sid, "t").unwrap();
-                sid
-            } else {
-                c.sid.clone()
-            };
-            let _keep_other_channel_open = &other_events;
-            c.room
-                .replay_one(&other, &history_id, "replay-eight")
-                .unwrap();
-            c.room
-                .playback(
-                    &other,
-                    "replay-eight",
-                    "interrupted",
-                    Some("user_interrupted"),
-                    Some(8),
-                    &Value::Null,
-                )
-                .unwrap();
-            let correction = c
-                .notes()
-                .into_iter()
-                .find(|note| note["notice"]["kind"] == "reply_heard")
-                .unwrap();
-            assert_eq!(correction["notice"]["corrects_message_id"], original_id);
-            assert_eq!(correction["notice"]["heard"][0]["fate"], "partial");
-            assert_eq!(correction["notice"]["heard"][0]["heard_chars"], 8);
-            c.report("original", "interrupted", Some("user_interrupted"), Some(4));
-            let rows = c.room.history(Some("t"));
-            let row = rows["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|row| row["id"] == history_id)
-                .unwrap();
-            assert_eq!(
-                row["heard_chars"], 8,
-                "pull={pull} elsewhere={replay_elsewhere}"
-            );
-            let corrections: Vec<_> = c
-                .notes()
-                .into_iter()
-                .filter(|note| note["notice"]["kind"] == "reply_heard")
-                .collect();
-            assert_eq!(
-                corrections.len(),
-                1,
-                "pull={pull} elsewhere={replay_elsewhere}"
-            );
-            assert_eq!(corrections[0]["notice"]["heard"][0]["heard_chars"], 8);
-            // A smaller fact must not contradict an already exposed correction.
-            {
-                let mut inner = c.room.inner.lock().unwrap();
-                inner.journal.find_mut(&history_id).unwrap().heard_chars = Some(4);
-                inner.reconcile_unclaimed("t");
-            }
-            assert_eq!(
-                c.notes()
-                    .iter()
-                    .filter(|note| note["notice"]["kind"] == "reply_heard")
-                    .count(),
-                1
-            );
-        }
-    }
 }
 
 #[test]
@@ -2541,76 +1956,35 @@ fn review_full_ack_after_local_stop_and_disconnect_orders_agree() {
 }
 
 #[test]
-fn review_replay_partial_extent_follows_words_or_empty_terminal() {
-    for words in [false, true] {
-        let c = Case::new(true);
-        c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
-        c.publish("r", 0, "Missed then replayed");
-        c.room.set_speech(&c.sid, true, None).unwrap();
-        let history_id = c.room.history(Some("t"))["messages"][0]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        c.room.replay_one(&c.sid, &history_id, "replay").unwrap();
-        c.room.begin_at_focus(&c.sid, "turn").unwrap();
-        c.report("replay", "interrupted", Some("user_interrupted"), Some(5));
-        c.room
-            .finish_turn(
-                &c.sid,
-                "turn",
-                words.then_some("Wait"),
-                &Value::Null,
-                Continuation::Standalone,
-            )
-            .unwrap();
-        let messages = c.pull();
-        let with_evidence = messages
-            .iter()
-            .find(|message| message["unheard"]["count"] == 1)
-            .unwrap();
-        assert_eq!(with_evidence["unheard"]["replies"][0]["heard_chars"], 5);
-        assert_eq!(
-            with_evidence["channel"],
-            if words { "voice" } else { "note" }
-        );
-    }
-}
-
-#[test]
-fn review_claimed_notice_gets_full_hearing_and_replay_corrections() {
-    for replay in [false, true] {
-        let c = Case::new(true);
-        c.publish("r", 0, "Reply");
-        c.hearing("r", "not_heard", None);
-        c.room.park(&c.sid, true);
-        c.room.resume(&c.sid, &[]);
-        c.room
-            .inner
-            .lock()
-            .unwrap()
-            .unheard
-            .note_mut("t")
-            .unwrap()
-            .due = 0;
-        let prior = c.pull()[0]["message_id"].clone();
-        if replay {
-            let history_id = c.room.history(Some("t"))["messages"][0]["id"]
-                .as_str()
-                .unwrap()
-                .to_owned();
-            c.room.replay_one(&c.sid, &history_id, "replay").unwrap();
-            c.report("replay", "heard", None, None);
-        } else {
-            c.hearing("r", "heard", None);
-        }
-        let messages = c.pull();
-        let correction = messages
-            .iter()
-            .find(|message| message["notice"]["kind"] == "reply_heard")
-            .unwrap();
-        assert_eq!(correction["notice"]["corrects_message_id"], prior);
-        assert_eq!(correction["notice"]["heard"][0]["fate"], "heard");
-    }
+fn review_replay_partial_extent_reaches_the_next_words() {
+    // A replay cut while the person speaks: how far it was heard goes with their words.
+    let c = Case::new(true);
+    c.room.set_speech(&c.sid, false, Some("voice_off")).unwrap();
+    c.publish("r", 0, "Missed then replayed");
+    c.room.set_speech(&c.sid, true, None).unwrap();
+    let history_id = c.room.history(Some("t"))["messages"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    c.room.replay_one(&c.sid, &history_id, "replay").unwrap();
+    c.room.begin_at_focus(&c.sid, "turn").unwrap();
+    c.report("replay", "interrupted", Some("user_interrupted"), Some(5));
+    c.room
+        .finish_turn(
+            &c.sid,
+            "turn",
+            Some("Wait"),
+            &Value::Null,
+            Continuation::Standalone,
+        )
+        .unwrap();
+    let messages = c.pull();
+    let with_evidence = messages
+        .iter()
+        .find(|message| message["unheard"]["count"] == 1)
+        .unwrap();
+    assert_eq!(with_evidence["unheard"]["heard_up_to"], "Misse");
+    assert_eq!(with_evidence["channel"], "voice");
 }
 
 #[test]
@@ -2668,45 +2042,6 @@ fn review_duplicate_cut_receipt_has_no_second_note_in_push_or_pull() {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["message_id"], original);
     }
-}
-
-#[test]
-fn review_offline_epoch_withdraws_second_device_and_correlates_its_late_receipt() {
-    let mut c = Case::new(true);
-    let (sender, mut other_events) = mpsc::channel(64);
-    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
-    c.room.select(&other, "t").unwrap();
-    c.publish("r", 0, "Old answer");
-    c.frames("voice-reply");
-    while other_events.try_recv().is_ok() {}
-    let focus = c.room.select(&c.sid, "t").unwrap();
-    let binding = focus["binding"]["binding_id"].as_str().unwrap();
-    c.room
-        .offline_input_captured(&c.sid, "offline", "Offline words", None, "t", binding)
-        .unwrap();
-    assert_eq!(c.frames("voice-reply-withdrawn").len(), 1);
-    assert!(std::iter::from_fn(|| other_events.try_recv().ok())
-        .any(|frame| frame["type"] == "voice-reply-withdrawn"));
-    c.room.park(&c.sid, true);
-    c.hearing("r", "not_heard", None);
-    c.room
-        .playback(
-            &other,
-            "r",
-            "unplayed",
-            Some("newer_turn"),
-            None,
-            &Value::Null,
-        )
-        .unwrap();
-    let messages = c.pull();
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1]["notice"]["kind"], "reply_not_heard");
-    assert_eq!(
-        messages[1]["notice"]["related_message_id"],
-        messages[0]["message_id"]
-    );
-    assert_eq!(messages[1]["unheard"]["replies"][0]["text"], "Old answer");
 }
 
 #[test]
@@ -2817,79 +2152,16 @@ fn h1_unrelated_late_receipt_keeps_untold_not_heard_context_in_words_and_note() 
                 .unwrap();
             let delivered = acknowledge_one_untold_input(&c, pull);
             assert_eq!(delivered["text"], if standalone_note { "" } else { "Wait" });
-            assert_eq!(delivered["unheard"]["count"], 1);
+            // From the first reply not heard in full, the later ones count too.
+            assert_eq!(delivered["unheard"]["count"], 2);
             assert_eq!(
-                delivered["unheard"]["replies"][0]["text"],
-                "A was not heard"
+                delivered["unheard"]["from"],
+                opening_words("A was not heard")
             );
-            assert_eq!(delivered["unheard"]["replies"][0]["fate"], "not_heard");
             assert_eq!(
                 c.room.history(Some("t"))["messages"][0]["hearing"],
                 "not_heard"
             );
-        }
-    }
-}
-
-#[test]
-fn h5_full_receipt_removes_miss_but_keeps_unexposed_empty_refusal_obligation() {
-    for pull in [false, true] {
-        let c = Case::new(pull);
-        let (sender, _events) = mpsc::channel(64);
-        let second = c.room.join("other".into(), "en".into(), sender).unwrap();
-        c.room.select(&second, "t").unwrap();
-        c.publish("a", 0, "Earlier reply");
-        c.hearing("a", "partial", Some(2));
-        let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
-        assert_eq!(
-            c.publish("refused", turn.epoch, "Await words")["reason"],
-            "user_speaking"
-        );
-        c.room
-            .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
-            .unwrap();
-        let before = c.notes();
-        assert_eq!(before.len(), 1);
-        assert_eq!(before[0]["notice"]["kind"], "turn_empty");
-        assert_eq!(before[0]["unheard"]["replies"][0]["fate"], "partial");
-        c.room
-            .reply_hearing(&second, &format!("{}:voice:a", c.sid), "a", "heard", None)
-            .unwrap();
-        let delivered = acknowledge_one_untold_input(&c, pull);
-        assert_eq!(delivered["message_id"], before[0]["message_id"]);
-        assert_eq!(delivered["notice"]["kind"], "turn_empty");
-        assert!(delivered.get("unheard").is_none());
-
-        let miss_only = Case::new(pull);
-        let (sender, _events) = mpsc::channel(64);
-        let second = miss_only
-            .room
-            .join("other".into(), "en".into(), sender)
-            .unwrap();
-        miss_only.room.select(&second, "t").unwrap();
-        miss_only.publish("a", 0, "Ordinary miss");
-        miss_only.hearing("a", "partial", Some(2));
-        miss_only.room.park(&miss_only.sid, true);
-        miss_only.room.resume(&miss_only.sid, &[]);
-        {
-            let mut inner = miss_only.room.inner.lock().unwrap();
-            inner.unheard.note_mut("t").unwrap().due = 0;
-            inner.materialize_due_notes();
-        }
-        miss_only
-            .room
-            .reply_hearing(
-                &second,
-                &format!("{}:voice:a", miss_only.sid),
-                "a",
-                "heard",
-                None,
-            )
-            .unwrap();
-        if pull {
-            assert!(miss_only.pull().is_empty());
-        } else {
-            assert!(miss_only.room.pending_delivery().is_empty());
         }
     }
 }
