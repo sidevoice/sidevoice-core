@@ -63,6 +63,12 @@ impl Call {
                 .await
                 .unwrap_or(false);
         if durable {
+            // What applying it made the room tell this call goes first: a page that reads the acknowledgement has
+            // already read its effects. Turn words withdraw older replies, and the page must never start one of them
+            // in between.
+            while let Ok(event) = self.output.try_recv() {
+                self.send(event).await;
+            }
             self.ack(&id).await;
         } else if first {
             self.state.seen.release(&self.device, &id);

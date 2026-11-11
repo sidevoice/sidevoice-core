@@ -317,6 +317,68 @@ async fn replies_go_out_as_text_and_the_history_shows_how_far_each_was_heard() {
     browser.close().await;
 }
 
+/// A spoken turn holds the older replies on the call it was spoken into; when it ends with words the room withdraws
+/// the ones still queued, and that withdrawal reaches the page before the acknowledgement of the words: a page that waits for the
+/// acknowledgement never starts a reply about to be withdrawn.
+#[tokio::test(flavor = "multi_thread")]
+async fn words_withdraw_the_held_replies_before_their_acknowledgement() {
+    let root = support::private_tempdir();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let (mut peer, binding) = connector_with_binding(&core, "frames", THREAD).await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    core.select(&token, &session, THREAD).await;
+    let revision = core.revision(&token, &session).await;
+    for (utterance, text) in [
+        ("sounding", "The reply sounding."),
+        ("waiting", "The reply waiting."),
+    ] {
+        let answer = publish(&mut peer, &binding, &session, revision, 0, utterance, text).await;
+        assert_eq!(answer["status"], "queued", "{answer}");
+        browser.frame("voice-reply").await;
+    }
+    browser.playback("sounding", "playing").await;
+
+    let turn = "words";
+    browser.start_turn(turn).await;
+    browser
+        .none_of(&["voice-reply-withdrawn"], Duration::from_millis(300))
+        .await;
+    let id = "words-final";
+    browser
+        .send(
+            "voice-user-turn",
+            json!({"session_id": session, "client_msg_id": id, "phase": "finished", "turn_id": turn,
+                "text": "Something new."}),
+        )
+        .await;
+    let mut withdrawn = Vec::new();
+    loop {
+        let event = browser
+            .next(STEP)
+            .await
+            .expect("the acknowledgement of the words");
+        if event["type"] == "voice-reply-withdrawn" {
+            assert_eq!(event["data"]["reason"], "newer_turn", "{event}");
+            withdrawn.extend(
+                event["data"]["utterance_ids"]
+                    .as_array()
+                    .expect("utterance ids")
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
+        if event["type"] == "voice-ack" && event["data"]["client_msg_id"] == id {
+            break;
+        }
+    }
+    // The one sounding is the voice module's to end (barge-in); what waited is withdrawn.
+    assert_eq!(withdrawn, ["waiting"]);
+    browser.close().await;
+}
+
 /// Refusals carry their stable key, for the page to word, and the core's English text.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_message_without_an_id_is_refused_with_its_key_and_english_text() {

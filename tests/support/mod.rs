@@ -674,6 +674,9 @@ pub struct Browser {
     /// Fail on an `error` frame met while waiting for any other kind, instead of passing over it.
     pub no_errors: bool,
     focus_lookup: Option<(u16, String)>,
+    /// Frames read while waiting for a message's acknowledgement, kept for the next reads: the room sends what
+    /// taking a message made it say ahead of acknowledging it.
+    ahead: std::collections::VecDeque<Value>,
 }
 
 impl Browser {
@@ -688,6 +691,7 @@ impl Browser {
             last_seq: 0,
             no_errors: false,
             focus_lookup: None,
+            ahead: std::collections::VecDeque::new(),
         }
     }
 
@@ -707,8 +711,24 @@ impl Browser {
         data["session_id"] = json!(self.session);
         data["client_msg_id"] = json!(id);
         self.send(kind, data).await;
-        self.wait("voice-ack", STEP, |ack| ack["client_msg_id"] == id.as_str())
-            .await;
+        let mut ahead = Vec::new();
+        loop {
+            let Some(event) = self.next(STEP).await else {
+                panic!(
+                    "no voice-ack for {kind} within {STEP:?} (closed: {:?}); seen: {:?}",
+                    self.close_code,
+                    ahead.iter().map(summary).collect::<Vec<_>>()
+                );
+            };
+            if event["type"] == "voice-ack" && event["data"]["client_msg_id"] == id.as_str() {
+                break;
+            }
+            ahead.push(event);
+        }
+        // Kept ahead of anything still unread, in the order they came.
+        for event in ahead.into_iter().rev() {
+            self.ahead.push_front(event);
+        }
         id
     }
 
@@ -787,6 +807,9 @@ impl Browser {
 
     /// The next event the core sends, or `None` once `within` passes or the socket closes.
     pub async fn next(&mut self, within: Duration) -> Option<Value> {
+        if let Some(event) = self.ahead.pop_front() {
+            return Some(event);
+        }
         let deadline = tokio::time::Instant::now() + within;
         loop {
             let message = tokio::time::timeout_at(deadline, self.rx.next())
