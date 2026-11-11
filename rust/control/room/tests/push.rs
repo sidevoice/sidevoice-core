@@ -144,6 +144,63 @@ fn the_garage_several_messages_wait_while_the_harness_is_unreachable_and_arrive_
 }
 
 #[test]
+fn a_conversation_that_cannot_take_injection_keeps_the_message_for_get_messages() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    let work = offered(&room);
+    let (bid, rid, generation, _) = &work[0];
+    // The harness has no way to put it in right now (no route, or the chat left its session); the conversation is
+    // still there.
+    room.settle_delivery(
+        bid,
+        rid,
+        generation,
+        Ok(json!({"status":"unsupported","detail":"t has no delivery route"})),
+    );
+    assert_eq!(
+        room.inner.lock().unwrap().journal.find(rid).unwrap().status,
+        "pending",
+        "not failed while its conversation exists"
+    );
+    // The agent can read it with get_messages meanwhile.
+    let fetched = room
+        .pull_input("connector", &json!({"binding_id":bid,"operation":"get"}))
+        .unwrap();
+    assert_eq!(fetched["messages"][0]["text"], "one");
+}
+
+#[test]
+fn a_message_answered_unsupported_is_offered_again_on_the_back_off() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    say(&room, &sid, "two");
+    let work = offered(&room);
+    room.settle_delivery(
+        &work[0].0,
+        &work[0].1,
+        &work[0].2,
+        Ok(json!({"status":"unsupported"})),
+    );
+    assert!(room.pending_delivery().is_empty(), "it waits its back-off");
+    due(&room);
+    let again = offered(&room);
+    assert_eq!(again.len(), 1);
+    assert_eq!(
+        again[0].3["text"], "one",
+        "the same message, and the later one waits behind it"
+    );
+    room.settle_delivery(
+        &again[0].0,
+        &again[0].1,
+        &again[0].2,
+        Ok(json!({"status":"accepted"})),
+    );
+    assert_eq!(offered(&room)[0].3["text"], "two");
+}
+
+#[test]
 fn the_retry_schedule_is_fast_at_first_and_then_every_fifteen_seconds() {
     let (directory, room, _) = pull_room(&["connector"]);
     let sid = garage(&directory, &room);
