@@ -1,12 +1,19 @@
 //! The person's input still waiting for its agent, kept across a restart of the core.
 //!
 //! The journal is in memory, and so is everything about a call; what the person said and the room has taken must not
-//! be lost with them. The rows of the person's input (and the notes that wait in the same order) that are `pending`, `sending`, or fetched by a pull and not yet
-//! acknowledged are written to `pending-input.json` in the same step that changes them (a message is taken, delivered,
-//! read, cancelled), before the page is told it was taken, and read back as `pending` rows, in the order they had, when
-//! the room loads. A message taken by a pull and not acknowledged before the restart is offered again, with the same
-//! `message_id`. Nothing else of the journal is kept: a row already delivered is the agent's, and a restart ends the
-//! calls, so there is no session to tell about them.
+//! be lost with them. The rows of the person's input (and the notes that wait in the same order) that have not been
+//! seen to reach their agent are written to `pending-input.json` in the same step that changes them (a message is taken,
+//! delivered, read, cancelled), before the page is told it was taken, and read back, in the order they had, when the room
+//! loads, each in its delivery phase (`push.rs`):
+//! - `pending` and `sending` come back `pending`: whether the agent took one being sent is not known, so it is offered
+//!   again with the same `message_id` (the connector never hands the agent an id twice);
+//! - `delivered` (the agent took it, its receipt is awaited) comes back `delivered`: it is only asked about again, never
+//!   offered;
+//! - `delivered` and fetched by a pull comes back claimed: the next fetch of its conversation returns it until it is
+//!   acknowledged, and it is never pushed.
+//!
+//! Nothing else of the journal is kept: a row already read is the agent's, and a restart ends the calls, so there is no
+//! session to tell about them.
 //!
 //! A record that cannot be written does not stop a message: it is delivered all the same (the disk failing must not
 //! silence the person), and the delivery pump writes what has changed and failed to be written before, every 250 ms, until
@@ -50,13 +57,18 @@ impl Inner {
         Ok(())
     }
 
-    /// The person's input still waiting for its agent, oldest first.
+    /// The person's input not yet seen to reach its agent, oldest first, each with its phase.
     fn pending_state(&self) -> Value {
         let rows: Vec<Value> = self
             .journal
-            .waiting_user_input()
+            .kept_input()
             .map(|row| {
-                json!({"id":row.id,"thread":row.thread,"role":row.role,"text":row.text,"name":row.name,"session":row.session,
+                let phase = if row.status == "delivered" {
+                    "delivered"
+                } else {
+                    "pending"
+                };
+                json!({"id":row.id,"phase":phase,"pull_claimed_by":row.pull_claimed_by,"thread":row.thread,"role":row.role,"text":row.text,"name":row.name,"session":row.session,
                 "revision":row.revision,"epoch":row.epoch,"turn_id":row.turn_id,"client_key":row.client_key,"time":row.time,
                 "offline":row.offline,"payload":row.payload,"queued_at":row.queued_at})
             })
@@ -82,7 +94,7 @@ impl Room {
             .is_ok()
     }
 
-    /// Puts back the input a previous run of the core was still holding, as `pending`, to be delivered again.
+    /// Puts back the input a previous run of the core was still holding, each in its phase (see the module).
     pub(super) fn restore_pending(&self) -> io::Result<()> {
         let state = match self.dir.read_json(FILE) {
             Ok(Some(state)) => state,
@@ -106,6 +118,14 @@ impl Room {
             if !inner.journal.can_append() || inner.journal.find(id).is_some() {
                 continue;
             }
+            // A message the agent took stays taken: only whether it has it is asked again. One fetched by a pull stays
+            // claimed, for whichever binding of its conversation fetches next (`transfer_claims`). Anything else, `sending`
+            // included, is offered again.
+            let delivered = saved["phase"].as_str() == Some("delivered");
+            let pull_claimed_by = saved["pull_claimed_by"]
+                .as_str()
+                .filter(|_| delivered)
+                .map(str::to_owned);
             inner
                 .conversations
                 .restore_epoch(thread, saved["epoch"].as_u64().unwrap_or(0));
@@ -133,7 +153,11 @@ impl Room {
                     }
                 }),
                 time: saved["time"].as_u64().unwrap_or(0),
-                status: "pending".into(),
+                status: if delivered { "delivered" } else { "pending" }.into(),
+                pull_claimed_by,
+                ever_exposed: delivered,
+                // Phase 2 asks again soon after a restart; phase 1 offers at once.
+                next_attempt: if delivered { seconds() + 1 } else { 0 },
                 offline: saved.get("offline").filter(|v| !v.is_null()).cloned(),
                 payload: Some(payload.clone()),
                 queued_at: saved["queued_at"].as_u64().unwrap_or_else(seconds),

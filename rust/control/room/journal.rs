@@ -62,7 +62,6 @@ pub(super) struct Row {
     pub(super) next_attempt: u64,
     pub(super) pull_claimed_by: Option<String>,
     pub(super) ever_exposed: bool,
-    pub(super) corrected_heard: HashMap<String, Value>,
     pub(super) notice_salvaged: bool,
 }
 impl Row {
@@ -183,14 +182,11 @@ impl Journal {
     pub(super) fn find_mut(&mut self, id: &str) -> Option<&mut Row> {
         self.rows.iter_mut().find(|r| r.id == id)
     }
-    pub(super) fn assistant_hearing_facts(&self, thread: &str) -> HashMap<String, Value> {
-        self.rows.iter().filter(|r| r.thread == thread && r.role == "assistant")
-            .filter_map(|r| {
-                let fate = r.hearing.as_deref()?;
-                let heard = r.heard_chars;
-                heard.map(|heard_chars| (r.id.clone(), json!({"utterance_id":r.id.rsplit_once(":voice:").map(|(_, id)| id).unwrap_or(""),
-                    "history_id":r.id,"fate":fate,"heard_chars":heard_chars})))
-            }).collect()
+    /// A thread's replies (the agent's rows), oldest first.
+    pub(super) fn replies<'a>(&'a self, thread: &'a str) -> impl Iterator<Item = &'a Row> {
+        self.rows
+            .iter()
+            .filter(move |row| row.role == "assistant" && row.thread == thread)
     }
     pub(super) fn unheard_summary(&self, thread: &str) -> Option<(usize, u64)> {
         let rows: Vec<_> = self
@@ -203,17 +199,6 @@ impl Journal {
             })
             .collect();
         Some((rows.len(), rows.first()?.time))
-    }
-    pub(super) fn newer_spoken_message(&self, thread: &str, epoch: u64) -> Option<(u64, String)> {
-        self.rows
-            .iter()
-            .find(|row| {
-                row.role == "user"
-                    && row.thread == thread
-                    && row.turn_id.is_some()
-                    && row.epoch > epoch
-            })
-            .map(|row| (row.epoch, row.message_id().to_owned()))
     }
     /// Whether every spoken turn after `epoch`, up to `current`, ended as a message that was never
     /// sent (expired or withdrawn). The agent cannot have seen those turns, so its reply to the
@@ -259,11 +244,26 @@ impl Journal {
     }
     /// The input (the person's words, and the notes that go in the same order) still waiting for its agent: pending,
     /// being sent, or fetched by a pull and not yet acknowledged; oldest first.
+    #[cfg(test)]
     pub(super) fn waiting_user_input(&self) -> impl Iterator<Item = &Row> {
         self.rows.iter().filter(|r| {
             r.is_input()
                 && (matches!(r.status.as_str(), "pending" | "sending")
                     || (r.status == "delivered" && r.pull_claimed_by.is_some()))
+        })
+    }
+    /// Input its agent took (`accepted`, phase 2 of `push.rs`) and has not been seen to have yet, oldest first. A message
+    /// fetched by a pull is not here: its acknowledgement is its receipt.
+    pub(super) fn awaiting_receipt(&mut self) -> impl Iterator<Item = &mut Row> {
+        self.rows
+            .iter_mut()
+            .filter(|r| r.is_input() && r.status == "delivered" && r.pull_claimed_by.is_none())
+    }
+    /// What a restart must not lose: the input still waiting (pending, being sent, or fetched and not acknowledged) and
+    /// the input awaiting its receipt, oldest first.
+    pub(super) fn kept_input(&self) -> impl Iterator<Item = &Row> {
+        self.rows.iter().filter(|r| {
+            r.is_input() && (matches!(r.status.as_str(), "pending" | "sending" | "delivered"))
         })
     }
     /// Unresolved push input in journal order, including rows waiting for their retry deadline.
@@ -307,6 +307,7 @@ impl Journal {
                 && !matches!(r.status.as_str(), "read" | "not_sent")
         })?;
         row.status = "read".into();
+        row.reason = None;
         row.pull_claimed_by = None;
         Some(row.input_ref())
     }
@@ -326,7 +327,6 @@ impl Inner {
     pub(super) fn append_row(&mut self, row: Row) {
         let dropped = self.journal.append(row);
         self.utterances.forget_rows(&dropped);
-        self.unheard.forget_rows(&dropped);
     }
 }
 

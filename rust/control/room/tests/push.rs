@@ -528,3 +528,226 @@ fn a_message_fetched_by_a_pull_holds_the_later_ones_from_a_push() {
         "\"two\" is not pushed before \"one\" is acknowledged"
     );
 }
+
+/// Makes every message awaiting its receipt due for a question now.
+fn ask_now(room: &crate::control::room::Room) {
+    let mut inner = room.inner.lock().unwrap();
+    for row in inner.journal.awaiting_receipt() {
+        row.next_attempt = 0;
+    }
+}
+
+fn status_of(room: &crate::control::room::Room, text: &str) -> String {
+    room.inner
+        .lock()
+        .unwrap()
+        .journal
+        .find_input(text)
+        .unwrap()
+        .status
+        .clone()
+}
+
+#[test]
+fn a_message_the_agent_took_is_asked_about_in_one_batch_until_received_and_never_offered_again() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    for words in ["one", "two"] {
+        say(&room, &sid, words);
+        let work = offered(&room);
+        assert_eq!(work.len(), 1);
+        room.settle_delivery(
+            &work[0].0,
+            &work[0].1,
+            &work[0].2,
+            Ok(json!({"status":"accepted"})),
+        );
+    }
+    assert_eq!(status_of(&room, "one"), "delivered");
+    ask_now(&room);
+    assert!(
+        room.pending_delivery().is_empty(),
+        "phase 2 never re-offers"
+    );
+    let questions = room.pending_receipts();
+    assert_eq!(questions.len(), 1, "one question per conversation");
+    let ids = questions[0].message_ids.clone();
+    assert_eq!(ids.len(), 2);
+    assert!(
+        room.pending_receipts().is_empty(),
+        "not asked again while the question waits"
+    );
+    // The agent has "one"; "two" is not known yet.
+    room.settle_receipts(
+        &questions[0].binding_id,
+        &questions[0].peer.generation,
+        &ids,
+        Ok(json!({"received":[ids[0]]})),
+    );
+    assert_eq!(status_of(&room, "one"), "read");
+    assert_eq!(status_of(&room, "two"), "delivered");
+    // A lost answer is recovered by the next question.
+    ask_now(&room);
+    let again = room.pending_receipts();
+    assert_eq!(again[0].message_ids, [ids[1].clone()]);
+    room.settle_receipts(
+        &again[0].binding_id,
+        &again[0].peer.generation,
+        &again[0].message_ids,
+        Err(crate::control::room::PeerError),
+    );
+    assert_eq!(status_of(&room, "two"), "delivered");
+    ask_now(&room);
+    let last = room.pending_receipts();
+    room.settle_receipts(
+        &last[0].binding_id,
+        &last[0].peer.generation,
+        &last[0].message_ids,
+        Ok(json!({"received":[ids[1]]})),
+    );
+    assert_eq!(status_of(&room, "two"), "read");
+    ask_now(&room);
+    assert!(room.pending_receipts().is_empty());
+}
+
+#[test]
+fn a_message_the_connector_has_no_record_of_is_offered_again() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    let work = offered(&room);
+    room.settle_delivery(
+        &work[0].0,
+        &work[0].1,
+        &work[0].2,
+        Ok(json!({"status":"accepted"})),
+    );
+    ask_now(&room);
+    let question = room.pending_receipts().remove(0);
+    room.settle_receipts(
+        &question.binding_id,
+        &question.peer.generation,
+        &question.message_ids,
+        Ok(json!({"received":[],"unknown":question.message_ids})),
+    );
+    let again = offered(&room);
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].3["message_id"], work[0].3["message_id"]);
+}
+
+#[test]
+fn a_delivery_answer_that_says_received_settles_both_phases_at_once() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    let work = offered(&room);
+    room.settle_delivery(
+        &work[0].0,
+        &work[0].1,
+        &work[0].2,
+        Ok(json!({"status":"accepted","received":true})),
+    );
+    assert_eq!(status_of(&room, "one"), "read");
+}
+
+#[test]
+fn an_older_connectors_unknown_is_handed_over_not_final() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    say(&room, &sid, "two");
+    let work = offered(&room);
+    room.settle_delivery(
+        &work[0].0,
+        &work[0].1,
+        &work[0].2,
+        Ok(json!({"status":"unknown"})),
+    );
+    assert_eq!(status_of(&room, "one"), "delivered");
+    assert_eq!(offered(&room)[0].3["text"], "two", "the next one follows");
+}
+
+#[test]
+fn a_restart_keeps_each_message_in_its_phase() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    for words in ["taken", "in flight", "waiting"] {
+        say(&room, &sid, words);
+    }
+    let work = offered(&room);
+    room.settle_delivery(
+        &work[0].0,
+        &work[0].1,
+        &work[0].2,
+        Ok(json!({"status":"accepted"})),
+    );
+    let in_flight = offered(&room);
+    assert_eq!(in_flight[0].3["text"], "in flight");
+    let reloaded = restarted(&directory, room);
+    assert_eq!(status_of(&reloaded, "taken"), "delivered");
+    assert_eq!(status_of(&reloaded, "in flight"), "pending");
+    // The one being sent is offered again (the connector never hands an id over twice); the taken one never is.
+    let again = offered(&reloaded);
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].3["text"], "in flight");
+    assert_eq!(again[0].3["message_id"], in_flight[0].3["message_id"]);
+    ask_now(&reloaded);
+    let question = reloaded.pending_receipts();
+    assert_eq!(question.len(), 1);
+    assert_eq!(
+        question[0].message_ids,
+        [work[0].3["message_id"].as_str().unwrap().to_owned()]
+    );
+}
+
+#[test]
+fn get_messages_counts_what_waits_behind_a_push_in_flight() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    say(&room, &sid, "two");
+    let work = offered(&room);
+    let fetched = room
+        .pull_input(
+            "connector",
+            &json!({"binding_id":work[0].0,"operation":"get"}),
+        )
+        .unwrap();
+    assert!(fetched["messages"].as_array().unwrap().is_empty());
+    assert_eq!(fetched["count"], 2, "on its way, not nothing");
+    assert_eq!(fetched["pending"], true);
+}
+
+#[test]
+fn why_an_offer_was_not_taken_is_shown_only_while_the_message_waits() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    let work = offered(&room);
+    room.settle_delivery(
+        &work[0].0,
+        &work[0].1,
+        &work[0].2,
+        Ok(json!({"status":"unsupported"})),
+    );
+    let reason = |room: &crate::control::room::Room| {
+        room.history(Some("t"))["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["text"] == "one")
+            .unwrap()["audio_reason"]
+            .clone()
+    };
+    assert_eq!(reason(&room), "unsupported");
+    room.pull_input(
+        "connector",
+        &json!({"binding_id":work[0].0,"operation":"get"}),
+    )
+    .unwrap();
+    assert_eq!(
+        reason(&room),
+        serde_json::Value::Null,
+        "fetched: no longer waiting"
+    );
+}

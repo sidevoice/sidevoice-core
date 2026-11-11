@@ -126,10 +126,7 @@ impl Room {
             inner.remember_refusal(uid, fingerprint, disposition.clone());
             return disposition;
         }
-        if inner
-            .room_for_bytes(text.len() + 2048 + inner.unheard.pending_bytes(&inner.journal))
-            .is_err()
-        {
+        if inner.room_for_bytes(text.len() + 2048).is_err() {
             let disposition = rejected("room.input_backlog_full");
             inner.remember_refusal(uid, fingerprint, disposition.clone());
             return disposition;

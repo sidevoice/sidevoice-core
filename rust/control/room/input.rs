@@ -178,8 +178,7 @@ impl Room {
             .bindings
             .newest_active(thread)
             .and_then(|binding| binding.title.clone());
-        inner
-            .room_for_bytes(text.len() + inner.unheard.next_batch_bytes(thread, &inner.journal))?;
+        inner.room_for_bytes(text.len() + super::unheard::BLOCK_BYTES)?;
         let browser = inner
             .browsers
             .get_mut(sid)
@@ -306,12 +305,7 @@ impl Inner {
     fn queue_input(&mut self, draft: InputDraft<'_>) -> Result<Value, RoomError> {
         self.room_for(draft.text)?;
         if draft.turn_id.is_some() {
-            self.room_for_bytes(
-                draft.text.len()
-                    + self
-                        .unheard
-                        .next_batch_bytes(draft.thread_id, &self.journal),
-            )?;
+            self.room_for_bytes(draft.text.len() + super::unheard::BLOCK_BYTES)?;
         }
         let InputDraft {
             row_id,
@@ -330,10 +324,10 @@ impl Inner {
         } = draft;
         let mut payload = json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
             "history_id":row_id,"revision":revision,"epoch":epoch,"channel":"voice","binding_id":binding_id,"title":title});
-        // Typed context does not consume a spoken turn's pending playback evidence.
+        // Only spoken words carry the not-heard block (and the return note); typed words leave it for them.
         if turn_id.is_some() {
             self.unheard.resolve_words(thread_id);
-            if let Some(unheard) = self.unheard.take(thread_id, &self.journal) {
+            if let Some(unheard) = self.take_unheard(thread_id, None) {
                 let kind = "reply_not_heard";
                 payload["notice"] =
                     json!({"kind":kind,"instruction":super::notices::instruction(kind)});
@@ -366,14 +360,6 @@ impl Inner {
         };
         let input = row.input_ref();
         self.append_row(row);
-        if turn_id.is_some() && self.unheard.has(thread_id) {
-            self.flush_all_unheard_notes(
-                thread_id,
-                session_id,
-                "reply_not_heard",
-                Some(message_id),
-            );
-        }
         self.mark_latency(
             session_id,
             thread_id,

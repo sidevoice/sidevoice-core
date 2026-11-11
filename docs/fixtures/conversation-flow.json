@@ -200,37 +200,20 @@
     "known_admission": "return original disposition",
     "known_refusal": "return original terminal refusal"
   },
-  "pending_reconciliation": {
-    "unrelated_full_receipt": {
-      "previously_queued_reply": {"fate": "not_heard", "heard_chars": 0, "text": "A was not heard"},
-      "after": {"fate": "not_heard", "heard_chars": 0, "text": "A was not heard"},
-      "meaning": "A later receipt for another reply cannot delete this untold context"
+  "unheard_block": {
+    "rule": "A reply counts as heard only after a reply-hearing heard from any device; from the first reply not heard in full, every later reply counts as not heard.",
+    "example": {
+      "count": 3,
+      "from": "The deploy failed on…",
+      "heard_up_to": "The deploy",
+      "history_id": "HISTORY_ID"
     },
-    "empty_turn_after_full_receipt": {
-      "before": {"notice": {"kind": "turn_empty"}, "unheard": {"count": 1}},
-      "after": {"notice": {"kind": "turn_empty"}},
-      "same_message_id": true,
-      "meaning": "Remove satisfied reply evidence but keep the no-words obligation"
-    },
-    "ordinary_miss_after_full_receipt": {"delivered": false}
-  },
-  "notice_correction": {
-    "kind": "reply_heard",
-    "corrects_message_id": "ORIGINAL_MESSAGE_ID",
-    "heard": [
-      {
-        "utterance_id": "REPLY_ID",
-        "history_id": "HISTORY_ID",
-        "fate": "partial",
-        "heard_chars": 2
-      }
+    "carries_reply_texts": false,
+    "goes_with": [
+      "the next spoken message (notice.kind reply_not_heard)",
+      "one user_returned note after five silent seconds back"
     ],
-    "original_message_id_and_payload_stay_unchanged_after_push_retry_or_pull_release": true,
-    "late_original_4_after_replay_8": {
-      "history_heard_chars": 8,
-      "additional_correction": false
-    },
-    "after_first_exposure_same_reply_only_corrects_prior_envelope": true
+    "late_receipt_sends_a_note": false
   },
   "turn_start": {
     "type": "voice-user-turn",
@@ -393,8 +376,8 @@
       "heard_chars": null,
       "hearing_unconfirmed": true
     },
-    "agent_evidence": null,
-    "meaning": "No terminal semantic receipt; no confirmed not_heard fact",
-    "bounded_eviction": "stale identity after journal eviction; never converted to not_heard"
+    "agent_evidence": "counted as not heard in the next unheard block",
+    "meaning": "No terminal semantic receipt: history says unconfirmed; the agent is told it was not heard",
+    "bounded_eviction": "stale identity after journal eviction"
   }
 }

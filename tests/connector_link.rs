@@ -781,6 +781,45 @@ async fn a_delivery_answer_with_keys_the_core_does_not_read_still_settles_it() {
     assert_eq!(browser.receipt("delivered").await["history_id"], sent["id"]);
 }
 
+/// After `accepted`, the core asks `input.received` until the connector names the message as received; an answer with
+/// keys and ids the core does not know still settles what it names.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_the_agent_took_is_asked_about_until_the_connector_says_it_was_received() {
+    let root = support::private_tempdir();
+    let core = Launch::new(root.path().join("core")).start();
+    let token = core.pair_local("Browser").await;
+    let mut browser = core.join(&token, Value::Null).await;
+    let session = browser.session.clone();
+    let (mut peer, _) = connector_with_binding(&core, "asked", THREAD).await;
+    let focus = core.select(&token, &session, THREAD).await;
+
+    let sent = core
+        .text(&token, (&session, THREAD, &focus), "First", &message_id())
+        .await;
+    let delivery = peer.event("input.deliver").await;
+    peer.answer(&delivery["id"], json!({"status": "accepted"}));
+    assert_eq!(browser.receipt("delivered").await["history_id"], sent["id"]);
+
+    let message = delivery["params"]["message_id"].clone();
+    let question = peer.event("input.received").await;
+    assert_eq!(question["params"]["message_ids"], json!([message]));
+    assert_eq!(
+        question["params"]["binding_id"],
+        delivery["params"]["binding_id"]
+    );
+    // Not yet: asked again on the back-off.
+    peer.answer(
+        &question["id"],
+        json!({"received": [], "added_later": {"nested": true}}),
+    );
+    let again = peer.event("input.received").await;
+    peer.answer(
+        &again["id"],
+        json!({"received": [message, "an-id-the-core-never-sent"], "unknown": [], "extra": 1}),
+    );
+    assert_eq!(browser.receipt("read").await["history_id"], sent["id"]);
+}
+
 /// A registration from a newer connector, with capabilities, a route and fields this core does not
 /// know: it binds, and the capabilities it does not know are left out.
 #[tokio::test(flavor = "multi_thread")]
