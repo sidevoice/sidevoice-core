@@ -836,3 +836,34 @@ fn a_typed_message_carries_the_block_and_no_return_note_follows() {
         .unwrap();
     assert_eq!(payload["unheard"]["count"], 1);
 }
+
+#[test]
+fn a_closed_conversation_is_no_longer_asked_about() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    say(&room, &sid, "one");
+    let work = offered(&room);
+    room.settle_delivery(
+        &work[0].0,
+        &work[0].1,
+        &work[0].2,
+        Ok(json!({"status":"accepted"})),
+    );
+    room.close_channel("t").unwrap();
+    room.register(
+        "connector",
+        &json!({"thread":"t","harness":"claude","capabilities":{"deliver":"supported"}}),
+    )
+    .unwrap();
+    ask_now(&room);
+    assert!(
+        room.pending_receipts().is_empty(),
+        "the connector dropped its record: asking would offer it again"
+    );
+    let reloaded = restarted(&directory, room);
+    ask_now(&reloaded);
+    assert!(
+        reloaded.pending_receipts().is_empty(),
+        "not kept for a restart"
+    );
+}

@@ -101,6 +101,7 @@ impl Room {
             }
             inner.inflight.finish(bid);
         }
+        inner.journal.close_receipts(thread);
         for input in inner.journal.cancel_unsent(thread, "channel_closed") {
             inner.browsers.input_receipt(&input, "not_sent");
             inner.salvage_input_notice(&input.id);

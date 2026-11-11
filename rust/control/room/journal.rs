@@ -65,6 +65,9 @@ pub(super) struct Row {
     pub(super) notice_salvaged: bool,
     /// Whether this message was counted as one that needed another offer (`Redeliveries`): once per message.
     pub(super) retry_counted: bool,
+    /// Its conversation was closed while its receipt was awaited: nobody asks about it any more (the connector drops its
+    /// record of a closed conversation).
+    pub(super) receipt_closed: bool,
 }
 impl Row {
     fn view(&self) -> Value {
@@ -257,15 +260,20 @@ impl Journal {
     /// Input its agent took (`accepted`, phase 2 of `push.rs`) and has not been seen to have yet, oldest first. A message
     /// fetched by a pull is not here: its acknowledgement is its receipt.
     pub(super) fn awaiting_receipt(&mut self) -> impl Iterator<Item = &mut Row> {
-        self.rows
-            .iter_mut()
-            .filter(|r| r.is_input() && r.status == "delivered" && r.pull_claimed_by.is_none())
+        self.rows.iter_mut().filter(|r| {
+            r.is_input()
+                && r.status == "delivered"
+                && r.pull_claimed_by.is_none()
+                && !r.receipt_closed
+        })
     }
     /// What a restart must not lose: the input still waiting (pending, being sent, or fetched and not acknowledged) and
     /// the input awaiting its receipt, oldest first.
     pub(super) fn kept_input(&self) -> impl Iterator<Item = &Row> {
         self.rows.iter().filter(|r| {
-            r.is_input() && (matches!(r.status.as_str(), "pending" | "sending" | "delivered"))
+            r.is_input()
+                && !r.receipt_closed
+                && (matches!(r.status.as_str(), "pending" | "sending" | "delivered"))
         })
     }
     /// Unresolved push input in journal order, including rows waiting for their retry deadline.
@@ -299,6 +307,15 @@ impl Journal {
                 r.input_ref()
             })
             .collect()
+    }
+    /// A closed conversation's input whose receipt was awaited is no longer asked about.
+    pub(super) fn close_receipts(&mut self, thread: &str) {
+        for row in self
+            .input_mut(thread)
+            .filter(|r| r.status == "delivered" && r.pull_claimed_by.is_none())
+        {
+            row.receipt_closed = true;
+        }
     }
     /// Mark read the newest of a thread's input with this message ID, unless it already was
     /// read or was never sent.
