@@ -460,14 +460,16 @@ fn t01_playing_reply_cut_carries_full_unicode_evidence_with_the_words() {
 }
 
 #[test]
-fn t02a_accepted_before_start_is_withdrawn_and_attached_to_words() {
+fn t02a_accepted_before_start_is_held_then_withdrawn_by_words_and_attached_to_them() {
     let mut c = Case::new(false);
     assert_eq!(c.publish("r", 0, "Not yet started")["status"], "queued");
     c.frames("voice-reply");
     let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
     assert_eq!(turn.epoch, 1);
-    assert_eq!(c.frames("voice-reply-withdrawn").len(), 1);
-    c.report("r", "unplayed", Some("newer_turn"), None);
+    assert!(
+        c.frames("voice-reply-withdrawn").is_empty(),
+        "held while the turn is open"
+    );
     c.room
         .finish_turn(
             &c.sid,
@@ -477,6 +479,8 @@ fn t02a_accepted_before_start_is_withdrawn_and_attached_to_words() {
             Continuation::Standalone,
         )
         .unwrap();
+    assert_eq!(c.frames("voice-reply-withdrawn").len(), 1);
+    c.report("r", "unplayed", Some("newer_turn"), None);
     assert_eq!(c.input("Actually")["unheard"]["count"], 1);
     assert!(c.input("Actually")["unheard"].get("heard_up_to").is_none());
     assert!(c.frames("voice-reply").is_empty());
@@ -495,6 +499,73 @@ fn t02b_accepted_before_start_with_empty_turn_tells_the_agent_nothing() {
     assert!(c.notes().is_empty());
     c.say("words", Some("Go on"));
     assert_eq!(c.input("Go on")["unheard"]["from"], "Not…");
+}
+
+#[test]
+fn t02e_replies_held_by_a_turn_that_comes_to_nothing_play_on_in_order() {
+    for ending in ["no words", "cancelled"] {
+        let mut c = Case::new(false);
+        c.publish("cut", 0, "The one sounding");
+        c.publish("next", 0, "The one after");
+        c.frames("voice-reply");
+        c.report("cut", "playing", None, None);
+        c.room.begin_at_focus(&c.sid, "turn").unwrap();
+        if ending == "cancelled" {
+            c.room
+                .cancel_turn(&c.sid, "turn", Continuation::Standalone)
+                .unwrap();
+        } else {
+            c.room
+                .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+                .unwrap();
+        }
+        assert!(
+            c.frames("voice-reply-withdrawn").is_empty(),
+            "{ending}: nothing withdrawn"
+        );
+        // The agent goes on in the epoch it knows: its next reply is current and plays behind the held ones.
+        let later = c.publish("later", 0, "Published after");
+        assert_eq!(
+            (later["status"].as_str(), later["epoch"].as_u64()),
+            (Some("queued"), Some(1)),
+            "{ending}"
+        );
+        let sent: Vec<_> = c
+            .frames("voice-reply")
+            .iter()
+            .map(|frame| frame["data"]["utterance_id"].clone())
+            .collect();
+        assert_eq!(sent, [json!("later")], "{ending}");
+        for id in ["cut", "next", "later"] {
+            c.report(id, "heard", None, None);
+        }
+        c.say("words", Some("Thanks"));
+        assert!(
+            c.input("Thanks")["unheard"].is_null(),
+            "{ending}: all of it was heard"
+        );
+        assert!(c.notes().is_empty(), "{ending}");
+    }
+}
+
+#[test]
+fn t02f_a_turn_that_came_to_nothing_does_not_make_a_reply_late_and_one_with_words_does() {
+    let c = Case::new(true);
+    assert_eq!(c.say("empty", None), 1);
+    assert_eq!(c.publish("a", 0, "After nothing")["status"], "queued");
+    assert_eq!(c.say("words", Some("New question")), 2);
+    assert_eq!(c.publish("b", 0, "For the old turn")["status"], "text_only");
+    assert_eq!(c.say("empty-again", None), 3);
+    assert_eq!(
+        c.publish("c", 0, "Still for the old turn")["status"],
+        "text_only",
+        "the turn with words is still between"
+    );
+    let current = c.publish("d", 2, "For the question");
+    assert_eq!(
+        (current["status"].as_str(), current["epoch"].as_u64()),
+        (Some("queued"), Some(3))
+    );
 }
 
 #[test]
@@ -590,7 +661,7 @@ fn t04a_multiple_same_epoch_replies_remain_fifo_and_present() {
 }
 
 #[test]
-fn t04b_new_epoch_withdraws_pending_replies_on_both_devices() {
+fn t04b_new_epoch_holds_pending_replies_on_its_device_and_withdraws_them_on_the_other() {
     let mut c = Case::new(false);
     let (sender, mut other_events) = mpsc::channel(64);
     let other = c.room.join("other".into(), "en".into(), sender).unwrap();
@@ -600,18 +671,31 @@ fn t04b_new_epoch_withdraws_pending_replies_on_both_devices() {
     c.frames("voice-reply");
     while other_events.try_recv().is_ok() {}
     c.room.begin_at_focus(&c.sid, "turn").unwrap();
-    let first = c.frames("voice-reply-withdrawn");
+    assert!(
+        c.frames("voice-reply-withdrawn").is_empty(),
+        "the device spoken into holds them"
+    );
     let second: Vec<_> = std::iter::from_fn(|| other_events.try_recv().ok())
         .filter(|frame| frame["type"] == "voice-reply-withdrawn")
         .collect();
-    assert_eq!(first.len(), 1);
     assert_eq!(second.len(), 1);
     assert_eq!(
-        first[0]["data"]["utterance_ids"].as_array().unwrap().len(),
+        second[0]["data"]["utterance_ids"].as_array().unwrap().len(),
         2
     );
+    c.room
+        .finish_turn(
+            &c.sid,
+            "turn",
+            Some("Words"),
+            &Value::Null,
+            Continuation::Standalone,
+        )
+        .unwrap();
+    let first = c.frames("voice-reply-withdrawn");
+    assert_eq!(first.len(), 1, "the words end what it held");
     assert_eq!(
-        second[0]["data"]["utterance_ids"].as_array().unwrap().len(),
+        first[0]["data"]["utterance_ids"].as_array().unwrap().len(),
         2
     );
 }

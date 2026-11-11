@@ -171,7 +171,7 @@ impl Inner {
         }))
     }
 
-    /// Keep the started turn only after the new epoch has withdrawn older queued replies.
+    /// Keep the started turn once its epoch is open and older replies are held or withdrawn.
     pub(super) fn retain_started(&mut self, turn: VoiceTurn) {
         self.browsers
             .get_mut(&turn.session_id)

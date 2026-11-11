@@ -20,17 +20,27 @@ impl Inner {
             PreparedTurn::New(turn) => turn,
         };
         if let Some(thread) = turn.thread_id.as_deref() {
-            turn.epoch = self.open_speech_epoch(thread, sid, turn_id);
+            turn.epoch = self.advance_speech_epoch(thread, sid, turn_id);
+            // The call the person speaks into holds what it has of older replies while the turn is open: they end
+            // only if it brings words, and play on if it comes to nothing. Other calls on the conversation are not
+            // holding them, so they are withdrawn there.
+            self.withdraw_older_epoch_replies(thread, turn.epoch, Some(sid));
         }
         self.retain_started(turn.clone());
         Ok(turn)
     }
 
-    /// Open the same conversation epoch for both live and offline voice input.
+    /// Open the conversation epoch of offline voice input, which comes with its words: older replies are withdrawn.
     pub(super) fn open_speech_epoch(&mut self, thread: &str, sid: &str, turn_id: &str) -> u64 {
         let epoch = self.advance_speech_epoch(thread, sid, turn_id);
-        self.withdraw_older_epoch_replies(thread, epoch);
+        self.withdraw_older_epoch_replies(thread, epoch, None);
         epoch
+    }
+
+    /// A spoken turn came to nothing: the replies it held play on, and the agent's next reply is not late for it.
+    fn turn_came_to_nothing(&mut self, thread: &str, sid: &str, epoch: u64) {
+        self.conversations.came_to_nothing(thread, epoch);
+        self.settle_empty_turn(thread, sid, epoch);
     }
 
     pub(super) fn finish_spoken_turn(
@@ -68,6 +78,7 @@ impl Inner {
         self.finish_browser_turn(sid, &turn);
         let revision = turn.revision;
         if let (Some(thread), Some(next)) = (turn.thread_id.as_deref(), continuing) {
+            self.conversations.came_to_nothing(thread, turn.epoch);
             self.unheard.transfer_empty(thread, turn.epoch, next);
             return Ok(
                 json!({"accepted":false,"revision":revision,"epoch":turn.epoch,"merged":true}),
@@ -75,18 +86,24 @@ impl Inner {
         }
         let Some(text) = text else {
             if let Some(thread) = turn.thread_id.as_deref() {
-                self.settle_empty_turn(thread, sid, turn.epoch);
+                self.turn_came_to_nothing(thread, sid, turn.epoch);
             }
             return Ok(json!({"accepted":false,"revision":revision,"epoch":turn.epoch}));
         };
         if turn.cancelled {
             if let Some(thread) = turn.thread_id.as_deref() {
-                self.settle_empty_turn(thread, sid, turn.epoch);
+                self.turn_came_to_nothing(thread, sid, turn.epoch);
             }
             return Ok(json!({"accepted":false,"revision":revision,"epoch":turn.epoch}));
         }
         self.record_transcript_latency(&turn, timings);
-        self.queue_turn(&turn, text)
+        let queued = self.queue_turn(&turn, text)?;
+        if let Some(thread) = turn.thread_id.as_deref() {
+            // The turn brought words: the older replies held while it was open end now, unplayed or cut.
+            self.withdraw_older_epoch_replies(thread, turn.epoch, None);
+            self.conversations.brought_words(thread, turn.epoch);
+        }
+        Ok(queued)
     }
 
     pub(super) fn cancel_spoken_turn(
@@ -100,9 +117,10 @@ impl Inner {
         if let Some(thread) = turn.thread_id.as_deref() {
             self.conversations.finish(thread, sid, turn_id, turn.epoch);
             if let Some(next) = continuing {
+                self.conversations.came_to_nothing(thread, turn.epoch);
                 self.unheard.transfer_empty(thread, turn.epoch, next);
             } else {
-                self.settle_empty_turn(thread, sid, turn.epoch);
+                self.turn_came_to_nothing(thread, sid, turn.epoch);
             }
         }
         Ok(json!({"status":"cancelled"}))

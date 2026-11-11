@@ -115,8 +115,9 @@ impl Room {
             return disposition;
         }
         let current = inner.conversations.epoch(thread);
-        // Turns whose message never reached the agent do not make its reply late: it plays as current.
-        let epoch = if epoch < current && inner.journal.abandoned_since(thread, epoch, current) {
+        // Turns the agent never saw (no words, cancelled, or a message never sent) do not make its reply late: it
+        // plays as current.
+        let epoch = if epoch < current && inner.unseen_turns_since(thread, epoch, current) {
             current
         } else {
             epoch

@@ -179,8 +179,13 @@ impl Room {
 }
 
 impl Inner {
-    /// Withdraw queued, unrequested replies of older epochs on this conversation.
-    pub(super) fn withdraw_older_epoch_replies(&mut self, thread: &str, epoch: u64) {
+    /// Withdraw queued, unrequested replies of older epochs on this conversation, from every call but `except`.
+    pub(super) fn withdraw_older_epoch_replies(
+        &mut self,
+        thread: &str,
+        epoch: u64,
+        except: Option<&str>,
+    ) {
         let rows: HashSet<String> = self
             .utterances
             .iter()
@@ -199,6 +204,7 @@ impl Inner {
             .iter()
             .filter(|(_, record)| rows.contains(&record.row_id))
             .flat_map(|(_, record)| record.clients.keys().cloned())
+            .filter(|listener| except != Some(listener.as_str()))
             .collect();
         for listener in sessions {
             self.withdraw(&listener, "newer_turn", |record, (_, status)| {
