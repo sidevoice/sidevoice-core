@@ -115,7 +115,9 @@ impl Room {
         let new_status = match status {
             Some("accepted") => "delivered",
             Some("unknown") if !note => "unconfirmed",
-            Some("unsupported") if !note => "not_sent",
+            // The harness cannot put it in now (no route, or the chat left the session that took it), but the
+            // conversation is still there: the message waits, offered again on the back-off and readable by
+            // get_messages meanwhile. Only a conversation that is gone lets go of it (`cancel_unsent`).
             _ if note && row.attempts + 1 >= MAX_NOTE_ATTEMPTS => {
                 if status == Some("unknown") {
                     "unconfirmed"

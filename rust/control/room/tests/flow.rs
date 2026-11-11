@@ -2097,26 +2097,25 @@ fn review_bounded_epoch_contexts_and_deferred_empty_obligations() {
 
 #[test]
 fn review_terminal_push_outcomes_salvage_attached_evidence() {
-    for outcome in ["unsupported", "unknown"] {
-        let c = Case::new(false);
-        c.publish("r", 0, "Reply evidence");
-        c.report("r", "interrupted", Some("user_interrupted"), Some(2));
-        c.say("turn", Some("Wait"));
-        let first = c.room.pending_delivery();
-        assert_eq!(first.len(), 1);
-        let (bid, rid, peer, data) = &first[0];
-        assert_eq!(data["unheard"]["count"], 1);
-        c.room
-            .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":outcome})));
-        let next = c.room.pending_delivery();
-        assert_eq!(next.len(), 1, "{outcome}");
-        assert_eq!(next[0].3["channel"], "note");
-        assert_eq!(next[0].3["unheard"]["replies"][0]["text"], "Reply evidence");
-        assert_eq!(
-            next[0].3["notice"]["related_message_id"],
-            data["message_id"]
-        );
-    }
+    // `unknown` is the one terminal push outcome; `unsupported` keeps the message waiting (and its evidence with it).
+    let c = Case::new(false);
+    c.publish("r", 0, "Reply evidence");
+    c.report("r", "interrupted", Some("user_interrupted"), Some(2));
+    c.say("turn", Some("Wait"));
+    let first = c.room.pending_delivery();
+    assert_eq!(first.len(), 1);
+    let (bid, rid, peer, data) = &first[0];
+    assert_eq!(data["unheard"]["count"], 1);
+    c.room
+        .settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"unknown"})));
+    let next = c.room.pending_delivery();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].3["channel"], "note");
+    assert_eq!(next[0].3["unheard"]["replies"][0]["text"], "Reply evidence");
+    assert_eq!(
+        next[0].3["notice"]["related_message_id"],
+        data["message_id"]
+    );
 }
 
 #[test]
@@ -2130,7 +2129,7 @@ fn a_note_answered_unknown_is_given_up_after_a_few_attempts() {
         &bid,
         &rid,
         &peer.generation,
-        Ok(json!({"status":"unsupported"})),
+        Ok(json!({"status":"unknown"})),
     );
     let mut note_id = String::new();
     let mut sent = 0;
