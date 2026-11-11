@@ -1,6 +1,6 @@
 //! Conversation-local speech boundaries. A call revision remains a routing key; only a
 //! qualified spoken start changes the epoch shared by every device on a conversation.
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use super::Inner;
 
@@ -10,11 +10,16 @@ pub(super) struct Conversations {
     open: HashMap<String, HashSet<(String, String)>>,
     completed: HashMap<(String, String), u64>,
     completed_order: VecDeque<(String, String)>,
+    /// Per conversation, the epochs of turns that came to nothing (no words, cancelled) since the last turn that
+    /// brought words: the agent saw nothing of them.
+    empty: HashMap<String, BTreeSet<u64>>,
 }
 
 /// Process-local cap: retain every issued epoch for these conversations so a thread
 /// cannot silently restart at zero while this room is alive.
 const MAX_EPOCH_CONTEXTS: usize = 2048;
+/// How many epochs of turns that came to nothing a conversation keeps: older ones make a reply late again.
+const MAX_EMPTY_EPOCHS: usize = 256;
 
 impl Conversations {
     pub(super) fn epoch(&self, thread: &str) -> u64 {
@@ -71,6 +76,33 @@ impl Conversations {
         }
     }
 
+    /// The turn of epoch `epoch` on `thread` came to nothing: no words, or cancelled.
+    pub(super) fn came_to_nothing(&mut self, thread: &str, epoch: u64) {
+        let empty = self.empty.entry(thread.to_owned()).or_default();
+        empty.insert(epoch);
+        while empty.len() > MAX_EMPTY_EPOCHS {
+            empty.pop_first();
+        }
+    }
+
+    /// The turn of epoch `epoch` on `thread` brought words: a reply of an earlier epoch is late from now on, so the
+    /// turns before it that came to nothing no longer matter.
+    pub(super) fn brought_words(&mut self, thread: &str, epoch: u64) {
+        if let Some(empty) = self.empty.get_mut(thread) {
+            empty.retain(|&nothing| nothing > epoch);
+            if empty.is_empty() {
+                self.empty.remove(thread);
+            }
+        }
+    }
+
+    /// Whether the turn of epoch `epoch` on `thread` came to nothing.
+    pub(super) fn was_empty(&self, thread: &str, epoch: u64) -> bool {
+        self.empty
+            .get(thread)
+            .is_some_and(|empty| empty.contains(&epoch))
+    }
+
     pub(super) fn prior(&self, session: &str, turn: &str) -> Option<u64> {
         self.completed
             .get(&(session.to_owned(), turn.to_owned()))
@@ -86,7 +118,16 @@ impl Conversations {
 }
 
 impl Inner {
-    /// Register a conversation-local speech boundary; playback withdrawal follows in `turn_flow`.
+    /// Whether the agent can have seen none of `thread`'s turns after `epoch`, up to `current`: each came to nothing
+    /// (no words, cancelled) or ended as a message that was never sent. Its reply to the last message it got is then
+    /// not for an older turn.
+    pub(super) fn unseen_turns_since(&self, thread: &str, epoch: u64, current: u64) -> bool {
+        (epoch + 1..=current).all(|turn| {
+            self.conversations.was_empty(thread, turn) || self.journal.abandoned_turn(thread, turn)
+        })
+    }
+
+    /// Register a conversation-local speech boundary; what it does to replies follows in `turn_flow`.
     pub(super) fn advance_speech_epoch(&mut self, thread: &str, sid: &str, turn_id: &str) -> u64 {
         assert!(
             self.conversations.can_begin(thread),

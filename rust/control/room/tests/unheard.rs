@@ -643,7 +643,7 @@ fn withdrawn(received: &mut mpsc::Receiver<Value>) -> Vec<Value> {
 }
 
 #[test]
-fn a_new_turn_withdraws_the_replies_sent_before_it_that_have_not_started() {
+fn a_turn_with_words_withdraws_the_replies_sent_before_it_that_have_not_started() {
     let (_directory, room, _, _) = room_on("t");
     let (sid, mut received) = call(&room, "t");
     let asked = revision(&room, &sid);
@@ -655,14 +655,21 @@ fn a_new_turn_withdraws_the_replies_sent_before_it_that_have_not_started() {
     withdrawn(&mut received);
 
     room.begin_at_focus(&sid, "next").unwrap();
+    // While the turn is open the call holds what it has: nothing is withdrawn yet.
+    assert!(withdrawn(&mut received).is_empty());
+    room.finish_turn(
+        &sid,
+        "next",
+        Some("Go on."),
+        &Value::Null,
+        Continuation::Standalone,
+    )
+    .unwrap();
     // Only the one not started: the one playing is the call's to cut, and a replay the person asked for stays.
     assert_eq!(
         withdrawn(&mut received),
         [json!({"session_id":sid,"utterance_ids":["waiting"],"reason":"newer_turn"})]
     );
-    // A reply published while the turn is open was sent after it started: it is not withdrawn by it.
-    reply(&room, &sid, "t", "during", "Written meanwhile.", asked);
-    assert!(withdrawn(&mut received).is_empty());
 
     // The call's report says what became of it; until then the row is as it was.
     assert_eq!(status(&room, &sid, "waiting").0, "queued");
@@ -679,14 +686,6 @@ fn a_new_turn_withdraws_the_replies_sent_before_it_that_have_not_started() {
         status(&room, &sid, "waiting"),
         ("interrupted".into(), Some("newer_turn".into()))
     );
-    room.finish_turn(
-        &sid,
-        "next",
-        Some("Go on."),
-        &Value::Null,
-        Continuation::Standalone,
-    )
-    .unwrap();
     assert_eq!(
         told(&room, "Go on.").unwrap()["from"],
         opening_words("Not started yet.")
@@ -769,8 +768,16 @@ fn a_reply_the_call_cannot_be_told_to_drop_ends_unheard_in_the_room() {
         "Sent, then stale.",
         revision(&room, &sid),
     );
-    while events.try_send(json!({"type":"filler"})).is_ok() {}
     room.begin_at_focus(&sid, "next").unwrap();
+    while events.try_send(json!({"type":"filler"})).is_ok() {}
+    room.finish_turn(
+        &sid,
+        "next",
+        Some("Next."),
+        &Value::Null,
+        Continuation::Standalone,
+    )
+    .unwrap();
     assert_eq!(
         status(&room, &sid, "sent"),
         ("interrupted".into(), Some("newer_turn".into()))

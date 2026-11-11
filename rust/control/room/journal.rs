@@ -205,18 +205,15 @@ impl Journal {
             .collect();
         Some((rows.len(), rows.first()?.time))
     }
-    /// Whether every spoken turn after `epoch`, up to `current`, ended as a message that was never
-    /// sent (expired or withdrawn). The agent cannot have seen those turns, so its reply to the
-    /// last message it did get is not for an older turn. A turn that left no row stays newer.
-    pub(super) fn abandoned_since(&self, thread: &str, epoch: u64, current: u64) -> bool {
-        (epoch + 1..=current).all(|e| {
-            self.rows.iter().any(|row| {
-                row.role == "user"
-                    && row.thread == thread
-                    && row.turn_id.is_some()
-                    && row.epoch == e
-                    && row.status == "not_sent"
-            })
+    /// Whether `thread`'s spoken turn of epoch `epoch` ended as a message that was never sent (expired or
+    /// withdrawn). A turn that left no row is not one.
+    pub(super) fn abandoned_turn(&self, thread: &str, epoch: u64) -> bool {
+        self.rows.iter().any(|row| {
+            row.role == "user"
+                && row.thread == thread
+                && row.turn_id.is_some()
+                && row.epoch == epoch
+                && row.status == "not_sent"
         })
     }
     /// A thread's input rows, oldest first.

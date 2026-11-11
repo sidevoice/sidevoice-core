@@ -167,8 +167,8 @@ pub(super) fn heard_tail(heard: &str) -> String {
 
 impl Inner {
     /// A turn ended with no words. Only a reply refused while the person spoke (`empty_obligation`) makes it worth a
-    /// note: the agent is told it can speak now. A turn that only cut a reply tells the agent nothing; the cut reply is
-    /// in the next block.
+    /// note: the agent is told it can speak now. A turn that only cut a reply tells the agent nothing: the reply plays
+    /// on, and what of it is still not heard is in the next block.
     pub(super) fn settle_empty_turn(&mut self, thread: &str, session: &str, epoch: u64) {
         if self.unheard.finish_empty(thread, epoch) {
             self.queue_unheard_note(thread, session, "turn_empty", None, None);
