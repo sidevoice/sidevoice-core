@@ -796,7 +796,7 @@ fn t07_disconnect_and_resume_never_replays_a_received_but_unstarted_reply() {
 }
 
 #[test]
-fn t08_typed_context_during_an_open_turn_preserves_epoch_and_pending_evidence() {
+fn t08_typed_context_during_an_open_turn_keeps_the_epoch_and_takes_the_block() {
     let c = Case::new(false);
     c.publish("r", 0, "Unheard");
     let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
@@ -810,8 +810,9 @@ fn t08_typed_context_during_an_open_turn_preserves_epoch_and_pending_evidence() 
         .send_text("Aside", &c.sid, "t", &binding, "typed-1")
         .unwrap();
     assert_eq!(typed["epoch"], turn.epoch);
-    assert!(c.input("Aside").get("unheard").is_none());
-    assert!(c.room.inner.lock().unwrap().has_unheard("t"));
+    // The next message, typed or spoken, carries the block; told once.
+    assert_eq!(c.input("Aside")["unheard"]["count"], 1);
+    assert!(!c.room.inner.lock().unwrap().has_unheard("t"));
     c.room
         .finish_turn(
             &c.sid,
@@ -821,7 +822,7 @@ fn t08_typed_context_during_an_open_turn_preserves_epoch_and_pending_evidence() 
             Continuation::Standalone,
         )
         .unwrap();
-    assert_eq!(c.input("Spoken")["unheard"]["count"], 1);
+    assert!(c.input("Spoken").get("unheard").is_none());
 }
 
 #[test]

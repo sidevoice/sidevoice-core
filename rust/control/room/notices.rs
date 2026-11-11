@@ -12,6 +12,8 @@ pub(super) struct PendingNotice {
     session: String,
     kind: String,
     related: Option<String>,
+    /// The journal position the note's block covers up to (`user_returned`); none for now.
+    until: Option<u64>,
     replacement: Option<Value>,
 }
 impl PendingNotice {
@@ -50,7 +52,7 @@ impl Inner {
         until: Option<u64>,
     ) {
         if self.room_for_bytes(BLOCK_BYTES).is_err() {
-            self.remember_pending(thread, session, kind, related_message_id);
+            self.remember_pending(thread, session, kind, related_message_id, until);
             return;
         }
         let unheard = self.take_unheard(thread, until);
@@ -122,7 +124,7 @@ impl Inner {
                     &note.session,
                     &note.kind,
                     note.related.as_deref(),
-                    None,
+                    note.until,
                 );
             } else {
                 self.pending_notices.push_back(note);
@@ -164,6 +166,7 @@ impl Inner {
                 session,
                 kind: "salvaged".into(),
                 related: Some(related),
+                until: None,
                 replacement: Some(replacement),
             });
         }
@@ -202,7 +205,14 @@ impl Inner {
         true
     }
 
-    fn remember_pending(&mut self, thread: &str, session: &str, kind: &str, related: Option<&str>) {
+    fn remember_pending(
+        &mut self,
+        thread: &str,
+        session: &str,
+        kind: &str,
+        related: Option<&str>,
+        until: Option<u64>,
+    ) {
         if self.pending_notices.iter().any(|pending| {
             pending.thread == thread
                 && pending.session == session
@@ -216,6 +226,7 @@ impl Inner {
             session: session.into(),
             kind: kind.into(),
             related: related.map(str::to_owned),
+            until,
             replacement: None,
         });
     }
@@ -226,12 +237,16 @@ fn note_epoch(payload: &Value) -> u64 {
 }
 
 /// What to bring the person up to date with, when they missed replies.
-const CATCH_UP: &str = "Bring the person up to date with only what is still relevant from what they did not hear, briefly and in fresh words: do not replay it all, and do not say it was missed.";
+macro_rules! catch_up {
+    () => {
+        "Bring the person up to date with only what is still relevant from what they did not hear, briefly and in fresh words: do not replay it all, and do not say it was missed."
+    };
+}
 
 pub(super) fn instruction(kind: &str) -> &'static str {
     match kind {
         "turn_empty" => "The person said nothing. Resend what you meant if it still matters.",
-        "user_returned" => "The person is back. Bring them up to date with only what is still relevant from what they did not hear, briefly and in fresh words: do not replay it all, and do not say it was missed.",
-        _ => CATCH_UP,
+        "user_returned" => concat!("The person is back. ", catch_up!()),
+        _ => catch_up!(),
     }
 }

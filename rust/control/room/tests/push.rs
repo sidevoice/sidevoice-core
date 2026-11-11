@@ -751,3 +751,88 @@ fn why_an_offer_was_not_taken_is_shown_only_while_the_message_waits() {
         "fetched: no longer waiting"
     );
 }
+
+#[test]
+fn a_note_nobody_can_take_is_never_given_up() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    // A reply never heard, then a return: one user_returned note.
+    let revision = room
+        .inner
+        .lock()
+        .unwrap()
+        .browsers
+        .get(&sid)
+        .unwrap()
+        .revision;
+    room.publish(
+        &json!({"session_id":sid,"thread_id":"t","revision":revision,"epoch":0,
+        "utterance_id":"r","text":"Missed"}),
+    );
+    room.park(&sid, true);
+    room.resume(&sid, &[]);
+    room.inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due = 0;
+    for _ in 0..12 {
+        let work = room.pending_delivery();
+        assert_eq!(work.len(), 1, "still offered");
+        assert_eq!(work[0].3["channel"], "note");
+        let (bid, rid, peer, _) = &work[0];
+        room.settle_delivery(
+            bid,
+            rid,
+            &peer.generation,
+            Ok(json!({"status":"unsupported"})),
+        );
+        let mut inner = room.inner.lock().unwrap();
+        let row = inner.journal.find_mut(rid).unwrap();
+        assert_eq!(row.status, "pending");
+        row.next_attempt = 0;
+    }
+}
+
+#[test]
+fn a_typed_message_carries_the_block_and_no_return_note_follows() {
+    let (directory, room, _) = pull_room(&["connector"]);
+    let sid = garage(&directory, &room);
+    let revision = room
+        .inner
+        .lock()
+        .unwrap()
+        .browsers
+        .get(&sid)
+        .unwrap()
+        .revision;
+    room.publish(
+        &json!({"session_id":sid,"thread_id":"t","revision":revision,"epoch":0,
+        "utterance_id":"r","text":"Missed reply"}),
+    );
+    room.park(&sid, true);
+    room.resume(&sid, &[]);
+    let bid = room.snapshot(Some(&sid))["binding"]["binding_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    room.send_text("Typed back", &sid, "t", &bid, "typed-1")
+        .unwrap();
+    assert!(room.inner.lock().unwrap().unheard.note_mut("t").is_none());
+    let work = offered(&room);
+    assert_eq!(work.len(), 1);
+    assert_eq!(work[0].3["text"], "Typed back");
+    let payload = room
+        .inner
+        .lock()
+        .unwrap()
+        .journal
+        .find_input("Typed back")
+        .unwrap()
+        .payload
+        .clone()
+        .unwrap();
+    assert_eq!(payload["unheard"]["count"], 1);
+}

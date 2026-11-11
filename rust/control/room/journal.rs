@@ -63,6 +63,8 @@ pub(super) struct Row {
     pub(super) pull_claimed_by: Option<String>,
     pub(super) ever_exposed: bool,
     pub(super) notice_salvaged: bool,
+    /// Whether this message was counted as one that needed another offer (`Redeliveries`): once per message.
+    pub(super) retry_counted: bool,
 }
 impl Row {
     fn view(&self) -> Value {

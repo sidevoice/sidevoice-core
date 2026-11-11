@@ -6,7 +6,8 @@
 //! 2. **After `accepted`, until `received`:** the room never offers it again; it asks, for all such messages of a
 //!    conversation at once (`input.received`), which ones the agent has. The connector answers from its own record of
 //!    each message id without touching the agent, so a receipt lost on the way is recovered by the next question. An id
-//!    the connector has no record of was never handed over, and goes back to phase 1.
+//!    the connector has no record of was never handed over, and goes back to phase 1. It is then offered again behind messages of
+//!    its conversation already taken after it: a lost record is the one case where order gives way to delivery.
 //!
 //! The connector also tells a receipt as soon as it sees it (`input.read`); the question is the safety net.
 use std::collections::{HashMap, HashSet};
@@ -31,9 +32,6 @@ const RECEIVED_BATCH: usize = 64;
 /// A message of a conversation waits for the earlier ones (`pending_delivery` takes a conversation's first unresolved row
 /// only), so a retry never lets a later one pass.
 const RETRY_SECONDS: [u64; 5] = [1, 2, 5, 10, 15];
-/// Failed offers after which a note is given up on. Notes are exempt from expiry, so without this one a note nobody can
-/// take would be offered forever.
-const MAX_NOTE_ATTEMPTS: usize = 5;
 /// The longest `detail` of a delivery answer the room keeps, in bytes.
 const MAX_DETAIL: usize = 1000;
 
@@ -146,7 +144,6 @@ impl Room {
         let Some(row) = inner.journal.find_mut(rid) else {
             return;
         };
-        let note = row.role == "note";
         if row.status == "read" {
             return;
         }
@@ -156,8 +153,8 @@ impl Room {
             Some("accepted" | "unknown") => "delivered",
             // The harness cannot put it in now (no route, or the chat left the session that took it), but the
             // conversation is still there: the message waits, offered again on the back-off and readable by
-            // get_messages meanwhile. Only a conversation that is gone lets go of it (`cancel_unsent`).
-            _ if note && row.attempts + 1 >= MAX_NOTE_ATTEMPTS => "not_sent",
+            // get_messages meanwhile. Notes too: a not-heard block is never dropped. Only a conversation that is gone lets
+            // go of the person's words (`cancel_unsent`).
             _ => "pending",
         };
         row.status = new_status.into();
@@ -167,7 +164,8 @@ impl Room {
             ("pending", Some(_)) => answer.as_ref().ok().and_then(delivery_detail),
             _ => None,
         };
-        let first_retry = new_status == "pending" && row.attempts == 0;
+        let first_retry = new_status == "pending" && !row.retry_counted;
+        row.retry_counted |= first_retry;
         if new_status == "pending" {
             row.attempts += 1;
             row.next_attempt = seconds() + retry_after(row.attempts);
@@ -190,9 +188,6 @@ impl Room {
             }
         }
         inner.browsers.input_receipt(&input, new_status);
-        if new_status == "not_sent" {
-            inner.salvage_input_notice(&input.id);
-        }
         if new_status == "delivered" {
             inner.mark_latency(
                 &input.session,
