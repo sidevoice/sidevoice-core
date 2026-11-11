@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.18.0](https://github.com/sidevoice/sidevoice-core/compare/v0.17.1...v0.18.0) (2026-11-11)
+
+
+### Features
+
+* **platform:** typed refusal reasons for private-directory checks ([#242](https://github.com/sidevoice/sidevoice-core/issues/242)) ([84caee3](https://github.com/sidevoice/sidevoice-core/commit/84caee37841943e462c090a70d19ffbb49c77185))
+
+
+### Bug Fixes
+
+* **delivery:** hold the agent's replies during the person's turn and withdraw them only after words ([#248](https://github.com/sidevoice/sidevoice-core/issues/248)) ([7e9ed13](https://github.com/sidevoice/sidevoice-core/commit/7e9ed135d93f2616678e9b2aa0f1f752ec7fef78))
+* **delivery:** keep a message answered unsupported pending instead of failing it ([#245](https://github.com/sidevoice/sidevoice-core/issues/245)) ([3063aa4](https://github.com/sidevoice/sidevoice-core/commit/3063aa43a68f88a47133195d669cea0376311915))
+* **delivery:** retry until accepted, ask until received, one bounded not-heard block ([#246](https://github.com/sidevoice/sidevoice-core/issues/246)) ([0d289c3](https://github.com/sidevoice/sidevoice-core/commit/0d289c3b3e1e69a40f00d321c31ad14db19f0511))
+
 ## [0.17.1](https://github.com/sidevoice/sidevoice-core/compare/v0.17.0...v0.17.1) (2026-11-07)
 
 
