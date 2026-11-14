@@ -51,6 +51,9 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync", "io-util"] }
 tower = { version = "=0.5.3", features = ["retry", "util"] }
 tokio-tungstenite = { version = "0.30", features = ["connect", "rustls-tls-native-roots"] }
+tracing = "0.1"
+# `tracing-log` stays off: no `LogTracer`, so the `log` lines of rustls, tungstenite and reqwest never reach a file.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "std"] }
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4"] }
 url = "2"

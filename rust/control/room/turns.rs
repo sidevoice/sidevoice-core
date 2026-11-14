@@ -1,16 +1,18 @@
 //! The call's spoken turns and the conversation captured for each one. Epochs, playback,
 //! hearing, and input delivery are sequenced by `turn_flow` under the room lock.
 use serde_json::{json, Value};
+use tracing::info;
 
 use super::browsers::MAX_OPEN_TURNS;
 use super::error::RoomError;
 use super::{Inner, Room};
+use crate::log_safe::{ClientId, IdHash};
 
 /// The longest turn id the room takes, in bytes.
 const MAX_TURN_ID: usize = 64;
 
 /// A turn as the room took it when it started: the client's id, revision, and captured focus.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct VoiceTurn {
     pub session_id: String,
     pub turn_id: String,
@@ -23,6 +25,25 @@ pub struct VoiceTurn {
     pub(super) language: String,
     /// The person cancelled it: its words, when they come, are dropped.
     pub(super) cancelled: bool,
+}
+
+/// Ids and sizes only: the title and the conversation id are the person's.
+impl std::fmt::Debug for VoiceTurn {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.debug_struct("VoiceTurn")
+            .field("turn_id", &ClientId(&self.turn_id).to_string())
+            .field("revision", &self.revision)
+            .field("epoch", &self.epoch)
+            .field("binding_id", &self.binding_id)
+            .field(
+                "title",
+                &self
+                    .title
+                    .as_ref()
+                    .map(|title| format!("<{} chars>", title.chars().count())),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 /// Whether this terminal report continues into a merged turn.
@@ -52,10 +73,18 @@ impl Room {
         thread_id: &str,
         binding_id: &str,
     ) -> Result<VoiceTurn, RoomError> {
-        self.inner
+        let turn = self
+            .inner
             .lock()
             .expect("room lock")
-            .begin_spoken_turn(sid, turn_id, thread_id, binding_id)
+            .begin_spoken_turn(sid, turn_id, thread_id, binding_id)?;
+        info!(
+            turn = %ClientId(turn_id),
+            epoch = turn.epoch,
+            conversation = %IdHash(thread_id),
+            "turn started"
+        );
+        Ok(turn)
     }
 
     /// Finish a turn with its transcript, or with none when it was empty or cancelled.
@@ -67,13 +96,20 @@ impl Room {
         timings: &Value,
         continuation: Continuation,
     ) -> Result<Value, RoomError> {
-        self.inner.lock().expect("room lock").finish_spoken_turn(
+        let finished = self.inner.lock().expect("room lock").finish_spoken_turn(
             sid,
             turn_id,
             text,
             timings,
             continuation,
-        )
+        )?;
+        let result = if finished["accepted"] == Value::Bool(true) {
+            "accepted"
+        } else {
+            "nothing"
+        };
+        info!(turn = %ClientId(turn_id), result, "turn finished");
+        Ok(finished)
     }
 
     /// Cancel a spoken turn; its eventual words are dropped.
@@ -83,10 +119,13 @@ impl Room {
         turn_id: &str,
         continuation: Continuation,
     ) -> Result<Value, RoomError> {
-        self.inner
-            .lock()
-            .expect("room lock")
-            .cancel_spoken_turn(sid, turn_id, continuation)
+        let cancelled =
+            self.inner
+                .lock()
+                .expect("room lock")
+                .cancel_spoken_turn(sid, turn_id, continuation)?;
+        info!(turn = %ClientId(turn_id), "turn cancelled");
+        Ok(cancelled)
     }
 }
 

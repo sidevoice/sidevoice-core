@@ -7,7 +7,9 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
+use tracing::{info, info_span, Instrument};
 
+use crate::log_safe::ClientId;
 use crate::server::AppState;
 
 use super::{attach, field};
@@ -29,11 +31,18 @@ async fn run(state: Arc<AppState>, mut socket: WebSocket) {
     let Some((hello_id, cid)) = handshake(&state, &mut socket).await else {
         return;
     };
-    let attached = attach(&state.room, cid);
-    connection::Connection::open(state, socket, attached, hello_id)
-        .await
-        .serve()
-        .await;
+    let span = info_span!("connector_link", connector = %ClientId(&cid));
+    async {
+        let attached = attach(&state.room, cid);
+        info!("connector linked");
+        connection::Connection::open(state, socket, attached, hello_id)
+            .await
+            .serve()
+            .await;
+        info!("connector unlinked");
+    }
+    .instrument(span)
+    .await;
 }
 
 /// Reads the connector's `connector.hello` and checks its credential, refusing

@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tracing::{info, info_span, Instrument};
 
 use super::journal::InputRef;
 use super::latency::{latency_now_micros, LatencyEvent};
@@ -21,6 +22,7 @@ use super::peers::{ConnectorPeer, PeerError};
 use super::util::seconds;
 use super::{Inner, Room};
 use crate::control::telemetry::Counted;
+use crate::log_safe::ClientId;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long the room waits for the connector to say which messages the agent has.
@@ -301,10 +303,26 @@ impl Room {
             }
             for (bid, rid, peer, data) in self.pending_delivery() {
                 let room = self.clone();
-                tokio::spawn(async move {
-                    let answer = peer.request("input.deliver", data, ACK_TIMEOUT).await;
-                    room.settle_delivery(&bid, &rid, &peer.generation, answer);
-                });
+                let span = info_span!(
+                    "delivery",
+                    binding = %bid,
+                    message_id = %ClientId(data["message_id"].as_str().unwrap_or_default())
+                );
+                tokio::spawn(
+                    async move {
+                        let answer = peer.request("input.deliver", data, ACK_TIMEOUT).await;
+                        info!(
+                            result = if answer.is_ok() {
+                                "answered"
+                            } else {
+                                "unreachable"
+                            },
+                            "delivery"
+                        );
+                        room.settle_delivery(&bid, &rid, &peer.generation, answer);
+                    }
+                    .instrument(span),
+                );
             }
             for question in self.pending_receipts() {
                 let room = self.clone();

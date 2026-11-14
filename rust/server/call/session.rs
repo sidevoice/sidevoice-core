@@ -7,6 +7,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
+use tracing::info;
 
 use crate::runtime::API;
 use crate::server::AppState;
@@ -73,6 +74,7 @@ pub(super) async fn run(
     let Some(admitted) = admit(&state, &mut socket, id.clone(), &hello, events).await else {
         return;
     };
+    tracing::Span::current().record("session", admitted.session.as_str());
     let mut call = Call::open(
         state,
         socket,
@@ -82,6 +84,7 @@ pub(super) async fn run(
         admitted,
         output,
     );
+    info!("call joined");
     call.trace_started(&hello);
     call.announce(refused).await;
     call.welcome(hello.get("data"));
@@ -259,6 +262,7 @@ impl Call {
         self.socket = None;
         if self.parked_until.is_none() {
             self.parked_until = Some(tokio::time::Instant::now() + self.resume_window);
+            info!("call parked");
             self.state.room.park(&self.session, true);
         }
     }
@@ -297,6 +301,7 @@ impl Call {
         self.parked_until = None;
         self.last_frame = tokio::time::Instant::now();
         self.state.room.resume(&self.session, &unreceived);
+        info!("call resumed");
         self.token = new_token();
         self.state.resumable.renew(&self.session, &self.token);
         let session = self.session_frame(json!({"resumed": true}));
@@ -393,5 +398,6 @@ impl Call {
             let _ = attach.answer.send(Err((attach.socket, "unknown")));
         }
         self.state.room.leave(&self.session);
+        info!("call left");
     }
 }

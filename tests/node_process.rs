@@ -546,14 +546,30 @@ fn the_core_writes_its_own_private_log() {
             .filter(|text| text.contains("runtime.log_ready"))
     });
     assert!(is_private(&log));
-    assert!(text.lines().all(|line| {
-        serde_json::from_str::<Value>(line).is_ok_and(|entry| entry["launch_id"] == "logged")
-    }));
+    // Human lines, one per event: an RFC 3339 UTC time, the level, the target, then `key=value` fields. The lifecycle
+    // lines name the launch; lines of tasks outside an operation do not (there is no process-root span).
+    let lifecycle = |text: &str, key: &str| {
+        text.lines()
+            .find(|line| line.contains(&format!("key=\"{key}\"")))
+            .map(str::to_owned)
+    };
+    let ready = lifecycle(&text, "runtime.log_ready").expect("a ready line");
+    assert!(ready.contains("launch_id=logged"), "{ready}");
+    assert!(
+        ready.contains(" INFO sidevoice_core::runtime::serve"),
+        "{ready}"
+    );
+    let at = ready.split(' ').next().unwrap();
+    assert!(
+        at.contains('T') && at.ends_with('Z') && at.starts_with("20"),
+        "{ready}"
+    );
+    assert!(!text.contains('\u{1b}'), "no colour in a file");
     core.terminate();
     assert!(core.wait(20).success());
-    assert!(fs::read_to_string(&log)
-        .unwrap()
-        .contains("runtime.log_stop"));
+    let text = fs::read_to_string(&log).unwrap();
+    let stopped = lifecycle(&text, "runtime.log_stop").expect("a stop line");
+    assert!(stopped.contains("launch_id=logged"), "{stopped}");
     let stderr = core.stderr();
     assert!(
         !stderr.contains("runtime.log_"),

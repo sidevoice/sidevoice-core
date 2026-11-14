@@ -85,10 +85,7 @@ impl Limits {
         let mut budget = budget.lock().expect("attempt budget");
         let retry = budget.retry_after(peer, per_peer, global, self.window)?;
         if !budget.logged {
-            eprintln!(
-                "network {kind} attempt limit reached; retry after {}s",
-                retry
-            );
+            tracing::warn!(kind, retry_after_s = retry, "rate limit reached");
             budget.logged = true;
         }
         let mut response = failure(

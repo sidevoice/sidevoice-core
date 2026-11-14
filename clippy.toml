@@ -11,3 +11,11 @@ disallowed-methods = [
     { path = "libc::getuid", reason = "the user is `platform::user`", allow-invalid = true },
     { path = "tokio::signal::unix::signal", reason = "the request to leave is `platform::signal`", allow-invalid = true },
 ]
+
+# Diagnostics are `tracing` events (docs/logging.md); a line a program must print for its reader opts out with `#[allow]` and a
+# reason.
+disallowed-macros = [
+    { path = "std::dbg", reason = "log with `tracing`" },
+    { path = "std::eprintln", reason = "log with `tracing`; a line a launcher reads opts out with a reason" },
+    { path = "std::println", reason = "log with `tracing`" },
+]

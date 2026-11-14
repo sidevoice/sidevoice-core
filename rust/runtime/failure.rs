@@ -2,8 +2,10 @@
 
 use serde_json::{json, Map, Value};
 
-use super::event_log::{log_event, timestamp};
+use tracing::error;
+
 use super::{system_language, Config};
+use crate::log_safe::ClientId;
 use crate::messages::{render, LocalizedMessage};
 use crate::storage::ReportDir;
 
@@ -46,7 +48,17 @@ impl StartFailure {
     }
 }
 
+/// The current UTC time as RFC 3339 with milliseconds.
+fn timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 /// Write `core-failure.json`, print the failure and log it; each part is best effort.
+// The launcher reads the stderr line (`core.stderr.log`).
+#[allow(
+    clippy::disallowed_macros,
+    reason = "the launcher's report is a stderr line"
+)]
 pub(super) fn report(config: &Config, error: &StartFailure) {
     let message = render(
         &LocalizedMessage {
@@ -61,5 +73,11 @@ pub(super) fn report(config: &Config, error: &StartFailure) {
         let _ = dir.write_json("core-failure.json", &report);
     }
     eprintln!("{}", json!({"key": error.key, "message": message}));
-    let _ = log_event(config, "runtime.log_failure", Some(error.key));
+    error!(
+        key = "runtime.log_failure",
+        code = error.key,
+        step = error.step,
+        launch_id = %ClientId(&config.launch_id),
+        "core start failed"
+    );
 }

@@ -49,3 +49,7 @@ its case there.
 ## Public product information
 
 For changes to user-visible behavior, supported platforms/models, setup, security/privacy practices, availability, limitations, or release/download details, follow the shared [public-information process](https://github.com/sidevoice/landing/blob/main/AGENTS.md#keep-public-product-information-current). Record the landing change/PR or a linked `sidevoice/landing` issue in the PR checklist. Landing issues are the follow-up triage queue.
+
+## Logging
+
+Logging and what may appear in a log follow the shared [logging guideline](https://github.com/sidevoice/.github-private/blob/main/docs/logging.md). The core's own pieces are `rust/runtime/logging.rs` (subscriber, `SIDEVOICE_LOG`, panic hook) and `rust/log_safe.rs`; `tests/log_canary.rs` fails when a secret or content reaches `core.log`.

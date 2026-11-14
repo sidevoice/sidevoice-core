@@ -8,6 +8,7 @@
 //! against it; one `pub` type per OS in `<concern>/{unix,windows}.rs` implements it, and `<concern>.rs` re-exports
 //! the one compiled in. Callers import the trait and the type (`use sidevoice_platform::user::{User, UserId};`).
 //! Data-only concerns ([`data_dir`], [`target`]) need no trait or per-OS files.
+#![cfg_attr(test, allow(clippy::disallowed_macros, reason = "a test's own output"))]
 
 pub mod data_dir;
 pub mod fs;
