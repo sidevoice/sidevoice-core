@@ -21,18 +21,13 @@ const PANIC_DIR: &str = "SIDEVOICE_CANARY_PANIC_DIR";
 const SEED_HOME: &str = "canary-user-7f3a";
 
 fn seeds(home: &str) -> Vec<String> {
-    let mut seeds: Vec<String> = [
-        home,
-        SEED_HOME,
-        SECRET,
-        WORDS,
-        URL,
-        "canary-pass",
-        "canary-q",
-        THREAD,
-    ]
-    .map(str::to_owned)
-    .into();
+    let mut seeds: Vec<String> = [home, SECRET, WORDS, URL, "canary-pass", "canary-q", THREAD]
+        .map(str::to_owned)
+        .into();
+    // On Windows the seeded home is the real one, so its name is not ours to seed.
+    if !cfg!(windows) {
+        seeds.push(SEED_HOME.to_owned());
+    }
     // `Vec<u8>` prints as `[99, 97, ...]`.
     let decimal = |text: &str| {
         text.bytes()
@@ -55,11 +50,18 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
     if let Ok(dir) = std::env::var(PANIC_DIR) {
         return panic_child(&dir);
     }
-    // The data directory, and so core.log, sit under the seeded home. `dirs` reads HOME on Unix, USERPROFILE on Windows.
+    // The data directory, and so core.log, sit under the seeded home. `dirs` reads HOME on Unix but asks the system on
+    // Windows, so there the seeded home is the real one and the data directory stays in the temporary one.
     let root = support::private_tempdir();
-    let home = root.path().join(SEED_HOME);
-    let data = home.join(".sidevoice");
-    support::private_dir(&home);
+    let home = if cfg!(windows) {
+        dirs::home_dir().unwrap()
+    } else {
+        root.path().join(SEED_HOME)
+    };
+    let data = if cfg!(windows) { root.path() } else { &home }.join(".sidevoice");
+    if !home.exists() {
+        support::private_dir(&home);
+    }
     support::private_dir(&data);
     let home = home.to_str().unwrap().to_owned();
     let mut core = Launch::new(data.join("core"))
