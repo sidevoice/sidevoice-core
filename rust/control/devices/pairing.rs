@@ -2,6 +2,8 @@
 
 use std::collections::VecDeque;
 
+use secrecy::{ExposeSecret, SecretString};
+
 use super::{digest, now, secret};
 
 pub(super) const PAIRING_TTL_SECONDS: i64 = 600;
@@ -14,12 +16,17 @@ pub(super) struct PairingSecrets {
 
 impl PairingSecrets {
     /// Issue a fresh secret and its expiry, dropping expired ones and keeping the newest few.
-    pub(super) fn issue(&mut self) -> (String, i64) {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "only the hash is kept; the value goes to the person who asked"
+    )]
+    pub(super) fn issue(&mut self) -> (SecretString, i64) {
         let at = now();
         self.pending.retain(|(_, expires)| *expires >= at);
-        let value = secret(16);
+        let value = SecretString::from(secret(16));
         let expires = at + PAIRING_TTL_SECONDS;
-        self.pending.push_back((digest(&value), expires));
+        self.pending
+            .push_back((digest(value.expose_secret()), expires));
         while self.pending.len() > MAX_PENDING {
             self.pending.pop_front();
         }
@@ -27,8 +34,12 @@ impl PairingSecrets {
     }
 
     /// Consume `value` if it is pending; it pairs only if it has not expired.
-    pub(super) fn redeem(&mut self, value: &str) -> bool {
-        let hashed = digest(value);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "compared by hash, as it was stored"
+    )]
+    pub(super) fn redeem(&mut self, value: &SecretString) -> bool {
+        let hashed = digest(value.expose_secret());
         let Some(index) = self.pending.iter().position(|(hash, _)| hash == &hashed) else {
             return false;
         };

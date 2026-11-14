@@ -9,6 +9,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 
 use super::refusal::failure;
+use crate::error::CoreError;
 
 pub(super) const PAIR_PER_PEER: u32 = 10;
 pub(super) const PAIR_GLOBAL: u32 = 40;
@@ -85,7 +86,12 @@ impl Limits {
         let mut budget = budget.lock().expect("attempt budget");
         let retry = budget.retry_after(peer, per_peer, global, self.window)?;
         if !budget.logged {
-            tracing::warn!(kind, retry_after_s = retry, "rate limit reached");
+            tracing::warn!(
+                error.type = CoreError::RateLimited.code(),
+                kind,
+                retry_after_s = retry,
+                "too many attempts, so further ones are refused for a while"
+            );
             budget.logged = true;
         }
         let mut response = failure(

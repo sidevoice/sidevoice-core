@@ -17,6 +17,8 @@ thread_local! {
     /// Set while the panic hook logs: a panic may come from inside a write that holds the lock, which this thread
     /// then must not wait for.
     pub(super) static IN_PANIC_HOOK: Cell<bool> = const { Cell::new(false) };
+    /// Set when a line written inside the panic hook was refused, so the hook knows the panic is not in the file.
+    pub(super) static PANIC_LINE_LOST: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The log file. Every line is judged again before it is written: a log that became a link, or open to others, is
@@ -86,7 +88,12 @@ pub(super) struct Line<'a>(&'a LogFile);
 
 impl Write for Line<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.append(buf)?;
+        if let Err(error) = self.0.append(buf) {
+            if IN_PANIC_HOOK.get() {
+                PANIC_LINE_LOST.set(true);
+            }
+            return Err(error);
+        }
         Ok(buf.len())
     }
 

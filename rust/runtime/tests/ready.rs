@@ -1,5 +1,6 @@
 use std::fs;
 
+use secrecy::SecretString;
 use serde_json::json;
 
 use super::support::{core_endpoint, full_config};
@@ -8,7 +9,7 @@ use crate::runtime::ready::{document, remove_own};
 #[test]
 fn document_describes_this_process_and_its_protocols() {
     let config = full_config();
-    let ready = document(&config, 9000, "connector", "token");
+    let ready = document(&config, 9000, "connector", &SecretString::from("token"));
     assert_eq!(
         ready,
         json!({"pid": std::process::id(), "port": 9000, "url": "http://127.0.0.1:9000",

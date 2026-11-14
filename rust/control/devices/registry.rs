@@ -3,6 +3,7 @@
 use std::io;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -51,8 +52,13 @@ impl DeviceRegistry {
         urls: &[String],
     ) -> Value {
         let (secret, expires) = self.secrets.issue();
+        // The pairing code is the one thing this answer exists to hand over.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the pairing code is sent to the person who asked"
+        )]
         let payload = json!({"v": 1, "fp": identity.fingerprint, "host": host, "urls": urls,
-            "secret": secret, "exp": expires});
+            "secret": secret.expose_secret(), "exp": expires});
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("JSON object"));
         json!({"code": format!("SV1.{encoded}"), "payload": payload, "expires_in": PAIRING_TTL_SECONDS})
     }
@@ -60,9 +66,9 @@ impl DeviceRegistry {
     /// Enrol a device for a pending, unexpired pairing secret; `None` if it is not one.
     pub fn redeem(
         &mut self,
-        value: &str,
+        value: &SecretString,
         name: Option<&str>,
-    ) -> io::Result<Option<(String, String)>> {
+    ) -> io::Result<Option<(String, SecretString)>> {
         if !self.secrets.redeem(value) {
             return Ok(None);
         }
@@ -70,7 +76,10 @@ impl DeviceRegistry {
     }
 
     /// Enrol the local device, replacing any previous one; returns the replaced ids too.
-    pub fn pair_local(&mut self, name: Option<&str>) -> io::Result<(String, String, Vec<String>)> {
+    pub fn pair_local(
+        &mut self,
+        name: Option<&str>,
+    ) -> io::Result<(String, SecretString, Vec<String>)> {
         let removed = self.local_ids();
         let (id, token) = self.enrol(name, "local", &removed)?;
         Ok((id, token, removed))
@@ -165,19 +174,23 @@ impl DeviceRegistry {
         Ok(removed)
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "only the hash of the token is stored"
+    )]
     fn enrol(
         &mut self,
         name: Option<&str>,
         kind: &str,
         removed: &[String],
-    ) -> io::Result<(String, String)> {
+    ) -> io::Result<(String, SecretString)> {
         let id = Uuid::new_v4().to_string();
-        let token = secret(32);
+        let token = SecretString::from(secret(32));
         let at = now();
         let mut next = self.without(removed);
         next.insert(
             id.clone(),
-            json!({"token_hash": digest(&token), "name": clean_name(name),
+            json!({"token_hash": digest(token.expose_secret()), "name": clean_name(name),
             "kind": kind, "created": at, "last_seen": at}),
         );
         self.save(next)?;

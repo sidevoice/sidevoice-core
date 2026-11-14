@@ -1,10 +1,13 @@
 //! Admission of an agent reply under the conversation's current speech epoch.
 use serde_json::{json, Value};
+use tracing::{info, info_span, warn};
 
 use super::journal::Row;
 use super::util::{default_title, field, millis, seconds, valid_thread};
 use super::utterances::{UtteranceRecord, MAX_UTTERANCES};
 use super::{Inner, Room};
+use crate::error::{refusal_code, CoreError};
+use crate::log_safe::ClientId;
 
 const SPEECH_LANGUAGES: [&str; 6] = ["es", "en", "fr", "it", "pt", "hi"];
 
@@ -20,8 +23,7 @@ impl Room {
         let thread = {
             let inner = self.inner.lock().expect("room lock");
             let Some(binding) = inner.bindings.live_of(cid, bid) else {
-                return json!({"status":"unknown_binding","event_id":p.get("event_id"),
-                    "utterance_id":p.get("utterance_id")});
+                return unknown_binding(p);
             };
             if inner.bindings.get(original_bid).is_some_and(|original| {
                 original.thread != binding.thread || original.connector != cid
@@ -35,7 +37,47 @@ impl Room {
         self.publish_with_policy(&speech, true)
     }
 
+    /// One agent reply asking to be spoken. The event is written after the room lock is released, with the length of
+    /// the words and never the words.
     fn publish_with_policy(&self, p: &Value, no_late_first_admission: bool) -> Value {
+        let epoch: u64 = p.get("epoch").and_then(Value::as_u64).unwrap_or_default();
+        let span = info_span!(
+            "speech",
+            binding = %ClientId(field(p, "binding_id")),
+            utterance = %ClientId(field(p, "utterance_id")),
+            epoch
+        );
+        let _in_span = span.enter();
+        let disposition = self.admit_speech(p, no_late_first_admission);
+        let len = field(p, "text").chars().count();
+        match disposition["status"].as_str() {
+            Some("queued") => info!(
+                result = "queued",
+                len, "speech accepted and queued to be spoken"
+            ),
+            Some("text_only") => info!(
+                result = "text_only",
+                len, "speech accepted as text only because nobody is listening"
+            ),
+            Some("rejected") => {
+                let key = disposition["error"]
+                    .as_str()
+                    .unwrap_or("room.user_speaking");
+                warn!(
+                    error.type = refusal_code(key),
+                    len,
+                    "speech was refused, so the reply is not spoken"
+                );
+            }
+            _ => info!(
+                result = "other",
+                len, "speech was answered without being spoken"
+            ),
+        }
+        disposition
+    }
+
+    fn admit_speech(&self, p: &Value, no_late_first_admission: bool) -> Value {
         let thread = field(p, "thread_id");
         let uid = field(p, "utterance_id");
         let text = field(p, "text");
@@ -252,8 +294,7 @@ impl Room {
             inner.bindings.live_of(cid, bid).map(|b| b.thread.clone())
         };
         let Some(thread) = thread else {
-            return json!({"status":"unknown_binding","event_id":p.get("event_id"),
-                "utterance_id":p.get("utterance_id")});
+            return unknown_binding(p);
         };
         let mut speech = p.clone();
         speech["thread_id"] = json!(thread);
@@ -307,6 +348,16 @@ impl Inner {
             self.send_reply(listener, uid);
         }
     }
+}
+
+/// The answer for speech from a binding the room does not hold live for the connector.
+fn unknown_binding(p: &Value) -> Value {
+    warn!(
+        error.type = CoreError::BindingUnknown.code(),
+        "speech came from a binding the core does not know, so it is not spoken"
+    );
+    json!({"status":"unknown_binding","event_id":p.get("event_id"),
+        "utterance_id":p.get("utterance_id")})
 }
 
 fn rejected(key: &str) -> Value {

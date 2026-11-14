@@ -2,13 +2,14 @@
 //! pairing codes and the list of paired machines.
 use std::io;
 
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 
 use super::util::field;
 use super::Room;
 
 impl Room {
-    pub fn local_credential(&self) -> io::Result<(String, String)> {
+    pub fn local_credential(&self) -> io::Result<(String, SecretString)> {
         let mut inner = self.inner.lock().expect("room lock");
         // One that does not parse is replaced; one that cannot be trusted (a link, open to others) is refused.
         let saved = match self.dir.read_json("connector-credential.json") {
@@ -19,15 +20,18 @@ impl Room {
             let cid = field(&saved, "connector_id");
             let token = field(&saved, "token");
             if inner.credentials.is_paired(cid, token) {
-                return Ok((cid.into(), token.into()));
+                return Ok((cid.into(), SecretString::from(token)));
             }
         }
         let (cid, token) = inner.credentials.issue(None);
         self.save(&inner)?;
-        self.dir.write_json(
-            "connector-credential.json",
-            &json!({"connector_id": cid, "token": token}),
-        )?;
+        // The credential file is where the token is stored for the launcher.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "stored in the private credential file"
+        )]
+        let saved = json!({"connector_id": cid, "token": token.expose_secret()});
+        self.dir.write_json("connector-credential.json", &saved)?;
         Ok((cid, token))
     }
     pub fn authenticate_connector(&self, cid: &str, token: &str, identity: &Value) -> bool {
@@ -38,20 +42,25 @@ impl Room {
         inner.credentials.touch(cid, identity);
         self.save(&inner).is_ok()
     }
-    pub fn pairing_code(&self) -> String {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the code is shaped for the person who reads it out"
+    )]
+    pub fn pairing_code(&self) -> SecretString {
         let code = self
             .inner
             .lock()
             .expect("room lock")
             .credentials
             .new_pairing_code();
-        format!("{}-{}-{}", &code[..4], &code[4..8], &code[8..])
+        let code = code.expose_secret();
+        SecretString::from(format!("{}-{}-{}", &code[..4], &code[4..8], &code[8..]))
     }
     pub fn redeem_pairing(
         &self,
         code: &str,
         identity: &Value,
-    ) -> io::Result<Option<(String, String)>> {
+    ) -> io::Result<Option<(String, SecretString)>> {
         let mut inner = self.inner.lock().expect("room lock");
         if !inner.credentials.redeem_pairing_code(code) {
             return Ok(None);

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use secrecy::SecretString;
 use serde_json::{json, Value};
 
 use super::{
@@ -79,16 +80,16 @@ fn the_ring_is_bounded_by_bytes_too() {
 async fn a_token_takes_its_own_call_once_and_only_for_its_device() {
     let calls = ResumableCalls::default();
     let (attach, _parked) = tokio::sync::mpsc::channel(1);
-    calls.open("s", "device", "token", attach);
+    calls.open("s", "device", &SecretString::from("token"), attach);
     assert!(calls.take("s", "other", "token").is_none());
     assert!(calls.take("s", "device", "wrong").is_none());
     assert!(calls.take("s", "device", "").is_none());
     assert!(calls.take("s", "device", "token").is_some());
     assert!(calls.take("s", "device", "token").is_none(), "spent");
-    calls.renew("s", "next");
+    calls.renew("s", &SecretString::from("next"));
     assert!(calls.take("s", "device", "next").is_some());
     calls.close("s");
-    calls.renew("s", "again");
+    calls.renew("s", &SecretString::from("again"));
     assert!(calls.take("s", "device", "again").is_none(), "closed");
 }
 

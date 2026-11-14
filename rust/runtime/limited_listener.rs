@@ -12,6 +12,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::error::CoreError;
+
 pub(super) const MAX_CONNECTIONS: usize = 256;
 
 pub(super) struct LimitedListener {
@@ -52,7 +54,11 @@ impl Listener for LimitedListener {
                 .logged
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(60))
             {
-                tracing::warn!(max = MAX_CONNECTIONS, "connection limit reached");
+                tracing::warn!(
+                    error.type = CoreError::ConnectionLimit.code(),
+                    max = MAX_CONNECTIONS,
+                    "too many connections are open, so new ones are closed until some end"
+                );
                 self.logged = Some(Instant::now());
             }
         }

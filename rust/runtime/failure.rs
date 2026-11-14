@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 use tracing::error;
 
 use super::{system_language, Config};
+use crate::error::CoreError;
 use crate::log_safe::ClientId;
 use crate::messages::{render, LocalizedMessage};
 use crate::storage::ReportDir;
@@ -75,9 +76,9 @@ pub(super) fn report(config: &Config, error: &StartFailure) {
     eprintln!("{}", json!({"key": error.key, "message": message}));
     error!(
         key = "runtime.log_failure",
-        code = error.key,
+        error.type = CoreError::from_start_key(error.key).code(),
         step = error.step,
         launch_id = %ClientId(&config.launch_id),
-        "core start failed"
+        "the core could not start, so nothing is being served"
     );
 }

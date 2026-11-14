@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
@@ -147,7 +148,7 @@ struct Call {
     /// What was sent, numbered, for a page that comes back.
     outbound: Outbound,
     /// The token that lets the page take this call over again, once.
-    token: String,
+    token: SecretString,
     resume_window: Duration,
     parked_until: Option<tokio::time::Instant>,
     reattach: mpsc::Receiver<Reattach>,
@@ -219,10 +220,14 @@ impl Call {
     }
 
     /// The session frame: where the call is, and the token that brings the page back to it.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the resume token is sent to the page that holds the call"
+    )]
     fn session_frame(&self, resumed: Value) -> Value {
         let room = json!({"api": API, "version": env!("CARGO_PKG_VERSION")});
         let mut data = json!({"session_id":self.session,"room":room,
-            "resume":{"token":self.token,"seconds":self.resume_window.as_secs_f64()}});
+            "resume":{"token":self.token.expose_secret(),"seconds":self.resume_window.as_secs_f64()}});
         if let (Some(data), Some(resumed)) = (data.as_object_mut(), resumed.as_object()) {
             data.extend(resumed.clone());
         }

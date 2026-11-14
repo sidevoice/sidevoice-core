@@ -123,6 +123,7 @@ impl Inner {
             })
             .collect();
         for input in &read {
+            tracing::debug!(result = "read", "the agent has the input");
             self.browsers.input_receipt(input, "read");
             self.mark_latency(
                 &input.session,

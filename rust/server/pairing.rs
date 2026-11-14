@@ -7,10 +7,14 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{body::Bytes, Json, Router};
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tracing::{info, instrument, warn};
 
 use crate::control::devices::valid_nonce;
+use crate::error::CoreError;
+use crate::log_safe::ClientId;
 
 use super::refusal::{refuse, require_origin, Handled, Refusal};
 use super::request::query;
@@ -56,20 +60,24 @@ async fn identity(State(state): State<Arc<AppState>>, headers: HeaderMap, uri: U
 
 #[derive(Deserialize)]
 struct Pair {
-    secret: String,
+    secret: SecretString,
     name: Option<String>,
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the new device token is sent once, to the device that paired"
+)]
+#[instrument(skip_all, fields(device = tracing::field::Empty))]
 async fn pair(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Handled {
     require_origin(&headers)?;
     let secret_invalid = |status| refuse("device.secret_invalid", status, &headers);
     let Ok(payload) = serde_json::from_slice::<Pair>(&body) else {
         return Err(secret_invalid(StatusCode::BAD_REQUEST));
     };
-    if payload.secret.is_empty()
-        || payload.secret.len() > MAX_FIELD
-        || name_too_long(payload.name.as_deref())
-    {
+    #[allow(clippy::disallowed_methods, reason = "only its length is checked here")]
+    let secret_len = payload.secret.expose_secret().len();
+    if secret_len == 0 || secret_len > MAX_FIELD || name_too_long(payload.name.as_deref()) {
         return Err(secret_invalid(StatusCode::BAD_REQUEST));
     }
     let result = state
@@ -78,12 +86,26 @@ async fn pair(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
         .expect("registry lock")
         .redeem(&payload.secret, payload.name.as_deref());
     match result {
-        Ok(Some((device_id, token))) => Ok(Json(
-            json!({"device_id": device_id, "token": token, "node": state.node()}),
-        )
-        .into_response()),
-        Ok(None) => Err(secret_invalid(StatusCode::FORBIDDEN)),
-        Err(_) => Err(start_failed(&headers)),
+        Ok(Some((device_id, token))) => {
+            tracing::Span::current().record("device", device_id.as_str());
+            info!(result = "paired", "device paired");
+            Ok(Json(
+                json!({"device_id": device_id, "token": token.expose_secret(), "node": state.node()}),
+            )
+            .into_response())
+        }
+        Ok(None) => {
+            warn!(
+                error.type = CoreError::PairingRefused.code(),
+                http.response.status_code = 403u16,
+                "a pairing secret was refused, so the device stays unpaired"
+            );
+            Err(secret_invalid(StatusCode::FORBIDDEN))
+        }
+        Err(error) => {
+            saving_failed(&error);
+            Err(start_failed(&headers))
+        }
     }
 }
 
@@ -104,6 +126,7 @@ async fn devices(
     Ok(Json(listing).into_response())
 }
 
+#[instrument(skip_all, fields(device = %ClientId(&id)))]
 async fn revoke(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -118,15 +141,20 @@ async fn revoke(
     match revoked {
         Ok(true) => {
             state.close_calls(&id);
+            info!(result = "revoked", "device revoked; its calls are closed");
             Ok(Json(json!({"ok": true})).into_response())
         }
         Ok(false) => Err(refuse("device.not_found", StatusCode::NOT_FOUND, &headers)),
-        Err(_) => Err(start_failed(&headers)),
+        Err(error) => {
+            saving_failed(&error);
+            Err(start_failed(&headers))
+        }
     }
 }
 
 /// Renames a paired device, authorised like revoking it. The body must be a JSON object whose
 /// `name` is a valid [`new_name`].
+#[instrument(skip_all, fields(device = %ClientId(&id)))]
 async fn rename(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -151,9 +179,15 @@ async fn rename(
         registry.rename(&id, &name)
     };
     match renamed {
-        Ok(true) => Ok(Json(json!({"ok": true, "name": name})).into_response()),
+        Ok(true) => {
+            info!(result = "renamed", "device renamed");
+            Ok(Json(json!({"ok": true, "name": name})).into_response())
+        }
         Ok(false) => Err(refuse("device.not_found", StatusCode::NOT_FOUND, &headers)),
-        Err(_) => Err(start_failed(&headers)),
+        Err(error) => {
+            saving_failed(&error);
+            Err(start_failed(&headers))
+        }
     }
 }
 
@@ -185,6 +219,11 @@ struct LocalPair {
     name: Option<String>,
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the new device token is sent once, to the device that paired"
+)]
+#[instrument(skip_all, fields(device = tracing::field::Empty))]
 async fn pair_local(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -204,20 +243,43 @@ async fn pair_local(
         .lock()
         .expect("registry lock")
         .pair_local(payload.name.as_deref());
-    let (device_id, token, replaced) = result.map_err(|_| start_failed(&headers))?;
+    let (device_id, token, replaced) = result.map_err(|error| {
+        saving_failed(&error);
+        start_failed(&headers)
+    })?;
     for id in replaced {
         state.close_calls(&id);
     }
-    Ok(Json(json!({"device_id": device_id, "token": token, "node": state.node()})).into_response())
+    tracing::Span::current().record("device", device_id.as_str());
+    info!(result = "paired_local", "this machine's own device paired");
+    Ok(
+        Json(json!({"device_id": device_id, "token": token.expose_secret(), "node": state.node()}))
+            .into_response(),
+    )
 }
 
+#[instrument(skip_all)]
 async fn unpair_local(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Handled {
     let result = state.registry.lock().expect("registry lock").revoke_local();
-    let revoked = result.map_err(|_| start_failed(&headers))?;
+    let revoked = result.map_err(|error| {
+        saving_failed(&error);
+        start_failed(&headers)
+    })?;
     for id in &revoked {
         state.close_calls(id);
     }
+    info!(count = revoked.len(), "this machine's own device unpaired");
     Ok(Json(json!({"ok": true, "revoked": !revoked.is_empty()})).into_response())
+}
+
+/// A device change that could not be written: the kind of the failure and nothing else (docs/logging.md, section 6).
+fn saving_failed(error: &std::io::Error) {
+    tracing::error!(
+        error.type = CoreError::StateSaveFailed.code(),
+        kind = ?error.kind(),
+        os_error = error.raw_os_error(),
+        "the paired devices could not be saved, so the change was not made"
+    );
 }
 
 fn name_too_long(name: Option<&str>) -> bool {
