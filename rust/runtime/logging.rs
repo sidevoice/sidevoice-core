@@ -49,23 +49,41 @@ fn filter(value: Option<&str>) -> (EnvFilter, bool) {
     }
 }
 
-/// A target-less directive `<lvl>` becomes `warn,<ours>=<lvl>`; directives that name a target are kept.
+/// A target-less directive `<lvl>` becomes `<quieter of lvl and warn>,<ours>=<lvl>`; directives that name a target are
+/// kept. Without any bare level the default applies to everything else, so naming one target does not silence the rest
+/// (panics included).
 fn rewrite(spec: &str) -> String {
-    spec.split(',')
+    let directives: Vec<&str> = spec
+        .split(',')
         .map(str::trim)
         .filter(|directive| !directive.is_empty())
-        .flat_map(|directive| match directive.parse::<LevelFilter>() {
-            Ok(_) => std::iter::once("warn".to_owned())
-                .chain(OURS.map(|target| format!("{target}={directive}")))
-                .collect(),
-            Err(_) => vec![directive.to_owned()],
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+        .collect();
+    let bare = |directive: &str| directive.parse::<LevelFilter>().ok();
+    let mut out: Vec<String> = if directives.iter().any(|d| bare(d).is_some()) {
+        Vec::new()
+    } else {
+        std::iter::once("warn".to_owned())
+            .chain(OURS.map(|target| format!("{target}=info")))
+            .collect()
+    };
+    for directive in directives {
+        match bare(directive) {
+            Some(level) => {
+                out.push(level.min(LevelFilter::WARN).to_string());
+                out.extend(OURS.map(|target| format!("{target}={directive}")));
+            }
+            None => out.push(directive.to_owned()),
+        }
+    }
+    out.join(",")
 }
 
 /// A panic is an event through the subscriber, so the writer's home backstop applies. The default hook is not
 /// chained: it prints the message raw on a stderr that the connector keeps as `core.stderr.log`.
+#[allow(
+    clippy::disallowed_macros,
+    reason = "the panic must stay visible when the log is unwritable"
+)]
 fn panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         IN_PANIC_HOOK.set(true);
@@ -85,6 +103,8 @@ fn panic_hook() {
             "panic"
         );
         IN_PANIC_HOOK.set(false);
+        // The log may be unwritable: the stderr line (the location only, never the message) keeps the panic visible.
+        eprintln!("sidevoice-core: panic at {location}");
     }));
 }
 
@@ -102,6 +122,23 @@ mod tests {
             rewrite("info, reqwest=debug,sidevoice_core::server=trace"),
             "warn,sidevoice_core=info,sidevoice_platform=info,panic=info,reqwest=debug,sidevoice_core::server=trace"
         );
+    }
+
+    #[test]
+    fn naming_a_target_keeps_the_default_for_the_rest() {
+        assert_eq!(
+            rewrite("sidevoice_core::server=trace"),
+            "warn,sidevoice_core=info,sidevoice_platform=info,panic=info,sidevoice_core::server=trace"
+        );
+    }
+
+    #[test]
+    fn dependencies_get_the_quieter_of_the_level_and_warn() {
+        assert_eq!(
+            rewrite("off"),
+            "off,sidevoice_core=off,sidevoice_platform=off,panic=off"
+        );
+        assert!(rewrite("error").starts_with("error,"));
     }
 
     #[test]

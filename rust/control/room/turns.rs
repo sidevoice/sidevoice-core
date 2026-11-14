@@ -124,7 +124,7 @@ impl Room {
                 .lock()
                 .expect("room lock")
                 .cancel_spoken_turn(sid, turn_id, continuation)?;
-        info!(turn = %ClientId(turn_id), "turn cancelled");
+        info!(turn = %ClientId(turn_id), session = %ClientId(sid), "turn cancelled");
         Ok(cancelled)
     }
 }

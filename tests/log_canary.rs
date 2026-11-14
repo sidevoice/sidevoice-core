@@ -13,17 +13,26 @@ use serde_json::{json, Value};
 use sidevoice_core::log_safe::IdHash;
 use support::*;
 
-const HOME: &str = "/home/canary-user-7f3a";
 const SECRET: &str = "canary-secret-7f3a";
 const WORDS: &str = "canary words 7f3a";
 const URL: &str = "https://u:canary-pass@x/?canary-q=1";
 const THREAD: &str = "canary-thread-7f3a";
 const PANIC_DIR: &str = "SIDEVOICE_CANARY_PANIC_DIR";
+const SEED_HOME: &str = "canary-user-7f3a";
 
-fn seeds() -> Vec<String> {
-    let mut seeds: Vec<String> = [HOME, SECRET, WORDS, URL, "canary-pass", "canary-q", THREAD]
-        .map(str::to_owned)
-        .into();
+fn seeds(home: &str) -> Vec<String> {
+    let mut seeds: Vec<String> = [
+        home,
+        SEED_HOME,
+        SECRET,
+        WORDS,
+        URL,
+        "canary-pass",
+        "canary-q",
+        THREAD,
+    ]
+    .map(str::to_owned)
+    .into();
     // `Vec<u8>` prints as `[99, 97, ...]`.
     let decimal = |text: &str| {
         text.bytes()
@@ -35,8 +44,8 @@ fn seeds() -> Vec<String> {
     seeds
 }
 
-fn assert_clean(what: &str, text: &str) {
-    for seed in seeds() {
+fn assert_clean(what: &str, text: &str, home: &str) {
+    for seed in seeds(home) {
         assert!(!text.contains(&seed), "{what} holds {seed:?}:\n{text}");
     }
 }
@@ -46,10 +55,17 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
     if let Ok(dir) = std::env::var(PANIC_DIR) {
         return panic_child(&dir);
     }
+    // The data directory, and so core.log, sit under the seeded home. `dirs` reads HOME on Unix, USERPROFILE on Windows.
     let root = support::private_tempdir();
-    let mut core = Launch::new(root.path().join("core"))
+    let home = root.path().join(SEED_HOME);
+    let data = home.join(".sidevoice");
+    support::private_dir(&home);
+    support::private_dir(&data);
+    let home = home.to_str().unwrap().to_owned();
+    let mut core = Launch::new(data.join("core"))
         .env("SIDEVOICE_LOG", "trace")
-        .env("HOME", HOME)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .start();
 
     // A device named by a person, a bearer value as a header and as a subprotocol, both refused.
@@ -103,7 +119,7 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
     let reported = core
         .post(
             "/api/presentation/client-error",
-            json!({"session_id": session, "kind": WORDS, "message": format!("{WORDS} {URL} {HOME}")}),
+            json!({"session_id": session, "kind": WORDS, "message": format!("{WORDS} {URL} {home}")}),
         )
         .token(&token)
         .send()
@@ -112,12 +128,34 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
 
     drop(browser);
     peer.disconnect();
+    // The refusals that log: more failed attempts than the budget, and more connections than the limit.
+    let mut limited = false;
+    for _ in 0..400 {
+        limited |= core
+            .get("/api/presentation")
+            .token(SECRET)
+            .send()
+            .await
+            .status
+            == 429;
+    }
+    assert!(limited, "the attempt budget was never reached");
+    let mut held = Vec::new();
+    for _ in 0..300 {
+        held.push(
+            tokio::net::TcpStream::connect(("127.0.0.1", core.port))
+                .await
+                .unwrap(),
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    drop(held);
     assert_eq!(core.stop(), 0);
 
-    let log = fs::read_to_string(root.path().join("core.log")).expect("the core's own log");
+    let log = fs::read_to_string(data.join("core.log")).expect("the core's own log");
     let stderr = core.log();
-    assert_clean("core.log", &log);
-    assert_clean("stderr", &stderr);
+    assert_clean("core.log", &log, &home);
+    assert_clean("stderr", &stderr, &home);
     // Positive controls: the flow was logged, and a hostile id became `invalid`.
     for expected in [
         "core starting",
@@ -129,12 +167,10 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
         "turn=turn-ok-1",
         "turn finished",
         "delivery",
-        "rate limit",
+        "rate limit reached",
+        "connection limit reached",
         "core stopped",
     ] {
-        if expected == "rate limit" {
-            continue;
-        }
         assert!(log.contains(expected), "no {expected:?} in:\n{log}");
     }
     assert!(
@@ -154,16 +190,17 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
             "--nocapture",
         ])
         .env(PANIC_DIR, &dir)
-        .env("HOME", HOME)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("SIDEVOICE_LOG", "trace")
         .output()
         .unwrap();
     let child_stderr = String::from_utf8_lossy(&output.stderr);
     let child_stdout = String::from_utf8_lossy(&output.stdout);
-    assert_clean("the panicking process's stderr", &child_stderr);
-    assert_clean("the panicking process's stdout", &child_stdout);
+    assert_clean("the panicking process's stderr", &child_stderr, &home);
+    assert_clean("the panicking process's stdout", &child_stdout, &home);
     let panicked = fs::read_to_string(dir.join("core.log")).expect("the panic's log");
-    assert_clean("the panic's core.log", &panicked);
+    assert_clean("the panic's core.log", &panicked, &home);
     assert!(
         panicked.contains("ERROR panic: panic")
             && panicked.contains("panic=\"canary path ~/project\""),
@@ -179,6 +216,7 @@ fn panic_child(dir: &str) {
     .unwrap();
     support::private_dir(std::path::Path::new(dir));
     assert!(sidevoice_core::runtime::init_logging(&config).is_ok());
-    let _ = std::thread::spawn(|| panic!("canary path {HOME}/project")).join();
+    let home = std::env::var("HOME").unwrap();
+    let _ = std::thread::spawn(move || panic!("canary path {home}/project")).join();
     std::process::exit(3);
 }
