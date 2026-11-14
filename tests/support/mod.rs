@@ -2,6 +2,7 @@
 //! local socket, a browser's call socket, and a connector on the JSON-RPC v3 link, each written here against the
 //! wire. Nothing from another repository, no Docker.
 #![allow(dead_code)]
+#![allow(clippy::disallowed_macros, reason = "a test's own output")]
 
 use std::fs;
 use std::io::Read;

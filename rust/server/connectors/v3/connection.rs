@@ -8,6 +8,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, watch};
+use tracing::Instrument;
 
 use crate::control::room::{PeerError, PeerRequest};
 use crate::server::connectors::{field, Attached, Link};
@@ -236,20 +237,24 @@ impl Connection {
         let finished = self.finished.clone();
         let state = self.state.clone();
         let link = self.link.clone();
-        tokio::spawn(async move {
-            let outcome =
-                tokio::time::timeout(REQUEST_TIMEOUT, dispatch(state, link, method, params)).await;
-            let Some(id) = request_id else {
-                return;
-            };
-            let reply = match outcome {
-                Ok(Ok(result)) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-                Ok(Err((code, message))) => error(id, code, message),
-                Err(_) => error(id, -32001, "Request timed out"),
-            };
-            let _ = out.send(reply).await;
-            let _ = finished.send(key).await;
-        });
+        tokio::spawn(
+            async move {
+                let outcome =
+                    tokio::time::timeout(REQUEST_TIMEOUT, dispatch(state, link, method, params))
+                        .await;
+                let Some(id) = request_id else {
+                    return;
+                };
+                let reply = match outcome {
+                    Ok(Ok(result)) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                    Ok(Err((code, message))) => error(id, code, message),
+                    Err(_) => error(id, -32001, "Request timed out"),
+                };
+                let _ = out.send(reply).await;
+                let _ = finished.send(key).await;
+            }
+            .in_current_span(),
+        );
         Flow::Continue
     }
 }

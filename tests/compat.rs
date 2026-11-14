@@ -10,6 +10,7 @@
 //!   test is not run.
 //!
 //! Ignored by `cargo test`: they need the artifacts.
+#![allow(clippy::disallowed_macros, reason = "a test's own output")]
 
 mod support;
 

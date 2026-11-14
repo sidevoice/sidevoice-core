@@ -16,6 +16,11 @@
 //! - `compat`: run the cross-repository contract tests against the latest published release of the connector and of
 //!   the web client; `compat-report` opens or updates the `compat` issue after a failed run in Actions.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a build tool prints for the person running it"
+)]
+
 mod archive;
 mod compat;
 mod dist;

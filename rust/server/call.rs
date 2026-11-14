@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use serde_json::Value;
+use tracing::{info_span, Instrument};
 
 use crate::messages::{render, LocalizedMessage};
 
@@ -61,7 +62,10 @@ async fn call_socket(
         ws
     };
     Ok(ws
-        .on_upgrade(move |socket| session::run(state, device, socket, close_reason, language))
+        .on_upgrade(move |socket| {
+            session::run(state, device, socket, close_reason, language)
+                .instrument(info_span!("call", session = tracing::field::Empty))
+        })
         .into_response())
 }
 

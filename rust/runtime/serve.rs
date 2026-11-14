@@ -1,17 +1,20 @@
 //! The process lifecycle: claim the directories, load state, serve, report ready, and stop.
 
 use std::io;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::net::TcpListener;
+use tracing::info;
 
 use super::directories::Directories;
-use super::event_log::log_event;
 use super::failure::StartFailure;
 use super::servers::Servers;
 use super::{ready, stop, Config};
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
+use crate::log_safe::ClientId;
 use crate::platform::ipc::{Channel, Channels};
 use crate::platform::signal::{Signals, Stop};
 use crate::platform::user::{User, UserId};
@@ -19,6 +22,7 @@ use crate::server::AppState;
 use crate::storage::PrivateDir;
 
 pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
+    let started = Instant::now();
     let directories = Directories::lock(config)?;
     let dir = &directories.data;
     let _ = dir.remove("core-failure.json");
@@ -73,7 +77,14 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
     let startup = async {
         servers.await_serving(tcp_address, &config.endpoint).await?;
         ready::write(config, dir.path(), &ready)?;
-        let _ = log_event(config, "runtime.log_ready", None);
+        info!(
+            key = "runtime.log_ready",
+            launch_id = %ClientId(&config.launch_id),
+            port,
+            bind = bind_class(&config.host),
+            duration_ms = started.elapsed().as_millis() as u64,
+            "core ready"
+        );
         Ok::<_, StartFailure>(())
     }
     .await;
@@ -98,6 +109,15 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         Err(StartFailure::crashed())
     } else {
         Ok(())
+    }
+}
+
+/// What the listening address is, never the address: a LAN address can name a person's network.
+fn bind_class(host: &str) -> &'static str {
+    match host.parse::<IpAddr>() {
+        Ok(ip) if ip.is_loopback() => "loopback",
+        Ok(_) => "network",
+        Err(_) => "name",
     }
 }
 

@@ -52,7 +52,7 @@ impl Listener for LimitedListener {
                 .logged
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(60))
             {
-                eprintln!("network connection limit reached ({MAX_CONNECTIONS})");
+                tracing::warn!(max = MAX_CONNECTIONS, "connection limit reached");
                 self.logged = Some(Instant::now());
             }
         }

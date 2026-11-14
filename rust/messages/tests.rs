@@ -72,10 +72,6 @@ fn english_templates_keep_their_wording() {
     let expected = [
         ("room.conversation_title", "Conversation 7"),
         (
-            "runtime.log_failure",
-            "The core could not start (bind.port-in-use).",
-        ),
-        (
             "settings.ui_language_invalid",
             "The interface language is not valid.",
         ),
@@ -84,7 +80,6 @@ fn english_templates_keep_their_wording() {
     ];
     let messages = [
         LocalizedMessage::new("room.conversation_title").with_param("id", json!("7")),
-        LocalizedMessage::new("runtime.log_failure").with_param("key", json!("bind.port-in-use")),
         LocalizedMessage::new("settings.ui_language_invalid"),
         LocalizedMessage::new("room.receipt_invalid"),
         LocalizedMessage::new("room.text_too_long"),
