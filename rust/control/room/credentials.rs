@@ -62,10 +62,6 @@ impl Credentials {
     }
     /// Record a new connector with a fresh token, copying what `identity` says about its machine.
     /// Returns the connector's ID and its token; only the token's hash is kept.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "only the hash of the token is stored"
-    )]
     pub(super) fn issue(&mut self, identity: Option<&Value>) -> (String, SecretString) {
         let cid = id();
         let mut bytes = [0u8; 32];
@@ -74,6 +70,10 @@ impl Credentials {
             SecretString::from(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes));
         let at = seconds();
         let mut record = Map::new();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "only the hash of the token is stored"
+        )]
         record.insert("token_hash".into(), json!(hash(token.expose_secret())));
         record.insert("created".into(), json!(at));
         record.insert("last_seen".into(), json!(at));

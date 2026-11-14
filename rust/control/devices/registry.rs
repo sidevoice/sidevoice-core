@@ -174,10 +174,6 @@ impl DeviceRegistry {
         Ok(removed)
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "only the hash of the token is stored"
-    )]
     fn enrol(
         &mut self,
         name: Option<&str>,
@@ -188,6 +184,10 @@ impl DeviceRegistry {
         let token = SecretString::from(secret(32));
         let at = now();
         let mut next = self.without(removed);
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "only the hash of the token is stored"
+        )]
         next.insert(
             id.clone(),
             json!({"token_hash": digest(token.expose_secret()), "name": clean_name(name),

@@ -64,10 +64,6 @@ struct Pair {
     name: Option<String>,
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the new device token is sent once, to the device that paired"
-)]
 #[instrument(skip_all, fields(device = tracing::field::Empty))]
 async fn pair(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Handled {
     require_origin(&headers)?;
@@ -89,10 +85,12 @@ async fn pair(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Byte
         Ok(Some((device_id, token))) => {
             tracing::Span::current().record("device", device_id.as_str());
             info!(result = "paired", "device paired");
-            Ok(Json(
-                json!({"device_id": device_id, "token": token.expose_secret(), "node": state.node()}),
-            )
-            .into_response())
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the new device token is sent once, to the device that paired"
+            )]
+            let body = json!({"device_id": device_id, "token": token.expose_secret(), "node": state.node()});
+            Ok(Json(body).into_response())
         }
         Ok(None) => {
             warn!(
@@ -219,10 +217,6 @@ struct LocalPair {
     name: Option<String>,
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the new device token is sent once, to the device that paired"
-)]
 #[instrument(skip_all, fields(device = tracing::field::Empty))]
 async fn pair_local(
     State(state): State<Arc<AppState>>,
@@ -252,10 +246,13 @@ async fn pair_local(
     }
     tracing::Span::current().record("device", device_id.as_str());
     info!(result = "paired_local", "this machine's own device paired");
-    Ok(
-        Json(json!({"device_id": device_id, "token": token.expose_secret(), "node": state.node()}))
-            .into_response(),
-    )
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the new device token is sent once, to the device that paired"
+    )]
+    let body =
+        json!({"device_id": device_id, "token": token.expose_secret(), "node": state.node()});
+    Ok(Json(body).into_response())
 }
 
 #[instrument(skip_all)]

@@ -16,15 +16,15 @@ pub(super) struct PairingSecrets {
 
 impl PairingSecrets {
     /// Issue a fresh secret and its expiry, dropping expired ones and keeping the newest few.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "only the hash is kept; the value goes to the person who asked"
-    )]
     pub(super) fn issue(&mut self) -> (SecretString, i64) {
         let at = now();
         self.pending.retain(|(_, expires)| *expires >= at);
         let value = SecretString::from(secret(16));
         let expires = at + PAIRING_TTL_SECONDS;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "only the hash is kept; the value goes to the person who asked"
+        )]
         self.pending
             .push_back((digest(value.expose_secret()), expires));
         while self.pending.len() > MAX_PENDING {
@@ -34,11 +34,11 @@ impl PairingSecrets {
     }
 
     /// Consume `value` if it is pending; it pairs only if it has not expired.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "compared by hash, as it was stored"
-    )]
     pub(super) fn redeem(&mut self, value: &SecretString) -> bool {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "compared by hash, as it was stored"
+        )]
         let hashed = digest(value.expose_secret());
         let Some(index) = self.pending.iter().position(|(hash, _)| hash == &hashed) else {
             return false;

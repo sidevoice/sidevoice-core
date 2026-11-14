@@ -5,6 +5,9 @@ use std::backtrace::Backtrace;
 use std::io::{self, IsTerminal};
 
 use tracing::level_filters::LevelFilter;
+use tracing::Metadata;
+use tracing_subscriber::filter::combinator::And;
+use tracing_subscriber::filter::{filter_fn, FilterExt, FilterFn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
@@ -36,7 +39,7 @@ pub(super) fn init(config: &Config) -> io::Result<()> {
         fmt::layer()
             .log_internal_errors(false)
             .with_writer(io::stderr)
-            .with_filter(EnvFilter::new(terminal_directives(&directives)))
+            .with_filter(terminal_filter(&directives))
     });
     tracing_subscriber::registry()
         .with(
@@ -67,6 +70,23 @@ fn directives(value: Option<&str>) -> (String, bool) {
         Ok(_) => (asked, false),
         Err(_) => (rewrite("info"), true),
     }
+}
+
+/// The filter of a stderr sink: the directives with the backtrace target off, and a target check no directive can
+/// bypass (a span directive such as `[call]=debug` is evaluated before a target one).
+type TargetCheck = FilterFn<fn(&Metadata<'_>) -> bool>;
+
+fn terminal_filter<S>(directives: &str) -> And<EnvFilter, TargetCheck, S> {
+    EnvFilter::new(terminal_directives(directives))
+        .and(filter_fn(not_backtrace as fn(&Metadata<'_>) -> bool))
+}
+
+fn not_backtrace(meta: &Metadata<'_>) -> bool {
+    let target = meta.target();
+    target != BACKTRACE_TARGET
+        && !target
+            .strip_prefix(BACKTRACE_TARGET)
+            .is_some_and(|rest| rest.starts_with("::"))
 }
 
 /// The same directives for a stderr sink, with the backtrace target off (spelled out, never implied).
@@ -255,16 +275,13 @@ mod tests {
         let sink = Sink::default();
         let kept = sink.clone();
         let (asked, _) = directives(Some(spec));
-        let asked = if stderr {
-            terminal_directives(&asked)
+        let layer = fmt::layer().with_writer(move || sink.clone());
+        let subscriber = tracing_subscriber::registry();
+        let subscriber = if stderr {
+            subscriber.with(layer.with_filter(terminal_filter(&asked)).boxed())
         } else {
-            asked
+            subscriber.with(layer.with_filter(EnvFilter::new(asked)).boxed())
         };
-        let subscriber = tracing_subscriber::registry().with(
-            fmt::layer()
-                .with_writer(move || sink.clone())
-                .with_filter(EnvFilter::new(asked)),
-        );
         tracing::subscriber::with_default(subscriber, || {
             tracing::error!(target: "panic", "the panic");
             tracing::error!(target: "crash_backtrace", "the backtrace");
@@ -289,6 +306,33 @@ mod tests {
             let stderr = written(spec, true);
             assert!(stderr.contains("the panic"), "{spec}: {stderr}");
             assert!(!stderr.contains("the backtrace"), "{spec}: {stderr}");
+        }
+    }
+
+    #[test]
+    fn a_span_directive_cannot_bring_the_backtrace_to_the_terminal() {
+        for spec in [
+            "info,[call]=trace",
+            "crash_backtrace[call]=trace",
+            "[call]=trace",
+        ] {
+            let (asked, _) = directives(Some(spec));
+            let sink = Sink::default();
+            let kept = sink.clone();
+            let subscriber = tracing_subscriber::registry().with(
+                fmt::layer()
+                    .with_writer(move || sink.clone())
+                    .with_filter(terminal_filter(&asked)),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                let _call = tracing::info_span!("call").entered();
+                tracing::error!(target: "crash_backtrace", "the backtrace");
+                tracing::error!(target: "crash_backtrace::deep", "the nested backtrace");
+                tracing::error!(target: "panic", "the panic");
+            });
+            let out = String::from_utf8(kept.0.lock().unwrap().clone()).unwrap();
+            assert!(out.contains("the panic"), "{spec}: {out}");
+            assert!(!out.contains("backtrace"), "{spec}: {out}");
         }
     }
 

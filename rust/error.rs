@@ -53,7 +53,7 @@ impl CoreError {
             Self::ConnectionLimit => "core.connection-limit",
             Self::PairingRefused => "core.pairing-refused",
             Self::DeviceUnknown => "core.device-unknown",
-            Self::StateSaveFailed => "core.state-save-failed",
+            Self::StateSaveFailed => "core.device-registry-save-failed",
             Self::BindingUnknown => "core.binding-unknown",
             Self::Refused(key) => refusal_code(key),
         }
@@ -100,7 +100,7 @@ pub fn refusal_code(key: &str) -> &'static str {
         "room.speech_conflict" => "core.speech-conflict",
         "room.speech_context_invalid" => "core.speech-context-invalid",
         "room.stale_utterance" => "core.stale-utterance",
-        "room.state_save_failed" => "core.state-save-failed",
+        "room.state_save_failed" => "core.room-state-save-failed",
         "room.text_empty" => "core.text-empty",
         "room.text_too_long" => "core.text-too-long",
         "room.thread_invalid" => "core.thread-invalid",
@@ -159,7 +159,7 @@ mod tests {
             .filter_map(|rest| rest.split('"').next())
             .collect();
         assert!(keys.len() > 25);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&str> = ALL.iter().map(CoreError::code).collect();
         for key in keys {
             let wire = format!("room.{key}");
             let code = refusal_code(&wire);
