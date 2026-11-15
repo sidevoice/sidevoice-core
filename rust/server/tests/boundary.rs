@@ -1265,7 +1265,9 @@ fn crash_fixture(node: &Node) -> String {
         &[],
     );
     let id = record.id.clone();
-    CrashStore::new(node.dir.path()).record(record).unwrap();
+    CrashStore::new(node.dir.path(), Vec::new())
+        .record(record)
+        .unwrap();
     id
 }
 

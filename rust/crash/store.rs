@@ -5,12 +5,13 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
+use std::time::{Duration as Age, SystemTime};
 
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 use super::record::CrashRecord;
-use super::{locations, MAX_AGE_DAYS, MAX_BYTES, MAX_RECORDS, MAX_RECORD_BYTES, TAIL_LINES};
+use super::{locations, MAX_AGE_DAYS, MAX_BYTES, MAX_RECORDS, MAX_RECORD_BYTES};
 use crate::platform::fs::{Files, Fs};
 
 /// The one lock of the store in this process (the core holds the data directory's lock, so there is no other process).
@@ -19,10 +20,14 @@ static LOCK: Mutex<()> = Mutex::new(());
 const MAX_INBOX_FILES: usize = 100;
 /// How much of the end of a log is read to find its last lines.
 const TAIL_BYTES: u64 = 64 * 1024;
+/// How old a staging file in the spool is before it is taken for a writer that died.
+const STAGING_AGE: Age = Age::from_secs(60 * 60);
 
 pub struct CrashStore {
     dir: PathBuf,
     inbox: PathBuf,
+    /// Every spelling of the home directory, hidden again in what comes from the spool.
+    homes: Vec<String>,
 }
 
 /// A record on disk and the bytes it takes.
@@ -33,9 +38,9 @@ struct Kept {
 
 impl CrashStore {
     /// The store of the core whose private directory is `data`.
-    pub fn new(data: &Path) -> Self {
+    pub fn new(data: &Path, homes: Vec<String>) -> Self {
         let (dir, inbox) = locations(data);
-        Self { dir, inbox }
+        Self { dir, inbox, homes }
     }
 
     fn file(&self, id: &str) -> PathBuf {
@@ -69,20 +74,21 @@ impl CrashStore {
         Ok(kept.into_iter().map(|kept| kept.record).collect())
     }
 
-    /// Deletes the record `id`: the app has handled it. `false` when there is none.
-    pub fn acknowledge(&self, id: &str) -> io::Result<bool> {
+    /// Deletes the record `id`: the app has handled it. Its signature, or `None` when there is no such record.
+    pub fn acknowledge(&self, id: &str) -> io::Result<Option<String>> {
         // Only a UUID names a file: nothing else reaches the file system.
         if Uuid::parse_str(id).map(|uuid| uuid.to_string()).as_deref() != Ok(id) {
-            return Ok(false);
+            return Ok(None);
         }
         let _held = lock();
         let path = self.file(id);
+        let signature = read(&path, &self.homes).map(|(record, _)| record.signature);
         match fs::remove_file(&path) {
             Ok(()) => {
                 let _ = Files::sync_dir(&self.dir);
-                Ok(true)
+                Ok(Some(signature.unwrap_or_default()))
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -145,7 +151,7 @@ impl CrashStore {
             else {
                 continue;
             };
-            match read(&entry.path()).filter(|(record, _)| record.id == id) {
+            match read(&entry.path(), &self.homes).filter(|(record, _)| record.id == id) {
                 Some((record, bytes)) => kept.push(Kept { record, bytes }),
                 None => {
                     let _ = fs::remove_file(entry.path());
@@ -179,25 +185,58 @@ impl CrashStore {
         let _ = Files::sync_dir(&self.dir);
     }
 
-    /// Takes in the records the connector left in the spool. A file that is not a valid record is deleted too.
+    /// Takes in the records the connector left in the spool, and applies the caps. Done when the core starts as well as
+    /// on every read, so a spool nobody reads is not left to grow.
+    pub fn maintain(&self) {
+        let _ = self.list();
+    }
+
+    /// Takes in the records the connector left in the spool. A file that is not a valid record, that is dated in the
+    /// future, or that the store refuses for a reason that will not change (an id it has, too big) is deleted; one it
+    /// could not take in for a reason that may pass (a disk error) stays for the next read. A staging file a writer
+    /// never finished is deleted once it is old; one that may still be written is not looked at.
     fn take_inbox(&self) {
+        // A link in the spool's place is never followed: it is not a directory of ours.
+        if fs::symlink_metadata(&self.inbox).is_ok_and(|meta| meta.file_type().is_symlink())
+            || (self.inbox.exists() && Files::ensure_private_dir(&self.inbox).is_err())
+        {
+            return;
+        }
         let Ok(entries) = fs::read_dir(&self.inbox) else {
             return;
         };
-        for (taken, entry) in entries.flatten().enumerate() {
+        let stale = SystemTime::now() - STAGING_AGE;
+        let mut taken = 0;
+        for entry in entries.flatten() {
             let path = entry.path();
-            let named = entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with("crash-") && name.ends_with(".json"));
-            if !named {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with(".crash-") {
+                let old = fs::symlink_metadata(&path)
+                    .and_then(|meta| meta.modified())
+                    .is_ok_and(|modified| modified < stale);
+                if old {
+                    let _ = fs::remove_file(&path);
+                }
                 continue;
             }
-            if taken < MAX_INBOX_FILES {
-                if let Some((record, _)) = read(&path) {
-                    if self.add(record).is_err() {
-                        // Left in the spool for the next read.
-                        continue;
+            if !(name.starts_with("crash-") && name.ends_with(".json")) {
+                continue;
+            }
+            taken += 1;
+            if taken <= MAX_INBOX_FILES {
+                if let Some((record, _)) = read(&path, &self.homes) {
+                    if !record.is_dated_in_the_future() {
+                        match self.add(record) {
+                            Ok(()) => {}
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    io::ErrorKind::AlreadyExists | io::ErrorKind::InvalidData
+                                ) => {}
+                            // Left in the spool for the next read.
+                            Err(_) => continue,
+                        }
                     }
                 }
             }
@@ -212,8 +251,8 @@ fn lock() -> MutexGuard<'static, ()> {
 
 /// The record in `path` and its size, `None` when it is not one: not a private regular file of ours (as the log is
 /// judged), over the size, not JSON, or not the closed shape.
-fn read(path: &Path) -> Option<(CrashRecord, u64)> {
-    let file = Files::open_private_file(path).ok()?;
+fn read(path: &Path, homes: &[String]) -> Option<(CrashRecord, u64)> {
+    let file = Files::open_created_file(path).ok()?;
     let mut bytes = Vec::new();
     file.take(MAX_RECORD_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -222,11 +261,12 @@ fn read(path: &Path) -> Option<(CrashRecord, u64)> {
         return None;
     }
     let value = serde_json::from_slice(&bytes).ok()?;
-    CrashRecord::from_untrusted(&value).map(|record| (record, bytes.len() as u64))
+    CrashRecord::from_untrusted(&value, homes).map(|record| (record, bytes.len() as u64))
 }
 
-/// The last lines of `log`, at most [`TAIL_LINES`], without the backtrace events (the record has the frames). Empty when
-/// the log cannot be read: a record without a tail is still a record.
+/// The lines in the last [`TAIL_BYTES`] of `log`, without the backtrace events (the record has the frames); the record keeps
+/// the last of those that are ours ([`CrashRecord::from_panic`]). Empty when the log cannot be read: a record without a
+/// tail is still a record.
 pub(super) fn log_tail(log: &Path) -> Vec<String> {
     let read = || -> io::Result<Vec<String>> {
         let mut file = Files::open_private_file(log)?;
@@ -240,13 +280,11 @@ pub(super) fn log_tail(log: &Path) -> Vec<String> {
             // The first line may be cut in the middle.
             lines.remove(0);
         }
-        let lines: Vec<String> = lines
+        Ok(lines
             .into_iter()
             .filter(|line| !line.contains("crash_backtrace"))
             .map(str::to_owned)
-            .collect();
-        let skip = lines.len().saturating_sub(TAIL_LINES);
-        Ok(lines.into_iter().skip(skip).collect())
+            .collect())
     };
     read().unwrap_or_default()
 }

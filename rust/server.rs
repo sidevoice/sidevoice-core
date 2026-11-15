@@ -69,7 +69,10 @@ impl AppState {
         room: Arc<Room>,
     ) -> Self {
         Self {
-            crashes: CrashStore::new(dir.path()),
+            crashes: CrashStore::new(
+                dir.path(),
+                crate::runtime::home_spellings(dirs::home_dir().as_deref()),
+            ),
             dir,
             room,
             identity,
@@ -84,6 +87,11 @@ impl AppState {
             port,
             shutdown: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Takes the connector's spool in and applies the crash records' caps: at start, not only when an app reads.
+    pub fn maintain_crash_records(&self) {
+        self.crashes.maintain();
     }
 
     pub fn issue_code(&self) -> Value {

@@ -39,8 +39,8 @@ pub const MAX_BYTES: u64 = 1024 * 1024;
 pub const MAX_AGE_DAYS: i64 = 30;
 /// The most bytes one record file may have: a bigger one is not ours and is deleted.
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
-/// The most lines of the piece's own log a record carries.
-pub const TAIL_LINES: usize = 50;
+/// The most lines of the piece's own log a record carries: its last warnings and errors.
+pub const TAIL_LINES: usize = 20;
 /// The most frames of the backtrace a record carries.
 pub const MAX_FRAMES: usize = 64;
 
@@ -71,7 +71,7 @@ pub fn install(
     arch: &'static str,
 ) {
     let _ = CONTEXT.set(Context {
-        store: CrashStore::new(data),
+        store: CrashStore::new(data, homes.clone()),
         log_file,
         homes,
         os,

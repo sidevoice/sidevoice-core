@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 use super::{Panic, MAX_FRAMES, TAIL_LINES};
 
+/// How far ahead of this machine's clock a record may be dated: a clock a little ahead is not a forgery.
+const SKEW_MINUTES: i64 = 5;
+
 /// What stands in for a panic message that is not a literal (`docs/logging.md`, section 9).
 pub const FORMATTED_MARKER: &str = "<formatted panic message omitted>";
 const MAX_TEXT: usize = 200;
@@ -85,14 +88,7 @@ impl CrashRecord {
     ) -> Self {
         let message = panic.literal.unwrap_or(FORMATTED_MARKER);
         let at = now();
-        let hide = |text: &str| {
-            homes
-                .iter()
-                .filter(|home| home.len() > 1)
-                .fold(text.to_owned(), |text, home| {
-                    text.replace(home.as_str(), "~")
-                })
-        };
+        let hide = |text: &str| mask_homes(text, homes);
         let mut record = Self {
             id: Uuid::new_v4().to_string(),
             piece,
@@ -119,8 +115,9 @@ impl CrashRecord {
     }
 
     /// Reads a record from untrusted JSON: only the closed field list is taken, every text is bounded and cleaned, and
-    /// the signature is made again rather than believed. `None` when a required field is missing or malformed.
-    pub fn from_untrusted(value: &Value) -> Option<Self> {
+    /// the signature is made again rather than believed. The home directory is hidden again and the times are made UTC
+    /// (milliseconds) and ordered. `None` when a required field is missing or malformed.
+    pub fn from_untrusted(value: &Value, homes: &[String]) -> Option<Self> {
         let text = |value: &Value| value.as_str().map(str::to_owned);
         let mut record = Self {
             id: text(&value["id"])?,
@@ -145,6 +142,22 @@ impl CrashRecord {
             backtrace: lines(&value["backtrace"]),
             log_tail: lines(&value["log_tail"]),
         };
+        let times = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .ok()
+                .map(|at| at.with_timezone(&chrono::Utc))
+        };
+        let (first, last) = (times(&record.first_at)?, times(&record.last_at)?);
+        let stamp = |at: chrono::DateTime<chrono::Utc>| {
+            at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
+        record.first_at = stamp(first.min(last));
+        record.last_at = stamp(first.max(last));
+        record.exception.message = mask_homes(&record.exception.message, homes);
+        record.location.file = mask_homes(&record.location.file, homes);
+        for text in record.backtrace.iter_mut().chain(&mut record.log_tail) {
+            *text = mask_homes(text, homes);
+        }
         if Uuid::parse_str(&record.id).ok()?.to_string() != record.id
             || !token(&record.version, 64, |c| {
                 c.is_ascii_alphanumeric() || "._+-".contains(c)
@@ -158,8 +171,6 @@ impl CrashRecord {
             || !token(&record.exception.kind, 64, |c| {
                 c.is_ascii_alphanumeric() || "._-".contains(c)
             })
-            || chrono::DateTime::parse_from_rfc3339(&record.first_at).is_err()
-            || chrono::DateTime::parse_from_rfc3339(&record.last_at).is_err()
         {
             return None;
         }
@@ -167,20 +178,47 @@ impl CrashRecord {
         Some(record)
     }
 
-    /// Bounds every text and makes the signature.
+    /// Whether the record claims to have happened later than a clock a few minutes ahead allows. Both times are
+    /// canonical UTC by now, so they compare as texts.
+    pub fn is_dated_in_the_future(&self) -> bool {
+        let limit = (chrono::Utc::now() + chrono::Duration::minutes(SKEW_MINUTES))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.first_at > limit || self.last_at > limit
+    }
+
+    /// Bounds every text, keeps only what has the shape of what we write, and makes the signature: the message is
+    /// printable ASCII or the marker, the file a short relative path, a frame `symbol` or `symbol at path:line`, a log
+    /// line one of our own warnings or errors.
     fn normalize(&mut self) {
-        self.exception.message = clean(&self.exception.message, MAX_TEXT);
-        self.location.file = clean(&self.location.file, MAX_TEXT);
-        self.backtrace.truncate(MAX_FRAMES);
-        for frame in &mut self.backtrace {
-            *frame = clean(frame, MAX_FRAME);
-        }
-        let skip = self.log_tail.len().saturating_sub(TAIL_LINES);
-        self.log_tail = self
-            .log_tail
-            .drain(skip..)
-            .map(|line| clean(&line, MAX_LINE))
+        let message = clean(&self.exception.message, MAX_TEXT);
+        self.exception.message = if message.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+            message
+        } else {
+            FORMATTED_MARKER.to_owned()
+        };
+        let file = clean(&self.location.file, MAX_TEXT).replace('\\', "/");
+        let relative = !file.starts_with('/')
+            && file.split('/').all(|part| part != ".." && !part.is_empty())
+            && file
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c));
+        self.location.file = if relative { file } else { "unknown".to_owned() };
+        self.backtrace = self
+            .backtrace
+            .iter()
+            .map(|frame| clean(frame, MAX_FRAME))
+            .filter(|frame| is_frame(frame))
+            .take(MAX_FRAMES)
             .collect();
+        let piece = self.piece;
+        let lines: Vec<String> = self
+            .log_tail
+            .iter()
+            .map(|line| clean(line, MAX_LINE))
+            .filter(|line| is_ours(line, piece))
+            .collect();
+        let skip = lines.len().saturating_sub(TAIL_LINES);
+        self.log_tail = lines.into_iter().skip(skip).collect();
         self.signature = self.make_signature();
     }
 
@@ -210,12 +248,100 @@ fn token(value: &str, max: usize, allowed: impl Fn(char) -> bool) -> bool {
     !value.is_empty() && value.len() <= max && value.chars().all(allowed)
 }
 
-/// `text` without control characters, cut to at most `max` characters.
+/// `text` with control characters as spaces and invisible format characters (bidi controls among them) removed, cut to
+/// at most `max` characters.
 fn clean(text: &str, max: usize) -> String {
     text.chars()
+        .filter(|c| !is_format(*c))
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(max)
         .collect()
+}
+
+/// Unicode format characters (category Cf): they change how a text is shown without being seen.
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{180e}'
+        | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}'
+        | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e007f}')
+}
+
+/// `text` with every spelling of the home directory shown as `~` (on Windows without regard to case).
+pub(super) fn mask_homes(text: &str, homes: &[String]) -> String {
+    homes
+        .iter()
+        .filter(|home| home.len() > 1)
+        .fold(text.to_owned(), |text, home| {
+            if !cfg!(windows) {
+                return text.replace(home.as_str(), "~");
+            }
+            // ASCII lowercasing keeps every byte offset.
+            let (folded, needle) = (text.to_ascii_lowercase(), home.to_ascii_lowercase());
+            let mut out = String::with_capacity(text.len());
+            let mut from = 0;
+            while let Some(at) = folded[from..].find(&needle) {
+                out.push_str(&text[from..from + at]);
+                out.push('~');
+                from += at + needle.len();
+            }
+            out.push_str(&text[from..]);
+            out
+        })
+}
+
+/// A frame as [`frames`] makes it: a symbol, then optionally ` at <path>:<line>[:<column>]`.
+fn is_frame(frame: &str) -> bool {
+    let (symbol, place) = match frame.rsplit_once(" at ") {
+        Some((symbol, place)) => (symbol, Some(place)),
+        None => (frame, None),
+    };
+    fn number(text: &str) -> Option<&str> {
+        text.rsplit_once(':')
+            .filter(|(_, n)| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()))
+            .map(|(rest, _)| rest)
+    }
+    let place_ok = place.is_none_or(|place| {
+        number(place).is_some_and(|path| {
+            let path = number(path).unwrap_or(path);
+            !path.is_empty()
+                && path
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_./\\~:+-".contains(c))
+        })
+    });
+    !symbol.is_empty()
+        && symbol
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_:<>{}$.,&*()[]'+-@# ".contains(c))
+        && place_ok
+}
+
+/// Whether `line` is a line of our own log at `warn` or `error`: `<RFC 3339 time> <LEVEL> <target>: ...`, the target
+/// one of this piece's own crates. A dependency's line, a debug line and a service's raw stderr are none of these.
+fn is_ours(line: &str, piece: Piece) -> bool {
+    let mut parts = line.split_whitespace();
+    let (Some(time), Some(level)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    if chrono::DateTime::parse_from_rfc3339(time).is_err() || !matches!(level, "WARN" | "ERROR") {
+        return false;
+    }
+    let rest = line.trim_start()[time.len()..].trim_start();
+    let rest = rest[level.len()..].trim_start();
+    let Some((target, _)) = rest.split_once(": ") else {
+        return false;
+    };
+    let own = match piece {
+        Piece::Core => "sidevoice_core",
+        Piece::Connector => "sidevoice_connector",
+    };
+    [own, "sidevoice_platform", "panic"].iter().any(|name| {
+        target == *name
+            || target
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with("::"))
+    })
 }
 
 fn lines(value: &Value) -> Vec<String> {

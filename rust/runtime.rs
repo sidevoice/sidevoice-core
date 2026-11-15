@@ -4,6 +4,7 @@ mod command;
 mod config;
 mod directories;
 mod event_log;
+pub(crate) use event_log::home_spellings;
 mod failure;
 mod language;
 mod limited_listener;

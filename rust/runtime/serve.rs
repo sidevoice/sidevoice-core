@@ -60,6 +60,7 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         port,
         stored.room.clone(),
     ));
+    state.maintain_crash_records();
     let delivery_task = tokio::spawn(stored.room.pump());
     // Conversations whose last viewer aged out or was unpaired close here, at startup and every quarter hour.
     let departed_task = tokio::spawn({

@@ -120,7 +120,7 @@ fn open_private_append(path: &Path) -> io::Result<File> {
 
 /// The spellings of the home directory a line may hold, each shown as `~`; none for the root or an empty home, which
 /// would blank every path out.
-pub(super) fn home_spellings(home: Option<&Path>) -> Vec<String> {
+pub(crate) fn home_spellings(home: Option<&Path>) -> Vec<String> {
     let mut homes = Vec::new();
     if let Some(home) = home.and_then(Path::to_str).filter(|home| home.len() > 1) {
         let escaped = format!("{home:?}");

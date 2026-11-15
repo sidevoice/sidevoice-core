@@ -19,6 +19,7 @@ use tracing::{info, warn};
 use super::refusal::{refuse, require_origin, Handled};
 use super::{AppState, AuthenticatedDevice};
 use crate::error::CoreError;
+use crate::log_safe::ClientId;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -52,7 +53,7 @@ async fn list(
     }
 }
 
-/// Never logs the id of a record: it may become a Sentry `event_id` before it is sent.
+/// Logs the device and the record's signature, never its id: the id may become a Sentry `event_id` before it is sent.
 async fn acknowledge(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -60,18 +61,20 @@ async fn acknowledge(
     device: Option<Extension<AuthenticatedDevice>>,
 ) -> Handled {
     require_origin(&headers)?;
-    if device.is_none() {
+    let Some(Extension(device)) = device else {
         return Err(unpaired(&headers));
-    }
+    };
     match state.crashes.acknowledge(&id) {
-        Ok(true) => {
+        Ok(Some(signature)) => {
             info!(
+                device = %ClientId(&device.0),
+                signature = %signature,
                 result = "acknowledged",
                 "a crash record was handled by an app and deleted"
             );
             Ok(Json(json!({"ok": true})).into_response())
         }
-        Ok(false) => Err(refuse("crash.not_found", StatusCode::NOT_FOUND, &headers)),
+        Ok(None) => Err(refuse("crash.not_found", StatusCode::NOT_FOUND, &headers)),
         Err(error) => {
             warn!(
                 error.type = CoreError::CrashRecordsUnavailable.code(),
