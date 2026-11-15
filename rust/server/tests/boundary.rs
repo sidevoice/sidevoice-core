@@ -1247,3 +1247,106 @@ async fn a_device_revoked_while_its_rename_is_on_the_way_renames_nothing() {
         "the name is kept"
     );
 }
+
+fn crash_fixture(node: &Node) -> String {
+    use crate::crash::{CrashRecord, CrashStore, Panic, Piece};
+    let record = CrashRecord::from_panic(
+        Piece::Core,
+        "1.0.0",
+        "linux",
+        "amd64",
+        &Panic {
+            literal: Some("boom"),
+            file: "rust/x.rs",
+            line: 3,
+            backtrace: "   0: f\n",
+        },
+        &["error line".to_owned()],
+        &[],
+    );
+    let id = record.id.clone();
+    CrashStore::new(node.dir.path()).record(record).unwrap();
+    id
+}
+
+#[tokio::test]
+async fn only_a_paired_device_lists_and_acknowledges_crash_records() {
+    let node = Node::new();
+    let id = crash_fixture(&node);
+    let list = "/api/device/crashes";
+    let one = format!("{list}/{id}");
+    // Nobody without a device token, on TCP or on the same user's socket, and no other credential.
+    for app in [node.tcp(), node.socket()] {
+        for (method, path) in [("GET", list), ("DELETE", one.as_str())] {
+            let (status, _, _) = send(&app, method, path, &[], None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+            let (status, _, _) = send(
+                &app,
+                method,
+                path,
+                &[("authorization", "Bearer not-a-device-token")],
+                None,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} with a stranger's token"
+            );
+        }
+    }
+    // The routes are not local-only, so no socket-only path opens them either.
+    assert!(!crate::server::trust::local_only(list));
+
+    let (_, token) = node.paired().await;
+    let authorization = bearer(&token);
+    let (status, _, body) = send(
+        &node.tcp(),
+        "GET",
+        list,
+        &[("authorization", &authorization)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["crashes"].as_array().unwrap().len(), 1);
+    assert_eq!(body["crashes"][0]["id"], id.as_str());
+    assert_eq!(body["crashes"][0]["exception"]["message"], "boom");
+
+    let (status, _, _) = send(
+        &node.tcp(),
+        "DELETE",
+        "/api/device/crashes/not-an-id",
+        &[("authorization", &authorization)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send(
+        &node.tcp(),
+        "DELETE",
+        &one,
+        &[("authorization", &authorization)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(
+        &node.tcp(),
+        "DELETE",
+        &one,
+        &[("authorization", &authorization)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "acknowledged once");
+    let (_, _, body) = send(
+        &node.tcp(),
+        "GET",
+        list,
+        &[("authorization", &authorization)],
+        None,
+    )
+    .await;
+    assert_eq!(body["crashes"], json!([]));
+}

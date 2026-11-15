@@ -34,23 +34,9 @@ impl LogFile {
     /// Opens (creating, judging and rotating) the log now: a log that cannot be opened is a start failure, which a
     /// writer made lazily by the subscriber could not report.
     pub(super) fn open(path: PathBuf, home: Option<&Path>) -> io::Result<Self> {
-        let mut homes = Vec::new();
-        // The root, or an empty home, would blank every path out.
-        if let Some(home) = home.and_then(Path::to_str).filter(|home| home.len() > 1) {
-            let escaped = format!("{home:?}");
-            for spelling in [
-                home.to_owned(),
-                escaped[1..escaped.len() - 1].to_owned(),
-                home.replace('\\', "/"),
-            ] {
-                if !homes.contains(&spelling) {
-                    homes.push(spelling);
-                }
-            }
-        }
         let log = Self {
             path,
-            homes,
+            homes: home_spellings(home),
             lock: Mutex::new(()),
         };
         log.append(b"")?;
@@ -130,4 +116,23 @@ fn open_private_append(path: &Path) -> io::Result<File> {
     let file = Files::open_private(path, Create::Append)?;
     Files::check_private(&file)?;
     Ok(file)
+}
+
+/// The spellings of the home directory a line may hold, each shown as `~`; none for the root or an empty home, which
+/// would blank every path out.
+pub(super) fn home_spellings(home: Option<&Path>) -> Vec<String> {
+    let mut homes = Vec::new();
+    if let Some(home) = home.and_then(Path::to_str).filter(|home| home.len() > 1) {
+        let escaped = format!("{home:?}");
+        for spelling in [
+            home.to_owned(),
+            escaped[1..escaped.len() - 1].to_owned(),
+            home.replace('\\', "/"),
+        ] {
+            if !homes.contains(&spelling) {
+                homes.push(spelling);
+            }
+        }
+    }
+    homes
 }

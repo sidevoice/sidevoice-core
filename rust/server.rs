@@ -9,11 +9,13 @@ use serde_json::{json, Value};
 
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
+use crate::crash::CrashStore;
 use crate::storage::PrivateDir;
 
 mod call;
 mod connector_routes;
 mod connectors;
+mod crashes;
 mod device_address;
 mod drain;
 mod guard;
@@ -32,6 +34,7 @@ pub(crate) use trust::safe_url;
 pub struct AppState {
     pub dir: PrivateDir,
     pub room: Arc<Room>,
+    crashes: CrashStore,
     pub identity: NodeIdentity,
     registry: Mutex<DeviceRegistry>,
     limits: limits::Limits,
@@ -66,6 +69,7 @@ impl AppState {
         room: Arc<Room>,
     ) -> Self {
         Self {
+            crashes: CrashStore::new(dir.path()),
             dir,
             room,
             identity,
@@ -159,6 +163,7 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
     let mut router = Router::new()
         .merge(node::routes())
         .merge(pairing::routes())
+        .merge(crashes::routes())
         .merge(call::routes())
         .merge(presentation::routes())
         .merge(connector_routes::routes());
