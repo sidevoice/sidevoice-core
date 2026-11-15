@@ -1,5 +1,6 @@
 //! The record's closed field list, its signature and the validation every record passes before it is kept.
 
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -148,6 +149,10 @@ impl CrashRecord {
                 .map(|at| at.with_timezone(&chrono::Utc))
         };
         let (first, last) = (times(&record.first_at)?, times(&record.last_at)?);
+        // A year past 9999 would be written with a sign and a fifth digit.
+        if first.max(last).year() > 9999 {
+            return None;
+        }
         let stamp = |at: chrono::DateTime<chrono::Utc>| {
             at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         };
@@ -179,11 +184,12 @@ impl CrashRecord {
     }
 
     /// Whether the record claims to have happened later than a clock a few minutes ahead allows. Both times are
-    /// canonical UTC by now, so they compare as texts.
+    /// canonical UTC by now; they are compared as times, and one that does not parse counts as in the future.
     pub fn is_dated_in_the_future(&self) -> bool {
-        let limit = (chrono::Utc::now() + chrono::Duration::minutes(SKEW_MINUTES))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        self.first_at > limit || self.last_at > limit
+        let limit = chrono::Utc::now() + chrono::Duration::minutes(SKEW_MINUTES);
+        [&self.first_at, &self.last_at]
+            .iter()
+            .any(|text| chrono::DateTime::parse_from_rfc3339(text).map_or(true, |at| at > limit))
     }
 
     /// Bounds every text, keeps only what has the shape of what we write, and makes the signature: the message is
@@ -267,27 +273,108 @@ fn is_format(c: char) -> bool {
         | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e007f}')
 }
 
-/// `text` with every spelling of the home directory shown as `~` (on Windows without regard to case).
+/// `text` with the invisible format characters removed, so one inside a name cannot keep it from being found.
+fn strip_format(text: &str) -> String {
+    text.chars().filter(|c| !is_format(*c)).collect()
+}
+
+/// `text` with the home directory shown as `~`: the format characters are removed first, every spelling of the home is
+/// matched (without regard to case on Windows and macOS, whose default file systems ignore it), and then the user
+/// segment of any path under a users root (`/Users/<name>`, `/home/<name>`, `C:\Users\<name>`, which also covers a
+/// Windows 8.3 short name) is hidden whatever the home says.
 pub(super) fn mask_homes(text: &str, homes: &[String]) -> String {
-    homes
+    let fold = cfg!(any(windows, target_os = "macos"));
+    let text = homes
         .iter()
         .filter(|home| home.len() > 1)
-        .fold(text.to_owned(), |text, home| {
-            if !cfg!(windows) {
-                return text.replace(home.as_str(), "~");
+        .fold(strip_format(text), |text, home| {
+            mask_home(&text, &strip_format(home), fold)
+        });
+    mask_users(&text)
+}
+
+pub(super) fn mask_home(text: &str, home: &str, fold: bool) -> String {
+    if !fold {
+        return text.replace(home, "~");
+    }
+    let needle: Vec<char> = home.chars().flat_map(char::to_lowercase).collect();
+    // The length in `text` of what matches `needle` when both are lowercased, if the text starts with it.
+    let matches = |text: &str| {
+        let (mut seen, mut len) = (0, 0);
+        for c in text.chars() {
+            if seen == needle.len() {
+                break;
             }
-            // ASCII lowercasing keeps every byte offset.
-            let (folded, needle) = (text.to_ascii_lowercase(), home.to_ascii_lowercase());
-            let mut out = String::with_capacity(text.len());
-            let mut from = 0;
-            while let Some(at) = folded[from..].find(&needle) {
-                out.push_str(&text[from..from + at]);
-                out.push('~');
-                from += at + needle.len();
+            for lower in c.to_lowercase() {
+                if needle.get(seen) != Some(&lower) {
+                    return None;
+                }
+                seen += 1;
             }
-            out.push_str(&text[from..]);
-            out
-        })
+            len += c.len_utf8();
+        }
+        (seen == needle.len()).then_some(len)
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(c) = text[at..].chars().next() {
+        if let Some(len) = matches(&text[at..]) {
+            out.push('~');
+            at += len;
+        } else {
+            out.push(c);
+            at += c.len_utf8();
+        }
+    }
+    out
+}
+
+/// `text` with the user segment of every path under a users root replaced, with the root, by `~`.
+fn mask_users(text: &str) -> String {
+    const ROOTS: [(&str, bool); 4] = [
+        ("/users/", false),
+        ("/home/", false),
+        (":\\users\\", true),
+        (":/users/", true),
+    ];
+    // ASCII lowercasing keeps every byte offset.
+    let low = text.to_ascii_lowercase();
+    let bytes = low.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b"_.-/~".contains(&b);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let hit = ROOTS.iter().find_map(|(root, drive)| {
+            if !bytes[i..].starts_with(root.as_bytes()) {
+                return None;
+            }
+            let start = if *drive {
+                (i > 0 && bytes[i - 1].is_ascii_alphabetic()).then(|| i - 1)?
+            } else {
+                i
+            };
+            if start < at || (start > 0 && word(bytes[start - 1])) {
+                return None;
+            }
+            let from = i + root.len();
+            let len = bytes[from..]
+                .iter()
+                .position(|b| b"/\\\"',:)] \t\r\n".contains(b))
+                .unwrap_or(bytes.len() - from);
+            (len > 0).then_some((start, from + len))
+        });
+        if let Some((start, end)) = hit {
+            out.push_str(&text[at..start]);
+            out.push('~');
+            at = end;
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// A frame as [`frames`] makes it: a symbol, then optionally ` at <path>:<line>[:<column>]`.
@@ -317,8 +404,9 @@ fn is_frame(frame: &str) -> bool {
         && place_ok
 }
 
-/// Whether `line` is a line of our own log at `warn` or `error`: `<RFC 3339 time> <LEVEL> <target>: ...`, the target
-/// one of this piece's own crates. A dependency's line, a debug line and a service's raw stderr are none of these.
+/// Whether `line` is a line of our own log at `warn` or `error`: `<RFC 3339 time> <LEVEL> [<span>: ]<target>: ...`, the
+/// target one of ours. A span the event was logged in (`name{fields}:` or `name:`, as many as there are) comes before
+/// the target. A dependency's line, a debug line and the service's raw stderr are none of these.
 fn is_ours(line: &str, piece: Piece) -> bool {
     let mut parts = line.split_whitespace();
     let (Some(time), Some(level)) = (parts.next(), parts.next()) else {
@@ -329,19 +417,57 @@ fn is_ours(line: &str, piece: Piece) -> bool {
     }
     let rest = line.trim_start()[time.len()..].trim_start();
     let rest = rest[level.len()..].trim_start();
-    let Some((target, _)) = rest.split_once(": ") else {
-        return false;
-    };
     let own = match piece {
         Piece::Core => "sidevoice_core",
         Piece::Connector => "sidevoice_connector",
     };
-    [own, "sidevoice_platform", "panic"].iter().any(|name| {
-        target == *name
-            || target
-                .strip_prefix(name)
-                .is_some_and(|rest| rest.starts_with("::"))
-    })
+    let own_targets = [own, "sidevoice_platform", "panic"];
+    let mut rest = rest;
+    loop {
+        let Some((head, after)) = split_head(rest) else {
+            return false;
+        };
+        if own_targets.iter().any(|name| {
+            head == *name
+                || head
+                    .strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with("::"))
+        }) {
+            return true;
+        }
+        let ident = |text: &str| {
+            !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        };
+        if !(ident(head) || head.contains('{') && head.ends_with('}')) {
+            return false;
+        }
+        rest = after.trim_start();
+    }
+}
+
+/// The first `target:` or `span{fields}:` of `rest` and what follows it.
+fn split_head(rest: &str) -> Option<(&str, &str)> {
+    let name = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    if name > 0 && rest[name..].starts_with('{') {
+        let (mut quoted, mut escaped) = (false, false);
+        for (at, c) in rest.char_indices().skip_while(|(at, _)| *at <= name) {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' if quoted => escaped = true,
+                '"' => quoted = !quoted,
+                '}' if !quoted => {
+                    return rest[at + 1..]
+                        .strip_prefix(':')
+                        .map(|after| (&rest[..=at], after));
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    rest.split_once(": ")
 }
 
 fn lines(value: &Value) -> Vec<String> {

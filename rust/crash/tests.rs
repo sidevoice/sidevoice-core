@@ -5,7 +5,7 @@ use chrono::{Duration, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::record::{frames, FORMATTED_MARKER};
+use super::record::{frames, mask_home, mask_homes, FORMATTED_MARKER};
 use super::*;
 use crate::storage::PrivateTemp;
 
@@ -557,4 +557,60 @@ fn staging_files_are_left_alone_until_they_are_old() {
         .unwrap();
     f.store.list().unwrap();
     assert!(!staged.exists());
+}
+
+#[test]
+fn format_characters_are_stripped_before_the_home_is_masked() {
+    let mut raw = serde_json::to_value(record(1)).unwrap();
+    raw["log_tail"] = json!([format!("{} at /data/al\u{200b}ice/x", ours(1))]);
+    let read = CrashRecord::from_untrusted(&raw, &["/data/alice".to_owned()]).unwrap();
+    assert!(read.log_tail[0].ends_with("at ~/x"), "{:?}", read.log_tail);
+}
+
+#[test]
+fn a_date_past_year_9999_is_not_taken_and_the_future_is_compared_as_time() {
+    let mut raw = serde_json::to_value(record(1)).unwrap();
+    raw["first_at"] = json!("9999-12-31T23:59:59-23:59");
+    raw["last_at"] = json!("9999-12-31T23:59:59-23:59");
+    assert!(CrashRecord::from_untrusted(&raw, &[]).is_none());
+    let mut future = record(1);
+    future.first_at = "+10000-01-01T00:00:00.000Z".to_owned();
+    assert!(future.is_dated_in_the_future());
+    assert!(!record(1).is_dated_in_the_future());
+}
+
+#[test]
+fn the_home_is_matched_without_case_and_any_users_root_is_masked() {
+    assert_eq!(
+        mask_home(
+            "D:\\Profiles\\\u{c9}LISE\\x",
+            "d:\\profiles\\\u{e9}lise",
+            true
+        ),
+        "~\\x"
+    );
+    assert_eq!(
+        mask_homes("C:\\USERS\\ALICE~1\\x /Users/Bob/y /home/carol z", &[]),
+        "~\\x ~/y ~ z"
+    );
+    assert_eq!(
+        mask_homes("/usr/home/x /homes/y", &[]),
+        "/usr/home/x /homes/y"
+    );
+}
+
+#[test]
+fn a_warning_inside_a_span_is_kept_and_a_dependency_inside_a_span_is_dropped() {
+    let t = "2026-11-15T10:00:00.123456Z";
+    let mut raw = serde_json::to_value(record(1)).unwrap();
+    raw["log_tail"] = json!([
+        format!("{t}  WARN binding{{id=\"a: b}}\" n=3}}: sidevoice_core::room: kept one"),
+        format!("{t}  WARN outer{{a=1}}: inner: sidevoice_core::room: kept two"),
+        format!("{t}  WARN binding{{id=1}}: hyper_util::client: dropped one"),
+        format!("{t}  WARN binding{{id=1}}: sidevoice_corevoice: dropped two"),
+        format!("{t}  WARN binding{{id=1}} sidevoice_core::room: dropped three"),
+    ]);
+    let read = CrashRecord::from_untrusted(&raw, &[]).unwrap();
+    assert_eq!(read.log_tail.len(), 2, "{:?}", read.log_tail);
+    assert!(read.log_tail[1].contains("kept two"));
 }
