@@ -205,18 +205,26 @@ fn the_retry_schedule_is_fast_at_first_and_then_every_fifteen_seconds() {
     let (directory, room, _) = pull_room(&["connector"]);
     let sid = garage(&directory, &room);
     say(&room, &sid, "one");
-    let mut waits = Vec::new();
-    for _ in 0..7 {
+    for wait in [1, 2, 5, 10, 15, 15, 15] {
         let work = room.pending_delivery();
         let (bid, rid, peer, _) = &work[0];
+        // The core reads the clock once, somewhere inside the settle call: bracket it instead of
+        // comparing against a later read, which breaks when a second boundary falls in between.
+        let before = crate::control::room::util::seconds();
         room.settle_delivery(bid, rid, &peer.generation, Ok(json!({"status":"failed"})));
+        let after = crate::control::room::util::seconds();
         let inner = room.inner.lock().unwrap();
         let row = inner.journal.waiting_user_input().next().unwrap();
-        waits.push(row.next_attempt - crate::control::room::util::seconds());
+        assert!(
+            (before + wait..=after + wait).contains(&row.next_attempt),
+            "retry in {wait}s: next_attempt {} not in {}..={}",
+            row.next_attempt,
+            before + wait,
+            after + wait
+        );
         drop(inner);
         due(&room);
     }
-    assert_eq!(waits, [1, 2, 5, 10, 15, 15, 15]);
 }
 
 #[test]
