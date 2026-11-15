@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::extract::ws::WebSocket;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
@@ -31,11 +32,16 @@ pub(super) fn resume_window(value: Option<&str>) -> Duration {
     Duration::from_secs_f64(seconds)
 }
 
-pub(super) fn new_token() -> String {
+pub(super) fn new_token() -> SecretString {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    SecretString::from(
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
 }
 
 /// A returning page handing its new socket to the call it left.
@@ -49,7 +55,8 @@ pub(in crate::server) struct Reattach {
 
 struct Resumable {
     device: String,
-    token: String,
+    /// Empty once spent.
+    token: Option<SecretString>,
     attach: mpsc::Sender<Reattach>,
 }
 
@@ -64,14 +71,14 @@ impl ResumableCalls {
         &self,
         session: &str,
         device: &str,
-        token: &str,
+        token: &SecretString,
         attach: mpsc::Sender<Reattach>,
     ) {
         self.lock().insert(
             session.to_owned(),
             Resumable {
                 device: device.to_owned(),
-                token: token.to_owned(),
+                token: Some(token.clone()),
                 attach,
             },
         );
@@ -86,17 +93,26 @@ impl ResumableCalls {
     ) -> Option<mpsc::Sender<Reattach>> {
         let mut calls = self.lock();
         let call = calls.get_mut(session)?;
-        let matches: bool = call.token.as_bytes().ct_eq(token.as_bytes()).into();
-        if call.device != device || call.token.is_empty() || !matches {
+        let held = call.token.as_ref()?;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "compared in constant time with what the page sent"
+        )]
+        let matches: bool = held
+            .expose_secret()
+            .as_bytes()
+            .ct_eq(token.as_bytes())
+            .into();
+        if call.device != device || !matches {
             return None;
         }
-        call.token.clear();
+        call.token = None;
         Some(call.attach.clone())
     }
 
-    pub(super) fn renew(&self, session: &str, token: &str) {
+    pub(super) fn renew(&self, session: &str, token: &SecretString) {
         if let Some(call) = self.lock().get_mut(session) {
-            call.token = token.to_owned();
+            call.token = Some(token.clone());
         }
     }
 

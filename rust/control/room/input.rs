@@ -1,5 +1,6 @@
 //! User input entering the journal: typed text, completed voice turns, and turns spoken offline.
 use serde_json::{json, Value};
+use tracing::{info, info_span, warn};
 
 use super::error::RoomError;
 use super::journal::{InputRef, Row};
@@ -8,6 +9,7 @@ use super::turns::{valid_turn_id, VoiceTurn};
 use super::util::valid_thread;
 use super::util::{id, millis, seconds};
 use super::{Inner, Room};
+use crate::log_safe::ClientId;
 
 /// The longest message the room takes, in bytes of its words: typed, spoken, or spoken offline.
 pub(super) const MAX_INPUT_BYTES: usize = 12_000;
@@ -34,6 +36,20 @@ struct InputDraft<'a> {
 
 impl Room {
     pub fn send_text(
+        &self,
+        text: &str,
+        sid: &str,
+        thread: &str,
+        bid: &str,
+        message_id: &str,
+    ) -> Result<Value, RoomError> {
+        let span = info_span!("input", kind = "text", session = %ClientId(sid), message_id = %ClientId(message_id));
+        let _in_span = span.enter();
+        let result = self.send_text_locked(text, sid, thread, bid, message_id);
+        log_queued(&result, text);
+        result
+    }
+    fn send_text_locked(
         &self,
         text: &str,
         sid: &str,
@@ -83,7 +99,11 @@ impl Room {
     /// Commit a completed transcript to the same memory journal/outbox as typed input.
     /// The captured focus may differ from today's selection after a mid-turn switch.
     pub fn queue_voice_input(&self, turn: &VoiceTurn, text: &str) -> Result<Value, RoomError> {
-        self.inner.lock().expect("room lock").queue_turn(turn, text)
+        let span = info_span!("input", kind = "voice", session = %ClientId(&turn.session_id), turn = %ClientId(&turn.turn_id));
+        let _in_span = span.enter();
+        let result = self.inner.lock().expect("room lock").queue_turn(turn, text);
+        log_queued(&result, text);
+        result
     }
     /// Convenience entry for a caller that captures the selected target at this boundary.
     /// The wire path uses `offline_input_captured` with the target captured when speech began.
@@ -112,6 +132,21 @@ impl Room {
     /// Offline words carry the conversation captured when speech began, even if focus changed
     /// before the room accepted them. The epoch is assigned once at acceptance.
     pub fn offline_input_captured(
+        &self,
+        sid: &str,
+        turn_id: &str,
+        text: &str,
+        time: Option<u64>,
+        thread: &str,
+        binding: &str,
+    ) -> Result<Value, RoomError> {
+        let span = info_span!("input", kind = "offline", session = %ClientId(sid), turn = %ClientId(turn_id));
+        let _in_span = span.enter();
+        let result = self.offline_input_locked(sid, turn_id, text, time, thread, binding);
+        log_queued(&result, text);
+        result
+    }
+    fn offline_input_locked(
         &self,
         sid: &str,
         turn_id: &str,
@@ -203,6 +238,27 @@ impl Room {
             offline: Some("offline"),
             time,
         })
+    }
+}
+
+/// The event for words that reached the room: the length only, never the words, and after the room lock is released.
+/// Words captured without a conversation to go to are `accepted: false`; they are not queued.
+fn log_queued(result: &Result<Value, RoomError>, text: &str) {
+    match result {
+        Ok(answer) if answer["accepted"] == Value::Bool(true) => info!(
+            epoch = answer["epoch"].as_u64().unwrap_or_default(),
+            len = text.len(),
+            "input queued for the agent"
+        ),
+        Ok(_) => info!(
+            len = text.len(),
+            "input was not queued because it has no conversation to go to"
+        ),
+        Err(error) => warn!(
+            error.type = error.code(),
+            len = text.len(),
+            "input was refused, so the agent does not get it"
+        ),
     }
 }
 

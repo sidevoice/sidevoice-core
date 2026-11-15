@@ -100,11 +100,18 @@ impl AppState {
                 urls.push(url);
             }
         }
-        self.registry.lock().expect("registry lock").issue_code(
+        let code = self.registry.lock().expect("registry lock").issue_code(
             &self.identity,
             Some(&self.host),
             &urls,
-        )
+        );
+        // Never the code: it pairs whoever reads it.
+        tracing::info!(
+            routes = urls.len(),
+            expires_in_s = code["expires_in"].as_i64().unwrap_or_default(),
+            "pairing code issued; it works once and expires"
+        );
+        code
     }
 
     /// Resolves once a local client has asked this process to leave (`POST /api/local/shutdown`), also when it

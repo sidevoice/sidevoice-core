@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 use base64::Engine;
 use rand::RngCore;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Map, Value};
 
 use super::util::{field, hash, id, seconds};
@@ -13,6 +14,7 @@ const CODE_TTL: u64 = 180;
 #[derive(Default)]
 pub(super) struct Credentials {
     connectors: Map<String, Value>,
+    /// One-time pairing codes by hash, with their expiry: the codes themselves are not kept.
     pairing: HashMap<String, u64>,
 }
 impl Credentials {
@@ -60,14 +62,19 @@ impl Credentials {
     }
     /// Record a new connector with a fresh token, copying what `identity` says about its machine.
     /// Returns the connector's ID and its token; only the token's hash is kept.
-    pub(super) fn issue(&mut self, identity: Option<&Value>) -> (String, String) {
+    pub(super) fn issue(&mut self, identity: Option<&Value>) -> (String, SecretString) {
         let cid = id();
         let mut bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let token =
+            SecretString::from(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes));
         let at = seconds();
         let mut record = Map::new();
-        record.insert("token_hash".into(), json!(hash(&token)));
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "only the hash of the token is stored"
+        )]
+        record.insert("token_hash".into(), json!(hash(token.expose_secret())));
         record.insert("created".into(), json!(at));
         record.insert("last_seen".into(), json!(at));
         record.insert("revoked".into(), json!(0));
@@ -120,15 +127,22 @@ impl Credentials {
         }
     }
     /// A new one-time pairing code, valid for a few minutes, without separators.
-    pub(super) fn new_pairing_code(&mut self) -> String {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "only the hash of the code is kept"
+    )]
+    pub(super) fn new_pairing_code(&mut self) -> SecretString {
         let mut bytes = [0u8; 12];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
-        let code: String = bytes
-            .iter()
-            .map(|b| CODE_ALPHABET[(*b as usize) % CODE_ALPHABET.len()] as char)
-            .collect();
+        let code = SecretString::from(
+            bytes
+                .iter()
+                .map(|b| CODE_ALPHABET[(*b as usize) % CODE_ALPHABET.len()] as char)
+                .collect::<String>(),
+        );
         self.pairing.retain(|_, expiry| *expiry >= seconds());
-        self.pairing.insert(code.clone(), seconds() + CODE_TTL);
+        self.pairing
+            .insert(hash(code.expose_secret()), seconds() + CODE_TTL);
         code
     }
     /// Consume a pairing code as a person typed it; true if it was issued and is still valid.
@@ -143,7 +157,7 @@ impl Credentials {
             })
             .collect();
         self.pairing
-            .remove(&normalized)
+            .remove(&hash(&normalized))
             .is_some_and(|expiry| expiry >= seconds())
     }
     /// Every paired connector without its token hash, oldest first.

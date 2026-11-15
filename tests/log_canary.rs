@@ -20,10 +20,12 @@ const THREAD: &str = "canary-thread-7f3a";
 const PANIC_DIR: &str = "SIDEVOICE_CANARY_PANIC_DIR";
 const SEED_HOME: &str = "canary-user-7f3a";
 
-fn seeds(home: &str) -> Vec<String> {
+fn seeds(home: &str, runtime: &[String]) -> Vec<String> {
     let mut seeds: Vec<String> = [home, SECRET, WORDS, URL, "canary-pass", "canary-q", THREAD]
         .map(str::to_owned)
         .into();
+    // Values this run minted: the pairing code, the device and the resume tokens.
+    seeds.extend(runtime.iter().cloned());
     // On Windows the seeded home is the real one, so its name is not ours to seed.
     if !cfg!(windows) {
         seeds.push(SEED_HOME.to_owned());
@@ -39,8 +41,8 @@ fn seeds(home: &str) -> Vec<String> {
     seeds
 }
 
-fn assert_clean(what: &str, text: &str, home: &str) {
-    for seed in seeds(home) {
+fn assert_clean(what: &str, text: &str, home: &str, runtime: &[String]) {
+    for seed in seeds(home, runtime) {
         assert!(!text.contains(&seed), "{what} holds {seed:?}:\n{text}");
     }
 }
@@ -83,12 +85,36 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
         .await;
     assert_eq!(refused.status, 401, "{refused:?}");
     drop(core.open_call(SECRET).await);
+    // A pairing secret that was never issued is refused, and the one that was is spent: neither is logged.
+    let wrong = core
+        .post("/api/device/pair", json!({"secret": SECRET, "name": WORDS}))
+        .send()
+        .await;
+    assert_eq!(wrong.status, 403, "{wrong:?}");
 
     // A call, a conversation named by the agent, a turn id that is a sentence, and a turn that is said.
     let mut browser = core.join(&token, Value::Null).await;
     let session = browser.session.clone();
     let (mut peer, binding) = connector_with_binding(&core, "canary", THREAD).await;
-    core.select(&token, &session, THREAD).await;
+    let issued = peer.call("device.pairing_code", json!({})).await;
+    let code = issued["payload"]["secret"].as_str().unwrap().to_owned();
+    let redeemed = core
+        .post("/api/device/pair", json!({"secret": code, "name": WORDS}))
+        .send()
+        .await;
+    assert_eq!(redeemed.status, 200, "{redeemed:?}");
+    let minted = vec![
+        code,
+        issued["code"].as_str().unwrap().to_owned(),
+        redeemed.json()["token"].as_str().unwrap().to_owned(),
+        token.clone(),
+        core.connector_token(),
+        browser.welcome["resume"]["token"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    ];
+    let focus = core.select(&token, &session, THREAD).await;
     browser.start_turn(WORDS).await;
     browser
         .report(
@@ -117,6 +143,10 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
     )
     .await;
     assert_eq!(reply["status"], "queued", "{reply}");
+    // Typed words, to the same conversation.
+    core.text(&token, (&session, THREAD, &focus), WORDS, &message_id())
+        .await;
+    accept_delivery(&mut peer).await;
     // What the page says of its own failure, in free text.
     let reported = core
         .post(
@@ -156,31 +186,44 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
 
     let log = fs::read_to_string(data.join("core.log")).expect("the core's own log");
     let stderr = core.log();
-    assert_clean("core.log", &log, &home);
-    assert_clean("stderr", &stderr, &home);
+    assert_clean("core.log", &log, &home, &minted);
+    assert_clean("stderr", &stderr, &home, &minted);
     // Positive controls: the flow was logged, and a hostile id became `invalid`.
     for expected in [
-        "core starting",
-        "core ready",
-        "call joined",
-        "connector linked",
-        "turn started",
+        "key=\"runtime.log_start\"",
+        "service.name=\"sidevoice-core\"",
+        "os.type=",
+        "host.arch=",
+        "key=\"runtime.log_ready\"",
+        "call{session=",
+        "connector_link{connector=",
+        "binding{connector=",
+        "input{kind=\"text\"",
+        "speech{binding=",
         "turn=invalid",
         "turn=turn-ok-1",
-        "turn finished",
-        "delivery",
-        "rate limit reached",
-        "connection limit reached",
-        "core stopped",
+        "result=\"paired_local\"",
+        "result=\"paired\"",
+        "error.type=\"core.pairing-refused\"",
+        "expires_in_s=",
+        "error.type=\"core.rate-limited\"",
+        "error.type=\"core.connection-limit\"",
+        "key=\"runtime.log_stop\"",
     ] {
         assert!(log.contains(expected), "no {expected:?} in:\n{log}");
+    }
+    // The v1 names are gone.
+    for old in [" code=", " http_status=", " exit_code=", " version="] {
+        assert!(!log.contains(old), "{old:?} is a v1 field name:\n{log}");
     }
     assert!(
         log.contains(&format!("conversation={}", IdHash(THREAD))),
         "{log}"
     );
-    assert!(log.contains("call{session="), "spans name the call:\n{log}");
-    assert!(log.contains("client error reported"), "{log}");
+    assert!(
+        log.contains("DEBUG") && log.contains("kind=invalid"),
+        "the page's error report, by kind only:\n{log}"
+    );
 
     // A panic whose message carries a path: through the subscriber, so the home shows as `~`, and not chained to
     // the default hook, which would print it raw on stderr.
@@ -199,14 +242,51 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
         .unwrap();
     let child_stderr = String::from_utf8_lossy(&output.stderr);
     let child_stdout = String::from_utf8_lossy(&output.stdout);
-    assert_clean("the panicking process's stderr", &child_stderr, &home);
-    assert_clean("the panicking process's stdout", &child_stdout, &home);
+    assert_clean("the panicking process's stderr", &child_stderr, &home, &[]);
+    assert_clean("the panicking process's stdout", &child_stdout, &home, &[]);
     let panicked = fs::read_to_string(dir.join("core.log")).expect("the panic's log");
-    assert_clean("the panic's core.log", &panicked, &home);
-    assert!(
-        panicked.contains("ERROR panic: panic")
-            && panicked.contains("panic=\"canary path ~/project\""),
+    assert_clean("the panic's core.log", &panicked, &home, &[]);
+    // Two panics in the child: the first with a formatted message (the path never printed), the second a literal.
+    // Each is a `panic` event and, for the file only, a `crash_backtrace` event.
+    let records = |target: &str| {
+        panicked
+            .lines()
+            .filter(|l| l.contains(&format!("ERROR {target}:")))
+            .count()
+    };
+    assert_eq!(
+        (records("panic"), records("crash_backtrace")),
+        (2, 2),
         "{panicked}"
+    );
+    assert!(
+        panicked.contains("exception.message=\"<formatted panic message omitted>\"")
+            && panicked.contains("exception.message=\"canary literal panic\"")
+            && panicked.contains("exception.type=\"panic\"")
+            && panicked.contains("thread.name=")
+            && panicked.contains("service.version=")
+            && panicked.contains("code.file.path=")
+            && panicked.contains("code.line.number="),
+        "{panicked}"
+    );
+    assert!(
+        panicked
+            .lines()
+            .filter(|line| line.contains("ERROR panic:"))
+            .all(|line| !line.contains("exception.stacktrace")),
+        "the backtrace is its own event:\n{panicked}"
+    );
+    assert!(
+        panicked
+            .lines()
+            .any(|line| line.contains("ERROR crash_backtrace:")
+                && line.contains("exception.stacktrace=")),
+        "{panicked}"
+    );
+    // The default hook is not chained, and a log that was written needs no stderr line: stderr holds neither.
+    assert!(
+        !child_stderr.contains("panicked at") && !child_stderr.contains("stack backtrace"),
+        "{child_stderr}"
     );
 }
 
@@ -220,5 +300,6 @@ fn panic_child(dir: &str) {
     assert!(sidevoice_core::runtime::init_logging(&config).is_ok());
     let home = std::env::var("HOME").unwrap();
     let _ = std::thread::spawn(move || panic!("canary path {home}/project")).join();
+    let _ = std::thread::spawn(|| panic!("canary literal panic")).join();
     std::process::exit(3);
 }

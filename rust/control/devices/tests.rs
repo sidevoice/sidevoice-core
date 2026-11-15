@@ -1,6 +1,12 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests read the tokens they issued"
+)]
+
 use super::pairing::PairingSecrets;
 use super::DeviceRegistry;
 use crate::storage::PrivateDir;
+use secrecy::{ExposeSecret, SecretString};
 
 fn registry() -> (tempfile::TempDir, DeviceRegistry) {
     let root = tempfile::tempdir().unwrap();
@@ -12,7 +18,7 @@ fn registry() -> (tempfile::TempDir, DeviceRegistry) {
 fn a_pairing_secret_redeems_once() {
     let mut secrets = PairingSecrets::default();
     let (secret, _) = secrets.issue();
-    assert!(!secrets.redeem("unknown"));
+    assert!(!secrets.redeem(&SecretString::from("unknown")));
     assert!(secrets.redeem(&secret));
     assert!(!secrets.redeem(&secret));
 }
@@ -32,7 +38,7 @@ fn pairing_the_local_device_replaces_the_previous_one() {
     assert!(removed.is_empty());
     let (second, _, removed) = registry.pair_local(None).unwrap();
     assert_eq!(removed, vec![first]);
-    assert_eq!(registry.authenticate(&first_token), None);
+    assert_eq!(registry.authenticate(first_token.expose_secret()), None);
     assert_eq!(registry.revoke_local().unwrap(), vec![second]);
     assert!(registry.revoke_local().unwrap().is_empty());
 }
@@ -47,10 +53,13 @@ fn devices_persist_and_revoke_by_id() {
     assert_eq!(listing["devices"][0]["name"], "Desk top");
     assert_eq!(listing["devices"][0]["kind"], "local");
     assert_eq!(listing["devices"][0]["current"], true);
-    assert_eq!(registry.authenticate(&token), Some(id.clone()));
+    assert_eq!(
+        registry.authenticate(token.expose_secret()),
+        Some(id.clone())
+    );
     assert!(registry.revoke(&id).unwrap());
     assert!(!registry.revoke(&id).unwrap());
-    assert_eq!(registry.authenticate(&token), None);
+    assert_eq!(registry.authenticate(token.expose_secret()), None);
 }
 
 #[test]

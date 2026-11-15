@@ -20,7 +20,7 @@ impl ClientErrors {
         debug!(
             kind = %ClientId(field(report, "kind")),
             session = %ClientId(field(report, "session_id")),
-            "client error reported"
+            "a page reported an error about itself"
         );
         let clipped =
             |key: &str, max: usize| field(report, key).chars().take(max).collect::<String>();

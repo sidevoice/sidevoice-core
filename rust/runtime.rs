@@ -42,12 +42,16 @@ pub async fn run(config: Config) -> i32 {
     info!(
         key = "runtime.log_start",
         launch_id = %ClientId(&config.launch_id),
-        version = env!("CARGO_PKG_VERSION"),
-        "core starting"
+        service.name = "sidevoice-core",
+        service.version = env!("CARGO_PKG_VERSION"),
+        os.type = logging::os_type(std::env::consts::OS),
+        os.name = logging::os_name(std::env::consts::OS),
+        host.arch = logging::host_arch(std::env::consts::ARCH),
+        "the core is starting"
     );
     match serve::serve(&config).await {
         Ok(()) => {
-            info!(key = "runtime.log_stop", launch_id = %ClientId(&config.launch_id), "core stopped");
+            info!(key = "runtime.log_stop", launch_id = %ClientId(&config.launch_id), "the core stopped");
             0
         }
         Err(error) => {

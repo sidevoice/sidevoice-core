@@ -1,10 +1,15 @@
 //! Node identity, pairing codes and device tokens, as the store keeps them.
 //! Pairing-secret expiry is `PairingSecrets`' own, covered beside it.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests read the tokens they issued"
+)]
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use p256::pkcs8::DecodePublicKey;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -29,11 +34,13 @@ fn names(dir: &PrivateDir) -> Vec<String> {
     names
 }
 
-fn issue(registry: &mut DeviceRegistry, identity: &NodeIdentity) -> String {
-    registry.issue_code(identity, None, &[])["payload"]["secret"]
-        .as_str()
-        .unwrap()
-        .to_owned()
+fn issue(registry: &mut DeviceRegistry, identity: &NodeIdentity) -> SecretString {
+    SecretString::from(
+        registry.issue_code(identity, None, &[])["payload"]["secret"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    )
 }
 
 fn decode_code(code: &str) -> Value {
@@ -174,7 +181,7 @@ fn only_a_handful_of_codes_are_outstanding_and_each_is_one_time() {
     let (_root, dir) = private_dir();
     let identity = NodeIdentity::load_or_create(&dir).unwrap();
     let mut registry = DeviceRegistry::load(dir).unwrap();
-    let issued: Vec<String> = (0..6).map(|_| issue(&mut registry, &identity)).collect();
+    let issued: Vec<SecretString> = (0..6).map(|_| issue(&mut registry, &identity)).collect();
     assert!(
         registry.redeem(&issued[0], Some("x")).unwrap().is_none(),
         "the oldest was dropped"
@@ -184,7 +191,10 @@ fn only_a_handful_of_codes_are_outstanding_and_each_is_one_time() {
         registry.redeem(&issued[5], Some("x")).unwrap().is_none(),
         "one-time"
     );
-    assert!(registry.redeem("guessed", Some("x")).unwrap().is_none());
+    assert!(registry
+        .redeem(&SecretString::from("guessed"), Some("x"))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -197,6 +207,7 @@ fn a_code_is_redeemed_once_and_only_its_hash_is_kept() {
         .redeem(&secret, Some("  Mi   portátil "))
         .unwrap()
         .unwrap();
+    let token = token.expose_secret().to_owned();
     Uuid::parse_str(&device_id).unwrap();
     assert_eq!(URL_SAFE_NO_PAD.decode(&token).unwrap().len(), 32);
     let path = dir.path().join("devices.json");
@@ -261,7 +272,9 @@ fn pairing_the_app_again_replaces_only_the_local_device() {
     let mut registry = DeviceRegistry::load(dir.clone()).unwrap();
     let secret = issue(&mut registry, &identity);
     let (phone, phone_token) = registry.redeem(&secret, Some("Móvil")).unwrap().unwrap();
-    let (first, first_token, replaced) = registry.pair_local(Some("first")).unwrap();
+    let (phone_token, first_token) = (phone_token.expose_secret().to_owned(), String::new());
+    let (first, first_local, replaced) = registry.pair_local(Some("first")).unwrap();
+    let first_token = first_local.expose_secret().to_owned() + &first_token;
     assert!(replaced.is_empty());
     let (second, _, replaced) = registry.pair_local(Some("second")).unwrap();
     assert_eq!(replaced, vec![first]);

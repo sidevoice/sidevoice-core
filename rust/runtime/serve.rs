@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use secrecy::SecretString;
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -83,7 +84,7 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
             port,
             bind = bind_class(&config.host),
             duration_ms = started.elapsed().as_millis() as u64,
-            "core ready"
+            "the core is ready and accepting connections"
         );
         Ok::<_, StartFailure>(())
     }
@@ -127,7 +128,7 @@ struct Stored {
     registry: DeviceRegistry,
     room: Arc<Room>,
     connector_id: String,
-    token: String,
+    token: SecretString,
 }
 
 impl Stored {

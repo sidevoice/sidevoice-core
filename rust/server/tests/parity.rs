@@ -7,6 +7,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as Frame};
 use tower::ServiceExt;
@@ -28,6 +29,11 @@ fn paired() -> (tempfile::TempDir, Arc<AppState>, String) {
         .unwrap()
         .pair_local(Some("Test device"))
         .unwrap();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test sends the token it was issued"
+    )]
+    let token = token.expose_secret().to_owned();
     (temp, state, token)
 }
 
@@ -250,9 +256,12 @@ async fn a_returning_page_takes_its_call_back_once_even_in_a_full_room() {
     let device = state.authenticate_token(&token).unwrap();
     let _held = fill_room(&state);
     let (attach, mut parked) = tokio::sync::mpsc::channel::<Reattach>(1);
-    state
-        .resumable
-        .open("parked-session", &device, "secret", attach);
+    state.resumable.open(
+        "parked-session",
+        &device,
+        &SecretString::from("secret"),
+        attach,
+    );
     let mut socket = call_socket_client(state.clone(), &token).await;
     hello(
         &mut socket,
@@ -287,9 +296,12 @@ async fn another_device_cannot_take_a_call_over() {
     let (_temp, state, token) = paired();
     let _held = fill_room(&state);
     let (attach, mut parked) = tokio::sync::mpsc::channel::<Reattach>(1);
-    state
-        .resumable
-        .open("parked-session", "someone-else", "secret", attach);
+    state.resumable.open(
+        "parked-session",
+        "someone-else",
+        &SecretString::from("secret"),
+        attach,
+    );
     let mut socket = call_socket_client(state, &token).await;
     hello(
         &mut socket,

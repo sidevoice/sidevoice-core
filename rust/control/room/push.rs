@@ -305,7 +305,7 @@ impl Room {
                 let room = self.clone();
                 let span = info_span!(
                     "delivery",
-                    binding = %bid,
+                    binding = %ClientId(&bid),
                     message_id = %ClientId(data["message_id"].as_str().unwrap_or_default())
                 );
                 tokio::spawn(
@@ -317,7 +317,7 @@ impl Room {
                             } else {
                                 "unreachable"
                             },
-                            "delivery"
+                            "delivery attempt finished"
                         );
                         room.settle_delivery(&bid, &rid, &peer.generation, answer);
                     }
@@ -326,21 +326,25 @@ impl Room {
             }
             for question in self.pending_receipts() {
                 let room = self.clone();
-                tokio::spawn(async move {
-                    let ReceiptQuestion {
-                        binding_id,
-                        peer,
-                        message_ids,
-                    } = question;
-                    let answer = peer
-                        .request(
-                            "input.received",
-                            json!({"binding_id":binding_id,"message_ids":message_ids}),
-                            RECEIVED_TIMEOUT,
-                        )
-                        .await;
-                    room.settle_receipts(&binding_id, &peer.generation, &message_ids, answer);
-                });
+                let span = info_span!("receipt_check", binding = %ClientId(&question.binding_id));
+                tokio::spawn(
+                    async move {
+                        let ReceiptQuestion {
+                            binding_id,
+                            peer,
+                            message_ids,
+                        } = question;
+                        let answer = peer
+                            .request(
+                                "input.received",
+                                json!({"binding_id":binding_id,"message_ids":message_ids}),
+                                RECEIVED_TIMEOUT,
+                            )
+                            .await;
+                        room.settle_receipts(&binding_id, &peer.generation, &message_ids, answer);
+                    }
+                    .instrument(span),
+                );
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -359,6 +363,7 @@ impl Inner {
         row.status = "read".into();
         row.reason = None;
         row.pull_claimed_by = None;
+        tracing::debug!(result = "read", "the agent has the input");
         self.browsers.input_receipt(input, "read");
         if let Some(thread) = input.thread.as_deref() {
             self.mark_latency(

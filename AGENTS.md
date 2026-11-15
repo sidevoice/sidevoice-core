@@ -52,4 +52,4 @@ For changes to user-visible behavior, supported platforms/models, setup, securit
 
 ## Logging
 
-Logging and what may appear in a log follow the shared [logging guideline](https://github.com/sidevoice/.github-private/blob/main/docs/logging.md). The core's own pieces are `rust/runtime/logging.rs` (subscriber, `SIDEVOICE_LOG`, panic hook) and `rust/log_safe.rs`; `tests/log_canary.rs` fails when a secret or content reaches `core.log`.
+Logging and what may appear in a log follow the shared [logging guideline](https://github.com/sidevoice/.github-private/blob/main/docs/logging.md). The core's own pieces are `rust/runtime/logging.rs` (subscriber, `SIDEVOICE_LOG`, panic hook) and `rust/log_safe.rs` (value wrappers), `rust/error.rs` (the error enum and its `error.type` codes); `tests/log_canary.rs` fails when a secret or content reaches `core.log`.

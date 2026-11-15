@@ -82,7 +82,7 @@ impl Room {
             turn = %ClientId(turn_id),
             epoch = turn.epoch,
             conversation = %IdHash(thread_id),
-            "turn started"
+            "a spoken turn started"
         );
         Ok(turn)
     }
@@ -108,7 +108,7 @@ impl Room {
         } else {
             "nothing"
         };
-        info!(turn = %ClientId(turn_id), result, "turn finished");
+        info!(turn = %ClientId(turn_id), result, "a spoken turn finished");
         Ok(finished)
     }
 
@@ -124,7 +124,7 @@ impl Room {
                 .lock()
                 .expect("room lock")
                 .cancel_spoken_turn(sid, turn_id, continuation)?;
-        info!(turn = %ClientId(turn_id), session = %ClientId(sid), "turn cancelled");
+        info!(turn = %ClientId(turn_id), session = %ClientId(sid), "a spoken turn was cancelled; its words are dropped");
         Ok(cancelled)
     }
 }

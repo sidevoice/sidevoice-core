@@ -1,11 +1,13 @@
 //! Registration: a connector binding one of its agent threads to the room, and ending it.
 use serde_json::{json, Value};
+use tracing::{field, info, info_span, warn};
 
 use super::bindings::Binding;
 use super::declaration::Declaration;
 use super::error::RoomError;
-use super::util::{field, id, valid_thread};
+use super::util::{field as text, id, valid_thread};
 use super::Room;
+use crate::log_safe::ClientId;
 
 impl Room {
     pub fn binding_views(&self) -> Value {
@@ -16,8 +18,33 @@ impl Room {
             .map(Binding::view)
             .collect::<Vec<_>>())
     }
+    /// A connector binds one of its agent threads to the room. The event is written after the room lock is released.
     pub fn register(&self, cid: &str, data: &Value) -> Result<Value, RoomError> {
-        let thread = field(data, "thread");
+        let span = info_span!(
+            "binding",
+            connector = %ClientId(cid),
+            harness = %ClientId(text(data, "harness")),
+            binding = field::Empty
+        );
+        let _in_span = span.enter();
+        let result = self.register_locked(cid, data);
+        match &result {
+            Ok(answer) => {
+                span.record(
+                    "binding",
+                    field::display(ClientId(answer["binding_id"].as_str().unwrap_or_default())),
+                );
+                info!("binding registered; the agent can now be heard through voice");
+            }
+            Err(error) => warn!(
+                error.type = error.code(),
+                "a binding was refused, so the agent stays out of voice"
+            ),
+        }
+        result
+    }
+    fn register_locked(&self, cid: &str, data: &Value) -> Result<Value, RoomError> {
+        let thread = text(data, "thread");
         if !valid_thread(thread) {
             return Err(RoomError::new(400, "room.thread_invalid"));
         }
@@ -28,7 +55,7 @@ impl Room {
         if !inner.conversations.ensure(thread) {
             return Err(RoomError::new(429, "room.input_backlog_full"));
         }
-        let requested = field(data, "binding_id");
+        let requested = text(data, "binding_id");
         if let Some(existing) = inner
             .bindings
             .get(requested)
@@ -83,6 +110,28 @@ impl Room {
     /// `leave` names a deliberate agent-side exit. A reset or lost transport may unregister a binding without
     /// retiring the conversation; an offline leave can name its thread after Core has restarted.
     pub fn unregister_with_thread(
+        &self,
+        cid: &str,
+        bid: &str,
+        declared_thread: &str,
+        leave: bool,
+    ) -> Result<(), RoomError> {
+        let span = info_span!("binding", connector = %ClientId(cid), binding = %ClientId(bid));
+        let _in_span = span.enter();
+        let result = self.unregister_locked(cid, bid, declared_thread, leave);
+        match &result {
+            Ok(()) => info!(
+                result = if leave { "left" } else { "closed" },
+                "binding closed; the agent is out of voice until it registers again"
+            ),
+            Err(error) => warn!(
+                error.type = error.code(),
+                "closing a binding was refused, so it stays as it was"
+            ),
+        }
+        result
+    }
+    fn unregister_locked(
         &self,
         cid: &str,
         bid: &str,
