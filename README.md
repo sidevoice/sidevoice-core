@@ -118,8 +118,8 @@ apply. The Core's standalone bind default remains loopback.
   trust, or reach the machine directly. End-to-end encryption to the machine's pinned identity is planned, not
   there yet.
 - **Crash records.** When the core panics it stores one record on the machine (`D/core/crashes`): version, OS, time,
-  the static panic message or a marker, location, backtrace and the last 20 warning and error lines of its own log; never a formatted
-  message. At most 20 records, 1 MiB and 30 days; the same crash is one record with a count. A paired device lists them
+  the static panic message or a marker, location, backtrace and the last 20 warning and error lines of its own log, each with its time as an offset from the crash (`-12.345s`, no date) and
+  its device, client and session ids as tokens of that record (`d1`, `c1`, `s1`); never a formatted message. At most 20 records, 1 MiB and 30 days; the same crash is one record with a count. A paired device lists them
   (`GET /api/device/crashes`) and deletes one it has handled (`DELETE /api/device/crashes/{id}`). The machine sends
   nothing and has no setting for it; no connector-link or MCP method can reach a record. The
   connector leaves its own record in `D/crash-inbox`, which the core takes in.

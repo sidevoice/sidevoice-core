@@ -249,7 +249,10 @@ fn a_record_is_cut_to_the_tail_and_frame_limits() {
     big.backtrace = (0..500).map(|n| format!("frame {n}")).collect();
     let read = CrashRecord::from_untrusted(&serde_json::to_value(&big).unwrap(), &[]).unwrap();
     assert_eq!(read.log_tail.len(), TAIL_LINES);
-    assert_eq!(read.log_tail.last().unwrap(), &ours(499), "the last lines");
+    assert!(
+        read.log_tail.last().unwrap().ends_with("line 499"),
+        "the last lines"
+    );
     assert_eq!(read.backtrace.len(), MAX_FRAMES);
 }
 
@@ -393,7 +396,7 @@ fn the_log_tail_keeps_only_our_warnings_and_errors_and_the_last_twenty() {
         &[],
     );
     assert_eq!(stored.log_tail.len(), TAIL_LINES);
-    assert_eq!(stored.log_tail.last().unwrap(), &ours(79));
+    assert!(stored.log_tail.last().unwrap().ends_with("line 79"));
     let all = serde_json::to_string(&stored).unwrap();
     for dropped in [
         "canary",
@@ -416,7 +419,10 @@ fn a_tail_line_is_cut_stripped_of_format_characters_and_never_forged_by_a_piece(
     ]);
     let read = CrashRecord::from_untrusted(&raw, &[]).unwrap();
     assert_eq!(read.log_tail.len(), 2);
-    assert_eq!(read.log_tail[0].chars().count(), 600);
+    assert!(
+        read.log_tail[0].chars().count() <= 600 && read.log_tail[0].ends_with("zzzz"),
+        "cut to the limit"
+    );
     assert!(read.log_tail[1].ends_with("reversed"));
     assert!(!read.log_tail[1].contains('\u{202e}'));
 }
@@ -613,4 +619,100 @@ fn a_warning_inside_a_span_is_kept_and_a_dependency_inside_a_span_is_dropped() {
     let read = CrashRecord::from_untrusted(&raw, &[]).unwrap();
     assert_eq!(read.log_tail.len(), 2, "{:?}", read.log_tail);
     assert!(read.log_tail[1].contains("kept two"));
+}
+
+/// A record crashed at `10:00:10.000Z` with `tail` read in.
+fn crashed(tail: &[&str]) -> CrashRecord {
+    let mut raw = serde_json::to_value(record(1)).unwrap();
+    raw["first_at"] = json!("2026-11-15T10:00:10.000Z");
+    raw["last_at"] = json!("2026-11-15T10:00:10.000Z");
+    raw["log_tail"] = json!(tail);
+    CrashRecord::from_untrusted(&raw, &[]).unwrap()
+}
+
+#[test]
+fn a_tail_line_carries_its_offset_from_the_crash_and_no_date() {
+    let read = crashed(&[
+        "2026-11-15T09:59:57.655Z ERROR sidevoice_core::x: twelve seconds before",
+        "2026-11-15T10:00:10.250Z  WARN sidevoice_core::x: a little after",
+        "2026-11-15T10:00:10.000Z  WARN sidevoice_core::x: at the crash",
+    ]);
+    assert_eq!(
+        read.log_tail,
+        [
+            "-12.345s ERROR sidevoice_core::x: twelve seconds before",
+            "+0.250s  WARN sidevoice_core::x: a little after",
+            "+0.000s  WARN sidevoice_core::x: at the crash",
+        ]
+    );
+    let text = serde_json::to_string(&read.log_tail).unwrap();
+    assert!(!text.contains("2026"), "{text}");
+    // Taken in again (the store reads its own file back): nothing changes.
+    let again = CrashRecord::from_untrusted(&serde_json::to_value(&read).unwrap(), &[]).unwrap();
+    assert_eq!(again.log_tail, read.log_tail);
+    // A line that is neither a date nor an offset, or an offset out of shape, is not ours.
+    let bad = crashed(&[
+        "yesterday WARN sidevoice_core::x: a",
+        "-1.5s WARN sidevoice_core::x: b",
+        "-1.500 WARN sidevoice_core::x: c",
+    ]);
+    assert!(bad.log_tail.is_empty(), "{:?}", bad.log_tail);
+}
+
+#[test]
+fn the_panic_hook_writes_offsets_from_its_own_crash_time() {
+    let line = format!(
+        "{} ERROR sidevoice_core::x: before",
+        (Utc::now() - Duration::seconds(3)).to_rfc3339_opts(SecondsFormat::Micros, true)
+    );
+    let stored = CrashRecord::from_panic(
+        Piece::Core,
+        "1",
+        "linux",
+        "amd64",
+        &panic(Some("x"), 1, ""),
+        &[line],
+        &[],
+    );
+    let offset = &stored.log_tail[0];
+    assert!(
+        offset.starts_with('-') && offset[1..].starts_with("3.") || offset.starts_with("-2.9"),
+        "{offset}"
+    );
+    assert!(offset.ends_with("s ERROR sidevoice_core::x: before"));
+}
+
+#[test]
+fn ids_in_a_tail_are_tokens_of_the_record_and_not_the_ids_themselves() {
+    let device_a = "6f1c2c9e-0d8d-4f3a-9a52-1d2b3c4d5e6f";
+    let device_b = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d";
+    let read = crashed(&[
+        &format!("2026-11-15T10:00:01.000Z  WARN call{{device={device_a} turn=7}}: sidevoice_core::x: one device={device_a}"),
+        &format!("2026-11-15T10:00:02.000Z  WARN sidevoice_core::x: two device={device_b} client=\"web 1\" session=s-9"),
+        &format!("2026-11-15T10:00:03.000Z  WARN sidevoice_core::x: three device={device_a} client=\"web 1\", deviceless=keep"),
+    ]);
+    assert_eq!(
+        read.log_tail,
+        [
+            "-9.000s  WARN call{device=d1 turn=t1}: sidevoice_core::x: one device=d1",
+            "-8.000s  WARN sidevoice_core::x: two device=d2 client=c1 session=s1",
+            "-7.000s  WARN sidevoice_core::x: three device=d1 client=c1, deviceless=keep",
+        ]
+    );
+    let text = serde_json::to_string(&read).unwrap();
+    for id in [device_a, device_b, "web 1", "s-9"] {
+        assert!(!text.contains(id), "{id}: {text}");
+    }
+    // The same device in another record is not the same token source: tokens count from one per record.
+    let other = crashed(&[&format!(
+        "2026-11-15T10:00:01.000Z  WARN sidevoice_core::x: x device={device_b}"
+    )]);
+    assert!(
+        other.log_tail[0].ends_with("device=d1"),
+        "{:?}",
+        other.log_tail
+    );
+    // Read back, a record keeps its tokens.
+    let again = CrashRecord::from_untrusted(&serde_json::to_value(&read).unwrap(), &[]).unwrap();
+    assert_eq!(again.log_tail, read.log_tail);
 }

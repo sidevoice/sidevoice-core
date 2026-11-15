@@ -69,7 +69,9 @@ pub struct CrashRecord {
     pub exception: Exception,
     pub location: Location,
     pub backtrace: Vec<String>,
-    /// The last lines of the piece's own log, masked where they were written.
+    /// The last lines of the piece's own log, masked where they were written. Each line starts with its time as an offset
+    /// from the crash (`-12.345s`, not a date) and names the ids it carries by tokens of this record (`d1`, `c2`), so
+    /// that nothing in it correlates with another report or says when the machine was in use.
     pub log_tail: Vec<String>,
 }
 
@@ -217,14 +219,16 @@ impl CrashRecord {
             .take(MAX_FRAMES)
             .collect();
         let piece = self.piece;
+        let crashed = chrono::DateTime::parse_from_rfc3339(&self.last_at).ok();
         let lines: Vec<String> = self
             .log_tail
             .iter()
             .map(|line| clean(line, MAX_LINE))
+            .map(|line| relative_time(&line, crashed).unwrap_or(line))
             .filter(|line| is_ours(line, piece))
             .collect();
         let skip = lines.len().saturating_sub(TAIL_LINES);
-        self.log_tail = lines.into_iter().skip(skip).collect();
+        self.log_tail = rekey_ids(&lines[skip..]);
         self.signature = self.make_signature();
     }
 
@@ -404,15 +408,159 @@ fn is_frame(frame: &str) -> bool {
         && place_ok
 }
 
-/// Whether `line` is a line of our own log at `warn` or `error`: `<RFC 3339 time> <LEVEL> [<span>: ]<target>: ...`, the
-/// target one of ours. A span the event was logged in (`name{fields}:` or `name:`, as many as there are) comes before
+/// `line` with the date it starts with replaced by the offset from `crashed` (`-12.345s`, milliseconds, `+` for a line after
+/// the crash). `None` when it does not start with a date (it may already be an offset): the line is left as it is.
+fn relative_time(
+    line: &str,
+    crashed: Option<chrono::DateTime<chrono::FixedOffset>>,
+) -> Option<String> {
+    let line = line.trim_start();
+    let time = line.split_whitespace().next()?;
+    let at = chrono::DateTime::parse_from_rfc3339(time).ok()?;
+    let millis = (at - crashed?).num_milliseconds();
+    let sign = if millis < 0 { '-' } else { '+' };
+    let millis = millis.unsigned_abs();
+    Some(format!(
+        "{sign}{}.{:03}s{}",
+        millis / 1000,
+        millis % 1000,
+        &line[time.len()..]
+    ))
+}
+
+/// Whether `time` is an offset as [`relative_time`] writes it: a sign, seconds, three digits of milliseconds and `s`.
+fn is_offset(time: &str) -> bool {
+    let Some(rest) = time
+        .strip_prefix(['-', '+'])
+        .and_then(|rest| rest.strip_suffix('s'))
+    else {
+        return false;
+    };
+    rest.split_once('.').is_some_and(|(seconds, millis)| {
+        (1..=12).contains(&seconds.len())
+            && seconds.bytes().all(|b| b.is_ascii_digit())
+            && millis.len() == 3
+            && millis.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// The log fields that carry an id the machine minted or a client named, and the letter of the tokens that stand for their
+/// values (`d1`, `d2`, ...): the same value is the same token inside one record and none across records.
+const ID_FIELDS: [(&str, char); 14] = [
+    ("device", 'd'),
+    ("device_id", 'd'),
+    ("device.id", 'd'),
+    ("client", 'c'),
+    ("client_id", 'c'),
+    ("client.id", 'c'),
+    ("session", 's'),
+    ("session_id", 's'),
+    ("turn", 't'),
+    ("utterance", 'u'),
+    ("message_id", 'm'),
+    ("conversation", 'v'),
+    ("conversation_id", 'v'),
+    ("call", 'k'),
+];
+
+/// `lines` with the value of every id field (`device=<id>`, also inside a span's `{...}`; a quoted value too) replaced by a
+/// token of this record: `d1` for the first device named, `d2` for the next, and so on per kind of id.
+fn rekey_ids(lines: &[String]) -> Vec<String> {
+    let mut seen: Vec<(char, String)> = Vec::new();
+    let mut token = |kind: char, value: &str| {
+        let index = match seen
+            .iter()
+            .filter(|(k, _)| *k == kind)
+            .position(|(_, v)| v == value)
+        {
+            Some(index) => index,
+            None => {
+                seen.push((kind, value.to_owned()));
+                seen.iter().filter(|(k, _)| *k == kind).count() - 1
+            }
+        };
+        format!("{kind}{}", index + 1)
+    };
+    lines
+        .iter()
+        .map(|line| {
+            let mut out = String::with_capacity(line.len());
+            let mut at = 0;
+            while at < line.len() {
+                let Some(c) = line[at..].chars().next() else {
+                    break;
+                };
+                let boundary = out
+                    .chars()
+                    .last()
+                    .is_none_or(|p| !(p.is_ascii_alphanumeric() || "_.".contains(p)));
+                let field = boundary
+                    .then(|| {
+                        ID_FIELDS
+                            .iter()
+                            .filter(|(name, _)| {
+                                line[at..]
+                                    .strip_prefix(name)
+                                    .is_some_and(|rest| rest.starts_with('='))
+                            })
+                            .max_by_key(|(name, _)| name.len())
+                    })
+                    .flatten();
+                if let Some((name, kind)) = field {
+                    let from = at + name.len() + 1;
+                    let (value, end) = field_value(&line[from..]);
+                    out.push_str(name);
+                    out.push('=');
+                    out.push_str(&if value.is_empty() {
+                        String::new()
+                    } else {
+                        token(*kind, value)
+                    });
+                    at = from + end;
+                } else {
+                    out.push(c);
+                    at += c.len_utf8();
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// The value at the start of `text` (after a `=`) and how many bytes it takes: a quoted text up to its closing quote
+/// (the quotes are not in it), else up to a space, a comma or a closing brace or parenthesis.
+fn field_value(text: &str) -> (&str, usize) {
+    if let Some(quoted) = text.strip_prefix('"') {
+        let (mut escaped, mut end) = (false, quoted.len());
+        for (at, c) in quoted.char_indices() {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => {
+                    end = at;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let taken = (end + 2).min(text.len());
+        return (&quoted[..end], taken);
+    }
+    let end = text
+        .find(|c: char| c.is_whitespace() || ",})".contains(c))
+        .unwrap_or(text.len());
+    (&text[..end], end)
+}
+
+/// Whether `line` is a line of our own log at `warn` or `error`: `<offset> <LEVEL> [<span>: ]<target>: ...` (the offset
+/// from the crash that [`relative_time`] writes), the target one of ours. A span the event was logged in (`name{fields}:` or `name:`, as many as there are) comes before
 /// the target. A dependency's line, a debug line and the service's raw stderr are none of these.
 fn is_ours(line: &str, piece: Piece) -> bool {
     let mut parts = line.split_whitespace();
     let (Some(time), Some(level)) = (parts.next(), parts.next()) else {
         return false;
     };
-    if chrono::DateTime::parse_from_rfc3339(time).is_err() || !matches!(level, "WARN" | "ERROR") {
+    if !is_offset(time) || !matches!(level, "WARN" | "ERROR") {
         return false;
     }
     let rest = line.trim_start()[time.len()..].trim_start();
