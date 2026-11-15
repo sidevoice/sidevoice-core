@@ -716,3 +716,22 @@ fn ids_in_a_tail_are_tokens_of_the_record_and_not_the_ids_themselves() {
     let again = CrashRecord::from_untrusted(&serde_json::to_value(&read).unwrap(), &[]).unwrap();
     assert_eq!(again.log_tail, read.log_tail);
 }
+
+#[test]
+fn every_id_like_field_is_a_token_also_inside_spans() {
+    let read = crashed(&[
+        "2026-11-15T10:00:01.000Z  WARN connector_link{connector=abc-1}:binding{binding=bnd-1}: sidevoice_core::x: up launch_id=L-9 id=77 peer.id=p5",
+        "2026-11-15T10:00:02.000Z  WARN connector_link{connector=abc-2}:binding{binding=bnd-1}: sidevoice_core::x: up launch_id=L-9 launch_id=L-8 note=keep",
+    ]);
+    assert_eq!(
+        read.log_tail,
+        [
+            "-9.000s  WARN connector_link{connector=n1}:binding{binding=b1}: sidevoice_core::x: up launch_id=l1 id=x1 peer.id=x2",
+            "-8.000s  WARN connector_link{connector=n2}:binding{binding=b1}: sidevoice_core::x: up launch_id=l1 launch_id=l2 note=keep",
+        ]
+    );
+    let text = serde_json::to_string(&read).unwrap();
+    for id in ["abc-1", "abc-2", "bnd-1", "L-9", "L-8", "77", "p5"] {
+        assert!(!text.contains(id), "{id}: {text}");
+    }
+}

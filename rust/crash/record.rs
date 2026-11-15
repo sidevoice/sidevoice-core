@@ -444,24 +444,35 @@ fn is_offset(time: &str) -> bool {
     })
 }
 
-/// The log fields that carry an id the machine minted or a client named, and the letter of the tokens that stand for their
-/// values (`d1`, `d2`, ...): the same value is the same token inside one record and none across records.
-const ID_FIELDS: [(&str, char); 14] = [
+/// The ids the logs name by a field, and the letter of the tokens that stand for their values (`d1`, `d2`, ...).
+const KNOWN_IDS: [(&str, char); 11] = [
     ("device", 'd'),
-    ("device_id", 'd'),
-    ("device.id", 'd'),
     ("client", 'c'),
-    ("client_id", 'c'),
-    ("client.id", 'c'),
     ("session", 's'),
-    ("session_id", 's'),
     ("turn", 't'),
     ("utterance", 'u'),
-    ("message_id", 'm'),
+    ("message", 'm'),
     ("conversation", 'v'),
-    ("conversation_id", 'v'),
     ("call", 'k'),
+    ("connector", 'n'),
+    ("binding", 'b'),
+    ("launch", 'l'),
 ];
+
+/// The token letter of the id a log field named `name` carries, if it carries one: a known id (`device`, `device_id`,
+/// `device.id`, ...), or generically any field that is `id` or ends in `_id` or `.id` (token letter `x`). The same value is
+/// the same token inside one record and none across records.
+fn id_kind(name: &str) -> Option<char> {
+    let stem = name
+        .strip_suffix("_id")
+        .or_else(|| name.strip_suffix(".id"))
+        .unwrap_or(name);
+    KNOWN_IDS
+        .iter()
+        .find(|(known, _)| *known == stem)
+        .map(|(_, kind)| *kind)
+        .or_else(|| (name == "id" || stem != name).then_some('x'))
+}
 
 /// `lines` with the value of every id field (`device=<id>`, also inside a span's `{...}`; a quoted value too) replaced by a
 /// token of this record: `d1` for the first device named, `d2` for the next, and so on per kind of id.
@@ -496,14 +507,14 @@ fn rekey_ids(lines: &[String]) -> Vec<String> {
                     .is_none_or(|p| !(p.is_ascii_alphanumeric() || "_.".contains(p)));
                 let field = boundary
                     .then(|| {
-                        ID_FIELDS
-                            .iter()
-                            .filter(|(name, _)| {
-                                line[at..]
-                                    .strip_prefix(name)
-                                    .is_some_and(|rest| rest.starts_with('='))
-                            })
-                            .max_by_key(|(name, _)| name.len())
+                        let name = line[at..]
+                            .split(|c: char| !(c.is_ascii_alphanumeric() || "_.".contains(c)))
+                            .next()
+                            .unwrap_or("");
+                        line[at + name.len()..]
+                            .starts_with('=')
+                            .then(|| id_kind(name).map(|kind| (name, kind)))
+                            .flatten()
                     })
                     .flatten();
                 if let Some((name, kind)) = field {
@@ -514,7 +525,7 @@ fn rekey_ids(lines: &[String]) -> Vec<String> {
                     out.push_str(&if value.is_empty() {
                         String::new()
                     } else {
-                        token(*kind, value)
+                        token(kind, value)
                     });
                     at = from + end;
                 } else {
