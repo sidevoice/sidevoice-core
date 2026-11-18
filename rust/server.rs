@@ -9,13 +9,12 @@ use serde_json::{json, Value};
 
 use crate::control::devices::{DeviceRegistry, NodeIdentity};
 use crate::control::room::Room;
-use crate::crash::CrashStore;
 use crate::storage::PrivateDir;
 
 mod call;
 mod connector_routes;
 mod connectors;
-mod crashes;
+mod crash_reports;
 mod device_address;
 mod drain;
 mod guard;
@@ -34,7 +33,6 @@ pub(crate) use trust::safe_url;
 pub struct AppState {
     pub dir: PrivateDir,
     pub room: Arc<Room>,
-    crashes: CrashStore,
     pub identity: NodeIdentity,
     registry: Mutex<DeviceRegistry>,
     limits: limits::Limits,
@@ -69,10 +67,6 @@ impl AppState {
         room: Arc<Room>,
     ) -> Self {
         Self {
-            crashes: CrashStore::new(
-                dir.path(),
-                crate::runtime::home_spellings(dirs::home_dir().as_deref()),
-            ),
             dir,
             room,
             identity,
@@ -87,11 +81,6 @@ impl AppState {
             port,
             shutdown: tokio::sync::Notify::new(),
         }
-    }
-
-    /// Takes the connector's spool in and applies the crash records' caps: at start, not only when an app reads.
-    pub fn maintain_crash_records(&self) {
-        self.crashes.maintain();
     }
 
     pub fn issue_code(&self) -> Value {
@@ -171,7 +160,6 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
     let mut router = Router::new()
         .merge(node::routes())
         .merge(pairing::routes())
-        .merge(crashes::routes())
         .merge(call::routes())
         .merge(presentation::routes())
         .merge(connector_routes::routes());
@@ -179,6 +167,7 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         router = router
             .merge(node::local_routes())
             .merge(pairing::local_routes())
+            .merge(crash_reports::local_routes())
             .merge(connectors::local_routes());
     }
     let telemetry = crate::control::telemetry::shared();

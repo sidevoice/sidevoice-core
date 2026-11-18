@@ -60,7 +60,6 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         port,
         stored.room.clone(),
     ));
-    state.maintain_crash_records();
     let delivery_task = tokio::spawn(stored.room.pump());
     // Conversations whose last viewer aged out or was unpaired close here, at startup and every quarter hour.
     let departed_task = tokio::spawn({
@@ -95,6 +94,8 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         servers.join().await;
         return Err(error);
     }
+    // Once the core is serving: the crash reports a previous run left are sent in the background (rust/crash.rs).
+    crate::crash::start();
     let crashed = tokio::select! {
         _ = signals.received() => false,
         _ = state.shutdown_requested() => false,

@@ -155,3 +155,26 @@ pub(crate) fn scratch_base() -> PathBuf {
         PathBuf::from("/tmp")
     }
 }
+
+/// The core's version, as `cargo metadata` says it (`Cargo.toml`, which release-please moves).
+pub(crate) fn version() -> Result<String> {
+    let metadata = parse_json(
+        output(
+            "cargo",
+            &["metadata", "--no-deps", "--locked", "--format-version", "1"],
+            Some(&repo()),
+        )?
+        .as_bytes(),
+        "cargo metadata",
+    )?;
+    metadata["packages"]
+        .as_array()
+        .and_then(|packages| {
+            packages
+                .iter()
+                .find(|package| package["name"] == "sidevoice-core")
+        })
+        .and_then(|package| package["version"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "no sidevoice-core version".to_owned())
+}

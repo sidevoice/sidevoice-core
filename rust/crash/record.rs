@@ -1,39 +1,24 @@
 //! The record's closed field list, its signature and the validation every record passes before it is kept.
 
-use chrono::Datelike;
+use std::str::FromStr;
+
+use chrono::{DateTime, Datelike, Utc};
+use sentry::types::DebugId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::{Panic, MAX_FRAMES, TAIL_LINES};
-
-/// How far ahead of this machine's clock a record may be dated: a clock a little ahead is not a forgery.
-const SKEW_MINUTES: i64 = 5;
+use super::{MAX_FRAMES, MAX_IMAGES, OWN_TARGETS, TAIL_LINES};
 
 /// What stands in for a panic message that is not a literal (`docs/logging.md`, section 9).
 pub const FORMATTED_MARKER: &str = "<formatted panic message omitted>";
 const MAX_TEXT: usize = 200;
-const MAX_FRAME: usize = 240;
+const MAX_FUNCTION: usize = 240;
+const MAX_NAME: usize = 100;
 const MAX_LINE: usize = 600;
 /// How many of the first frames the signature takes.
 const SIGNATURE_FRAMES: usize = 5;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Piece {
-    Core,
-    Connector,
-}
-
-impl Piece {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Core => "core",
-            Self::Connector => "connector",
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Exception {
@@ -42,6 +27,9 @@ pub struct Exception {
     pub kind: String,
     /// A `&'static str` payload, or [`FORMATTED_MARKER`].
     pub message: String,
+    /// With the marker: how long the formatted message was (its text is never kept).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub len: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,13 +38,40 @@ pub struct Location {
     pub line: u32,
 }
 
-/// One crash, or the several of one signature (`count`, `first_at`, `last_at`). Exactly these fields are stored, listed
-/// and sent on to an app.
+/// One frame of the stack, innermost first. The address is what Sentry symbolicates with the debug files of the release;
+/// the name and place are what the binary itself could say (its symbol table, `strip = "debuginfo"`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Frame {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    /// A bare file name, never a path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub addr: u64,
+}
+
+/// A loaded module that holds a frame of the stack, so that Sentry can match the frame to the debug file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    /// A bare file name, never a path.
+    pub name: String,
+    pub addr: u64,
+    pub size: u64,
+    pub vmaddr: u64,
+    /// The debug id (`debugid`'s canonical text).
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_id: Option<String>,
+}
+
+/// One crash, or the several of one signature (`count`, `first_at`, `last_at`). Exactly these fields are stored and sent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrashRecord {
-    /// A random UUID v4, made when the crash happened; the app may use it as the Sentry `event_id`.
+    /// A random UUID v4, made when the crash happened: the Sentry `event_id`, so a send repeated after a failed delete is
+    /// one event.
     pub id: String,
-    pub piece: Piece,
     pub version: String,
     pub os: String,
     pub arch: String,
@@ -64,40 +79,50 @@ pub struct CrashRecord {
     pub first_at: String,
     pub last_at: String,
     pub count: u32,
-    /// Groups the crashes that are the same: a hash of the piece, version, location and top frames.
+    /// Groups the crashes that are the same: a hash of the version, location and top frames.
     pub signature: String,
     pub exception: Exception,
     pub location: Location,
-    pub backtrace: Vec<String>,
-    /// The last lines of the piece's own log, masked where they were written. Each line starts with its time as an offset
-    /// from the crash (`-12.345s`, not a date) and names the ids it carries by tokens of this record (`d1`, `c2`), so
-    /// that nothing in it correlates with another report or says when the machine was in use.
+    pub backtrace: Vec<Frame>,
+    pub images: Vec<Image>,
+    /// The last warnings and errors of our own targets, masked where they were taken. Each line starts with its time as an
+    /// offset from the crash (`-12.345s`, not a date) and names the ids it carries by tokens of this record (`d1`, `c2`),
+    /// so that nothing in it correlates with another report or says when the machine was in use.
     pub log_tail: Vec<String>,
 }
 
-fn now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+/// What a panic is, as the capture knows it.
+pub struct Panic<'a> {
+    pub version: &'a str,
+    pub os: &'a str,
+    pub arch: &'a str,
+    pub at: DateTime<Utc>,
+    /// The payload when it is a `&'static str`; `None` for anything formatted.
+    pub literal: Option<&'a str>,
+    /// How long a formatted payload was; 0 when there was none.
+    pub formatted_len: usize,
+    pub file: &'a str,
+    pub line: u32,
+    pub frames: Vec<Frame>,
+    pub images: Vec<Image>,
+    /// Already rendered, with offsets from `at` (`tail::snapshot`).
+    pub tail: Vec<String>,
+}
+
+fn stamp(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 impl CrashRecord {
-    pub fn from_panic(
-        piece: Piece,
-        version: &str,
-        os: &str,
-        arch: &str,
-        panic: &Panic<'_>,
-        tail: &[String],
-        homes: &[String],
-    ) -> Self {
+    pub fn from_panic(panic: Panic<'_>, homes: &[String]) -> Self {
         let message = panic.literal.unwrap_or(FORMATTED_MARKER);
-        let at = now();
+        let at = stamp(panic.at);
         let hide = |text: &str| mask_homes(text, homes);
         let mut record = Self {
             id: Uuid::new_v4().to_string(),
-            piece,
-            version: version.to_owned(),
-            os: os.to_owned(),
-            arch: arch.to_owned(),
+            version: panic.version.to_owned(),
+            os: panic.os.to_owned(),
+            arch: panic.arch.to_owned(),
             first_at: at.clone(),
             last_at: at,
             count: 1,
@@ -105,26 +130,30 @@ impl CrashRecord {
             exception: Exception {
                 kind: "panic".to_owned(),
                 message: hide(message),
+                len: u32::try_from(panic.formatted_len)
+                    .ok()
+                    .filter(|len| *len > 0 && panic.literal.is_none()),
             },
             location: Location {
                 file: hide(panic.file),
                 line: panic.line,
             },
-            backtrace: frames(&hide(panic.backtrace)),
-            log_tail: tail.iter().map(|line| hide(line)).collect(),
+            backtrace: panic.frames,
+            images: panic.images,
+            log_tail: panic.tail.iter().map(|line| hide(line)).collect(),
         };
         record.normalize();
         record
     }
 
-    /// Reads a record from untrusted JSON: only the closed field list is taken, every text is bounded and cleaned, and
-    /// the signature is made again rather than believed. The home directory is hidden again and the times are made UTC
-    /// (milliseconds) and ordered. `None` when a required field is missing or malformed.
+    /// Reads a record from untrusted JSON (a file on disk may be corrupt): only the closed field list is taken, every text is
+    /// bounded and cleaned, and the signature is made again rather than believed. The home directory is hidden again and
+    /// the times are made UTC (milliseconds) and ordered. `None` when a required field is missing or malformed.
     pub fn from_untrusted(value: &Value, homes: &[String]) -> Option<Self> {
         let text = |value: &Value| value.as_str().map(str::to_owned);
+        let list = |value: &Value| -> Vec<Value> { value.as_array().cloned().unwrap_or_default() };
         let mut record = Self {
             id: text(&value["id"])?,
-            piece: serde_json::from_value(value["piece"].clone()).ok()?,
             version: text(&value["version"])?,
             os: text(&value["os"])?,
             arch: text(&value["arch"])?,
@@ -137,32 +166,43 @@ impl CrashRecord {
             exception: Exception {
                 kind: text(&value["exception"]["type"])?,
                 message: text(&value["exception"]["message"])?,
+                len: value["exception"]["len"]
+                    .as_u64()
+                    .and_then(|len| u32::try_from(len).ok()),
             },
             location: Location {
                 file: text(&value["location"]["file"])?,
                 line: u32::try_from(value["location"]["line"].as_u64()?).ok()?,
             },
-            backtrace: lines(&value["backtrace"]),
-            log_tail: lines(&value["log_tail"]),
+            backtrace: list(&value["backtrace"])
+                .into_iter()
+                .filter_map(|frame| serde_json::from_value(frame).ok())
+                .collect(),
+            images: list(&value["images"])
+                .into_iter()
+                .filter_map(|image| serde_json::from_value(image).ok())
+                .collect(),
+            log_tail: list(&value["log_tail"])
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
         };
         let times = |text: &str| {
-            chrono::DateTime::parse_from_rfc3339(text)
+            DateTime::parse_from_rfc3339(text)
                 .ok()
-                .map(|at| at.with_timezone(&chrono::Utc))
+                .map(|at| at.with_timezone(&Utc))
         };
         let (first, last) = (times(&record.first_at)?, times(&record.last_at)?);
         // A year past 9999 would be written with a sign and a fifth digit.
         if first.max(last).year() > 9999 {
             return None;
         }
-        let stamp = |at: chrono::DateTime<chrono::Utc>| {
-            at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-        };
         record.first_at = stamp(first.min(last));
         record.last_at = stamp(first.max(last));
         record.exception.message = mask_homes(&record.exception.message, homes);
         record.location.file = mask_homes(&record.location.file, homes);
-        for text in record.backtrace.iter_mut().chain(&mut record.log_tail) {
+        for text in &mut record.log_tail {
             *text = mask_homes(text, homes);
         }
         if Uuid::parse_str(&record.id).ok()?.to_string() != record.id
@@ -185,18 +225,9 @@ impl CrashRecord {
         Some(record)
     }
 
-    /// Whether the record claims to have happened later than a clock a few minutes ahead allows. Both times are
-    /// canonical UTC by now; they are compared as times, and one that does not parse counts as in the future.
-    pub fn is_dated_in_the_future(&self) -> bool {
-        let limit = chrono::Utc::now() + chrono::Duration::minutes(SKEW_MINUTES);
-        [&self.first_at, &self.last_at]
-            .iter()
-            .any(|text| chrono::DateTime::parse_from_rfc3339(text).map_or(true, |at| at > limit))
-    }
-
     /// Bounds every text, keeps only what has the shape of what we write, and makes the signature: the message is
-    /// printable ASCII or the marker, the file a short relative path, a frame `symbol` or `symbol at path:line`, a log
-    /// line one of our own warnings or errors.
+    /// printable ASCII or the marker, the file a short relative path, a frame a symbol and a bare file name, an image a
+    /// bare name and a debug id, a log line one of our own warnings or errors.
     fn normalize(&mut self) {
         let message = clean(&self.exception.message, MAX_TEXT);
         self.exception.message = if message.bytes().all(|b| (0x20..0x7f).contains(&b)) {
@@ -204,6 +235,9 @@ impl CrashRecord {
         } else {
             FORMATTED_MARKER.to_owned()
         };
+        if self.exception.message != FORMATTED_MARKER {
+            self.exception.len = None;
+        }
         let file = clean(&self.location.file, MAX_TEXT).replace('\\', "/");
         let relative = !file.starts_with('/')
             && file.split('/').all(|part| part != ".." && !part.is_empty())
@@ -211,31 +245,28 @@ impl CrashRecord {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c));
         self.location.file = if relative { file } else { "unknown".to_owned() };
-        self.backtrace = self
-            .backtrace
+        self.backtrace = self.backtrace.iter().take(MAX_FRAMES).map(frame).collect();
+        self.images = self
+            .images
             .iter()
-            .map(|frame| clean(frame, MAX_FRAME))
-            .filter(|frame| is_frame(frame))
-            .take(MAX_FRAMES)
+            .filter_map(image)
+            .take(MAX_IMAGES)
             .collect();
-        let piece = self.piece;
-        let crashed = chrono::DateTime::parse_from_rfc3339(&self.last_at).ok();
         let lines: Vec<String> = self
             .log_tail
             .iter()
             .map(|line| clean(line, MAX_LINE))
-            .map(|line| relative_time(&line, crashed).unwrap_or(line))
-            .filter(|line| is_ours(line, piece))
+            .filter(|line| is_ours(line))
             .collect();
         let skip = lines.len().saturating_sub(TAIL_LINES);
-        self.log_tail = rekey_ids(&lines[skip..]);
+        self.log_tail = lines[skip..].to_vec();
         self.signature = self.make_signature();
     }
 
+    /// Not the addresses: they change with every run.
     fn make_signature(&self) -> String {
         let mut hash = Sha256::new();
         for part in [
-            self.piece.name(),
             &self.version,
             &self.location.file,
             &self.location.line.to_string(),
@@ -244,8 +275,14 @@ impl CrashRecord {
             hash.update([0]);
         }
         for frame in self.backtrace.iter().take(SIGNATURE_FRAMES) {
-            hash.update(frame.as_bytes());
-            hash.update([0]);
+            for part in [
+                frame.function.clone().unwrap_or_default(),
+                frame.file.clone().unwrap_or_default(),
+                frame.line.map(|line| line.to_string()).unwrap_or_default(),
+            ] {
+                hash.update(part.as_bytes());
+                hash.update([0]);
+            }
         }
         hash.finalize()[..16]
             .iter()
@@ -256,6 +293,50 @@ impl CrashRecord {
 
 fn token(value: &str, max: usize, allowed: impl Fn(char) -> bool) -> bool {
     !value.is_empty() && value.len() <= max && value.chars().all(allowed)
+}
+
+/// The last component of a path, when it has the shape of a file name: so that no directory (a home, an install place) is
+/// ever kept.
+pub(super) fn bare(path: &str) -> Option<String> {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    token(name, MAX_NAME, |c| {
+        c.is_ascii_alphanumeric() || "_.-+".contains(c)
+    })
+    .then(|| name.to_owned())
+}
+
+/// A frame with its name bounded and shaped like a symbol, its file a bare name: what is not is dropped, the address stays.
+fn frame(frame: &Frame) -> Frame {
+    Frame {
+        function: frame
+            .function
+            .as_deref()
+            .map(|function| clean(function, MAX_FUNCTION))
+            .filter(|function| {
+                !function.is_empty()
+                    && function
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "_:<>{}$.,&*()[]'+-@# ".contains(c))
+            }),
+        file: frame.file.as_deref().and_then(bare),
+        line: frame.line,
+        addr: frame.addr,
+    }
+}
+
+/// An image with a bare name and a debug id `debugid` reads; `None` when it has neither.
+fn image(image: &Image) -> Option<Image> {
+    Some(Image {
+        name: bare(&image.name)?,
+        addr: image.addr,
+        size: image.size,
+        vmaddr: image.vmaddr,
+        id: DebugId::from_str(&image.id).ok()?.to_string(),
+        code_id: image
+            .code_id
+            .clone()
+            .filter(|id| token(id, 128, |c| c.is_ascii_hexdigit())),
+    })
 }
 
 /// `text` with control characters as spaces and invisible format characters (bidi controls among them) removed, cut to
@@ -381,54 +462,7 @@ fn mask_users(text: &str) -> String {
     out
 }
 
-/// A frame as [`frames`] makes it: a symbol, then optionally ` at <path>:<line>[:<column>]`.
-fn is_frame(frame: &str) -> bool {
-    let (symbol, place) = match frame.rsplit_once(" at ") {
-        Some((symbol, place)) => (symbol, Some(place)),
-        None => (frame, None),
-    };
-    fn number(text: &str) -> Option<&str> {
-        text.rsplit_once(':')
-            .filter(|(_, n)| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()))
-            .map(|(rest, _)| rest)
-    }
-    let place_ok = place.is_none_or(|place| {
-        number(place).is_some_and(|path| {
-            let path = number(path).unwrap_or(path);
-            !path.is_empty()
-                && path
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "_./\\~:+-".contains(c))
-        })
-    });
-    !symbol.is_empty()
-        && symbol
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_:<>{}$.,&*()[]'+-@# ".contains(c))
-        && place_ok
-}
-
-/// `line` with the date it starts with replaced by the offset from `crashed` (`-12.345s`, milliseconds, `+` for a line after
-/// the crash). `None` when it does not start with a date (it may already be an offset): the line is left as it is.
-fn relative_time(
-    line: &str,
-    crashed: Option<chrono::DateTime<chrono::FixedOffset>>,
-) -> Option<String> {
-    let line = line.trim_start();
-    let time = line.split_whitespace().next()?;
-    let at = chrono::DateTime::parse_from_rfc3339(time).ok()?;
-    let millis = (at - crashed?).num_milliseconds();
-    let sign = if millis < 0 { '-' } else { '+' };
-    let millis = millis.unsigned_abs();
-    Some(format!(
-        "{sign}{}.{:03}s{}",
-        millis / 1000,
-        millis % 1000,
-        &line[time.len()..]
-    ))
-}
-
-/// Whether `time` is an offset as [`relative_time`] writes it: a sign, seconds, three digits of milliseconds and `s`.
+/// Whether `time` is an offset as `tail` writes it: a sign, seconds, three digits of milliseconds and `s`.
 fn is_offset(time: &str) -> bool {
     let Some(rest) = time
         .strip_prefix(['-', '+'])
@@ -444,129 +478,10 @@ fn is_offset(time: &str) -> bool {
     })
 }
 
-/// The ids the logs name by a field, and the letter of the tokens that stand for their values (`d1`, `d2`, ...).
-const KNOWN_IDS: [(&str, char); 11] = [
-    ("device", 'd'),
-    ("client", 'c'),
-    ("session", 's'),
-    ("turn", 't'),
-    ("utterance", 'u'),
-    ("message", 'm'),
-    ("conversation", 'v'),
-    ("call", 'k'),
-    ("connector", 'n'),
-    ("binding", 'b'),
-    ("launch", 'l'),
-];
-
-/// The token letter of the id a log field named `name` carries, if it carries one: a known id (`device`, `device_id`,
-/// `device.id`, ...), or generically any field that is `id` or ends in `_id` or `.id` (token letter `x`). The same value is
-/// the same token inside one record and none across records.
-fn id_kind(name: &str) -> Option<char> {
-    let stem = name
-        .strip_suffix("_id")
-        .or_else(|| name.strip_suffix(".id"))
-        .unwrap_or(name);
-    KNOWN_IDS
-        .iter()
-        .find(|(known, _)| *known == stem)
-        .map(|(_, kind)| *kind)
-        .or_else(|| (name == "id" || stem != name).then_some('x'))
-}
-
-/// `lines` with the value of every id field (`device=<id>`, also inside a span's `{...}`; a quoted value too) replaced by a
-/// token of this record: `d1` for the first device named, `d2` for the next, and so on per kind of id.
-fn rekey_ids(lines: &[String]) -> Vec<String> {
-    let mut seen: Vec<(char, String)> = Vec::new();
-    let mut token = |kind: char, value: &str| {
-        let index = match seen
-            .iter()
-            .filter(|(k, _)| *k == kind)
-            .position(|(_, v)| v == value)
-        {
-            Some(index) => index,
-            None => {
-                seen.push((kind, value.to_owned()));
-                seen.iter().filter(|(k, _)| *k == kind).count() - 1
-            }
-        };
-        format!("{kind}{}", index + 1)
-    };
-    lines
-        .iter()
-        .map(|line| {
-            let mut out = String::with_capacity(line.len());
-            let mut at = 0;
-            while at < line.len() {
-                let Some(c) = line[at..].chars().next() else {
-                    break;
-                };
-                let boundary = out
-                    .chars()
-                    .last()
-                    .is_none_or(|p| !(p.is_ascii_alphanumeric() || "_.".contains(p)));
-                let field = boundary
-                    .then(|| {
-                        let name = line[at..]
-                            .split(|c: char| !(c.is_ascii_alphanumeric() || "_.".contains(c)))
-                            .next()
-                            .unwrap_or("");
-                        line[at + name.len()..]
-                            .starts_with('=')
-                            .then(|| id_kind(name).map(|kind| (name, kind)))
-                            .flatten()
-                    })
-                    .flatten();
-                if let Some((name, kind)) = field {
-                    let from = at + name.len() + 1;
-                    let (value, end) = field_value(&line[from..]);
-                    out.push_str(name);
-                    out.push('=');
-                    out.push_str(&if value.is_empty() {
-                        String::new()
-                    } else {
-                        token(kind, value)
-                    });
-                    at = from + end;
-                } else {
-                    out.push(c);
-                    at += c.len_utf8();
-                }
-            }
-            out
-        })
-        .collect()
-}
-
-/// The value at the start of `text` (after a `=`) and how many bytes it takes: a quoted text up to its closing quote
-/// (the quotes are not in it), else up to a space, a comma or a closing brace or parenthesis.
-fn field_value(text: &str) -> (&str, usize) {
-    if let Some(quoted) = text.strip_prefix('"') {
-        let (mut escaped, mut end) = (false, quoted.len());
-        for (at, c) in quoted.char_indices() {
-            match c {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => {
-                    end = at;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let taken = (end + 2).min(text.len());
-        return (&quoted[..end], taken);
-    }
-    let end = text
-        .find(|c: char| c.is_whitespace() || ",})".contains(c))
-        .unwrap_or(text.len());
-    (&text[..end], end)
-}
-
 /// Whether `line` is a line of our own log at `warn` or `error`: `<offset> <LEVEL> [<span>: ]<target>: ...` (the offset
-/// from the crash that [`relative_time`] writes), the target one of ours. A span the event was logged in (`name{fields}:` or `name:`, as many as there are) comes before
-/// the target. A dependency's line, a debug line and the service's raw stderr are none of these.
-fn is_ours(line: &str, piece: Piece) -> bool {
+/// from the crash that `tail` writes), the target one of ours. A span the event was logged in (`name{fields}:` or `name:`,
+/// as many as there are) comes before the target. A dependency's line, a debug line and the panic's own are none of these.
+pub(super) fn is_ours(line: &str) -> bool {
     let mut parts = line.split_whitespace();
     let (Some(time), Some(level)) = (parts.next(), parts.next()) else {
         return false;
@@ -575,18 +490,12 @@ fn is_ours(line: &str, piece: Piece) -> bool {
         return false;
     }
     let rest = line.trim_start()[time.len()..].trim_start();
-    let rest = rest[level.len()..].trim_start();
-    let own = match piece {
-        Piece::Core => "sidevoice_core",
-        Piece::Connector => "sidevoice_connector",
-    };
-    let own_targets = [own, "sidevoice_platform", "panic"];
-    let mut rest = rest;
+    let mut rest = rest[level.len()..].trim_start();
     loop {
         let Some((head, after)) = split_head(rest) else {
             return false;
         };
-        if own_targets.iter().any(|name| {
+        if OWN_TARGETS.iter().any(|name| {
             head == *name
                 || head
                     .strip_prefix(name)
@@ -627,35 +536,4 @@ fn split_head(rest: &str) -> Option<(&str, &str)> {
         return None;
     }
     rest.split_once(": ")
-}
-
-fn lines(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The frames of a `Backtrace`'s `Display`: `   3: symbol` and, under it, `at file:line`, one string each.
-pub(super) fn frames(backtrace: &str) -> Vec<String> {
-    let mut frames: Vec<String> = Vec::new();
-    for line in backtrace.lines().map(str::trim) {
-        if let Some((index, symbol)) = line.split_once(": ") {
-            if !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) {
-                frames.push(symbol.to_owned());
-                continue;
-            }
-        }
-        if let (Some(place), Some(last)) = (line.strip_prefix("at "), frames.last_mut()) {
-            last.push_str(" at ");
-            last.push_str(place);
-        }
-    }
-    frames
 }

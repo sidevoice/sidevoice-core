@@ -36,7 +36,6 @@ pub(super) fn init(config: &Config) -> io::Result<()> {
     let file = LogFile::open(config.log_file.clone(), dirs::home_dir().as_deref())?;
     crate::crash::install(
         &config.data_dir,
-        config.log_file.clone(),
         home_spellings(dirs::home_dir().as_deref()),
         os_type(std::env::consts::OS),
         host_arch(std::env::consts::ARCH),
@@ -57,6 +56,7 @@ pub(super) fn init(config: &Config) -> io::Result<()> {
                 .with_filter(EnvFilter::new(&directives)),
         )
         .with(terminal)
+        .with(crate::crash::tail_layer(|| IN_PANIC_HOOK.get()))
         .try_init()
         .map_err(io::Error::other)?;
     if rejected {
@@ -182,13 +182,7 @@ fn panic_hook() {
             exception.stacktrace = ?backtrace,
             "backtrace of the panic recorded above"
         );
-        // After the log events, so the record's tail ends with the panic itself.
-        crate::crash::capture(&crate::crash::Panic {
-            literal,
-            file,
-            line,
-            backtrace: &backtrace.to_string(),
-        });
+        crate::crash::capture(literal, formatted_len, file, line);
         let lost = PANIC_LINE_LOST.get();
         IN_PANIC_HOOK.set(false);
         // A log that refused the line would lose the panic. A terminal already shows the event through its own

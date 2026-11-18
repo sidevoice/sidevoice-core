@@ -51,6 +51,18 @@ did not start on Debian 12 or Ubuntu 22.04. The floor is fixed in `xtask/src/gli
 Raising or lowering the floor is a change of `FLOOR` and `FLOOR_IMAGE` together. Musl-based systems (Alpine) are not
 supported.
 
+## Crash reports
+
+The core sends its own crash reports to Sentry (README, "Security"; `rust/crash.rs`). Only the release and nightly builds can:
+`release.yml` gives `cargo xtask dist` the organisation's variable `SENTRY_DSN` as `SIDEVOICE_SENTRY_DSN`, which the build
+bakes in (`option_env!`); a pull request, a local build and `cargo test` have none, and a build without a DSN sends
+nothing. The release profile keeps line tables and the symbol table (`debug = "line-tables-only"`, `split-debuginfo =
+"packed"`, `strip = "debuginfo"`), so frames carry function names whatever Sentry does. After each target's package, the
+workflow installs `sentry-cli` on its own (`npm install --global --ignore-scripts`, no secret in that step) and runs
+`cargo xtask sentry-upload` with `secrets.SENTRY_AUTH_TOKEN` in that step's environment alone: it creates the release
+`sidevoice-core@<version>` in the organisation `twentynine-tech-sl`, project `sidevoice`, uploads the debug files of the
+build (`.dwp`, `.dSYM`, `.pdb` and the binary) and finalises it. The workflow checks out without persisting credentials.
+
 ## Assets
 
 - `sidevoice-core-<version>-<target>.tar.zst` for `macos-aarch64`, `linux-x86_64`, `linux-aarch64` and `windows-x86_64` (on the nightly,

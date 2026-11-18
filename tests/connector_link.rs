@@ -662,7 +662,7 @@ async fn a_v3_connector_speaks_json_rpc_on_the_local_socket_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_connector_link_has_no_method_for_crash_records() {
+async fn the_connector_link_has_no_method_for_crash_reports() {
     let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let mut rpc = Rpc::hello(&core).await;
@@ -671,10 +671,12 @@ async fn the_connector_link_has_no_method_for_crash_records() {
         "crash.list",
         "crash.ack",
         "crashes.list",
-        "crashes.get",
         "crashes.delete",
         "crash.send",
-        "device.crashes",
+        "crash_reports.get",
+        "crash_reports.set",
+        "crashReports.set",
+        "settings.crash_reports",
     ] {
         let answer = rpc.request(method, json!({"id": "x"})).await;
         assert_eq!(answer["error"]["code"], -32601, "{method}: {answer}");
