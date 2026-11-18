@@ -30,6 +30,7 @@ mod tests;
 mod trace;
 
 use std::cell::Cell;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, OnceLock};
@@ -37,7 +38,7 @@ use std::time::{Duration, SystemTime};
 
 pub use record::{CrashRecord, Exception, Frame, Image, Location, Panic};
 pub use report::{event, EXTRAS, SERVICE, TAGS};
-pub use settings::{enabled, read as setting, set_enabled};
+pub use settings::{enabled, read as setting};
 pub use store::CrashStore;
 pub use tail::layer as tail_layer;
 
@@ -96,6 +97,24 @@ pub fn install(data: &Path, homes: Vec<String>, os: &'static str, arch: &'static
         arch,
         images: trace::loaded(),
     });
+}
+
+/// Keeps the choice. Off first writes the switch (so a send in flight stops at its next look, and nothing new is recorded), then
+/// erases the machine id and every pending record; a failure to erase is reported and the switch stays off (the next start
+/// erases again).
+pub fn set_enabled(data: &Path, on: bool) -> io::Result<()> {
+    settings::write(data, on)?;
+    if !on {
+        erase(data)?;
+    }
+    Ok(())
+}
+
+/// Deletes the machine id and every pending record.
+fn erase(data: &Path) -> io::Result<()> {
+    let id = settings::remove_id(data);
+    let records = CrashStore::new(data, Vec::new()).erase();
+    id.and(records)
 }
 
 /// Sends what a previous run left, in the background (call once the core is serving). Never blocks and never fails.

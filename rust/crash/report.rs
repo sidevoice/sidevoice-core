@@ -39,7 +39,7 @@ const MAX_IN_FLIGHT: usize = 2;
 /// The tags an event may carry.
 pub const TAGS: [&str; 4] = ["service.name", "os.type", "host.arch", "installation.id"];
 /// The `extra` entries an event may carry.
-pub const EXTRAS: [&str; 5] = ["count", "first_at", "location", "log_tail", "len"];
+pub const EXTRAS: [&str; 3] = ["location", "log_tail", "len"];
 
 /// The event of a record, from its closed field list: the Sentry `event_id` is the record's id, the release the core's
 /// version, and `installation.id` the machine id.
@@ -87,8 +87,6 @@ pub fn event(record: &CrashRecord, machine_id: &str) -> Event<'static> {
         })
         .collect();
     let mut extra: Map<String, Value> = Map::new();
-    extra.insert("count".to_owned(), Value::from(record.count));
-    extra.insert("first_at".to_owned(), Value::from(record.first_at.clone()));
     extra.insert(
         "location".to_owned(),
         Value::from(format!("{}:{}", record.location.file, record.location.line)),
@@ -268,7 +266,7 @@ pub(super) fn pass(context: &Context, dsn: Option<&Dsn>) {
         Ok(true) => {}
         // Records made while off, or left from before it, are discarded.
         Ok(false) => {
-            if let Err(error) = settings::erase(&context.data) {
+            if let Err(error) = super::erase(&context.data) {
                 warn!(
                     error.type = CoreError::CrashReportsUnavailable.code(),
                     kind = ?error.kind(),

@@ -765,6 +765,12 @@ fn the_event_carries_the_closed_field_list_and_nothing_else() {
     extras.sort_unstable();
     assert_eq!(keys(&value["extra"]), extras);
     assert_eq!(value["extra"]["len"], 42);
+    for local in ["count", "first_at"] {
+        assert!(
+            value["extra"].get(local).is_none(),
+            "{local} stays on the machine"
+        );
+    }
     assert_eq!(value["extra"]["location"], "unknown:7");
     let exception = &value["exception"]["values"][0];
     assert_eq!(keys(exception), ["stacktrace", "type", "value"]);
@@ -934,4 +940,50 @@ async fn a_store_that_cannot_be_read_is_one_log_line_and_no_panic() {
     assert_eq!(drain(&context(&f), &dsn(&server)).await, 0);
     assert!(server.received_requests().await.unwrap().is_empty());
     pass(&context(&f), None);
+}
+
+// The races of turning sending off.
+
+#[test]
+fn nothing_is_kept_or_made_after_the_switch_was_written_off() {
+    let f = fixture();
+    // The switch alone, as a person's `off` writes it before it erases: what comes after finds it off, under the store's lock.
+    settings::write(&f.data, false).unwrap();
+    f.store.record(record(1)).unwrap();
+    f.store.record_without_waiting(record(2));
+    assert!(!f.data.join("crashes").exists(), "no record after off");
+    // The id is made and then looked at again: a sender that read the switch before `off` is not left holding an id.
+    assert!(settings::machine_id(&f.data).is_err());
+    assert!(!f.data.join("crash-machine-id.json").exists());
+    // On again: both work.
+    settings::write(&f.data, true).unwrap();
+    f.store.record(record(3)).unwrap();
+    assert_eq!(f.store.pending().unwrap().len(), 1);
+    assert!(settings::machine_id(&f.data).is_ok());
+}
+
+#[test]
+fn off_erases_a_store_that_is_being_written_into() {
+    let f = fixture();
+    for line in 0..MAX_RECORDS as u32 {
+        f.store.record(record(line)).unwrap();
+    }
+    let writer = {
+        let dir = f.data.join("crashes");
+        std::thread::spawn(move || {
+            for n in 0..2000 {
+                let _ = fs::write(dir.join(format!("noise-{n}")), b"x");
+            }
+        })
+    };
+    // Whatever the writer is doing to the directory, turning off is not an error and the switch is off.
+    for _ in 0..20 {
+        set_enabled(&f.data, false).unwrap();
+        assert!(!enabled(&f.data));
+        set_enabled(&f.data, true).unwrap();
+        f.store.record(record(1)).unwrap();
+    }
+    writer.join().unwrap();
+    set_enabled(&f.data, false).unwrap();
+    assert!(f.store.pending().unwrap().is_empty());
 }

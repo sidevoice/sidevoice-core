@@ -21,6 +21,8 @@ const STORE: &str = "crashes";
 static LOCK: Mutex<()> = Mutex::new(());
 
 pub struct CrashStore {
+    /// The core's private directory: the switch is in it.
+    data: PathBuf,
     dir: PathBuf,
     /// Every spelling of the home directory, hidden again in what is read back.
     homes: Vec<String>,
@@ -36,6 +38,7 @@ impl CrashStore {
     /// The store of the core whose private directory is `data`.
     pub fn new(data: &Path, homes: Vec<String>) -> Self {
         Self {
+            data: data.to_path_buf(),
             dir: data.join(STORE),
             homes,
         }
@@ -46,8 +49,13 @@ impl CrashStore {
     }
 
     /// Keeps `record`: merged into the one with its signature if there is one, then the caps are applied.
+    /// Nothing is kept while the switch is off: it is asked again under the lock, so a record that raced the erasing of an `off` is
+    /// not left behind (the erasing takes the same lock).
     pub fn record(&self, record: CrashRecord) -> io::Result<()> {
         let _held = lock();
+        if !self.wanted() {
+            return Ok(());
+        }
         self.add(record)
     }
 
@@ -59,7 +67,9 @@ impl CrashStore {
             Err(TryLockError::Poisoned(held)) => held.into_inner(),
             Err(TryLockError::WouldBlock) => return,
         };
-        let _ = self.add(record);
+        if self.wanted() {
+            let _ = self.add(record);
+        }
     }
 
     /// The records waiting to be sent, newest first; what is expired or unreadable is deleted.
@@ -84,14 +94,23 @@ impl CrashStore {
         }
     }
 
-    /// Deletes every record.
+    /// Deletes every record. A directory that is written into while it is removed (a capture that had the lock before this one)
+    /// is removed again; one that still is after a few tries is left to the next start: the switch is off, nothing new is kept.
     pub fn erase(&self) -> io::Result<()> {
         let _held = lock();
-        match fs::remove_dir_all(&self.dir) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
+        for _ in 0..5 {
+            match fs::remove_dir_all(&self.dir) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {}
+                Err(error) => return Err(error),
+            }
         }
+        Ok(())
+    }
+
+    fn wanted(&self) -> bool {
+        super::settings::enabled(&self.data)
     }
 
     fn add(&self, mut record: CrashRecord) -> io::Result<()> {

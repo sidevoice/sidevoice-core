@@ -79,10 +79,9 @@ opentelemetry-proto = { version = "0.31", default-features = false, features = [
 prost = "0.14"
 wiremock = "=0.6.5"
 
-# Crash reports (rust/crash.rs, RELEASING.md): line tables for file and line, split off the binary where the platform can (dSYM,
-# PDB, .dwp), and the symbol table kept (`debuginfo` strips only the debug sections) so a panic's frames have names with or
-# without Sentry. The release and nightly workflows upload the debug files (`cargo xtask sentry-upload`).
+# Crash reports (rust/crash.rs, RELEASING.md): line tables for file and line, and no stripping here (`strip = "none"`; on MSVC a
+# build that strips links without a PDB). `cargo xtask dist` splits the debug sections off the binary it ships (xtask/src/debug_files.rs:
+# the symbol table stays, so frames have names with or without Sentry) and leaves them beside the archive for the upload.
 [profile.release]
 debug = "line-tables-only"
-split-debuginfo = "packed"
-strip = "debuginfo"
+strip = "none"

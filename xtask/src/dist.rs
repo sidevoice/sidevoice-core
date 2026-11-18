@@ -7,12 +7,13 @@
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
-use sidevoice_platform::target::{self, ReleaseTarget};
+use sidevoice_platform::target;
 
+use crate::debug_files;
 use crate::glibc;
 use crate::libraries::{linux_libraries, windows_libraries};
 use crate::notices::stage_notices;
@@ -32,7 +33,7 @@ pub(crate) fn dist() -> Result<()> {
     let windows = target.os == "windows";
     let entrypoint = target.exe_name(ENTRYPOINT_STEM);
     let mut build = Command::new(&cargo);
-    if linux {
+    let built = if linux {
         let triple = target.triple;
         build
             .args([
@@ -43,10 +44,11 @@ pub(crate) fn dist() -> Result<()> {
                 "sidevoice-core",
             ])
             .args(["--target", &format!("{triple}.{}", glibc::FLOOR)]);
+        repo.join("target").join(triple).join("release")
     } else {
         build.args(["build", "--locked", "--release", "--bin", "sidevoice-core"]);
-    }
-    let built = built_dir(target);
+        repo.join("target/release")
+    };
     let status = build
         .current_dir(&repo)
         .status()
@@ -66,6 +68,12 @@ pub(crate) fn dist() -> Result<()> {
         &read(&built.join(target.exe_name("sidevoice-core")))?,
     )?;
     chmod(&binary, 0o755)?;
+    // The debug files go beside the archive (`native/debug`, `cargo xtask sentry-upload`); the shipped binary carries none.
+    debug_files::split(
+        target,
+        &built.join(target.exe_name("sidevoice-core")),
+        &binary,
+    )?;
     stage_notices(&stage.join("notices"), target)?;
     let links = if linux {
         linux_libraries(&binary)?
@@ -151,14 +159,4 @@ pub(crate) fn write_tar(work: &Path, raw: &Path, epoch: u64, entrypoint: &str) -
         .into_inner()
         .and_then(|mut file| file.flush())
         .map_err(|error| error.to_string())
-}
-
-/// Where `dist` finds the release binary it built (and the debug files split off it, `sentry-upload`).
-pub(crate) fn built_dir(target: &ReleaseTarget) -> PathBuf {
-    let release = repo().join("target");
-    if target.os == "linux" {
-        release.join(target.triple).join("release")
-    } else {
-        release.join("release")
-    }
 }

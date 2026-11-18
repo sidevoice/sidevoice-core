@@ -20,7 +20,6 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use super::store::CrashStore;
 use crate::platform::fs::{Files, Fs};
 
 const SWITCH: &str = "crash-reports.json";
@@ -57,24 +56,17 @@ pub fn enabled(data: &Path) -> bool {
     read(data).unwrap_or(false)
 }
 
-/// Keeps the choice. Off first writes the switch (so a send in flight stops at its next look), then erases the id and every
-/// pending record; a failure to erase is reported and the switch stays off (the next start erases again).
-pub fn set_enabled(data: &Path, on: bool) -> io::Result<()> {
-    Files::write_json(&data.join(SWITCH), &Switch { send: on })?;
-    if !on {
-        erase(data)?;
-    }
-    Ok(())
+/// Writes the switch, nothing else (`crash::set_enabled` is what a person asking for off gets: this and the erasing).
+pub(super) fn write(data: &Path, on: bool) -> io::Result<()> {
+    Files::write_json(&data.join(SWITCH), &Switch { send: on })
 }
 
-/// Deletes the machine id and every pending record.
-pub(super) fn erase(data: &Path) -> io::Result<()> {
-    let id = match std::fs::remove_file(data.join(IDENTITY)) {
+/// Deletes the machine id.
+pub(super) fn remove_id(data: &Path) -> io::Result<()> {
+    match std::fs::remove_file(data.join(IDENTITY)) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
-    };
-    let records = CrashStore::new(data, Vec::new()).erase();
-    id.and(records)
+    }
 }
 
 /// The machine id: the one kept, or a new one when there is none, it is not ours or it is a year old.
@@ -97,6 +89,11 @@ pub(super) fn machine_id(data: &Path) -> io::Result<String> {
         made: now.to_rfc3339_opts(SecondsFormat::Secs, true),
     };
     Files::write_json(&path, &identity)?;
+    // Off may have been written after the switch was read and before this file was: no id is kept for a machine set to off.
+    if !enabled(data) {
+        let _ = remove_id(data);
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
     Ok(identity.id)
 }
 
