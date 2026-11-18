@@ -138,8 +138,9 @@ apply. The Core's standalone bind default remains loopback.
   were about. An `error` event of the core's own log (never the panic's, never a dependency's) sends its stable error code
   (`error.type`), the place that logged it (a relative source file and line), the version, OS and architecture and the same
   random id; the event's message and fields are never read, so no text, value, path, host name or breadcrumb can go with it.
-  An event without a code is only counted in memory. At most one event per error code per day (UTC) and install, and at most
-  64 codes a day; the day's list is `D/core/handled-errors.json`. They are sent after the core is serving, in the background,
+  Only the core's own error codes (the list in `rust/error.rs`) are sent: an event with any other value in that field, or
+  none, is only counted in memory. At most one event per error code per day (UTC) and install; the day's list is
+  `D/core/handled-errors.json`. They are sent after the core is serving, in the background,
   one at a time with the same timeouts as a crash report; after a failed send none is tried for ten minutes. **Off** sends
   nothing, queues nothing and erases that list with the machine id. A build with no DSN does not even watch for them.
 

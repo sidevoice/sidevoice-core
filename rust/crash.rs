@@ -36,11 +36,11 @@ mod trace;
 use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, SystemTime};
 
-pub use handled::{layer as handled_layer, untyped as untyped_errors, TAGS as HANDLED_TAGS};
+pub use handled::{layer as handled_layer, unreported as unreported_errors, TAGS as HANDLED_TAGS};
 pub use record::{CrashRecord, Exception, Frame, Image, Location, Panic};
 pub use report::{event, EXTRAS, SERVICE, TAGS};
 pub use settings::{enabled, read as setting};
@@ -81,6 +81,8 @@ struct Context {
     arch: &'static str,
     /// The loaded modules, listed at start.
     images: Vec<Image>,
+    /// The sends under way (`report::deliver`): one count for the core, which has one context.
+    in_flight: AtomicUsize,
 }
 
 static CONTEXT: OnceLock<Context> = OnceLock::new();
@@ -110,6 +112,7 @@ pub fn install(
         os_name,
         arch,
         images: trace::loaded(),
+        in_flight: AtomicUsize::new(0),
     });
 }
 

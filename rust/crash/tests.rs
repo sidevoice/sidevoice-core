@@ -93,6 +93,7 @@ fn context(f: &Fixture) -> Context {
         os_name: "Linux",
         arch: "amd64",
         images: Vec::new(),
+        in_flight: std::sync::atomic::AtomicUsize::new(0),
     }
 }
 

@@ -5,24 +5,29 @@
 //!
 //! - **Which events.** `error` level, a target of ours ([`OWN_TARGETS`]), never the panic hook's own (`PANIC_TARGETS`, written
 //!   out and checked first: a target is matched whole or up to a `::`, so a lookalike such as `panic_x` is not ours either).
-//!   The core has no webview target. One that carries no `error.type`, or one that is not a code of the `<component>.<name>`
-//!   shape, is not sent: it is counted ([`untyped`]) and nothing else.
-//! - **What of an event.** The layer reads exactly one field of it, `error.type`, and only as a string. The message and every
-//!   other field value are never looked at, so nothing can leak from them. The place is the callsite's own file and line
-//!   (`code.file.path`, `code.line.number`), compiled into the binary, as a short relative path or `unknown`. The sent event
-//!   ([`event`]) is the release, the five tags of [`TAGS`] and one exception with that type and that one frame: no message,
-//!   breadcrumb, extra, context, user or host name.
+//!   The core has no webview target. And one of the core's own error codes: `error.type` must be one of
+//!   [`CoreError::codes`] (the enum's codes, the refusals' too), so a value of any other kind, however well formed (an address,
+//!   a host name, a word somebody typed), is never sent. An event without such a code is counted ([`unreported`]) and nothing
+//!   else.
+//! - **What of an event.** The layer reads exactly one field of it, `error.type`, and only as a string; what it keeps is the
+//!   matching `&'static str` of the list, never a byte of the event's own text. The message and every other field value are
+//!   never looked at, so nothing can leak from them. The place is the callsite's own file and line (`code.file.path`,
+//!   `code.line.number`), compiled into the binary, as a short relative path or `unknown`. The sent event ([`event`]) is the
+//!   release, the five tags of [`TAGS`] and one exception with that type and that one frame: no message, breadcrumb, extra,
+//!   context, user or host name.
 //! - **How often.** One event per `error.type` per day (UTC) per install, the same type again that day is dropped. The day's
 //!   list lives in memory and in `handled-errors.json` (private, in the core's data directory, read at start and written
-//!   after a send); a different day, a clock that went back or a file that says another day all mean a new day. At most
-//!   [`MAX_TYPES`] types a day, so neither a storm of codes nor a bad file can make the list or the day's sends unbounded.
+//!   after a send; only codes of the list are read back from it); a different day, a clock that went back or a file that says
+//!   another day all mean a new day. The list of codes is closed, so neither a storm of codes nor a bad file can make the
+//!   day's sends unbounded.
 //! - **Under the switch.** The layer asks it before queueing: off, or a setting that cannot be read, queues nothing. The
 //!   sender asks it again, and [`deliver`] a third time just before the POST. Off erases the day's list with the machine id.
-//! - **Never breaks the core.** The layer does no network and no allocation beyond the code's own text: it checks, reads the
-//!   switch and `try_send`s into a queue of [`QUEUE`] (a full queue drops the event). The POST is on a thread of its own with
-//!   a runtime of its own, one at a time, [`POST_BUDGET`] each, `catch_unwind` around each event, and after a failed send it
-//!   waits [`QUIET`] before trying again (an error that comes with the network down comes in storms). That thread never feeds
-//!   itself: what it logs is `warn`, and the layer ignores events of a sending thread.
+//! - **Never breaks the core.** The layer does no network and never waits: for an `error` event with a code of the list it
+//!   reads the switch (a small private file, on the logging thread, so one file read per such event) and `try_send`s into a
+//!   queue of [`QUEUE`] (a full queue drops the event). The POST is on a thread of its own with a runtime of its own, one at a
+//!   time, [`POST_BUDGET`] each, `catch_unwind` around each event, and after a failed send it waits [`QUIET`] before trying
+//!   again (an error that comes with the network down comes in storms). That thread never feeds itself: what it logs is
+//!   `warn`, and the layer ignores events of a sending thread.
 
 use std::borrow::Cow;
 use std::fmt::Debug;
@@ -60,32 +65,28 @@ pub const TAGS: [&str; 5] = [
 ];
 /// How many events wait for the sender.
 const QUEUE: usize = 16;
-/// How many error types one day's list holds.
-pub(super) const MAX_TYPES: usize = 64;
-/// The longest `error.type` taken.
-const MAX_TYPE: usize = 64;
 /// How long the sender leaves the network alone after a failed send.
 const QUIET: Duration = Duration::from_secs(10 * 60);
 /// The day's list, a private file of the core's data directory.
 const CAP: &str = "handled-errors.json";
-/// The most the file may hold when read: `MAX_TYPES` codes of `MAX_TYPE` characters, with room.
+/// The most the file may hold when read: the closed list of codes, with room.
 const LIMIT: u64 = 8 * 1024;
 
 /// A handled error, as much of it as may leave: its code and the place of the `error!` that logged it.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Handled {
-    pub kind: String,
+    pub kind: &'static str,
     pub file: String,
     pub line: u32,
 }
 
-/// The events without a usable `error.type` seen by this process.
-static UNTYPED: AtomicU64 = AtomicU64::new(0);
+/// The `error` events of ours that had no `error.type` of the core's list, seen by this process.
+static UNREPORTED: AtomicU64 = AtomicU64::new(0);
 
-/// How many `error` events of ours had no usable `error.type` since this process started. They are not sent; this is all
-/// that is kept of them.
-pub fn untyped() -> u64 {
-    UNTYPED.load(Ordering::Relaxed)
+/// How many `error` events of ours had no `error.type` of the core's own codes (none, not a string, or any other value)
+/// since this process started. They are not sent; this is all that is kept of them.
+pub fn unreported() -> u64 {
+    UNREPORTED.load(Ordering::Relaxed)
 }
 
 /// What the layer queues into, until the sender takes it (`send_from_now_on`).
@@ -101,14 +102,14 @@ where
     dsn()?;
     let (queue, waiting) = sync_channel(QUEUE);
     *PENDING.lock().unwrap_or_else(PoisonError::into_inner) = Some(waiting);
-    Some(queueing(context.data.clone(), queue, &UNTYPED, in_hook))
+    Some(queueing(context.data.clone(), queue, &UNREPORTED, in_hook))
 }
 
 /// The layer, with its filter: events at `error` of our targets, the panic hook's own never.
 pub(super) fn queueing<S>(
     data: PathBuf,
     queue: SyncSender<Handled>,
-    untyped: &'static AtomicU64,
+    unreported: &'static AtomicU64,
     in_hook: fn() -> bool,
 ) -> impl Layer<S>
 where
@@ -117,7 +118,7 @@ where
     Queueing {
         data,
         queue,
-        untyped,
+        unreported,
         in_hook,
     }
     .with_filter(filter_fn(handled as fn(&Metadata<'_>) -> bool))
@@ -141,29 +142,20 @@ fn in_targets(target: &str, names: &[&str]) -> bool {
     })
 }
 
-/// Whether `text` is a code as the guideline writes them, `<component>.<kebab-name>`: short, lowercase, digits and `-`, with
-/// a dot. Text that is not (a sentence, a path, a name somebody typed) is never an `error.type` that leaves.
-pub(super) fn is_code(text: &str) -> bool {
-    text.len() <= MAX_TYPE
-        && text.split('.').count() >= 2
-        && text.split('.').all(|part| {
-            !part.is_empty()
-                && !part.starts_with('-')
-                && !part.ends_with('-')
-                && part
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
+/// The code of the core's list that `text` is, if it is one: the only way an `error.type` is taken. What comes back is the
+/// list's own `&'static str`, so nothing of the event's text is kept.
+fn known(text: &str) -> Option<&'static str> {
+    CoreError::codes().find(|code| *code == text)
 }
 
-/// Reads one field of an event, `error.type`, and only when it is a string.
+/// Reads one field of an event, `error.type`, and only when it is a string that is one of the core's codes.
 #[derive(Default)]
-struct ErrorType(Option<String>);
+struct ErrorType(Option<&'static str>);
 
 impl Visit for ErrorType {
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "error.type" && value.len() <= MAX_TYPE {
-            self.0 = Some(value.to_owned());
+        if field.name() == "error.type" {
+            self.0 = known(value);
         }
     }
 
@@ -174,7 +166,7 @@ impl Visit for ErrorType {
 struct Queueing {
     data: PathBuf,
     queue: SyncSender<Handled>,
-    untyped: &'static AtomicU64,
+    unreported: &'static AtomicU64,
     /// Whether this thread is inside the panic hook: nothing is done there.
     in_hook: fn() -> bool,
 }
@@ -187,8 +179,8 @@ impl<S: Subscriber> Layer<S> for Queueing {
         }
         let mut field = ErrorType::default();
         event.record(&mut field);
-        let Some(kind) = field.0.filter(|kind| is_code(kind)) else {
-            self.untyped.fetch_add(1, Ordering::Relaxed);
+        let Some(kind) = field.0 else {
+            self.unreported.fetch_add(1, Ordering::Relaxed);
             return;
         };
         // Off, or a setting that cannot be read: nothing is queued.
@@ -229,7 +221,7 @@ pub(super) fn event(context: &Context, error: &Handled, machine_id: &str) -> Eve
             ("installation.id", machine_id),
         ]),
         exception: Values::from(vec![Exception {
-            ty: error.kind.clone(),
+            ty: error.kind.to_owned(),
             value: None,
             stacktrace: Stacktrace::from_frames_reversed(vec![frame]),
             ..Default::default()
@@ -242,19 +234,19 @@ pub(super) fn event(context: &Context, error: &Handled, machine_id: &str) -> Eve
 #[derive(Default)]
 struct Cap {
     day: Option<NaiveDate>,
-    sent: Vec<String>,
+    sent: Vec<&'static str>,
 }
 
 /// The file's shape when written; read back loosely (a value that is not ours is dropped, not the whole file).
 #[derive(Serialize)]
 struct Kept {
     day: String,
-    sent: Vec<String>,
+    sent: Vec<&'static str>,
 }
 
 impl Cap {
-    /// What the file says about `today`: nothing for another day, a file that is not ours or cannot be read, and only valid
-    /// codes, at most [`MAX_TYPES`], otherwise.
+    /// What the file says about `today`: nothing for another day, a file that is not ours or cannot be read, and only the
+    /// codes of the core's list, once each, otherwise.
     fn load(data: &Path, today: NaiveDate) -> Self {
         let Ok(Some(bytes)) = Files::read_private(&data.join(CAP), LIMIT) else {
             return Self::default();
@@ -268,15 +260,15 @@ impl Cap {
         if !same_day {
             return Self::default();
         }
-        let mut sent: Vec<String> = Vec::new();
+        let mut sent: Vec<&'static str> = Vec::new();
         let listed = kept["sent"].as_array().map_or(&[][..], Vec::as_slice);
         for kind in listed
             .iter()
             .filter_map(|kind| kind.as_str())
-            .filter(|kind| is_code(kind))
+            .filter_map(known)
         {
-            if sent.len() < MAX_TYPES && !sent.iter().any(|known| known == kind) {
-                sent.push(kind.to_owned());
+            if !sent.contains(&kind) {
+                sent.push(kind);
             }
         }
         Self {
@@ -286,19 +278,19 @@ impl Cap {
     }
 
     /// Whether `kind` may be sent on `today`. A day that is not the one the list is for starts a new list.
-    fn permits(&mut self, kind: &str, today: NaiveDate) -> bool {
+    fn permits(&mut self, kind: &'static str, today: NaiveDate) -> bool {
         if self.day != Some(today) {
             *self = Self {
                 day: Some(today),
                 sent: Vec::new(),
             };
         }
-        self.sent.len() < MAX_TYPES && !self.sent.iter().any(|sent| sent == kind)
+        !self.sent.contains(&kind)
     }
 
     /// Records that `kind` was sent (after `permits` said it might be).
-    fn mark(&mut self, kind: &str) {
-        self.sent.push(kind.to_owned());
+    fn mark(&mut self, kind: &'static str) {
+        self.sent.push(kind);
     }
 
     fn save(&self, data: &Path) -> io::Result<()> {
@@ -326,7 +318,7 @@ pub(super) enum Outcome {
     Sent,
     /// The switch is off, or cannot be read.
     Off,
-    /// Its type was already sent today, or the day's list is full.
+    /// Its type was already sent today.
     Capped,
     /// The network failed a moment ago.
     Quiet,
@@ -369,7 +361,7 @@ impl<'a> Worker<'a> {
             self.cap = Cap::default();
             return Outcome::Off;
         }
-        if !self.cap.permits(&error.kind, today) {
+        if !self.cap.permits(error.kind, today) {
             return Outcome::Capped;
         }
         let id = match settings::machine_id(data) {
@@ -392,7 +384,7 @@ impl<'a> Worker<'a> {
         .await
         {
             Ok(()) => {
-                self.cap.mark(&error.kind);
+                self.cap.mark(error.kind);
                 self.keep();
                 Outcome::Sent
             }

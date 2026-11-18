@@ -33,7 +33,7 @@ pub const SERVICE: &str = "sidevoice-core";
 pub(super) const POST_BUDGET: Duration = Duration::from_secs(10);
 /// How long a whole pass may take; what is left waits for the next start.
 const PASS_BUDGET: Duration = Duration::from_secs(60);
-/// How many sends may be under way at once, whoever asks.
+/// How many sends may be under way at once, whoever asks (the crash reports and the handled errors share them).
 const MAX_IN_FLIGHT: usize = 2;
 
 /// The tags an event may carry.
@@ -139,11 +139,6 @@ pub(super) enum Undelivered {
     Failed,
 }
 
-fn counter() -> &'static AtomicUsize {
-    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-    &IN_FLIGHT
-}
-
 /// The one door: the switch is read again, a slot taken, and the envelope posted within [`POST_BUDGET`].
 pub(super) async fn deliver(
     context: &Context,
@@ -154,7 +149,7 @@ pub(super) async fn deliver(
     if !settings::enabled(&context.data) {
         return Err(Undelivered::Off);
     }
-    let _slot = take().ok_or(Undelivered::Busy)?;
+    let _slot = take(context).ok_or(Undelivered::Busy)?;
     let mut body = Vec::new();
     Envelope::from(event)
         .to_writer(&mut body)
@@ -176,19 +171,20 @@ pub(super) async fn deliver(
     }
 }
 
-fn take() -> Option<Guard> {
-    if counter().fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
-        counter().fetch_sub(1, Ordering::SeqCst);
+/// One of the [`MAX_IN_FLIGHT`] places of this core's sends (`Context::in_flight`: the core has one context, and a test its own).
+fn take(context: &Context) -> Option<Guard<'_>> {
+    if context.in_flight.fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
+        context.in_flight.fetch_sub(1, Ordering::SeqCst);
         return None;
     }
-    Some(Guard)
+    Some(Guard(&context.in_flight))
 }
 
-struct Guard;
+struct Guard<'a>(&'a AtomicUsize);
 
-impl Drop for Guard {
+impl Drop for Guard<'_> {
     fn drop(&mut self) {
-        counter().fetch_sub(1, Ordering::SeqCst);
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
