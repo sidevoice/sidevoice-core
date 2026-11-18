@@ -14,6 +14,7 @@ use crate::storage::PrivateDir;
 mod call;
 mod connector_routes;
 mod connectors;
+mod crash_reports;
 mod device_address;
 mod drain;
 mod guard;
@@ -166,6 +167,7 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         router = router
             .merge(node::local_routes())
             .merge(pairing::local_routes())
+            .merge(crash_reports::local_routes())
             .merge(connectors::local_routes());
     }
     let telemetry = crate::control::telemetry::shared();

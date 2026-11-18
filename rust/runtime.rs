@@ -2,6 +2,7 @@
 
 mod command;
 mod config;
+mod crash_reports;
 mod directories;
 mod event_log;
 mod failure;
@@ -16,8 +17,9 @@ mod stop;
 #[cfg(test)]
 mod tests;
 
-pub use command::Cli;
+pub use command::{Cli, Command, Switch};
 pub use config::Config;
+pub use crash_reports::crash_reports;
 pub use language::system_language;
 
 use failure::StartFailure;

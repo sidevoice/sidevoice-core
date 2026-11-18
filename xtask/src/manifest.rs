@@ -23,24 +23,7 @@ pub(crate) fn manifest(dir: &Path, tag: Option<&str>) -> Result<()> {
         }
     }
     if let Some(tag) = tag {
-        let metadata = parse_json(
-            output(
-                "cargo",
-                &["metadata", "--no-deps", "--locked", "--format-version", "1"],
-                Some(&repo),
-            )?
-            .as_bytes(),
-            "cargo metadata",
-        )?;
-        let version = metadata["packages"]
-            .as_array()
-            .and_then(|packages| {
-                packages
-                    .iter()
-                    .find(|package| package["name"] == "sidevoice-core")
-            })
-            .and_then(|package| package["version"].as_str())
-            .ok_or("no sidevoice-core version")?;
+        let version = version()?;
         if format!("v{version}") != tag {
             return Err(format!("Cargo.toml says {version}, the release is {tag}"));
         }

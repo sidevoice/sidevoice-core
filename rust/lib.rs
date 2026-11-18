@@ -1,4 +1,5 @@
 pub mod control;
+pub mod crash;
 pub mod error;
 pub mod log_safe;
 pub mod messages;

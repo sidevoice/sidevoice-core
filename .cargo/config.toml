@@ -6,3 +6,8 @@ xtask = "run --quiet --locked --manifest-path xtask/Cargo.toml --"
 # (`cargo xtask verify` fails an archive whose binary imports vcruntime*.dll, xtask/src/libraries.rs).
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Every Linux binary has a build id: the release's debug files are matched to a crash by it (rust/crash/trace.rs, the
+# module's debug id; xtask/src/debug_files.rs refuses a binary without one).
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,--build-id=sha1"]

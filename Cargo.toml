@@ -46,6 +46,14 @@ reqwest = { version = "=0.13.0", default-features = false, features = ["json", "
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 secrecy = { version = "0.10", features = ["serde"] }
+# Crash reports (rust/crash): the maintained SDK's event and envelope types and its DSN only. No default features: no
+# transport, panic or context integration and no client is ever started; the event is built from the record's closed
+# field list and posted by `crash::report` (the same approach as the desktop app's).
+sentry = { version = "0.49", default-features = false }
+# The frames of a panic with their addresses (resolved after the hook, off the dying thread) and the modules loaded at
+# start (rust/crash/trace.rs); the maintained crates the SDK's own integrations are made of, without them.
+backtrace = "0.3"
+findshlibs = "0.10"
 sha2 = "=0.10.9"
 subtle = "2"
 tempfile = "3"
@@ -70,3 +78,10 @@ libc = "0.2"
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics"] }
 prost = "0.14"
 wiremock = "=0.6.5"
+
+# Crash reports (rust/crash.rs, RELEASING.md): line tables for file and line, and no stripping here (`strip = "none"`; on MSVC a
+# build that strips links without a PDB). `cargo xtask dist` splits the debug sections off the binary it ships (xtask/src/debug_files.rs:
+# the symbol table stays, so frames have names with or without Sentry) and leaves them beside the archive for the upload.
+[profile.release]
+debug = "line-tables-only"
+strip = "none"

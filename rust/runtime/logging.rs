@@ -12,7 +12,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 
-use super::event_log::{LogFile, IN_PANIC_HOOK, PANIC_LINE_LOST};
+use super::event_log::{home_spellings, LogFile, IN_PANIC_HOOK, PANIC_LINE_LOST};
 use super::Config;
 use crate::error::CoreError;
 
@@ -34,6 +34,12 @@ const OMITTED: &str = "<formatted panic message omitted>";
 /// Install the subscriber and the panic hook. An error is a log that cannot be opened.
 pub(super) fn init(config: &Config) -> io::Result<()> {
     let file = LogFile::open(config.log_file.clone(), dirs::home_dir().as_deref())?;
+    crate::crash::install(
+        &config.data_dir,
+        home_spellings(dirs::home_dir().as_deref()),
+        os_type(std::env::consts::OS),
+        host_arch(std::env::consts::ARCH),
+    );
     let (directives, rejected) = directives(std::env::var(VARIABLE).ok().as_deref());
     let terminal = io::stderr().is_terminal().then(|| {
         fmt::layer()
@@ -50,6 +56,7 @@ pub(super) fn init(config: &Config) -> io::Result<()> {
                 .with_filter(EnvFilter::new(&directives)),
         )
         .with(terminal)
+        .with(crate::crash::tail_layer(|| IN_PANIC_HOOK.get()))
         .try_init()
         .map_err(io::Error::other)?;
     if rejected {
@@ -175,6 +182,7 @@ fn panic_hook() {
             exception.stacktrace = ?backtrace,
             "backtrace of the panic recorded above"
         );
+        crate::crash::capture(literal, formatted_len, file, line);
         let lost = PANIC_LINE_LOST.get();
         IN_PANIC_HOOK.set(false);
         // A log that refused the line would lose the panic. A terminal already shows the event through its own

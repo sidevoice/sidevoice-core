@@ -94,6 +94,8 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         servers.join().await;
         return Err(error);
     }
+    // Once the core is serving: the crash reports a previous run left are sent in the background (rust/crash.rs).
+    crate::crash::start();
     let crashed = tokio::select! {
         _ = signals.received() => false,
         _ = state.shutdown_requested() => false,

@@ -33,6 +33,10 @@ pub enum CoreError {
     StateSaveFailed,
     #[error("the binding is not known")]
     BindingUnknown,
+    #[error("the crash report setting or records cannot be read or changed")]
+    CrashReportsUnavailable,
+    #[error("a crash report could not be sent")]
+    CrashReportFailed,
     /// A refusal the core answers with a wire key (a room operation, a speech publication).
     #[error("the request was refused")]
     Refused(&'static str),
@@ -55,6 +59,8 @@ impl CoreError {
             Self::DeviceUnknown => "core.device-unknown",
             Self::StateSaveFailed => "core.device-registry-save-failed",
             Self::BindingUnknown => "core.binding-unknown",
+            Self::CrashReportsUnavailable => "core.crash-reports-unavailable",
+            Self::CrashReportFailed => "core.crash-report-failed",
             Self::Refused(key) => refusal_code(key),
         }
     }
@@ -114,7 +120,7 @@ pub fn refusal_code(key: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL: [CoreError; 13] = [
+    const ALL: [CoreError; 15] = [
         CoreError::LogFilterInvalid,
         CoreError::StartFailed,
         CoreError::AlreadyRunning,
@@ -128,6 +134,8 @@ mod tests {
         CoreError::DeviceUnknown,
         CoreError::StateSaveFailed,
         CoreError::BindingUnknown,
+        CoreError::CrashReportsUnavailable,
+        CoreError::CrashReportFailed,
     ];
 
     fn grammar(code: &str) -> bool {

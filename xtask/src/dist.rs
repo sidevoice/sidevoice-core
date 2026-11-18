@@ -13,6 +13,7 @@ use std::process::Command;
 use serde_json::json;
 use sidevoice_platform::target;
 
+use crate::debug_files;
 use crate::glibc;
 use crate::libraries::{linux_libraries, windows_libraries};
 use crate::notices::stage_notices;
@@ -67,6 +68,12 @@ pub(crate) fn dist() -> Result<()> {
         &read(&built.join(target.exe_name("sidevoice-core")))?,
     )?;
     chmod(&binary, 0o755)?;
+    // The debug files go beside the archive (`native/debug`, `cargo xtask sentry-upload`); the shipped binary carries none.
+    debug_files::split(
+        target,
+        &built.join(target.exe_name("sidevoice-core")),
+        &binary,
+    )?;
     stage_notices(&stage.join("notices"), target)?;
     let links = if linux {
         linux_libraries(&binary)?

@@ -283,6 +283,34 @@ async fn nothing_secret_or_said_reaches_the_core_log() {
                 && line.contains("exception.stacktrace=")),
         "{panicked}"
     );
+    // Each panic also left a crash record on the machine: the closed fields, the literal or the marker, no canary.
+    let stored: Vec<Value> = fs::read_dir(dir.join("core").join("crashes"))
+        .expect("the crash records")
+        .map(|entry| {
+            let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+            assert_clean("a crash record", &text, &home, &[]);
+            serde_json::from_str(&text).unwrap()
+        })
+        .collect();
+    let mut messages: Vec<&str> = stored
+        .iter()
+        .map(|record| record["exception"]["message"].as_str().unwrap())
+        .collect();
+    messages.sort_unstable();
+    assert_eq!(
+        messages,
+        ["<formatted panic message omitted>", "canary literal panic"]
+    );
+    for record in &stored {
+        assert!(record["location"]["line"].as_u64().unwrap() > 0);
+        assert!(!record["backtrace"].as_array().unwrap().is_empty());
+        assert!(record["backtrace"][0]["addr"].as_u64().unwrap() > 0);
+        assert!(
+            !record["log_tail"].to_string().contains("ERROR panic:"),
+            "the panic itself is the record, not its tail"
+        );
+    }
+
     // The default hook is not chained, and a log that was written needs no stderr line: stderr holds neither.
     assert!(
         !child_stderr.contains("panicked at") && !child_stderr.contains("stack backtrace"),

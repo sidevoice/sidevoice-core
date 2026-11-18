@@ -6,12 +6,15 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Sidevoice core: this node's conversations.
 #[derive(Debug, Parser)]
 #[command(name = "sidevoice-core", disable_version_flag = true)]
 pub struct Cli {
+    /// Run a command instead of serving
+    #[command(subcommand)]
+    pub command: Option<Command>,
     /// Address to listen on [default: 127.0.0.1]
     #[arg(long, env = "SIDEVOICE_CORE_HOST", value_name = "HOST")]
     pub host: Option<String>,
@@ -19,7 +22,12 @@ pub struct Cli {
     #[arg(long, env = "SIDEVOICE_CORE_PORT", value_name = "PORT")]
     pub port: Option<u16>,
     /// Private core data directory [default: <data directory>/core, see SIDEVOICE_DATA_DIR]
-    #[arg(long, env = "SIDEVOICE_CORE_DATA_DIR", value_name = "PATH")]
+    #[arg(
+        long,
+        env = "SIDEVOICE_CORE_DATA_DIR",
+        value_name = "PATH",
+        global = true
+    )]
     pub data_dir: Option<PathBuf>,
     /// Readiness file path [default: core.json in the data directory]
     #[arg(long, value_name = "PATH")]
@@ -39,6 +47,27 @@ pub struct Cli {
         allow_hyphen_values = true
     )]
     pub idle_exit: Option<f64>,
+}
+
+/// What the command line can do besides serving.
+#[derive(Clone, Copy, Debug, Subcommand)]
+pub enum Command {
+    /// Whether this machine sends its crash reports to the developers: on by default; off erases the machine id and the
+    /// reports not yet sent
+    CrashReports {
+        #[arg(value_enum)]
+        action: Switch,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Switch {
+    /// Send crash reports
+    On,
+    /// Send nothing, and erase the machine id and the reports not yet sent
+    Off,
+    /// Say whether crash reports are sent
+    Status,
 }
 
 fn idle_seconds(value: &str) -> Result<f64, String> {

@@ -1247,3 +1247,113 @@ async fn a_device_revoked_while_its_rename_is_on_the_way_renames_nothing() {
         "the name is kept"
     );
 }
+
+#[tokio::test]
+async fn the_crash_report_switch_is_on_the_local_channel_only() {
+    let node = Node::new();
+    let path = "/api/local/crash-reports";
+    let body = json!({"send": false});
+    // Not on TCP, whatever the credential: not for the network, a paired remote device or a browser.
+    let (_, token) = node.paired().await;
+    let authorization = bearer(&token);
+    for headers in [vec![], vec![("authorization", authorization.as_str())]] {
+        for (method, payload) in [("GET", None), ("PUT", Some(body.clone()))] {
+            let (status, _, _) = send(&node.tcp(), method, path, &headers, payload).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} on TCP");
+        }
+    }
+    // Not for a web page on the same machine either: a request with an `Origin` is refused on the socket too.
+    for (method, payload) in [("GET", None), ("PUT", Some(body.clone()))] {
+        let (status, _, _) = send(
+            &node.socket(),
+            method,
+            path,
+            &[("origin", "http://localhost:3000")],
+            payload,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} with an Origin");
+    }
+    assert!(
+        crate::crash::setting(node.dir.path()).unwrap(),
+        "nothing changed"
+    );
+
+    // The same user's socket, without a token: on by default, then set.
+    let (status, _, answer) = send(&node.socket(), "GET", path, &[], None).await;
+    assert_eq!((status, answer), (StatusCode::OK, json!({"send": true})));
+    let (status, _, answer) = send(&node.socket(), "PUT", path, &[], Some(body)).await;
+    assert_eq!((status, answer), (StatusCode::OK, json!({"send": false})));
+    assert!(!crate::crash::setting(node.dir.path()).unwrap());
+    let (_, _, answer) = send(&node.socket(), "GET", path, &[], None).await;
+    assert_eq!(answer, json!({"send": false}));
+    for bad in [
+        json!({}),
+        json!({"send": "yes"}),
+        json!([true]),
+        json!(null),
+    ] {
+        let (status, _, _) = send(&node.socket(), "PUT", path, &[], Some(bad)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _, _) = send(
+        &node.socket(),
+        "PUT",
+        path,
+        &[],
+        Some(json!({"send": true, "other": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unknown fields are ignored");
+    assert!(crate::crash::setting(node.dir.path()).unwrap());
+    // The old device surface for records is gone.
+    let (status, _, _) = send(
+        &node.tcp(),
+        "GET",
+        "/api/device/crashes",
+        &[("authorization", &authorization)],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn turning_the_switch_off_over_the_socket_erases_the_pending_records() {
+    use crate::crash::{CrashRecord, CrashStore, Frame, Panic};
+    let node = Node::new();
+    let record = CrashRecord::from_panic(
+        Panic {
+            version: "1.0.0",
+            os: "linux",
+            arch: "amd64",
+            at: chrono::Utc::now(),
+            literal: Some("boom"),
+            formatted_len: 0,
+            file: "rust/x.rs",
+            line: 3,
+            frames: vec![Frame {
+                function: Some("f".to_owned()),
+                file: None,
+                line: None,
+                addr: 1,
+            }],
+            images: Vec::new(),
+            tail: Vec::new(),
+        },
+        &[],
+    );
+    let store = CrashStore::new(node.dir.path(), Vec::new());
+    store.record(record).unwrap();
+    assert_eq!(store.pending().unwrap().len(), 1);
+    let (status, _, _) = send(
+        &node.socket(),
+        "PUT",
+        "/api/local/crash-reports",
+        &[],
+        Some(json!({"send": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(store.pending().unwrap().is_empty());
+}

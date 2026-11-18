@@ -3,7 +3,8 @@
 //! - `dist`: build the release binary for this host (Linux: against glibc `glibc::FLOOR`, with cargo-zigbuild; Windows:
 //!   MSVC, C runtime linked statically) and
 //!   package it, with its licence notices, as the relocatable archive
-//!   `native/sidevoice-core-<target>.tar.zst`; then `verify` it.
+//!   `native/sidevoice-core-<target>.tar.zst`; then `verify` it. The binary in the archive has no debug sections: they are split
+//!   off into `native/debug` (`debug_files.rs`).
 //! - `verify ARCHIVE`: unpack it somewhere else, check its inventory and (Linux) that nothing in it needs a glibc
 //!   newer than the floor the inventory records, and start the core from there.
 //! - `verify-floor ARCHIVE` (Linux, needs Docker and cargo-zigbuild): `verify`, starting the core in a container of
@@ -13,6 +14,8 @@
 //!   `SHA256SUMS`; with a tag, the crate version must be that release.
 //! - `publish DIR TAG`: attach every file in DIR to the release TAG (for `nightly`, move the tag here first and drop
 //!   older assets), download them back, check them against `SHA256SUMS` and the attestation, and publish.
+//! - `sentry-upload` (needs `sentry-cli` and `SENTRY_AUTH_TOKEN`): the release `sidevoice-core@<version>` and the debug files `dist` left in `native/debug` (`debug_files.rs`), to
+//!   Sentry (rust/crash.rs); only the release and nightly workflows run it.
 //! - `compat`: run the cross-repository contract tests against the latest published release of the connector and of
 //!   the web client; `compat-report` opens or updates the `compat` issue after a failed run in Actions.
 
@@ -23,12 +26,14 @@
 
 mod archive;
 mod compat;
+mod debug_files;
 mod dist;
 mod glibc;
 mod libraries;
 mod manifest;
 mod notices;
 mod publish;
+mod sentry;
 mod util;
 mod verify;
 
@@ -52,7 +57,7 @@ pub(crate) const KIND: &str = "rust-native-v2";
 
 const USAGE: &str =
     "usage: cargo xtask dist | verify ARCHIVE | verify-floor ARCHIVE | manifest DIR [--tag vX.Y.Z] \
-     | publish DIR TAG | compat | compat-report";
+     | publish DIR TAG | sentry-upload | compat | compat-report";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -65,6 +70,7 @@ fn main() {
         ["manifest", dir] => manifest(Path::new(dir), None),
         ["manifest", dir, "--tag", tag] => manifest(Path::new(dir), Some(tag)),
         ["publish", dir, tag] => publish(Path::new(dir), tag),
+        ["sentry-upload"] => sentry::upload(),
         ["compat"] => compat(),
         ["compat-report"] => report(),
         _ => Err(USAGE.into()),

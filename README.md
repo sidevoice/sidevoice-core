@@ -117,6 +117,23 @@ apply. The Core's standalone bind default remains loopback.
   replies. The machine's signed identity proves which machine answered; it encrypts nothing. Use only a proxy you
   trust, or reach the machine directly. End-to-end encryption to the machine's pinned identity is planned, not
   there yet.
+- **Crash reports.** The core sends **its own** crash reports to the developers (Sentry), on by default and never asked;
+  one machine setting turns it off. When the core panics it keeps one record on the machine (`D/core/crashes`) and sends it
+  at its next start, in the background, then deletes it. The record and the report hold a closed list and nothing else:
+  the version, OS and architecture, the panic's location and backtrace (addresses, function names, bare file names, and the
+  loaded modules that hold a frame, by bare name, for the debug files), the panic message only when it is a literal (else a
+  marker and its length), the last 20 warning and error events of the core's own log with their time as an offset from
+  the crash (`-12.345s`, no date) and their device, client and session ids as tokens of that record (`d1`, `c1`, `s1`),
+  and a random per-machine id (128 bits, replaced after a year, never derived from the machine). No host name, user, IP,
+  path, environment, log of a dependency or formatted message. At most 20 records, 1 MiB and 30 days; the same crash is one
+  record with a count. Sending never delays or breaks the core: it runs on a thread of its own with timeouts, and a failure
+  is one log line. A build with no DSN (every local and pull-request build) records but sends nothing.
+  `sidevoice-core crash-reports on|off|status` is the setting (`D/core/crash-reports.json`, read again wherever it
+  matters); **off** erases the machine id and every pending record, and nothing is recorded or sent while it holds. The
+  desktop app on the same machine can set it too, over the local channel only (`PUT /api/local/crash-reports`
+  `{"send": false}`, `GET` says it): the setting goes one way, app to core, and a change on the command line is not told to
+  the app. No paired device (remote or not), no browser and no connector-link or MCP message can read or change it or list a
+  record; the local channel serves only processes of the same user, as it does for shutdown.
 
 Please report vulnerabilities privately through
 [GitHub's security advisories](https://github.com/sidevoice/sidevoice-core/security/advisories/new), not in an issue.

@@ -6,8 +6,8 @@ publish = false
 description = "Build tooling for the core: detector models, relocatable release archives and their manifest."
 
 [dependencies]
-# The DLLs a Windows binary imports (libraries.rs).
-object = { version = "0.40", default-features = false, features = ["read_core", "pe", "std"] }
+# The DLLs a Windows binary imports (libraries.rs), and whether a Linux binary has line tables and a build id (debug_files.rs).
+object = { version = "0.40", default-features = false, features = ["read_core", "pe", "elf", "std"] }
 # Shared release targets and asking the core to leave (on Windows by its stop event).
 sidevoice-platform = { path = "../platform" }
 # The core's local channel, a Unix socket or a named pipe, from `verify`.
