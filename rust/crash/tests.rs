@@ -976,14 +976,18 @@ fn off_erases_a_store_that_is_being_written_into() {
             }
         })
     };
-    // Whatever the writer is doing to the directory, turning off is not an error and the switch is off.
+    // Whatever the writer is doing to the directory, the switch is off when `off` returns. A directory that stays written into
+    // through every retry is reported as `DirectoryNotEmpty` (and nothing else); the next start erases it again.
     for _ in 0..20 {
-        set_enabled(&f.data, false).unwrap();
+        if let Err(error) = set_enabled(&f.data, false) {
+            assert_eq!(error.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+        }
         assert!(!enabled(&f.data));
         set_enabled(&f.data, true).unwrap();
         f.store.record(record(1)).unwrap();
     }
     writer.join().unwrap();
+    // Once nobody writes, off erases it all and says so.
     set_enabled(&f.data, false).unwrap();
     assert!(f.store.pending().unwrap().is_empty());
 }

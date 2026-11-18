@@ -95,18 +95,20 @@ impl CrashStore {
     }
 
     /// Deletes every record. A directory that is written into while it is removed (a capture that had the lock before this one)
-    /// is removed again; one that still is after a few tries is left to the next start: the switch is off, nothing new is kept.
+    /// is removed again; one that still is after a few tries is an error (`DirectoryNotEmpty`), which the caller reports: the
+    /// switch is already off, nothing new is kept, and the next start erases again.
     pub fn erase(&self) -> io::Result<()> {
         let _held = lock();
+        let mut last: io::Error = io::ErrorKind::DirectoryNotEmpty.into();
         for _ in 0..5 {
             match fs::remove_dir_all(&self.dir) {
                 Ok(()) => return Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {}
+                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => last = error,
                 Err(error) => return Err(error),
             }
         }
-        Ok(())
+        Err(last)
     }
 
     fn wanted(&self) -> bool {
