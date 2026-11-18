@@ -98,6 +98,13 @@ apply. The Core's standalone bind default remains loopback.
 - **Devices.** Every route except discovery, the identity proof and redeeming a pairing code needs a device token.
   A device gets one by redeeming a one-time code (valid ten minutes); the core keeps only its hash, and revoking a
   device ends its open calls at once. Every paired device has the machine's full authority: there are no roles.
+- **The log.** `GET /api/logs?limit=&after=&wait=` gives any paired device the core's own log (`core.log` and the two
+  older generations rotation keeps) in pages of whole lines: no `after` is the latest `limit` lines (1 to 1000, default
+  200), `after` is the cursor of the last page and gives what was written since, and `wait` (seconds, held at most 25)
+  holds the answer until a line is written. A cursor goes on through a rotation; once its generation is deleted the
+  answer is `410`. It needs the bearer on either listener (it is not a local path) and is not exposed over the v3
+  connector link (the connector is this user's process and can read the file from disk anyway). A device may start 100
+  reads in 10 seconds and have four waiting at once (`429` past either), and a read writes no log line.
 - **Discovery** (`GET /api/rendezvous`, `GET /api/device/identity`) answers without a token and says only what
   pairing needs: that this is a Sidevoice machine, its fingerprint and public key, and a signature over the
   caller's nonce. The machine's name is given only to a paired device.

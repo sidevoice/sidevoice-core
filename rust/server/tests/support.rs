@@ -28,5 +28,8 @@ pub(in crate::server) fn app_state(dir: &PrivateDir, room: Arc<Room>, host: &str
         "127.0.0.1".to_owned(),
         10829,
         room,
+        ["log.2", "log.1", "log"]
+            .map(|extension| dir.path().join("core").with_extension(extension))
+            .to_vec(),
     ))
 }

@@ -283,7 +283,7 @@ fn name_too_long(name: Option<&str>) -> bool {
     name.is_some_and(|name| name.len() > MAX_FIELD)
 }
 
-fn unpaired(headers: &HeaderMap) -> Refusal {
+pub(super) fn unpaired(headers: &HeaderMap) -> Refusal {
     refuse("device.unpaired", StatusCode::UNAUTHORIZED, headers)
 }
 

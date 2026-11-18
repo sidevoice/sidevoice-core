@@ -96,13 +96,21 @@ impl<'a> MakeWriter<'a> for LogFile {
     }
 }
 
+/// The files the log lives in, oldest generation first: the log itself and the two older ones rotation keeps.
+pub(super) fn generations(path: &Path) -> [PathBuf; 3] {
+    [
+        path.with_extension("log.2"),
+        path.with_extension("log.1"),
+        path.to_path_buf(),
+    ]
+}
+
 /// Keep two older generations, `<log>.1` and `<log>.2`, once the log reaches its size limit.
 pub(super) fn rotate_if_full(path: &Path) -> io::Result<()> {
     if !fs::metadata(path).is_ok_and(|meta| meta.len() >= ROTATE_AT_BYTES) {
         return Ok(());
     }
-    let first = path.with_extension("log.1");
-    let second = path.with_extension("log.2");
+    let [second, first, _] = generations(path);
     let _ = fs::remove_file(&second);
     if first.exists() {
         fs::rename(&first, &second)?;

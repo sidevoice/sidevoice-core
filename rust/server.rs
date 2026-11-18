@@ -1,5 +1,6 @@
 //! Minimum device trust surface on TCP and the same user's Unix socket.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::middleware;
@@ -19,6 +20,7 @@ mod device_address;
 mod drain;
 mod guard;
 mod limits;
+mod logs;
 mod node;
 mod pairing;
 mod presentation;
@@ -36,6 +38,7 @@ pub struct AppState {
     pub identity: NodeIdentity,
     registry: Mutex<DeviceRegistry>,
     limits: limits::Limits,
+    logs: logs::Logs,
     calls: call::CallRegistry,
     /// Every live call a page may come back to, and the client messages already taken.
     resumable: call::ResumableCalls,
@@ -65,6 +68,7 @@ impl AppState {
         bind_host: String,
         port: u16,
         room: Arc<Room>,
+        log_files: Vec<PathBuf>,
     ) -> Self {
         Self {
             dir,
@@ -72,6 +76,7 @@ impl AppState {
             identity,
             registry: Mutex::new(registry),
             limits: limits::Limits::default(),
+            logs: logs::Logs::new(log_files),
             calls: call::CallRegistry::default(),
             resumable: call::ResumableCalls::default(),
             seen: call::SeenMessages::default(),
@@ -162,6 +167,7 @@ pub fn router(state: Arc<AppState>, local: bool) -> Router {
         .merge(pairing::routes())
         .merge(call::routes())
         .merge(presentation::routes())
+        .merge(logs::routes())
         .merge(connector_routes::routes());
     if local {
         router = router
