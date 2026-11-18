@@ -382,11 +382,15 @@ impl Node {
     }
 
     fn timed(max_wait: Duration, poll: Duration) -> Self {
+        Self::shaped(|logs| logs.timed(max_wait, poll))
+    }
+
+    fn shaped(shape: impl FnOnce(Logs) -> Logs) -> Self {
         let (temp, dir) = private_dir();
         let log = dir.path().join("core.log");
         let room = Arc::new(Room::load(dir.clone()).unwrap());
         let mut state = app_state(&dir, room, "fixture-host");
-        Arc::get_mut(&mut state).unwrap().logs = Logs::new(files(&log)).timed(max_wait, poll);
+        Arc::get_mut(&mut state).unwrap().logs = shape(Logs::new(files(&log)));
         Self {
             _temp: temp,
             log,
@@ -745,4 +749,33 @@ async fn a_device_holds_at_most_four_reads_and_the_places_come_back() {
     let (status, ..) = get(&node.tcp(), "/api/logs?wait=1", &token).await;
     assert_eq!(status, StatusCode::OK);
     assert!(node.state.logs.waits.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_device_that_only_reads_is_limited_per_window_and_the_window_ends() {
+    let node = Node::shaped(|logs| logs.limited(3, Duration::from_secs(3)));
+    append(&node.log, &numbered(0, 2));
+    let (_, token) = node.device().await;
+    let (_, other) = node.device().await;
+    for _ in 0..3 {
+        assert_eq!(
+            get(&node.tcp(), "/api/logs", &token).await.0,
+            StatusCode::OK
+        );
+    }
+    let (status, _, body) = get(&node.tcp(), "/api/logs", &token).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body, json!({"detail": refusal("request.rate_limited")}));
+    // Whatever it asks counts, a wait included; another device has its own reads.
+    let (status, ..) = get(&node.tcp(), "/api/logs?wait=1", &token).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        get(&node.tcp(), "/api/logs", &other).await.0,
+        StatusCode::OK
+    );
+    tokio::time::sleep(Duration::from_millis(3200)).await;
+    assert_eq!(
+        get(&node.tcp(), "/api/logs", &token).await.0,
+        StatusCode::OK
+    );
 }

@@ -31,17 +31,25 @@ const MAX_WAIT: Duration = Duration::from_secs(25);
 /// How often a held read looks again.
 const POLL: Duration = Duration::from_millis(250);
 const WAITS_PER_DEVICE: usize = 4;
+/// The reads a device may start in a window, holding or not: well above a viewer's four a second, and a bound on what
+/// a device that only reads can ask of the disk.
+const READS_PER_WINDOW: usize = 100;
+const READ_WINDOW: Duration = Duration::from_secs(10);
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/logs", get(read))
 }
 
-/// The log's files, oldest first, and the reads holding on for a line.
+/// The log's files, oldest first, the reads holding on for a line and how many each device has started lately.
 pub(super) struct Logs {
     files: Arc<[PathBuf]>,
     waits: Mutex<HashMap<String, usize>>,
+    /// Per device: when its window began and the reads started in it.
+    reads: Mutex<HashMap<String, (Instant, usize)>>,
     max_wait: Duration,
     poll: Duration,
+    reads_per_window: usize,
+    read_window: Duration,
 }
 
 impl Logs {
@@ -49,8 +57,11 @@ impl Logs {
         Self {
             files: files.into(),
             waits: Mutex::default(),
+            reads: Mutex::default(),
             max_wait: MAX_WAIT,
             poll: POLL,
+            reads_per_window: READS_PER_WINDOW,
+            read_window: READ_WINDOW,
         }
     }
 
@@ -59,6 +70,23 @@ impl Logs {
         self.max_wait = max_wait;
         self.poll = poll;
         self
+    }
+
+    #[cfg(test)]
+    fn limited(mut self, reads_per_window: usize, read_window: Duration) -> Self {
+        self.reads_per_window = reads_per_window;
+        self.read_window = read_window;
+        self
+    }
+
+    /// Whether the device may start another read in this window.
+    fn admit(&self, device: &str) -> bool {
+        let mut reads = self.reads.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        reads.retain(|_, (began, _)| now.duration_since(*began) < self.read_window);
+        let (_, count) = reads.entry(device.to_owned()).or_insert((now, 0));
+        *count += 1;
+        *count <= self.reads_per_window
     }
 
     /// A place among the device's holding reads, or `None` when it has all of them.
@@ -129,18 +157,15 @@ async fn read(
         return Err(unpaired(&headers));
     };
     let logs = &state.logs;
+    if !logs.admit(&device) {
+        return Err(rate_limited(&headers));
+    }
     let request = Request::parse(&uri, logs.max_wait)
         .ok_or_else(|| refuse("logs.request_invalid", StatusCode::BAD_REQUEST, &headers))?;
     let _held = if request.wait.is_zero() {
         None
     } else {
-        Some(logs.hold(&device).ok_or_else(|| {
-            refuse(
-                "request.rate_limited",
-                StatusCode::TOO_MANY_REQUESTS,
-                &headers,
-            )
-        })?)
+        Some(logs.hold(&device).ok_or_else(|| rate_limited(&headers))?)
     };
     let deadline = Instant::now() + request.wait;
     loop {
@@ -166,6 +191,14 @@ async fn read(
         }
         tokio::time::sleep(left.min(logs.poll)).await;
     }
+}
+
+fn rate_limited(headers: &HeaderMap) -> Refusal {
+    refuse(
+        "request.rate_limited",
+        StatusCode::TOO_MANY_REQUESTS,
+        headers,
+    )
 }
 
 fn refused(error: Refused, headers: &HeaderMap) -> Refusal {
