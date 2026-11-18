@@ -641,7 +641,11 @@ fn a_capture_makes_a_record_with_addresses_and_none_while_the_switch_is_off() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].exception.message, "boom");
     assert!(!records[0].backtrace.is_empty());
-    assert!(records[0].backtrace.iter().all(|frame| frame.addr != 0));
+    assert!(
+        records[0].backtrace.iter().all(|frame| frame.addr != 0),
+        "{:#?}",
+        records[0].backtrace
+    );
 
     set_enabled(&f.data, false).unwrap();
     capture(Some("again"));
@@ -687,9 +691,16 @@ fn frames_start_at_the_code_that_panicked_and_images_are_the_ones_that_hold_a_fr
         "past the end"
     );
 
+    // A real backtrace: frames with an address each (the unwinder's terminal frame, address 0, is not one), and names.
     let mut here = backtrace::Backtrace::new();
     here.resolve();
-    assert!(trace::frames(&here).iter().all(|frame| frame.addr != 0));
+    let frames = trace::frames(&here);
+    assert!(!frames.is_empty());
+    assert!(frames.iter().all(|frame| frame.addr != 0), "{frames:#?}");
+    assert!(
+        frames.iter().any(|frame| frame.function.is_some()),
+        "{frames:#?}"
+    );
     // The program's own module is listed with a bare name, when it has a debug id.
     assert!(trace::loaded()
         .iter()
@@ -990,4 +1001,22 @@ fn off_erases_a_store_that_is_being_written_into() {
     // Once nobody writes, off erases it all and says so.
     set_enabled(&f.data, false).unwrap();
     assert!(f.store.pending().unwrap().is_empty());
+}
+
+#[test]
+fn a_frame_without_an_address_is_never_kept_or_sent() {
+    let mut raw = panic(Some("boom"), 1);
+    raw.frames = vec![frame("a", 0x1010), frame("end of the stack", 0)];
+    let stored = CrashRecord::from_panic(raw, &[]);
+    assert_eq!(stored.backtrace.len(), 1);
+    // Nor when it is read back from a file that has one.
+    let mut json = serde_json::to_value(&stored).unwrap();
+    json["backtrace"] = json!([
+        {"function": "a", "addr": 0x1010},
+        {"function": "z", "addr": 0}
+    ]);
+    let read = CrashRecord::from_untrusted(&json, &[]).unwrap();
+    assert_eq!(read.backtrace.len(), 1);
+    let sent = serde_json::to_string(&event(&read, "00")).unwrap();
+    assert!(!sent.contains("\"z\"") && !sent.contains("0x0\""), "{sent}");
 }
