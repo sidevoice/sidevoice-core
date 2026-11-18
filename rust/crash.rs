@@ -15,11 +15,15 @@
 //! - At the next start, once the core is serving, a thread of its own ([`start`], `report`) sends each record to Sentry as an
 //!   event built from the record's closed field list and deletes it once Sentry took it. No DSN in the build (a local one,
 //!   a pull request) means nothing is sent, silently.
+//! - Handled errors (`handled`) go out under the same switch: the `error` events of our own targets, one event per `error.type`
+//!   per day, each with its code and place (the callsite's file and line) and the closed tags, never a message or a field value.
+//!   A layer of the subscriber queues them, a thread of its own sends them through the same door as the crash reports.
 //!
 //! A record holds a closed list of fields ([`CrashRecord`]) and nothing else; text in it is bounded and free of control
 //! characters. The panic message is only ever a `&'static str` literal or the fixed marker (with the formatted message's
 //! length); the formatted message of `docs/logging.md` section 9 is never stored.
 
+mod handled;
 mod record;
 mod report;
 mod settings;
@@ -32,18 +36,19 @@ mod trace;
 use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, SystemTime};
 
+pub use handled::{layer as handled_layer, unreported as unreported_errors, TAGS as HANDLED_TAGS};
 pub use record::{CrashRecord, Exception, Frame, Image, Location, Panic};
 pub use report::{event, EXTRAS, SERVICE, TAGS};
 pub use settings::{enabled, read as setting};
 pub use store::CrashStore;
 pub use tail::layer as tail_layer;
 
-/// The core's own log targets: what a record's tail keeps. Not `panic` and `crash_backtrace` (the hook's own, which the
-/// record itself replaces), and a future report of handled errors leaves those two out as well.
+/// The core's own log targets: what a record's tail keeps and what the handled errors are taken from. Not `panic` and
+/// `crash_backtrace` (the hook's own, which the record itself replaces: a handled error is never one of those).
 pub const OWN_TARGETS: [&str; 2] = ["sidevoice_core", "sidevoice_platform"];
 /// The targets the panic hook logs under: never a handled error, never in a tail.
 pub const PANIC_TARGETS: [&str; 2] = ["panic", "crash_backtrace"];
@@ -70,10 +75,14 @@ struct Context {
     data: PathBuf,
     store: CrashStore,
     homes: Vec<String>,
+    /// `os.type`, `os.name` and `host.arch` in OpenTelemetry's values.
     os: &'static str,
+    os_name: &'static str,
     arch: &'static str,
     /// The loaded modules, listed at start.
     images: Vec<Image>,
+    /// The sends under way (`report::deliver`): one count for the core, which has one context.
+    in_flight: AtomicUsize,
 }
 
 static CONTEXT: OnceLock<Context> = OnceLock::new();
@@ -88,14 +97,22 @@ thread_local! {
 
 /// From now on a panic of this process leaves a record. `data` is the core's private directory; `homes` are the spellings
 /// of the home directory, each shown as `~` (the log's own backstop, reused here). Lists the loaded modules now.
-pub fn install(data: &Path, homes: Vec<String>, os: &'static str, arch: &'static str) {
+pub fn install(
+    data: &Path,
+    homes: Vec<String>,
+    os: &'static str,
+    os_name: &'static str,
+    arch: &'static str,
+) {
     let _ = CONTEXT.set(Context {
         data: data.to_path_buf(),
         store: CrashStore::new(data, homes.clone()),
         homes,
         os,
+        os_name,
         arch,
         images: trace::loaded(),
+        in_flight: AtomicUsize::new(0),
     });
 }
 
@@ -110,17 +127,20 @@ pub fn set_enabled(data: &Path, on: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Deletes the machine id and every pending record.
+/// Deletes the machine id, the day's cap of handled errors and every pending record.
 fn erase(data: &Path) -> io::Result<()> {
     let id = settings::remove_id(data);
+    let cap = handled::remove_cap(data);
     let records = CrashStore::new(data, Vec::new()).erase();
-    id.and(records)
+    id.and(cap).and(records)
 }
 
-/// Sends what a previous run left, in the background (call once the core is serving). Never blocks and never fails.
+/// Sends what a previous run left, and from now on the handled errors, in the background (call once the core is serving).
+/// Never blocks and never fails.
 pub fn start() {
     if let Some(context) = CONTEXT.get() {
         report::send_at_start(context);
+        handled::send_from_now_on(context);
     }
 }
 

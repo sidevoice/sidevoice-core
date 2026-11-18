@@ -38,6 +38,7 @@ pub(super) fn init(config: &Config) -> io::Result<()> {
         &config.data_dir,
         home_spellings(dirs::home_dir().as_deref()),
         os_type(std::env::consts::OS),
+        os_name(std::env::consts::OS),
         host_arch(std::env::consts::ARCH),
     );
     let (directives, rejected) = directives(std::env::var(VARIABLE).ok().as_deref());
@@ -57,6 +58,7 @@ pub(super) fn init(config: &Config) -> io::Result<()> {
         )
         .with(terminal)
         .with(crate::crash::tail_layer(|| IN_PANIC_HOOK.get()))
+        .with(crate::crash::handled_layer(|| IN_PANIC_HOOK.get()))
         .try_init()
         .map_err(io::Error::other)?;
     if rejected {

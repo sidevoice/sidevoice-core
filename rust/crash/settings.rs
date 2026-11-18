@@ -14,6 +14,7 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use rand::rngs::OsRng;
@@ -70,7 +71,12 @@ pub(super) fn remove_id(data: &Path) -> io::Result<()> {
 }
 
 /// The machine id: the one kept, or a new one when there is none, it is not ours or it is a year old.
+///
+/// Two threads send (the crash reports of the last run and the handled errors of this one): the first to ask makes the id
+/// under this lock, so that both report under the same one.
 pub(super) fn machine_id(data: &Path) -> io::Result<String> {
+    static MAKING: Mutex<()> = Mutex::new(());
+    let _making = MAKING.lock().unwrap_or_else(PoisonError::into_inner);
     let path = data.join(IDENTITY);
     let now = Utc::now();
     if let Some(bytes) = Files::read_private(&path, LIMIT)? {

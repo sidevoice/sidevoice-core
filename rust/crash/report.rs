@@ -6,8 +6,8 @@
 //! contained, and whatever fails is one log line; the record stays for the next start.
 //!
 //! [`deliver`] is the one door anything leaves through, and it asks the switch again just before the POST. What is
-//! sent later under the same switch (the handled errors) comes in through it, as events of its own: never from the `panic` or
-//! `crash_backtrace` targets, which this module already reports.
+//! sent under the same switch besides the crash reports (the handled errors, `handled`) comes in through it, as events of
+//! its own: never from the `panic` or `crash_backtrace` targets, which this module already reports.
 
 use std::borrow::Cow;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -30,10 +30,10 @@ use crate::error::CoreError;
 /// The `service.name` and the release's name: `sidevoice-core@<version>`.
 pub const SERVICE: &str = "sidevoice-core";
 /// How long one POST may take.
-const POST_BUDGET: Duration = Duration::from_secs(10);
+pub(super) const POST_BUDGET: Duration = Duration::from_secs(10);
 /// How long a whole pass may take; what is left waits for the next start.
 const PASS_BUDGET: Duration = Duration::from_secs(60);
-/// How many sends may be under way at once, whoever asks.
+/// How many sends may be under way at once, whoever asks (the crash reports and the handled errors share them).
 const MAX_IN_FLIGHT: usize = 2;
 
 /// The tags an event may carry.
@@ -41,21 +41,30 @@ pub const TAGS: [&str; 4] = ["service.name", "os.type", "host.arch", "installati
 /// The `extra` entries an event may carry.
 pub const EXTRAS: [&str; 3] = ["location", "log_tail", "len"];
 
+/// The tags of an event: the closed list its kind allows, name and value.
+pub(super) fn tags<'a>(tags: impl IntoIterator<Item = (&'a str, &'a str)>) -> Map<String, String> {
+    tags.into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
+}
+
+/// The release of an event, as the debug files of the build are filed: `sidevoice-core@<version>`.
+pub(super) fn release(version: &str) -> Cow<'static, str> {
+    Cow::Owned(format!("{SERVICE}@{version}"))
+}
+
 /// The event of a record, from its closed field list: the Sentry `event_id` is the record's id, the release the core's
 /// version, and `installation.id` the machine id.
 pub fn event(record: &CrashRecord, machine_id: &str) -> Event<'static> {
     let time = |text: &str| {
         chrono::DateTime::parse_from_rfc3339(text).map_or(SystemTime::now(), SystemTime::from)
     };
-    let tags: Map<String, String> = [
+    let tags = tags([
         ("service.name", SERVICE),
         ("os.type", record.os.as_str()),
         ("host.arch", record.arch.as_str()),
         ("installation.id", machine_id),
-    ]
-    .into_iter()
-    .map(|(name, value)| (name.to_owned(), value.to_owned()))
-    .collect();
+    ]);
     let frames: Vec<Frame> = record
         .backtrace
         .iter()
@@ -102,7 +111,7 @@ pub fn event(record: &CrashRecord, machine_id: &str) -> Event<'static> {
         // Never the host name: the SDK's client would fill it in, and no client exists here; still said, not assumed.
         server_name: None,
         timestamp: time(&record.last_at),
-        release: Some(Cow::Owned(format!("{SERVICE}@{}", record.version))),
+        release: Some(release(&record.version)),
         tags,
         extra,
         exception: Values::from(vec![Exception {
@@ -130,11 +139,6 @@ pub(super) enum Undelivered {
     Failed,
 }
 
-fn counter() -> &'static AtomicUsize {
-    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-    &IN_FLIGHT
-}
-
 /// The one door: the switch is read again, a slot taken, and the envelope posted within [`POST_BUDGET`].
 pub(super) async fn deliver(
     context: &Context,
@@ -145,7 +149,7 @@ pub(super) async fn deliver(
     if !settings::enabled(&context.data) {
         return Err(Undelivered::Off);
     }
-    let _slot = take().ok_or(Undelivered::Busy)?;
+    let _slot = take(context).ok_or(Undelivered::Busy)?;
     let mut body = Vec::new();
     Envelope::from(event)
         .to_writer(&mut body)
@@ -167,19 +171,20 @@ pub(super) async fn deliver(
     }
 }
 
-fn take() -> Option<Guard> {
-    if counter().fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
-        counter().fetch_sub(1, Ordering::SeqCst);
+/// One of the [`MAX_IN_FLIGHT`] places of this core's sends (`Context::in_flight`: the core has one context, and a test its own).
+fn take(context: &Context) -> Option<Guard<'_>> {
+    if context.in_flight.fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
+        context.in_flight.fetch_sub(1, Ordering::SeqCst);
         return None;
     }
-    Some(Guard)
+    Some(Guard(&context.in_flight))
 }
 
-struct Guard;
+struct Guard<'a>(&'a AtomicUsize);
 
-impl Drop for Guard {
+impl Drop for Guard<'_> {
     fn drop(&mut self) {
-        counter().fetch_sub(1, Ordering::SeqCst);
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -240,7 +245,7 @@ pub(super) async fn drain(context: &Context, dsn: &Dsn) -> usize {
 
 /// What the build was given: the DSN, set by the release and nightly workflows from the organisation's variable
 /// `SENTRY_DSN`. None (a local build, a pull request), or one that does not parse, means nothing is ever sent, silently.
-fn dsn() -> Option<Dsn> {
+pub(super) fn dsn() -> Option<Dsn> {
     option_env!("SIDEVOICE_SENTRY_DSN")
         .filter(|dsn| !dsn.is_empty())
         .and_then(|dsn| Dsn::from_str(dsn).ok())
