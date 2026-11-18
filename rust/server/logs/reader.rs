@@ -51,8 +51,32 @@ impl From<io::Error> for Refused {
 
 /// The latest `limit` lines when `after` is `None`, else the lines written after the cursor `after`, oldest first.
 pub(super) fn read(paths: &[PathBuf], after: Option<&str>, limit: usize) -> Result<Page, Refused> {
+    pages(open(paths)?, after, limit)
+}
+
+/// The files that exist, newest first: a rotation between two opens then shows a file twice (told apart by its first
+/// line) and hides none. A link, or a file that is not private, is refused.
+fn open(paths: &[PathBuf]) -> io::Result<Vec<File>> {
+    let mut files = Vec::new();
+    for path in paths.iter().rev() {
+        let file = match Files::open_read(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        Files::check_private(&file)?;
+        files.push(file);
+    }
+    Ok(files)
+}
+
+// From here on the reader is the one the desktop app has for its own log (desktop/core/src/app_log.rs): both are held
+// to the same list of behaviours, so they change together.
+
+/// [`read`] over `files`, newest first.
+fn pages(files: Vec<File>, after: Option<&str>, limit: usize) -> Result<Page, Refused> {
     let cursor = after.map(Cursor::parse).transpose()?;
-    let generations = generations(paths)?;
+    let generations = generations(files)?;
     let (lines, last, more) = match cursor {
         None => {
             let (lines, last) = tail(&generations, limit)?;
@@ -226,17 +250,10 @@ fn complete_end(mut file: &File) -> io::Result<u64> {
     Ok(0)
 }
 
-/// The generations that have a line, oldest first.
-fn generations(paths: &[PathBuf]) -> io::Result<Vec<Generation>> {
-    // Newest first: a rotation between two opens then shows a file twice (told apart by its first line) and hides none.
+/// The generations that have a line, oldest first, of `files` newest first.
+fn generations(files: Vec<File>) -> io::Result<Vec<Generation>> {
     let mut found = Vec::new();
-    for path in paths.iter().rev() {
-        let file = match Files::open_read(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        Files::check_private(&file)?;
+    for file in files {
         found.extend(Generation::of(file)?);
     }
     found.reverse();
