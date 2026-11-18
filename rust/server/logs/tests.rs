@@ -601,18 +601,15 @@ async fn the_log_is_read_as_a_tail_then_by_cursor_and_an_expired_cursor_is_gone(
 #[tokio::test]
 async fn a_generation_that_cannot_be_read_is_unavailable_not_empty() {
     let node = Node::new();
-    // A link where a generation should be is refused, not followed.
-    #[cfg(unix)]
-    {
-        append(&node.log, "hello\n");
-        let elsewhere = node.log.with_file_name("elsewhere");
-        append(&elsewhere, "secret\n");
-        std::os::unix::fs::symlink(&elsewhere, node.log.with_extension("log.1")).unwrap();
-        let (_, token) = node.device().await;
-        let (status, _, body) = get(&node.tcp(), "/api/logs", &token).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-        assert_eq!(body, json!({"detail": refusal("logs.unreadable")}));
-    }
+    // A generation that has another name is one somebody else can write to: refused, not read.
+    append(&node.log, "hello\n");
+    let (_, token) = node.device().await;
+    let (status, _, body) = get(&node.tcp(), "/api/logs", &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    fs::hard_link(&node.log, node.log.with_extension("log.1")).unwrap();
+    let (status, _, body) = get(&node.tcp(), "/api/logs", &token).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body, json!({"detail": refusal("logs.unreadable")}));
 }
 
 #[tokio::test]
