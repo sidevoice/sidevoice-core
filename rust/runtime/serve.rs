@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use super::directories::Directories;
+use super::event_log;
 use super::failure::StartFailure;
 use super::servers::Servers;
 use super::{ready, stop, Config};
@@ -59,6 +60,7 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
         config.host.clone(),
         port,
         stored.room.clone(),
+        event_log::generations(&config.log_file).to_vec(),
     ));
     let delivery_task = tokio::spawn(stored.room.pump());
     // Conversations whose last viewer aged out or was unpaired close here, at startup and every quarter hour.
