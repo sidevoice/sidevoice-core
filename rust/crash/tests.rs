@@ -13,6 +13,8 @@ use super::*;
 use crate::platform::fs::{Files, Fs};
 use crate::storage::PrivateTemp;
 
+mod handled;
+
 const ID: &str = "7b2f0b00-1c3e-4d5a-8f6b-0123456789ab";
 
 fn at(days_ago: i64) -> String {
@@ -88,6 +90,7 @@ fn context(f: &Fixture) -> Context {
         store: CrashStore::new(&f.data, Vec::new()),
         homes: Vec::new(),
         os: "linux",
+        os_name: "Linux",
         arch: "amd64",
         images: Vec::new(),
     }
@@ -851,6 +854,19 @@ fn dsn(server: &MockServer) -> sentry::types::Dsn {
         .unwrap()
 }
 
+/// The DSN of a port nobody listens on. Not a dropped `MockServer`: wiremock pools its servers, so a dropped one is still
+/// listening and the next test to start one gets it.
+fn closed_dsn() -> sentry::types::Dsn {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    format!("http://public@127.0.0.1:{port}/42")
+        .parse()
+        .unwrap()
+}
+
 async fn envelope_server(status: u16) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -900,13 +916,7 @@ async fn a_failed_send_keeps_the_record_and_ends_the_pass() {
         "one failure and no more tries this start"
     );
     // A server that is not there is the same: nothing panics, nothing is lost.
-    let gone = {
-        let server = MockServer::start().await;
-        let dsn = dsn(&server);
-        drop(server);
-        dsn
-    };
-    assert_eq!(drain(&context(&f), &gone).await, 0);
+    assert_eq!(drain(&context(&f), &closed_dsn()).await, 0);
     assert_eq!(f.store.pending().unwrap().len(), 2);
 }
 

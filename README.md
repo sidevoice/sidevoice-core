@@ -134,6 +134,14 @@ apply. The Core's standalone bind default remains loopback.
   `{"send": false}`, `GET` says it): the setting goes one way, app to core, and a change on the command line is not told to
   the app. No paired device (remote or not), no browser and no connector-link or MCP message can read or change it or list a
   record; the local channel serves only processes of the same user, as it does for shutdown.
+- **Handled errors.** Under the same setting the core also reports **which** of its own errors it handled, not what they
+  were about. An `error` event of the core's own log (never the panic's, never a dependency's) sends its stable error code
+  (`error.type`), the place that logged it (a relative source file and line), the version, OS and architecture and the same
+  random id; the event's message and fields are never read, so no text, value, path, host name or breadcrumb can go with it.
+  An event without a code is only counted in memory. At most one event per error code per day (UTC) and install, and at most
+  64 codes a day; the day's list is `D/core/handled-errors.json`. They are sent after the core is serving, in the background,
+  one at a time with the same timeouts as a crash report; after a failed send none is tried for ten minutes. **Off** sends
+  nothing, queues nothing and erases that list with the machine id. A build with no DSN does not even watch for them.
 
 Please report vulnerabilities privately through
 [GitHub's security advisories](https://github.com/sidevoice/sidevoice-core/security/advisories/new), not in an issue.
