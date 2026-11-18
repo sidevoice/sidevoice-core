@@ -225,7 +225,8 @@ mod tests {
     /// listed would be logged and never reported. The enum's own source is read, so adding one fails here until it is listed.
     #[test]
     fn the_list_of_variants_holds_every_variant_of_the_enum() {
-        let source = include_str!("error.rs");
+        // A checkout on Windows has CRLF line ends.
+        let source = include_str!("error.rs").replace("\r\n", "\n");
         let body = source
             .split("pub enum CoreError {")
             .nth(1)
