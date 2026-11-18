@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.19.0](https://github.com/sidevoice/sidevoice-core/compare/v0.18.0...v0.19.0) (2026-11-18)
+
+
+### Features
+
+* **crash:** send handled errors to Sentry under the crash-report switch ([#256](https://github.com/sidevoice/sidevoice-core/issues/256)) ([765733e](https://github.com/sidevoice/sidevoice-core/commit/765733e7874d2b1d84f01096e34b73aea1169905))
+* **crash:** send the core's own crash reports to Sentry at the next start ([#254](https://github.com/sidevoice/sidevoice-core/issues/254)) ([a23ad3a](https://github.com/sidevoice/sidevoice-core/commit/a23ad3ab59f73288fff346e50ab27eb48674004b))
+* **logging:** adopt tracing per the shared guideline ([#250](https://github.com/sidevoice/sidevoice-core/issues/250)) ([018523a](https://github.com/sidevoice/sidevoice-core/commit/018523a69ef55ac7c254c7066d315dca56d1022c))
+* **logs:** read the core's own log through GET /api/logs ([#255](https://github.com/sidevoice/sidevoice-core/issues/255)) ([696079b](https://github.com/sidevoice/sidevoice-core/commit/696079b75c33dac704f7d26ec3086b8518fc87a0))
+
 ## [0.18.0](https://github.com/sidevoice/sidevoice-core/compare/v0.17.1...v0.18.0) (2026-11-11)
 
 
