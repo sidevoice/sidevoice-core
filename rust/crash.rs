@@ -19,10 +19,16 @@
 //!   per day, each with its code and place (the callsite's file and line) and the closed tags, never a message or a field value.
 //!   A layer of the subscriber queues them, a thread of its own sends them through the same door as the crash reports.
 //!
+//! - A run that did not end by itself and whose manager saw a crash status (a signal, an out-of-memory kill, a Windows exception)
+//!   leaves one more record at the next start (`exit`, decided in sidevoice-connector#366): a fixed type, the persisted tail of
+//!   that run (`tail`, mirrored to a file), no frames; once a day per version and type, and never when a panic record of that
+//!   run exists. The classification and the exit file are `sidevoice_platform::exit`'s.
+//!
 //! A record holds a closed list of fields ([`CrashRecord`]) and nothing else; text in it is bounded and free of control
 //! characters. The panic message is only ever a `&'static str` literal or the fixed marker (with the formatted message's
 //! length); the formatted message of `docs/logging.md` section 9 is never stored.
 
+mod exit;
 mod handled;
 mod record;
 mod report;
@@ -37,7 +43,7 @@ use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 pub use handled::{layer as handled_layer, unreported as unreported_errors, TAGS as HANDLED_TAGS};
@@ -83,6 +89,10 @@ struct Context {
     images: Vec<Image>,
     /// The sends under way (`report::deliver`): one count for the core, which has one context.
     in_flight: AtomicUsize,
+    /// This run's random id: it ties the marker to the panic that may suppress an exit record. Never sent.
+    run: String,
+    /// The previous run, when it ended in a crash status (`exit`): its record is made once the sender starts.
+    previous: Mutex<Option<exit::Previous>>,
 }
 
 static CONTEXT: OnceLock<Context> = OnceLock::new();
@@ -104,6 +114,10 @@ pub fn install(
     os_name: &'static str,
     arch: &'static str,
 ) {
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    // Before the mirror is turned on: the previous run's tail is read first.
+    let previous = exit::begin(data, &run, env!("CARGO_PKG_VERSION"));
+    tail::persist(data);
     let _ = CONTEXT.set(Context {
         data: data.to_path_buf(),
         store: CrashStore::new(data, homes.clone()),
@@ -113,6 +127,8 @@ pub fn install(
         arch,
         images: trace::loaded(),
         in_flight: AtomicUsize::new(0),
+        run,
+        previous: Mutex::new(previous),
     });
 }
 
@@ -132,7 +148,10 @@ fn erase(data: &Path) -> io::Result<()> {
     let id = settings::remove_id(data);
     let cap = handled::remove_cap(data);
     let records = CrashStore::new(data, Vec::new()).erase();
-    id.and(cap).and(records)
+    id.and(cap)
+        .and(exit::remove_cap(data))
+        .and(tail::remove_mirror(data))
+        .and(records)
 }
 
 /// Sends what a previous run left, and from now on the handled errors, in the background (call once the core is serving).
@@ -225,4 +244,13 @@ fn write(
     );
     // A thread that panicked inside the store holds its lock: do not wait for it.
     context.store.record_without_waiting(record);
+    // The exit record of this run, if it ends in a crash status after all, is suppressed: this record says more.
+    let _ = sidevoice_platform::exit::Marker::panicked(&context.data, &context.run);
+}
+
+/// The run ends by itself (`run` returned): no run marker is left, so the next start knows this one did not crash.
+pub fn finish() {
+    if let Some(context) = CONTEXT.get() {
+        exit::finish(&context.data);
+    }
 }

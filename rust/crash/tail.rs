@@ -1,4 +1,5 @@
-//! The last warnings and errors of our own targets, kept in memory for the record of a crash.
+//! The last warnings and errors of our own targets, kept in memory for the record of a crash and mirrored to a small file
+//! so that a crash nothing could record (a signal, an out-of-memory kill) still carries them (`persist`).
 //!
 //! A layer of the process's subscriber keeps each such event as it is: its time, level and target, the spans it was in,
 //! its message and its fields, each field apart. Nothing is read back from a log file (a process that logs to stderr only has
@@ -9,11 +10,21 @@
 //! The ring is bounded (`TAIL_LINES` events, fields and texts cut), written with a lock that is only tried while the panic
 //! hook runs (a panic may come from inside a write), and read with a lock that is only ever tried. The `panic` and
 //! `crash_backtrace` targets are not in it: the record itself says what the panic was.
+//!
+//! The mirror (`persist`, `previous`): each warning or error rewrites one private file of the core's own directory with the ring
+//! as structured entries (no formatting, each field apart), never from inside the panic hook and only while the switch is on
+//! (looked at again at most every [`SWITCH_LOOK`]). The next start reads the previous run's file before this run writes its own,
+//! and the record of an abnormal exit renders it as a panic's is rendered: the ids re-keyed by the name of their field, offsets
+//! from the last event, the home directory hidden. A torn or foreign file is no tail.
 
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::sync::{Mutex, PoisonError, TryLockError};
-use std::time::SystemTime;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError, TryLockError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -23,13 +34,14 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 use super::{OWN_TARGETS, TAIL_LINES};
+use crate::platform::fs::{Create, Files, Fs};
 
 const MAX_FIELDS: usize = 16;
 const MAX_SPANS: usize = 8;
 const MAX_TEXT: usize = 200;
 
 /// An event of ours at `warn` or `error`, as it was logged.
-struct Entry {
+pub(super) struct Entry {
     at: SystemTime,
     level: Level,
     target: String,
@@ -38,8 +50,8 @@ struct Entry {
     fields: Vec<(String, String)>,
 }
 
-struct Span {
-    name: &'static str,
+pub(super) struct Span {
+    name: String,
     fields: Vec<(String, String)>,
 }
 
@@ -88,14 +100,17 @@ where
     Tail { in_hook }.with_filter(filter_fn(ours as fn(&Metadata<'_>) -> bool))
 }
 
-fn ours(meta: &Metadata<'_>) -> bool {
-    let target = meta.target();
+fn own_target(target: &str) -> bool {
     OWN_TARGETS.iter().any(|own| {
         target == *own
             || target
                 .strip_prefix(own)
                 .is_some_and(|rest| rest.starts_with("::"))
-    }) && (meta.is_span() || *meta.level() <= Level::WARN)
+    })
+}
+
+fn ours(meta: &Metadata<'_>) -> bool {
+    own_target(meta.target()) && (meta.is_span() || *meta.level() <= Level::WARN)
 }
 
 struct Tail {
@@ -140,7 +155,7 @@ where
                     .from_root()
                     .take(MAX_SPANS)
                     .map(|span| Span {
-                        name: span.name(),
+                        name: span.name().to_owned(),
                         fields: span
                             .extensions()
                             .get::<SpanFields>()
@@ -160,7 +175,8 @@ where
             fields: visitor.fields,
         };
         // Inside the panic hook a lock somebody holds is never waited for: this thread may be the one that panicked in it.
-        let mut ring = if (self.in_hook)() {
+        let in_hook = (self.in_hook)();
+        let mut ring = if in_hook {
             match RING.try_lock() {
                 Ok(ring) => ring,
                 Err(TryLockError::Poisoned(ring)) => ring.into_inner(),
@@ -173,6 +189,16 @@ where
             ring.pop_front();
         }
         ring.push_back(entry);
+        // Never from inside the hook (it may be the thread that panicked in a write). The ring is encoded under its lock and
+        // written after it, so a slow disk never holds up another thread's log line.
+        let mirrored = match MIRROR_OF.get() {
+            Some(mirror) if !in_hook => Some((mirror, encode(ring.iter()))),
+            _ => None,
+        };
+        drop(ring);
+        if let Some((mirror, bytes)) = mirrored {
+            mirror.write(&bytes);
+        }
     }
 }
 
@@ -282,7 +308,7 @@ fn render<'a>(entries: impl Iterator<Item = &'a Entry>, crashed: SystemTime) -> 
             );
             for span in &entry.spans {
                 line.push(' ');
-                line.push_str(span.name);
+                line.push_str(&span.name);
                 if !span.fields.is_empty() {
                     let fields: Vec<String> = span
                         .fields
@@ -301,6 +327,174 @@ fn render<'a>(entries: impl Iterator<Item = &'a Entry>, crashed: SystemTime) -> 
             line
         })
         .collect()
+}
+
+// ---- The mirror -----------------------------------------------------------------------------------------------------------
+
+/// How often the switch is looked at again by the writer of the mirror: a change made by another process (`crash-reports off`)
+/// holds within this.
+const SWITCH_LOOK: Duration = Duration::from_secs(5);
+/// The file of the mirror, in the core's private directory.
+const MIRROR: &str = "crash-tail.json";
+/// The most bytes of the mirror read back: 20 events of 16 fields of 200 characters, with room.
+const MIRROR_LIMIT: u64 = 256 * 1024;
+
+struct Mirror {
+    data: PathBuf,
+    file: PathBuf,
+    /// When the switch was last looked at, and what it said.
+    switch: Mutex<Option<(Instant, bool)>>,
+}
+
+static MIRROR_OF: OnceLock<Mirror> = OnceLock::new();
+
+/// From now on the ring is mirrored to a file of `data`, the core's private directory.
+pub(super) fn persist(data: &Path) {
+    let _ = MIRROR_OF.set(Mirror {
+        data: data.to_path_buf(),
+        file: data.join(MIRROR),
+        switch: Mutex::new(None),
+    });
+}
+
+/// Deletes the mirror.
+pub(super) fn remove_mirror(data: &Path) -> io::Result<()> {
+    match std::fs::remove_file(data.join(MIRROR)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+impl Mirror {
+    fn wanted(&self) -> bool {
+        let mut look = self.switch.lock().unwrap_or_else(PoisonError::into_inner);
+        match *look {
+            Some((at, on)) if at.elapsed() < SWITCH_LOOK => on,
+            _ => {
+                let on = super::settings::enabled(&self.data);
+                *look = Some((Instant::now(), on));
+                on
+            }
+        }
+    }
+
+    /// Rewrites the file with `bytes`. Not atomic and not synced, to keep it cheap: a torn file is read as no tail.
+    fn write(&self, bytes: &[u8]) {
+        if !self.wanted() {
+            return;
+        }
+        let _ = (|| -> io::Result<()> {
+            let mut file = Files::open_private(&self.file, Create::ReadWrite)?;
+            file.set_len(0)?;
+            file.write_all(bytes)
+        })();
+    }
+}
+
+fn pair_list(pairs: &[(String, String)]) -> Value {
+    Value::Array(
+        pairs
+            .iter()
+            .map(|(name, value)| json!([name, value]))
+            .collect(),
+    )
+}
+
+/// The entries as the file holds them.
+fn encode<'a>(entries: impl Iterator<Item = &'a Entry>) -> Vec<u8> {
+    let list: Vec<Value> = entries
+        .map(|entry| {
+            let at = entry
+                .at
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis() as u64);
+            json!({
+                "at": at,
+                "level": entry.level.as_str(),
+                "target": entry.target,
+                "spans": entry.spans.iter().map(|span| json!({
+                    "name": span.name,
+                    "fields": pair_list(&span.fields),
+                })).collect::<Vec<_>>(),
+                "message": entry.message,
+                "fields": pair_list(&entry.fields),
+            })
+        })
+        .collect();
+    serde_json::to_vec(&list).unwrap_or_default()
+}
+
+fn text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(|text| text.chars().take(MAX_TEXT).collect())
+}
+
+fn pairs(value: &Value) -> Vec<(String, String)> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|pair| Some((text(&pair[0])?, text(&pair[1])?)))
+        .take(MAX_FIELDS)
+        .collect()
+}
+
+/// Entries from a file's bytes, read as untrusted: only warnings and errors of our own targets, bounded like the live ring.
+fn decode(bytes: &[u8]) -> Vec<Entry> {
+    let Ok(Value::Array(list)) = serde_json::from_slice::<Value>(bytes) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<Entry> = list
+        .iter()
+        .filter_map(|item| {
+            let level = match item["level"].as_str()? {
+                "WARN" => Level::WARN,
+                "ERROR" => Level::ERROR,
+                _ => return None,
+            };
+            let target = text(&item["target"]).filter(|target| own_target(target))?;
+            Some(Entry {
+                at: UNIX_EPOCH + Duration::from_millis(item["at"].as_u64()?),
+                level,
+                target,
+                spans: item["spans"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(MAX_SPANS)
+                    .filter_map(|span| {
+                        Some(Span {
+                            name: text(&span["name"])?,
+                            fields: pairs(&span["fields"]),
+                        })
+                    })
+                    .collect(),
+                message: text(&item["message"])?,
+                fields: pairs(&item["fields"]),
+            })
+        })
+        .collect();
+    let skip = entries.len().saturating_sub(TAIL_LINES);
+    entries.drain(..skip);
+    entries
+}
+
+/// What the previous run mirrored, read before this run writes its own.
+pub(super) fn previous(data: &Path) -> Vec<Entry> {
+    Files::read_private(&data.join(MIRROR), MIRROR_LIMIT)
+        .ok()
+        .flatten()
+        .map(|bytes| decode(&bytes))
+        .unwrap_or_default()
+}
+
+/// The previous run's tail as a record's lines: the offsets are from its last event (nothing says when it ended), the ids re-keyed.
+pub(super) fn render_previous(entries: &[Entry]) -> Vec<String> {
+    match entries.last() {
+        Some(last) => render(entries.iter(), last.at),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -340,7 +534,7 @@ mod tests {
                 crashed - Duration::from_millis(12_345),
                 Level::ERROR,
                 vec![Span {
-                    name: "call",
+                    name: "call".into(),
                     fields: vec![("session".into(), "\"abc\"".into())],
                 }],
                 &[
@@ -382,7 +576,7 @@ mod tests {
                 crashed,
                 Level::WARN,
                 vec![Span {
-                    name: "call",
+                    name: "call".into(),
                     fields: vec![(
                         "trace".into(),
                         "\"550e8400-e29b-41d4-a716-446655440000\"".into(),
