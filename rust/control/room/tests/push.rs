@@ -445,7 +445,8 @@ fn the_garage_with_a_restart_a_new_session_and_a_resend_of_the_same_client_messa
         .to_owned();
     // Two typed messages said in the garage: the harness never answers.
     for (id, text) in [("c-1", "one"), ("c-2", "two")] {
-        room.send_text(text, &sid, "t", &bid, id).unwrap();
+        room.send_text(text, &sid, "t", &bid, id, &serde_json::Value::Null)
+            .unwrap();
     }
     let work = offered(&room);
     room.settle_delivery(
@@ -464,7 +465,9 @@ fn the_garage_with_a_restart_a_new_session_and_a_resend_of_the_same_client_messa
         .unwrap()
         .to_owned();
     for (id, text) in [("c-1", "one"), ("c-2", "two")] {
-        let again = reloaded.send_text(text, &sid, "t", &bid, id).unwrap();
+        let again = reloaded
+            .send_text(text, &sid, "t", &bid, id, &serde_json::Value::Null)
+            .unwrap();
         assert_eq!(
             again["accepted"], true,
             "said again, it is the same message"
@@ -826,8 +829,15 @@ fn a_typed_message_carries_the_block_and_no_return_note_follows() {
         .as_str()
         .unwrap()
         .to_owned();
-    room.send_text("Typed back", &sid, "t", &bid, "typed-1")
-        .unwrap();
+    room.send_text(
+        "Typed back",
+        &sid,
+        "t",
+        &bid,
+        "typed-1",
+        &serde_json::Value::Null,
+    )
+    .unwrap();
     assert!(room.inner.lock().unwrap().unheard.note_mut("t").is_none());
     let work = offered(&room);
     assert_eq!(work.len(), 1);

@@ -115,8 +115,15 @@ fn replay_stops_close_and_leave_keep_original_history() {
             .key,
         "room.replay_unavailable"
     );
-    room.finish_turn(&sid, "turn", None, &Value::Null, Continuation::Standalone)
-        .unwrap();
+    room.finish_turn(
+        &sid,
+        "turn",
+        None,
+        &Value::Null,
+        Continuation::Standalone,
+        &Value::Null,
+    )
+    .unwrap();
     let (other_events, _other_received) = mpsc::channel(8);
     let other = room
         .join("other-device".into(), "en".into(), other_events)

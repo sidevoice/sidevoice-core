@@ -27,6 +27,13 @@ pub(super) fn id() -> String {
 pub(super) fn field<'a>(value: &'a Value, name: &str) -> &'a str {
     value.get(name).and_then(Value::as_str).unwrap_or("")
 }
+/// How the person wants the agent to speak, as the connector reads it from the message.
+const SPEAKING_STYLES: [&str; 3] = ["brief", "normal", "detailed"];
+/// A client's `speaking_style` when it is one of the closed set; anything else is no style (the connector defaults it).
+pub(super) fn speaking_style(value: &Value) -> Option<&'static str> {
+    let asked = value.as_str()?;
+    SPEAKING_STYLES.into_iter().find(|style| *style == asked)
+}
 pub(super) fn valid_thread(thread: &str) -> bool {
     !thread.is_empty()
         && thread.len() <= 200

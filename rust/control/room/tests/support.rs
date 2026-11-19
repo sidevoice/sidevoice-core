@@ -56,6 +56,7 @@ pub(super) fn say(room: &Room, sid: &str, text: &str) {
         Some(text),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
 }

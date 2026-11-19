@@ -663,6 +663,7 @@ fn a_turn_with_words_withdraws_the_replies_sent_before_it_that_have_not_started(
         Some("Go on."),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
     // Only the one not started: the one playing is the call's to cut, and a replay the person asked for stays.
@@ -776,6 +777,7 @@ fn a_reply_the_call_cannot_be_told_to_drop_ends_unheard_in_the_room() {
         Some("Next."),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
     assert_eq!(

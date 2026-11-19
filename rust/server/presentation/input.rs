@@ -38,6 +38,7 @@ pub(super) async fn text(
             data["thread_id"].as_str().unwrap_or(""),
             data["binding_id"].as_str().unwrap_or(""),
             mid,
+            &data["speaking_style"],
         )
         .map_err(|error| room_refusal(error, &headers))?;
     Ok(Json(sent).into_response())

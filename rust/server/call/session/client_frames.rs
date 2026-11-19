@@ -115,6 +115,7 @@ impl Call {
                     data["started_at"].as_u64(),
                     data["thread_id"].as_str().unwrap_or(""),
                     data["binding_id"].as_str().unwrap_or(""),
+                    &data["speaking_style"],
                 )
                 .map(|taken| {
                     if taken["accepted"] == true {
@@ -137,6 +138,7 @@ impl Call {
                     } else {
                         Continuation::Standalone
                     },
+                    &data["speaking_style"],
                 )
                 .map(|_| Value::Null)
             }

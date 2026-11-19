@@ -72,6 +72,7 @@ fn delayed_captured_start_routes_to_original_focus_after_http_selection_and_bind
         Some("A words"),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
     assert_eq!(said(&room, "x"), ["A words"]);
@@ -169,6 +170,7 @@ fn a_newer_turn_does_not_lose_the_words_of_one_still_transcribed() {
         Some("First words"),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
     room.finish_turn(
@@ -177,6 +179,7 @@ fn a_newer_turn_does_not_lose_the_words_of_one_still_transcribed() {
         Some("Second words"),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
     assert_eq!(said(&room, "x"), ["First words", "Second words"]);
@@ -187,7 +190,8 @@ fn a_newer_turn_does_not_lose_the_words_of_one_still_transcribed() {
             &a.turn_id,
             Some("First words"),
             &Value::Null,
-            Continuation::Standalone
+            Continuation::Standalone,
+            &Value::Null
         )
         .unwrap_err()
         .key,
@@ -206,6 +210,7 @@ fn a_turn_finished_after_the_focus_moved_goes_once_to_the_conversation_it_was_sp
         Some("Words for x"),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
     assert_eq!(said(&room, "x"), ["Words for x"]);
@@ -226,7 +231,8 @@ fn a_cancelled_turn_drops_its_words_and_leaves_the_others() {
             &a.turn_id,
             Some("Dropped"),
             &Value::Null,
-            Continuation::Standalone
+            Continuation::Standalone,
+            &Value::Null
         )
         .unwrap_err()
         .key,
@@ -238,6 +244,7 @@ fn a_cancelled_turn_drops_its_words_and_leaves_the_others() {
         Some("Kept"),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
     assert_eq!(said(&room, "x"), ["Kept"]);
@@ -253,6 +260,7 @@ fn an_offline_message_is_newer_than_the_turn_before_it() {
         Some("Live words"),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
     let offline = room
@@ -304,6 +312,7 @@ fn words_longer_than_a_message_are_refused_whichever_way_they_come() {
             Some(&too_long),
             &Value::Null,
             Continuation::Standalone,
+            &Value::Null,
         )
         .unwrap_err();
     assert_eq!(refused.key, "room.text_too_long");
@@ -314,6 +323,7 @@ fn words_longer_than_a_message_are_refused_whichever_way_they_come() {
         Some(&longest),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     )
     .unwrap();
     assert_eq!(
@@ -340,6 +350,7 @@ fn words_longer_than_a_message_are_refused_whichever_way_they_come() {
         "x",
         &binding,
         "00000000-0000-4000-8000-000000000001",
+        &Value::Null,
     );
     assert_eq!(typed.unwrap_err().key, "room.text_too_long");
     assert_eq!(said(&room, "x"), [longest]);
@@ -372,6 +383,7 @@ fn messages_waiting_for_their_agent_are_bounded_in_number_and_in_bytes() {
         Some(&long),
         &Value::Null,
         Continuation::Standalone,
+        &Value::Null,
     );
     assert_eq!(refused.unwrap_err().key, "room.input_backlog_full");
     assert_eq!(said(&room, "x").len(), fit);
@@ -403,6 +415,7 @@ fn a_turn_keeps_its_reserved_input_place_at_full_backlog() {
                 Some(&text),
                 &Value::Null,
                 Continuation::Standalone,
+                &Value::Null,
             )
             .unwrap();
         assert_eq!(taken["accepted"], true, "long: {long}");
@@ -430,6 +443,7 @@ fn a_turn_past_the_open_bound_is_refused_and_the_open_ones_keep_their_words() {
             Some(&format!("Words {n}")),
             &Value::Null,
             Continuation::Standalone,
+            &Value::Null,
         )
         .unwrap();
     }
@@ -455,6 +469,7 @@ fn a_call_still_open_is_known_however_many_calls_came_and_went() {
             Some("Still here"),
             &Value::Null,
             Continuation::Standalone,
+            &Value::Null,
         )
         .unwrap();
     assert_eq!(taken["accepted"], true);

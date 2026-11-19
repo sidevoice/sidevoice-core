@@ -50,6 +50,7 @@ impl Inner {
         text: Option<&str>,
         timings: &Value,
         continuation: Continuation,
+        speaking_style: &Value,
     ) -> Result<Value, RoomError> {
         if text.is_some_and(|text| text.len() > MAX_INPUT_BYTES) {
             return Err(RoomError::new(413, "room.text_too_long"));
@@ -71,7 +72,8 @@ impl Inner {
         } else {
             Continuation::Standalone
         };
-        let (turn, continuing) = self.take_finished(sid, turn_id, effective)?;
+        let (mut turn, continuing) = self.take_finished(sid, turn_id, effective)?;
+        turn.speaking_style = super::util::speaking_style(speaking_style);
         if let Some(thread) = turn.thread_id.as_deref() {
             self.conversations.finish(thread, sid, turn_id, turn.epoch);
         }

@@ -105,6 +105,9 @@ impl Room {
             let mut data = json!({"event_id":row.id,"binding_id":binding.id,"thread":row.thread,"text":row.text,
                 "channel":payload["channel"],"session_id":payload["session_id"],"revision":payload["revision"],
                 "epoch":payload["epoch"],"message_id":payload["message_id"]});
+            if let Some(style) = payload.get("speaking_style") {
+                data["speaking_style"] = style.clone();
+            }
             if let Some(unheard) = payload.get("unheard") {
                 data["unheard"] = unheard.clone();
             }
