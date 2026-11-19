@@ -52,7 +52,7 @@ pub(crate) fn dist() -> Result<()> {
     };
     // Paths of this machine out of the panic locations and the debug files (remap.rs).
     let status = build
-        .args(remap::cargo_args(&repo)?)
+        .args(remap::cargo_args(&repo, &repo)?)
         .current_dir(&repo)
         .status()
         .map_err(|error| format!("cargo build: {error}"))?;
