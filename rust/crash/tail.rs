@@ -14,7 +14,7 @@
 //! The mirror (`persist`, `previous`): one writer thread of its own rewrites one private file of the core's own directory with
 //! the tail already prepared (ids re-keyed by the name of their field, offsets from the last event, home directory hidden) and the
 //! id of the run it belongs to; changes are coalesced (a few writes a second at most), never from inside the panic hook, and only
-//! while the switch is on (looked at again at most every [`SWITCH_LOOK`]). The next start takes the file only for the marker of
+//! while the switch is on (read at every write; off, the file is deleted). The next start takes the file only for the marker of
 //! that run, before this run's mirror removes it. A torn, foreign or other run's file is no tail.
 
 use std::collections::VecDeque;
@@ -22,7 +22,7 @@ use std::fmt::Debug;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, OnceLock, PoisonError, TryLockError};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -328,9 +328,6 @@ fn render<'a>(entries: impl Iterator<Item = &'a Entry>, crashed: SystemTime) -> 
 
 // ---- The mirror -----------------------------------------------------------------------------------------------------------
 
-/// How often the switch is looked at again by the writer of the mirror: a change made by another process (`crash-reports off`)
-/// holds within this.
-const SWITCH_LOOK: Duration = Duration::from_secs(5);
 /// The writer rests this long after each write: a burst of warnings is one write, a few a second at most.
 const WRITE_EVERY: Duration = Duration::from_millis(250);
 /// The file of the mirror, in the core's private directory.
@@ -347,8 +344,6 @@ struct Mirror {
     run: String,
     /// The spellings of the home directory, hidden in the lines as they are written.
     homes: Vec<String>,
-    /// When the switch was last looked at, and what it said (the writer's alone).
-    switch: Mutex<Option<(Instant, bool)>>,
     /// Whether the ring changed since the writer last looked: the writer sleeps on it.
     dirty: Mutex<bool>,
     wake: Condvar,
@@ -373,7 +368,6 @@ pub(super) fn persist(data: &Path, run: &str, homes: Vec<String>) {
         file: data.join(MIRROR),
         run: run.to_owned(),
         homes,
-        switch: Mutex::new(None),
         dirty: Mutex::new(false),
         wake: Condvar::new(),
     };
@@ -397,18 +391,6 @@ pub(super) fn remove_mirror(data: &Path) -> io::Result<()> {
 }
 
 impl Mirror {
-    fn wanted(&self) -> bool {
-        let mut look = self.switch.lock().unwrap_or_else(PoisonError::into_inner);
-        match *look {
-            Some((at, on)) if at.elapsed() < SWITCH_LOOK => on,
-            _ => {
-                let on = super::settings::enabled(&self.data);
-                *look = Some((Instant::now(), on));
-                on
-            }
-        }
-    }
-
     /// The ring changed: the writer is told, and nothing is waited for.
     fn touch(&self) {
         *self.dirty.lock().unwrap_or_else(PoisonError::into_inner) = true;
@@ -435,7 +417,10 @@ impl Mirror {
 
     /// Rewrites the file. Not atomic and not synced, to keep it cheap: a torn file is read as no tail.
     fn write(&self) {
-        if !self.wanted() {
+        // The switch is read at every write (a few small reads a second at most): an `off` from another process holds at
+        // once, and the file of a run that is off is not left behind.
+        if !super::settings::enabled(&self.data) {
+            let _ = remove_mirror(&self.data);
             return;
         }
         let lines = {
@@ -640,5 +625,32 @@ mod tests {
             lines[0]
         );
         testing::clear();
+    }
+
+    #[test]
+    fn the_switch_is_read_at_every_write_and_off_deletes_the_file() {
+        let _ring = testing::LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path();
+        std::fs::set_permissions(data, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let mirror = Mirror {
+            data: data.to_path_buf(),
+            file: data.join(MIRROR),
+            run: "r".to_owned(),
+            homes: Vec::new(),
+            dirty: Mutex::new(false),
+            wake: Condvar::new(),
+        };
+        mirror.write();
+        assert!(data.join(MIRROR).exists(), "on by default: written");
+        super::super::settings::write(data, false).unwrap();
+        mirror.write();
+        assert!(
+            !data.join(MIRROR).exists(),
+            "off at once, no 5 s cache: the file is deleted"
+        );
+        super::super::settings::write(data, true).unwrap();
+        mirror.write();
+        assert!(data.join(MIRROR).exists(), "on again at once");
     }
 }
