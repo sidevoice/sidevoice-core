@@ -13,7 +13,7 @@ async fn main() {
     let command = cli.command.clone();
     // A hook of the service manager: no configuration, no log, and it never fails the unit.
     if let Some(Command::RecordExit { file }) = command.clone() {
-        let _ = runtime::record_exit(file);
+        let _ = runtime::record_exit(file, cli.data_dir.clone());
         return;
     }
     let config = match Config::from_cli(cli) {

@@ -96,7 +96,6 @@ fn context(f: &Fixture) -> Context {
         images: Vec::new(),
         in_flight: std::sync::atomic::AtomicUsize::new(0),
         run: "ab".to_owned(),
-        previous: std::sync::Mutex::new(None),
     }
 }
 

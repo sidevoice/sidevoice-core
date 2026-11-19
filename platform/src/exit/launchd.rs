@@ -58,22 +58,59 @@ pub fn crash_type(before: Option<u64>, now: &State) -> Option<String> {
     signal_type(now.last_signal?, Unix::Macos)
 }
 
-/// `launchctl print gui/<uid>/<label>` (this user's uid)'s output; an error where launchd cannot be asked (not macOS, no such job).
-#[cfg(target_os = "macos")]
-pub fn print(label: &str) -> std::io::Result<String> {
-    let output = std::process::Command::new("/bin/launchctl")
-        .arg("print")
-        .arg(format!(
-            "gui/{}/{label}",
-            rustix::process::geteuid().as_raw()
-        ))
+/// How long `launchctl print` may take: launchd can stall, and nothing here is worth waiting for.
+pub const PRINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Runs `command` and returns its standard output if it succeeded within `timeout`; a stalled command is killed.
+pub fn output_within(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut child = command
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()?;
-    if !output.status.success() {
+        .spawn()?;
+    let mut stdout = child.stdout.take().ok_or(std::io::ErrorKind::BrokenPipe)?;
+    // Read on a thread so a full pipe never blocks the child, and the wait below can give up.
+    let (done, text) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.by_ref().take(1024 * 1024).read_to_end(&mut bytes);
+        let _ = done.send(bytes);
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    if !status.success() {
         return Err(std::io::ErrorKind::NotFound.into());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let bytes = text
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `launchctl print gui/<uid>/<label>` (this user's uid)'s output, within [`PRINT_TIMEOUT`]; an error where launchd cannot be asked
+/// (not macOS, no such job, a stall).
+#[cfg(target_os = "macos")]
+pub fn print(label: &str) -> std::io::Result<String> {
+    let mut command = std::process::Command::new("/bin/launchctl");
+    command.arg("print").arg(format!(
+        "gui/{}/{label}",
+        rustix::process::geteuid().as_raw()
+    ));
+    output_within(command, PRINT_TIMEOUT)
 }
 
 /// `launchctl print gui/<uid>/<label>` (this user's uid)'s output; an error where launchd cannot be asked (not macOS, no such job).
@@ -132,5 +169,29 @@ mod tests {
             crash_type(Some(1), &parse(bus)).as_deref(),
             Some("abort.signal.SIGBUS")
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod timeout_tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    fn sh(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(script);
+        command
+    }
+
+    #[test]
+    fn output_is_returned_and_a_stalled_command_is_killed_at_the_timeout() {
+        let text = output_within(sh("echo runs = 4"), Duration::from_secs(5)).unwrap();
+        assert_eq!(text.trim(), "runs = 4");
+        assert!(output_within(sh("exit 3"), Duration::from_secs(5)).is_err());
+        let started = Instant::now();
+        let error = output_within(sh("exec sleep 30"), Duration::from_millis(200)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

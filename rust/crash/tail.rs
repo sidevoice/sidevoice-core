@@ -11,20 +11,20 @@
 //! hook runs (a panic may come from inside a write), and read with a lock that is only ever tried. The `panic` and
 //! `crash_backtrace` targets are not in it: the record itself says what the panic was.
 //!
-//! The mirror (`persist`, `previous`): each warning or error rewrites one private file of the core's own directory with the ring
-//! as structured entries (no formatting, each field apart), never from inside the panic hook and only while the switch is on
-//! (looked at again at most every [`SWITCH_LOOK`]). The next start reads the previous run's file before this run writes its own,
-//! and the record of an abnormal exit renders it as a panic's is rendered: the ids re-keyed by the name of their field, offsets
-//! from the last event, the home directory hidden. A torn or foreign file is no tail.
+//! The mirror (`persist`, `previous`): one writer thread of its own rewrites one private file of the core's own directory with
+//! the tail already prepared (ids re-keyed by the name of their field, offsets from the last event, home directory hidden) and the
+//! id of the run it belongs to; changes are coalesced (a few writes a second at most), never from inside the panic hook, and only
+//! while the switch is on (looked at again at most every [`SWITCH_LOOK`]). The next start takes the file only for the marker of
+//! that run, before this run's mirror removes it. A torn, foreign or other run's file is no tail.
 
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError, TryLockError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Condvar, Mutex, OnceLock, PoisonError, TryLockError};
+use std::time::{Duration, Instant, SystemTime};
 
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -189,19 +189,16 @@ where
             ring.pop_front();
         }
         ring.push_back(entry);
-        // Never from inside the hook (it may be the thread that panicked in a write). The ring is encoded under its lock and
-        // written after it, so a slow disk never holds up another thread's log line.
-        let mirrored = match MIRROR_OF.get() {
-            Some(mirror) if !in_hook => Some((mirror, encode(ring.iter()))),
-            _ => None,
-        };
         drop(ring);
-        if let Some((mirror, bytes)) = mirrored {
-            mirror.write(&bytes);
+        // Never from inside the hook (it may be the thread that panicked in a write). The writer thread does the work: this
+        // only tells it, so a slow disk never holds up a log line.
+        if !in_hook {
+            if let Some(mirror) = MIRROR_OF.get() {
+                mirror.touch();
+            }
         }
     }
 }
-
 /// The tail as lines for a record whose crash is at `crashed`: empty when the ring is busy (a record without a tail is still
 /// a record).
 pub(super) fn snapshot(crashed: SystemTime) -> Vec<String> {
@@ -334,27 +331,61 @@ fn render<'a>(entries: impl Iterator<Item = &'a Entry>, crashed: SystemTime) -> 
 /// How often the switch is looked at again by the writer of the mirror: a change made by another process (`crash-reports off`)
 /// holds within this.
 const SWITCH_LOOK: Duration = Duration::from_secs(5);
+/// The writer rests this long after each write: a burst of warnings is one write, a few a second at most.
+const WRITE_EVERY: Duration = Duration::from_millis(250);
 /// The file of the mirror, in the core's private directory.
 const MIRROR: &str = "crash-tail.json";
-/// The most bytes of the mirror read back: 20 events of 16 fields of 200 characters, with room.
+/// The most bytes of the mirror read back: 20 lines, each cut, with room.
 const MIRROR_LIMIT: u64 = 256 * 1024;
+/// The longest line read back.
+const MAX_LINE: usize = 8 * 1024;
 
 struct Mirror {
     data: PathBuf,
     file: PathBuf,
-    /// When the switch was last looked at, and what it said.
+    /// The run whose tail the file holds: the next start takes it only for the marker of that run.
+    run: String,
+    /// The spellings of the home directory, hidden in the lines as they are written.
+    homes: Vec<String>,
+    /// When the switch was last looked at, and what it said (the writer's alone).
     switch: Mutex<Option<(Instant, bool)>>,
+    /// Whether the ring changed since the writer last looked: the writer sleeps on it.
+    dirty: Mutex<bool>,
+    wake: Condvar,
 }
 
 static MIRROR_OF: OnceLock<Mirror> = OnceLock::new();
 
-/// From now on the ring is mirrored to a file of `data`, the core's private directory.
-pub(super) fn persist(data: &Path) {
-    let _ = MIRROR_OF.set(Mirror {
+/// The tail as the file holds it: already prepared, so that the next start renders nothing. Offsets are from the last event
+/// (nothing says when the run ended), ids re-keyed by the name of their field, home directory hidden.
+#[derive(Serialize, Deserialize)]
+struct File {
+    run: String,
+    lines: Vec<String>,
+}
+
+/// From now on the ring is mirrored to a file of `data`, the core's private directory, by one thread of its own, for run `run`.
+/// The previous run's file is gone from here on: read it first (`previous`).
+pub(super) fn persist(data: &Path, run: &str, homes: Vec<String>) {
+    let _ = std::fs::remove_file(data.join(MIRROR));
+    let fresh = Mirror {
         data: data.to_path_buf(),
         file: data.join(MIRROR),
+        run: run.to_owned(),
+        homes,
         switch: Mutex::new(None),
-    });
+        dirty: Mutex::new(false),
+        wake: Condvar::new(),
+    };
+    if MIRROR_OF.set(fresh).is_ok() {
+        let _ = std::thread::Builder::new()
+            .name("crash-tail".into())
+            .spawn(|| {
+                if let Some(mirror) = MIRROR_OF.get() {
+                    mirror.writer();
+                }
+            });
+    }
 }
 
 /// Deletes the mirror.
@@ -378,128 +409,91 @@ impl Mirror {
         }
     }
 
-    /// Rewrites the file with `bytes`. Not atomic and not synced, to keep it cheap: a torn file is read as no tail.
-    fn write(&self, bytes: &[u8]) {
+    /// The ring changed: the writer is told, and nothing is waited for.
+    fn touch(&self) {
+        *self.dirty.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.wake.notify_one();
+    }
+
+    /// The one writer: waits for a change, writes the whole tail, rests, and so on. Changes during the rest are one write.
+    fn writer(&self) {
+        loop {
+            {
+                let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+                while !*dirty {
+                    dirty = self
+                        .wake
+                        .wait(dirty)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+                *dirty = false;
+            }
+            self.write();
+            std::thread::sleep(WRITE_EVERY);
+        }
+    }
+
+    /// Rewrites the file. Not atomic and not synced, to keep it cheap: a torn file is read as no tail.
+    fn write(&self) {
         if !self.wanted() {
             return;
         }
+        let lines = {
+            let ring = RING.lock().unwrap_or_else(PoisonError::into_inner);
+            prepared(ring.iter(), &self.homes)
+        };
+        let bytes = serde_json::to_vec(&File {
+            run: self.run.clone(),
+            lines,
+        })
+        .unwrap_or_default();
         let _ = (|| -> io::Result<()> {
             let mut file = Files::open_private(&self.file, Create::ReadWrite)?;
             file.set_len(0)?;
-            file.write_all(bytes)
+            file.write_all(&bytes)
         })();
     }
 }
 
-fn pair_list(pairs: &[(String, String)]) -> Value {
-    Value::Array(
-        pairs
-            .iter()
-            .map(|(name, value)| json!([name, value]))
-            .collect(),
-    )
-}
-
-/// The entries as the file holds them.
-fn encode<'a>(entries: impl Iterator<Item = &'a Entry>) -> Vec<u8> {
-    let list: Vec<Value> = entries
-        .map(|entry| {
-            let at = entry
-                .at
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |since| since.as_millis() as u64);
-            json!({
-                "at": at,
-                "level": entry.level.as_str(),
-                "target": entry.target,
-                "spans": entry.spans.iter().map(|span| json!({
-                    "name": span.name,
-                    "fields": pair_list(&span.fields),
-                })).collect::<Vec<_>>(),
-                "message": entry.message,
-                "fields": pair_list(&entry.fields),
-            })
-        })
-        .collect();
-    serde_json::to_vec(&list).unwrap_or_default()
-}
-
-fn text(value: &Value) -> Option<String> {
-    value
-        .as_str()
-        .map(|text| text.chars().take(MAX_TEXT).collect())
-}
-
-fn pairs(value: &Value) -> Vec<(String, String)> {
-    value
-        .as_array()
+/// The lines a file holds: offsets from the last event, ids re-keyed, the home directory hidden.
+fn prepared<'a>(entries: impl Iterator<Item = &'a Entry>, homes: &[String]) -> Vec<String> {
+    let entries: Vec<&Entry> = entries.collect();
+    let Some(last) = entries.last().map(|entry| entry.at) else {
+        return Vec::new();
+    };
+    render(entries.into_iter(), last)
         .into_iter()
-        .flatten()
-        .filter_map(|pair| Some((text(&pair[0])?, text(&pair[1])?)))
-        .take(MAX_FIELDS)
+        .map(|line| super::record::mask_homes(&line, homes))
         .collect()
 }
 
-/// Entries from a file's bytes, read as untrusted: only warnings and errors of our own targets, bounded like the live ring.
-fn decode(bytes: &[u8]) -> Vec<Entry> {
-    let Ok(Value::Array(list)) = serde_json::from_slice::<Value>(bytes) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<Entry> = list
-        .iter()
-        .filter_map(|item| {
-            let level = match item["level"].as_str()? {
-                "WARN" => Level::WARN,
-                "ERROR" => Level::ERROR,
-                _ => return None,
-            };
-            let target = text(&item["target"]).filter(|target| own_target(target))?;
-            Some(Entry {
-                at: UNIX_EPOCH + Duration::from_millis(item["at"].as_u64()?),
-                level,
-                target,
-                spans: item["spans"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .take(MAX_SPANS)
-                    .filter_map(|span| {
-                        Some(Span {
-                            name: text(&span["name"])?,
-                            fields: pairs(&span["fields"]),
-                        })
-                    })
-                    .collect(),
-                message: text(&item["message"])?,
-                fields: pairs(&item["fields"]),
-            })
-        })
-        .collect();
-    let skip = entries.len().saturating_sub(TAIL_LINES);
-    entries.drain(..skip);
-    entries
-}
-
-/// What the previous run mirrored, read before this run writes its own.
-pub(super) fn previous(data: &Path) -> Vec<Entry> {
-    Files::read_private(&data.join(MIRROR), MIRROR_LIMIT)
+/// What run `run` mirrored (its lines), read before this run writes its own: nothing when the file is not run `run`'s, torn or
+/// foreign. Read as untrusted: only lines of our grammar, bounded.
+pub(super) fn previous(data: &Path, run: &str) -> Vec<String> {
+    let Some(file) = Files::read_private(&data.join(MIRROR), MIRROR_LIMIT)
         .ok()
         .flatten()
-        .map(|bytes| decode(&bytes))
-        .unwrap_or_default()
-}
-
-/// The previous run's tail as a record's lines: the offsets are from its last event (nothing says when it ended), the ids re-keyed.
-pub(super) fn render_previous(entries: &[Entry]) -> Vec<String> {
-    match entries.last() {
-        Some(last) => render(entries.iter(), last.at),
-        None => Vec::new(),
-    }
+        .and_then(|bytes| serde_json::from_slice::<File>(&bytes).ok())
+        .filter(|file| file.run == run)
+    else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = file
+        .lines
+        .into_iter()
+        .filter(|line| line.len() <= MAX_LINE && super::record::is_ours(line))
+        .collect();
+    let skip = lines.len().saturating_sub(TAIL_LINES);
+    lines.drain(..skip);
+    lines
 }
 
 #[cfg(test)]
 pub(super) mod testing {
     use super::*;
+
+    /// The ring is the process's: a test that reads it back holds this.
+    pub(crate) static LOCK: Mutex<()> = Mutex::new(());
 
     pub(crate) fn clear() {
         RING.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -605,6 +599,7 @@ mod tests {
     #[test]
     fn the_layer_keeps_the_last_events_of_ours_with_their_spans_and_nothing_else() {
         use tracing_subscriber::layer::SubscriberExt;
+        let _ring = testing::LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         testing::clear();
         let subscriber = tracing_subscriber::registry().with(layer(|| false));
         tracing::subscriber::with_default(subscriber, || {

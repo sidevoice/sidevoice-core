@@ -21,8 +21,7 @@
 //!
 //! - A run that did not end by itself and whose manager saw a crash status (a signal, an out-of-memory kill, a Windows exception)
 //!   leaves one more record at the next start (`exit`, decided in sidevoice-connector#366): a fixed type, the persisted tail of
-//!   that run (`tail`, mirrored to a file), no frames; once a day per version and type, and never when a panic record of that
-//!   run exists. The classification and the exit file are `sidevoice_platform::exit`'s.
+//!   that run (`tail`, mirrored to a file by one writer), no frames, made at that start whatever happens next; every exit, no daily cap, and not when a panic record of that run exists and the exit is the abort a panic produces (SIGABRT, 0xC0000409). The classification and the exit file are `sidevoice_platform::exit`'s.
 //!
 //! A record holds a closed list of fields ([`CrashRecord`]) and nothing else; text in it is bounded and free of control
 //! characters. The panic message is only ever a `&'static str` literal or the fixed marker (with the formatted message's
@@ -43,9 +42,10 @@ use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, SystemTime};
 
+pub use exit::exit_file_of;
 pub use handled::{layer as handled_layer, unreported as unreported_errors, TAGS as HANDLED_TAGS};
 pub use record::{CrashRecord, Exception, Frame, Image, Location, Panic};
 pub use report::{event, EXTRAS, SERVICE, TAGS};
@@ -91,8 +91,6 @@ struct Context {
     in_flight: AtomicUsize,
     /// This run's random id: it ties the marker to the panic that may suppress an exit record. Never sent.
     run: String,
-    /// The previous run, when it ended in a crash status (`exit`): its record is made once the sender starts.
-    previous: Mutex<Option<exit::Previous>>,
 }
 
 static CONTEXT: OnceLock<Context> = OnceLock::new();
@@ -115,9 +113,6 @@ pub fn install(
     arch: &'static str,
 ) {
     let run = uuid::Uuid::new_v4().simple().to_string();
-    // Before the mirror is turned on: the previous run's tail is read first.
-    let previous = exit::begin(data, &run, env!("CARGO_PKG_VERSION"));
-    tail::persist(data);
     let _ = CONTEXT.set(Context {
         data: data.to_path_buf(),
         store: CrashStore::new(data, homes.clone()),
@@ -128,7 +123,6 @@ pub fn install(
         images: trace::loaded(),
         in_flight: AtomicUsize::new(0),
         run,
-        previous: Mutex::new(previous),
     });
 }
 
@@ -148,10 +142,7 @@ fn erase(data: &Path) -> io::Result<()> {
     let id = settings::remove_id(data);
     let cap = handled::remove_cap(data);
     let records = CrashStore::new(data, Vec::new()).erase();
-    id.and(cap)
-        .and(exit::remove_cap(data))
-        .and(tail::remove_mirror(data))
-        .and(records)
+    id.and(cap).and(tail::remove_mirror(data)).and(records)
 }
 
 /// Sends what a previous run left, and from now on the handled errors, in the background (call once the core is serving).
@@ -244,13 +235,22 @@ fn write(
     );
     // A thread that panicked inside the store holds its lock: do not wait for it.
     context.store.record_without_waiting(record);
-    // The exit record of this run, if it ends in a crash status after all, is suppressed: this record says more.
+    // The exit record of this run, if it ends in the abort a panic produces, is suppressed: this record says more.
     let _ = sidevoice_platform::exit::Marker::panicked(&context.data, &context.run);
 }
 
 /// The run ends by itself (`run` returned): no run marker is left, so the next start knows this one did not crash.
 pub fn finish() {
     if let Some(context) = CONTEXT.get() {
-        exit::finish(&context.data);
+        exit::finish(&context.data, &context.run);
+    }
+}
+
+/// This run holds the data directory's lock: its marker is put, the previous run's exit is read and, if it was a crash, recorded
+/// (the sending waits for [`start`]), and the tail is mirrored from now on. Called once, right after the lock and never before:
+/// a second start that loses the lock must not touch the live core's files.
+pub fn begin_run() {
+    if let Some(context) = CONTEXT.get() {
+        exit::begin(context);
     }
 }

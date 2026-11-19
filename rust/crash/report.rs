@@ -299,8 +299,7 @@ pub(super) fn pass(context: &Context, dsn: Option<&Dsn>) {
             return;
         }
     }
-    // What the previous run's exit left (a crash status), made before anything is sent.
-    super::exit::record(context);
+
     let Some(dsn) = dsn else { return };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()

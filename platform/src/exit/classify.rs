@@ -63,15 +63,23 @@ pub fn ntstatus_type(code: u32) -> Option<String> {
 
 /// What systemd hands `ExecStopPost=`: `$SERVICE_RESULT` (`oom-kill`, `signal`, `core-dump`, `exit-code`, ...), `$EXIT_CODE`
 /// (`exited`, `killed`, `dumped`) and `$EXIT_STATUS` (the exit number, or the signal's name). A crash is an `oom-kill`
-/// result, or a main process killed or dumped by a crash signal.
+/// result, or a main process killed or dumped by a crash signal **and** a result of `signal` or `core-dump`: a `watchdog` or
+/// `timeout` result is systemd's own kill (it signals the process itself), not a crash.
 pub fn systemd_type(result: &str, exit_code: &str, status: &str) -> Option<String> {
-    if result.trim() == "oom-kill" {
-        return Some(OOM.to_owned());
-    }
-    match exit_code.trim() {
-        "killed" | "dumped" => named_signal(status),
+    match result.trim() {
+        "oom-kill" => Some(OOM.to_owned()),
+        "signal" | "core-dump" => match exit_code.trim() {
+            "killed" | "dumped" => named_signal(status),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// Whether `kind` is the end a Rust panic produces when the process aborts (`SIGABRT`; on Windows `0xC0000409`, the fast fail
+/// `abort` raises). Only for these may a panic record of the same run stand for the exit: any other end is a different event.
+pub fn is_panic_abort(kind: &str) -> bool {
+    kind == "abort.signal.SIGABRT" || kind == "ntstatus.0xC0000409"
 }
 
 /// Whether `text` is one of the types this module returns: nothing else is ever read back from an exit file or reported.
@@ -173,6 +181,11 @@ mod tests {
         assert_eq!(case("exit-code", "exited", "1"), None);
         assert_eq!(case("exit-code", "exited", "11"), None);
         assert_eq!(case("signal", "killed", "SEGV; rm -rf ~"), None);
+        // systemd's own kills (a watchdog, a stop that timed out) end in a signal too: not a crash.
+        for result in ["watchdog", "timeout", "resources", "start-limit-hit", ""] {
+            assert_eq!(case(result, "killed", "ABRT"), None, "{result}");
+            assert_eq!(case(result, "dumped", "SEGV"), None, "{result}");
+        }
         assert_eq!(case("", "", ""), None);
     }
 

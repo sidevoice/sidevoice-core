@@ -10,6 +10,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,8 @@ const MARKER: &str = "run.json";
 const LIMIT: u64 = 4 * 1024;
 /// How far before a run's start an exit file may be dated: clocks of two processes, not a different run.
 const SLOP_SECS: u64 = 5;
+/// The marker is read-modify-written by the run's own threads (the panic hook's capture, the launchd lookup).
+static EDIT: Mutex<()> = Mutex::new(());
 
 fn now() -> u64 {
     SystemTime::now()
@@ -84,19 +87,35 @@ impl Marker {
         Ok(previous)
     }
 
-    /// The run ended by itself (a return from `main`, a handled exit): no marker is left.
-    pub fn end(dir: &Path) -> io::Result<()> {
-        match std::fs::remove_file(dir.join(MARKER)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+    /// Run `run` ended by itself (a return from `main`, a handled exit): its marker is removed. Only that run's: a marker that is
+    /// another run's (a second start that never got the data directory's lock) is the live process's and stays.
+    pub fn end(dir: &Path, run: &str) -> io::Result<()> {
+        let _held = EDIT.lock().unwrap_or_else(PoisonError::into_inner);
+        match Self::read(dir) {
+            Some(marker) if marker.run == run => match std::fs::remove_file(dir.join(MARKER)) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            },
             _ => Ok(()),
         }
     }
 
     /// Says that a panic of run `run` was recorded: only if the marker is still that run's.
     pub fn panicked(dir: &Path, run: &str) -> io::Result<()> {
+        Self::edit(dir, run, |marker| marker.panicked = true)
+    }
+
+    /// Says launchd's run count for run `run`, learned after the run started (macOS: asking launchd is not on the start's way).
+    pub fn launchd_runs(dir: &Path, run: &str, runs: u64) -> io::Result<()> {
+        Self::edit(dir, run, |marker| marker.launchd_runs = Some(runs))
+    }
+
+    /// Changes the marker if it is run `run`'s. The process's own edits do not interleave.
+    fn edit(dir: &Path, run: &str, change: impl FnOnce(&mut Self)) -> io::Result<()> {
+        let _held = EDIT.lock().unwrap_or_else(PoisonError::into_inner);
         match Self::read(dir) {
             Some(mut marker) if marker.run == run => {
-                marker.panicked = true;
+                change(&mut marker);
                 Files::write_json(&dir.join(MARKER), &marker)
             }
             _ => Ok(()),
@@ -154,8 +173,10 @@ pub fn take(path: &Path, since: u64) -> Option<String> {
     let read = Files::read_private(path, LIMIT);
     let _ = std::fs::remove_file(path);
     let exit = serde_json::from_slice::<Exit>(&read.ok()??).ok()?;
-    (is_crash_type(&exit.kind) && exit.at + SLOP_SECS >= since && exit.at <= now() + SLOP_SECS)
-        .then_some(exit.kind)
+    (is_crash_type(&exit.kind)
+        && exit.at.saturating_add(SLOP_SECS) >= since
+        && exit.at <= now().saturating_add(SLOP_SECS))
+    .then_some(exit.kind)
 }
 
 #[cfg(test)]
@@ -243,10 +264,25 @@ mod tests {
         Marker::panicked(&dir, "d4e5f6").unwrap();
         assert!(Marker::read(&dir).unwrap().panicked);
         // A clean end: nothing for the next start.
-        Marker::end(&dir).unwrap();
-        Marker::end(&dir).unwrap();
+        // Another run's end (a second start that lost the lock) leaves the live marker.
+        Marker::end(&dir, "a1b2c3").unwrap();
+        assert!(Marker::read(&dir).is_some());
+        Marker::end(&dir, "d4e5f6").unwrap();
+        Marker::end(&dir, "d4e5f6").unwrap();
+        assert!(Marker::read(&dir).is_none());
         let third = Marker::new("0a0b".into(), "0.20.0", None);
         assert_eq!(Marker::begin(&dir, &third).unwrap(), None);
+    }
+
+    #[test]
+    fn an_exit_file_dated_at_the_end_of_time_does_not_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = exit_file(dir.path(), &CORE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for at in [u64::MAX, u64::MAX - 1] {
+            std::fs::write(&path, format!(r#"{{"type":"abort.oom_kill","at":{at}}}"#)).unwrap();
+            assert_eq!(take(&path, u64::MAX), None);
+        }
     }
 
     #[test]

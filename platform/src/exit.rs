@@ -24,7 +24,7 @@ mod classify;
 mod file;
 pub mod launchd;
 
-pub use classify::{is_crash_type, ntstatus_type, signal_type, systemd_type, Unix};
+pub use classify::{is_crash_type, is_panic_abort, ntstatus_type, signal_type, systemd_type, Unix};
 pub use file::{exit_file, record, record_systemd, take, Marker};
 
 /// One of the jobs a manager runs, as the manager knows it.
