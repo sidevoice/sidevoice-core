@@ -37,7 +37,13 @@ const PASS_BUDGET: Duration = Duration::from_secs(60);
 const MAX_IN_FLIGHT: usize = 2;
 
 /// The tags an event may carry.
-pub const TAGS: [&str; 4] = ["service.name", "os.type", "host.arch", "installation.id"];
+pub const TAGS: [&str; 5] = [
+    "service.name",
+    "os.type",
+    "os.name",
+    "host.arch",
+    "installation.id",
+];
 /// The `extra` entries an event may carry.
 pub const EXTRAS: [&str; 3] = ["location", "log_tail", "len"];
 
@@ -54,14 +60,15 @@ pub(super) fn release(version: &str) -> Cow<'static, str> {
 }
 
 /// The event of a record, from its closed field list: the Sentry `event_id` is the record's id, the release the core's
-/// version, and `installation.id` the machine id.
-pub fn event(record: &CrashRecord, machine_id: &str) -> Event<'static> {
+/// version, `os.name` the one the handled errors carry (`context.os_name`) and `installation.id` the machine id.
+pub fn event(record: &CrashRecord, os_name: &str, machine_id: &str) -> Event<'static> {
     let time = |text: &str| {
         chrono::DateTime::parse_from_rfc3339(text).map_or(SystemTime::now(), SystemTime::from)
     };
     let tags = tags([
         ("service.name", SERVICE),
         ("os.type", record.os.as_str()),
+        ("os.name", os_name),
         ("host.arch", record.arch.as_str()),
         ("installation.id", machine_id),
     ]);
@@ -218,7 +225,7 @@ pub(super) async fn drain(context: &Context, dsn: &Dsn) -> usize {
             // Off, or no id to be had: nothing is sent.
             Err(_) => break,
         };
-        match deliver(context, &client, dsn, event(&record, &id)).await {
+        match deliver(context, &client, dsn, event(&record, context.os_name, &id)).await {
             Ok(()) => {
                 sent += 1;
                 if let Err(error) = context.store.remove(&record.id) {
