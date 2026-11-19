@@ -1326,6 +1326,7 @@ async fn turning_the_switch_off_over_the_socket_erases_the_pending_records() {
         Panic {
             version: "1.0.0",
             os: "linux",
+            os_name: "Linux",
             arch: "amd64",
             at: chrono::Utc::now(),
             literal: Some("boom"),
