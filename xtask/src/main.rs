@@ -33,6 +33,7 @@ mod libraries;
 mod manifest;
 mod notices;
 mod publish;
+mod remap;
 mod sentry;
 mod util;
 mod verify;

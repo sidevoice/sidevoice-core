@@ -17,6 +17,7 @@ use crate::debug_files;
 use crate::glibc;
 use crate::libraries::{linux_libraries, windows_libraries};
 use crate::notices::stage_notices;
+use crate::remap;
 use crate::util::*;
 use crate::verify::verify;
 use crate::{Result, ENTRYPOINT_STEM, KIND, ROOT_NAME};
@@ -49,7 +50,9 @@ pub(crate) fn dist() -> Result<()> {
         build.args(["build", "--locked", "--release", "--bin", "sidevoice-core"]);
         repo.join("target/release")
     };
+    // Paths of this machine out of the panic locations and the debug files (remap.rs).
     let status = build
+        .args(remap::cargo_args(&repo)?)
         .current_dir(&repo)
         .status()
         .map_err(|error| format!("cargo build: {error}"))?;
@@ -74,6 +77,8 @@ pub(crate) fn dist() -> Result<()> {
         &built.join(target.exe_name("sidevoice-core")),
         &binary,
     )?;
+    // The shipped binary, debug sections gone, names no directory of this machine in its panic locations (remap.rs).
+    remap::check(&binary, &repo)?;
     stage_notices(&stage.join("notices"), target)?;
     let links = if linux {
         linux_libraries(&binary)?
