@@ -113,6 +113,7 @@ impl Call {
                     turn_id,
                     data["text"].as_str().unwrap_or(""),
                     data["started_at"].as_u64(),
+                    data["age_ms"].as_u64(),
                     data["thread_id"].as_str().unwrap_or(""),
                     data["binding_id"].as_str().unwrap_or(""),
                 )

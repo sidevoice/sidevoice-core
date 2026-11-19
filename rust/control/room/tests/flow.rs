@@ -1101,13 +1101,29 @@ fn t11_offline_input_uses_the_captured_target_after_focus_changes() {
     c.room.select(&c.sid, "other").unwrap();
     let accepted = c
         .room
-        .offline_input_captured(&c.sid, "offline", "Captured words", None, "t", &binding)
+        .offline_input_captured(
+            &c.sid,
+            "offline",
+            "Captured words",
+            None,
+            None,
+            "t",
+            &binding,
+        )
         .unwrap();
     assert_eq!(accepted["epoch"], 1);
     assert_eq!(c.input("Captured words")["thread_id"], "t");
     let again = c
         .room
-        .offline_input_captured(&c.sid, "offline", "Captured words", None, "t", &binding)
+        .offline_input_captured(
+            &c.sid,
+            "offline",
+            "Captured words",
+            None,
+            None,
+            "t",
+            &binding,
+        )
         .unwrap();
     assert_eq!(again["epoch"], 1);
 }
@@ -1304,6 +1320,7 @@ fn review_offline_epoch_withdraws_other_devices_pending_reply() {
             &c.sid,
             "offline",
             "New speech",
+            None,
             None,
             "t",
             focus["binding"]["binding_id"].as_str().unwrap(),
@@ -1525,6 +1542,7 @@ fn review_cancelled_turn_cannot_return_as_offline_speech() {
             &c.sid,
             "cancelled",
             "Cancelled words",
+            None,
             None,
             "t",
             focus["binding"]["binding_id"].as_str().unwrap()

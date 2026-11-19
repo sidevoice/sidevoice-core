@@ -72,9 +72,11 @@ impl Room {
                 inner
                     .conversations
                     .finish(thread, sid, &turn.turn_id, turn.epoch);
-                inner.settle_empty_turn(thread, sid, turn.epoch);
+                // The call ended mid-turn: "said nothing" would be false, the words may still arrive late.
+                inner.unheard.finish_empty(thread, turn.epoch);
             }
         }
+        inner.note_call_ended(sid);
         inner.browsers.leave(sid);
         inner.interrupt_client(sid, "call_ended");
         if let Some(telemetry) = super::telemetry::shared() {

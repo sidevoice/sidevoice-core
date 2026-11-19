@@ -81,10 +81,13 @@ impl Unheard {
     /// A person came back to `thread`: if they missed something published until now, the agent is told unless they
     /// speak first.
     pub(super) fn offer_note(&mut self, thread: &str, until: u64) {
-        let note = self.notes.entry(thread.to_owned()).or_insert(Note {
-            due: seconds() + NOTE_GRACE_SECONDS,
-            until,
-        });
+        // Every return restarts the grace: an overdue note is not sent the moment the person is back.
+        let due = seconds() + NOTE_GRACE_SECONDS;
+        let note = self
+            .notes
+            .entry(thread.to_owned())
+            .or_insert(Note { due, until });
+        note.due = due;
         // Back again before the note was due: what was published meanwhile was missed too.
         note.until = note.until.max(until);
     }
@@ -172,6 +175,41 @@ impl Inner {
     pub(super) fn settle_empty_turn(&mut self, thread: &str, session: &str, epoch: u64) {
         if self.unheard.finish_empty(thread, epoch) {
             self.queue_unheard_note(thread, session, "turn_empty", None, None);
+        }
+    }
+
+    /// The call `sid` is ending: when it was the last one on its conversation and something is still untold, the agent
+    /// is sent one `call_ended` note with the block. Never `user_returned` (nobody is back) and never `turn_empty`.
+    pub(super) fn note_call_ended(&mut self, sid: &str) {
+        let mut threads: Vec<String> = Vec::new();
+        if let Some(browser) = self.browsers.get(sid) {
+            threads.extend(browser.bound_target().map(|target| target.thread.clone()));
+            threads.extend(
+                browser
+                    .turns
+                    .iter()
+                    .filter_map(|turn| turn.thread_id.clone()),
+            );
+        }
+        threads.sort();
+        threads.dedup();
+        for thread in threads {
+            if self
+                .browsers
+                .on_thread(&thread)
+                .any(|(other, _)| other != sid)
+            {
+                continue;
+            }
+            if self
+                .unheard
+                .block(&thread, &self.journal, self.journal.last_seq())
+                .is_none()
+            {
+                continue;
+            }
+            self.unheard.drop_note(&thread);
+            self.queue_unheard_note(&thread, sid, "call_ended", None, None);
         }
     }
 

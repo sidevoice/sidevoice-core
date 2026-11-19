@@ -810,7 +810,7 @@ fn a_miss_confirmed_by_the_new_session_of_the_same_device_is_told_on_return() {
     let (_directory, room, _, _) = room_on("t");
     let (first, _) = call(&room, "t");
     reply(&room, &first, "t", "r", "Reply", revision(&room, &first));
-    room.leave(&first);
+    room.park(&first, true);
     let second = call_of(&room, "device", "t");
     confirm_not_heard_of(&room, &second, &first, "r");
     assert_eq!(
@@ -893,4 +893,176 @@ fn from_the_first_reply_not_heard_in_full_every_later_one_counts_and_it_is_told_
     // Told once: the next words carry nothing about those replies.
     say(&room, &sid, "Thanks.");
     assert_eq!(told(&room, "Thanks."), None);
+}
+
+fn binding_of(room: &Room, sid: &str) -> String {
+    room.snapshot(Some(sid))["binding"]["binding_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn offline(room: &Room, sid: &str, turn: &str, text: &str, age_ms: Option<u64>) -> Value {
+    let binding = binding_of(room, sid);
+    room.offline_input_captured(sid, turn, text, None, age_ms, "t", &binding)
+        .unwrap()
+}
+
+fn due_now(room: &Room) {
+    room.inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due = 0;
+}
+
+#[test]
+fn every_return_restarts_the_grace_of_an_overdue_note() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "elsewhere");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.select(&sid, "t").unwrap();
+    confirm_not_heard(&room, &sid, "p");
+    due_now(&room);
+    room.park(&sid, true);
+    room.resume(&sid, &[]);
+    assert!(
+        deliveries(&room, "note").is_empty(),
+        "a fresh grace after the resume"
+    );
+    due_now(&room);
+    assert_eq!(only(deliveries(&room, "note"))["unheard"]["count"], 1);
+}
+
+#[test]
+fn the_last_call_ending_with_something_untold_sends_one_call_ended_note() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.park(&sid, true);
+    room.leave(&sid);
+    let note = only(deliveries(&room, "note"));
+    assert_eq!(note["notice"]["kind"], "call_ended");
+    assert_eq!(note["unheard"]["count"], 1);
+    assert!(deliveries(&room, "note").is_empty(), "told once");
+}
+
+#[test]
+fn a_call_ending_mid_turn_sends_call_ended_and_no_turn_empty() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.begin_at_focus(&sid, "turn").unwrap();
+    room.leave(&sid);
+    let note = only(deliveries(&room, "note"));
+    assert_eq!(note["notice"]["kind"], "call_ended");
+}
+
+#[test]
+fn a_call_ending_with_nothing_untold_or_another_call_there_sends_nothing() {
+    let (_directory, room, _, _) = room_on("t");
+    let (first, _a) = call(&room, "t");
+    room.leave(&first);
+    assert!(deliveries(&room, "note").is_empty());
+    let (phone, _b) = call(&room, "t");
+    let (laptop, _c) = call(&room, "t");
+    reply(&room, &phone, "t", "p", "Done.", revision(&room, &phone));
+    room.park(&phone, true);
+    room.leave(&phone);
+    assert!(
+        deliveries(&room, "note").is_empty(),
+        "the laptop is still there"
+    );
+    room.leave(&laptop);
+    assert_eq!(
+        only(deliveries(&room, "note"))["notice"]["kind"],
+        "call_ended"
+    );
+}
+
+#[test]
+fn a_late_transcript_is_tagged_and_opens_no_epoch() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    let epoch = room.inner.lock().unwrap().conversations.epoch("t");
+    let taken = offline(&room, &sid, "late-turn", "Said long ago", Some(300_000));
+    assert_eq!(taken["epoch"], epoch);
+    assert_eq!(room.inner.lock().unwrap().conversations.epoch("t"), epoch);
+    let message = only(deliveries(&room, "voice"));
+    assert_eq!(message["late"], true);
+    let said = message["said_at"].as_str().unwrap();
+    let said = chrono::DateTime::parse_from_rfc3339(said).unwrap();
+    let age = chrono::Utc::now().signed_duration_since(said).num_seconds();
+    assert!((299..=302).contains(&age), "computed from the age: {age}");
+    // The same turn sent again: one row.
+    offline(&room, &sid, "late-turn", "Said long ago", Some(310_000));
+    assert!(deliveries(&room, "voice").is_empty());
+}
+
+#[test]
+fn offline_words_inside_the_window_are_not_late_and_open_an_epoch() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    let epoch = room.inner.lock().unwrap().conversations.epoch("t");
+    offline(&room, &sid, "recent", "Just now", Some(30_000));
+    assert_eq!(
+        room.inner.lock().unwrap().conversations.epoch("t"),
+        epoch + 1
+    );
+    let message = only(deliveries(&room, "voice"));
+    assert!(message.get("late").is_none() && message.get("said_at").is_none());
+}
+
+#[test]
+fn a_late_transcript_takes_the_block_and_drops_a_held_note() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "elsewhere");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.select(&sid, "t").unwrap();
+    confirm_not_heard(&room, &sid, "p");
+    offline(&room, &sid, "late-turn", "Late words", Some(120_000));
+    let message = only(deliveries(&room, "voice"));
+    assert_eq!(message["unheard"]["count"], 1);
+    assert!(room.inner.lock().unwrap().unheard.note_mut("t").is_none());
+}
+
+#[test]
+fn a_late_transcript_withdraws_nothing_from_the_live_exchange() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, mut received) = call(&room, "t");
+    reply(
+        &room,
+        &sid,
+        "t",
+        "live",
+        "Live answer",
+        revision(&room, &sid),
+    );
+    while received.try_recv().is_ok() {}
+    offline(&room, &sid, "late-turn", "Late words", Some(120_000));
+    assert!(withdrawn(&mut received).is_empty());
+}
+
+#[test]
+fn words_for_a_closed_conversation_are_not_sent() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    let binding = binding_of(&room, &sid);
+    room.inner.lock().unwrap().closed_threads.insert("t".into());
+    let answer = room
+        .offline_input_captured(
+            &sid,
+            "late-turn",
+            "Too late",
+            None,
+            Some(120_000),
+            "t",
+            &binding,
+        )
+        .unwrap();
+    assert_eq!(answer["accepted"], false);
+    assert_eq!(answer["status"], "not_sent");
+    assert_eq!(room.inner.lock().unwrap().journal.waiting_input().0, 0);
 }

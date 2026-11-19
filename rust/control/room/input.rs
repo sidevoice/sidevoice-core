@@ -16,6 +16,14 @@ pub(super) const MAX_INPUT_BYTES: usize = 12_000;
 /// How many messages may wait at once to reach their agents, and how many bytes of words between them.
 const MAX_WAITING_INPUT: usize = 256;
 const MAX_WAITING_BYTES: usize = 1024 * 1024;
+/// Offline words older than this when they reach the room (the call's resume window) are late.
+const LATE_AFTER_MS: u64 = 60_000;
+
+fn rfc3339(ms: u64) -> String {
+    chrono::DateTime::from_timestamp_millis(i64::try_from(ms).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
 
 struct InputDraft<'a> {
     row_id: String,
@@ -32,6 +40,8 @@ struct InputDraft<'a> {
     turn_id: Option<&'a str>,
     offline: Option<&'a str>,
     time: Option<u64>,
+    /// When the person said it (ms since the epoch), set only on a late transcript.
+    said_at: Option<u64>,
 }
 
 impl Room {
@@ -94,6 +104,7 @@ impl Room {
             turn_id: None,
             offline: None,
             time: None,
+            said_at: None,
         })
     }
     /// Commit a completed transcript to the same memory journal/outbox as typed input.
@@ -126,32 +137,44 @@ impl Room {
         let Some(target) = target else {
             return Err(RoomError::new(409, "room.focus_changed"));
         };
-        self.offline_input_captured(sid, turn_id, text, time, &target.thread, &target.binding_id)
+        self.offline_input_captured(
+            sid,
+            turn_id,
+            text,
+            time,
+            None,
+            &target.thread,
+            &target.binding_id,
+        )
     }
 
     /// Offline words carry the conversation captured when speech began, even if focus changed
     /// before the room accepted them. The epoch is assigned once at acceptance.
+    #[allow(clippy::too_many_arguments)] // The wire frame's fields, one each.
     pub fn offline_input_captured(
         &self,
         sid: &str,
         turn_id: &str,
         text: &str,
         time: Option<u64>,
+        age_ms: Option<u64>,
         thread: &str,
         binding: &str,
     ) -> Result<Value, RoomError> {
         let span = info_span!("input", kind = "offline", session = %ClientId(sid), turn = %ClientId(turn_id));
         let _in_span = span.enter();
-        let result = self.offline_input_locked(sid, turn_id, text, time, thread, binding);
+        let result = self.offline_input_locked(sid, turn_id, text, time, age_ms, thread, binding);
         log_queued(&result, text);
         result
     }
+    #[allow(clippy::too_many_arguments)] // The wire frame's fields, one each.
     fn offline_input_locked(
         &self,
         sid: &str,
         turn_id: &str,
         text: &str,
         time: Option<u64>,
+        age_ms: Option<u64>,
         thread: &str,
         binding: &str,
     ) -> Result<Value, RoomError> {
@@ -205,9 +228,15 @@ impl Room {
         if !inner.conversations.can_begin(thread) {
             return Err(RoomError::new(429, "room.input_backlog_full"));
         }
+        // A conversation that was closed takes no more words, however late: never rerouted, never left pending.
+        let closed = inner.closed_threads.contains(thread);
         let Some(browser) = inner.browsers.get_mut(sid) else {
             return Err(RoomError::new(409, "room.browser_absent"));
         };
+        if closed {
+            let revision = browser.next_revision();
+            return Ok(inner.not_sent(sid, row_id, revision, turn_id));
+        }
         let language = browser.language.clone();
         let title = inner
             .bindings
@@ -220,7 +249,17 @@ impl Room {
             .expect("the call, under the same lock");
         let revision = browser.next_revision();
         browser.turn_revision = revision;
-        let epoch = inner.open_speech_epoch(thread, sid, turn_id);
+        // The age is the device's own measure, so it does not depend on its clock: the time it was said is
+        // computed here from it. Words older than the resume window are late: they open no epoch and withdraw
+        // nothing, as what they answer to has moved on.
+        let now = millis();
+        let said_at = age_ms.map(|age| now.saturating_sub(age));
+        let late = age_ms.is_some_and(|age| age > LATE_AFTER_MS);
+        let epoch = if late {
+            inner.conversations.epoch(thread)
+        } else {
+            inner.open_speech_epoch(thread, sid, turn_id)
+        };
         inner.conversations.finish(thread, sid, turn_id, epoch);
         let message_id = id();
         inner.queue_input(InputDraft {
@@ -236,7 +275,8 @@ impl Room {
             message_id: &message_id,
             turn_id: Some(turn_id),
             offline: Some("offline"),
-            time,
+            time: said_at.or(time),
+            said_at: said_at.filter(|_| late),
         })
     }
 }
@@ -356,6 +396,7 @@ impl Inner {
             turn_id: Some(&turn.turn_id),
             offline: None,
             time: None,
+            said_at: None,
         })
     }
     fn queue_input(&mut self, draft: InputDraft<'_>) -> Result<Value, RoomError> {
@@ -375,9 +416,14 @@ impl Inner {
             turn_id,
             offline,
             time,
+            said_at,
         } = draft;
         let mut payload = json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
             "history_id":row_id,"revision":revision,"epoch":epoch,"channel":"voice","binding_id":binding_id,"title":title});
+        if let Some(said_at) = said_at {
+            payload["late"] = json!(true);
+            payload["said_at"] = json!(rfc3339(said_at));
+        }
         // The person's next message, spoken or typed, carries the not-heard block, and no return note is sent after it.
         self.unheard.resolve_words(thread_id);
         if let Some(unheard) = self.take_unheard(thread_id, None) {

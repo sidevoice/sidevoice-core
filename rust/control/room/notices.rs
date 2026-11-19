@@ -56,7 +56,7 @@ impl Inner {
             return;
         }
         let unheard = self.take_unheard(thread, until);
-        if unheard.is_none() && kind == "user_returned" {
+        if unheard.is_none() && matches!(kind, "user_returned" | "call_ended") {
             return;
         }
         let message_id = format!("note:{}", id());
@@ -246,6 +246,7 @@ macro_rules! catch_up {
 pub(super) fn instruction(kind: &str) -> &'static str {
     match kind {
         "turn_empty" => "The person said nothing. Resend what you meant if it still matters.",
+        "call_ended" => concat!("The call ended. ", catch_up!()),
         "user_returned" => concat!("The person is back. ", catch_up!()),
         _ => catch_up!(),
     }
