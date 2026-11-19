@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/sidevoice/sidevoice-core/compare/v0.19.0...v0.19.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **crash-reports:** send os.name with crash reports ([#258](https://github.com/sidevoice/sidevoice-core/issues/258)) ([3c70c6d](https://github.com/sidevoice/sidevoice-core/commit/3c70c6dfb588f3327c8548a3c25aed25e1bb9a15))
+
 ## [0.19.0](https://github.com/sidevoice/sidevoice-core/compare/v0.18.0...v0.19.0) (2026-11-18)
 
 
