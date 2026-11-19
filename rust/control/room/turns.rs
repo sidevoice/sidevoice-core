@@ -5,6 +5,7 @@ use tracing::info;
 
 use super::browsers::MAX_OPEN_TURNS;
 use super::error::RoomError;
+use super::util::SpeakingStyle;
 use super::{Inner, Room};
 use crate::log_safe::{ClientId, IdHash};
 
@@ -26,7 +27,7 @@ pub struct VoiceTurn {
     /// The person cancelled it: its words, when they come, are dropped.
     pub(super) cancelled: bool,
     /// How the person wants the agent to speak, said when the turn finished.
-    pub(super) speaking_style: Option<&'static str>,
+    pub(super) speaking_style: Option<SpeakingStyle>,
 }
 
 /// Ids and sizes only: the title and the conversation id are the person's.
@@ -97,7 +98,7 @@ impl Room {
         text: Option<&str>,
         timings: &Value,
         continuation: Continuation,
-        speaking_style: &Value,
+        speaking_style: Option<SpeakingStyle>,
     ) -> Result<Value, RoomError> {
         let finished = self.inner.lock().expect("room lock").finish_spoken_turn(
             sid,

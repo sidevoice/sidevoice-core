@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use super::error::RoomError;
 use super::input::MAX_INPUT_BYTES;
 use super::turns::{Continuation, PreparedTurn, VoiceTurn};
+use super::util::SpeakingStyle;
 use super::Inner;
 
 impl Inner {
@@ -50,7 +51,7 @@ impl Inner {
         text: Option<&str>,
         timings: &Value,
         continuation: Continuation,
-        speaking_style: &Value,
+        speaking_style: Option<SpeakingStyle>,
     ) -> Result<Value, RoomError> {
         if text.is_some_and(|text| text.len() > MAX_INPUT_BYTES) {
             return Err(RoomError::new(413, "room.text_too_long"));
@@ -73,7 +74,7 @@ impl Inner {
             Continuation::Standalone
         };
         let (mut turn, continuing) = self.take_finished(sid, turn_id, effective)?;
-        turn.speaking_style = super::util::speaking_style(speaking_style);
+        turn.speaking_style = speaking_style;
         if let Some(thread) = turn.thread_id.as_deref() {
             self.conversations.finish(thread, sid, turn_id, turn.epoch);
         }

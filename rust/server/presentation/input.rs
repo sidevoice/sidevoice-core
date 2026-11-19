@@ -9,7 +9,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use uuid::Uuid;
 
-use crate::control::room::Continuation;
+use crate::control::room::{Continuation, SpeakingStyle};
 use crate::server::refusal::{refuse, require_origin, room_refusal, Handled};
 use crate::server::request::room_payload;
 use crate::server::{AppState, AuthenticatedDevice};
@@ -38,7 +38,7 @@ pub(super) async fn text(
             data["thread_id"].as_str().unwrap_or(""),
             data["binding_id"].as_str().unwrap_or(""),
             mid,
-            &data["speaking_style"],
+            SpeakingStyle::parse(&data["speaking_style"]),
         )
         .map_err(|error| room_refusal(error, &headers))?;
     Ok(Json(sent).into_response())

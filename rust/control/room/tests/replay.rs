@@ -121,7 +121,7 @@ fn replay_stops_close_and_leave_keep_original_history() {
         None,
         &Value::Null,
         Continuation::Standalone,
-        &Value::Null,
+        None,
     )
     .unwrap();
     let (other_events, _other_received) = mpsc::channel(8);

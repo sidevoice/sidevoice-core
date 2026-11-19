@@ -114,7 +114,7 @@ fn an_open_turn_refuses_immediately_and_retry_keeps_the_refusal() {
             None,
             &Value::Null,
             Continuation::Standalone,
-            &Value::Null,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -140,7 +140,7 @@ fn a_spoken_boundary_stales_old_context_but_accepts_fresh_context() {
             Some("New context"),
             &Value::Null,
             Continuation::Standalone,
-            &Value::Null,
+            None,
         )
         .unwrap();
     let stale = f.publish("stale", &sid, "thread-a", revision, 0);
@@ -176,7 +176,7 @@ fn typed_context_does_not_change_epoch_or_queued_replies() {
             "thread-a",
             &binding,
             "00000000-0000-4000-8000-000000000001",
-            &Value::Null,
+            None,
         )
         .unwrap();
     assert_eq!(typed["epoch"], 0);
@@ -204,7 +204,7 @@ fn focus_and_session_switches_cannot_rewrite_a_reply_epoch() {
             Some("Later"),
             &Value::Null,
             Continuation::Standalone,
-            &Value::Null,
+            None,
         )
         .unwrap();
     let stale = f.publish("stale", &first, "thread-a", revision, 0);

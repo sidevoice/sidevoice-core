@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::support::{pull, pull_room, BeginAtFocus};
-use crate::control::room::{Continuation, Room};
+use crate::control::room::{Continuation, Room, SpeakingStyle};
 
 const OFFLINE: &str = "offline-turn";
 
@@ -26,7 +26,7 @@ fn spoken(room: &Room, sid: &str, turn_id: &str, text: &str, style: &Value) {
         Some(text),
         &Value::Null,
         Continuation::Standalone,
-        style,
+        SpeakingStyle::parse(style),
     )
     .unwrap();
 }
@@ -44,16 +44,31 @@ fn styles(messages: &[Value]) -> Vec<Option<String>> {
 }
 
 fn typed_and_spoken(room: &Room, sid: &str, bid: &str) {
-    room.send_text("typed", sid, "t", bid, "m-1", &json!("brief"))
+    room.send_text("typed", sid, "t", bid, "m-1", Some(SpeakingStyle::Brief))
         .unwrap();
     spoken(room, sid, "turn-1", "spoken", &json!("detailed"));
-    room.send_text("bogus", sid, "t", bid, "m-2", &json!("loud"))
-        .unwrap();
+    room.send_text(
+        "bogus",
+        sid,
+        "t",
+        bid,
+        "m-2",
+        SpeakingStyle::parse(&json!("loud")),
+    )
+    .unwrap();
     spoken(room, sid, "turn-2", "number", &json!(3));
-    room.send_text("absent", sid, "t", bid, "m-3", &Value::Null)
+    room.send_text("absent", sid, "t", bid, "m-3", None)
         .unwrap();
-    room.offline_input_captured(sid, OFFLINE, "late", None, "t", bid, &json!("normal"))
-        .unwrap();
+    room.offline_input_captured(
+        sid,
+        OFFLINE,
+        "late",
+        None,
+        "t",
+        bid,
+        Some(SpeakingStyle::Normal),
+    )
+    .unwrap();
 }
 
 const EXPECTED: [Option<&str>; 6] = [
