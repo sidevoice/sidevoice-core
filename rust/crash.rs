@@ -210,6 +210,7 @@ fn write(
         Panic {
             version: env!("CARGO_PKG_VERSION"),
             os: context.os,
+            os_name: context.os_name,
             arch: context.arch,
             at: crashed.into(),
             literal,

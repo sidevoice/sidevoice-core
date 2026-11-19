@@ -50,6 +50,7 @@ fn panic<'a>(literal: Option<&'a str>, line: u32) -> Panic<'a> {
     Panic {
         version: "1.2.3",
         os: "linux",
+        os_name: "Linux",
         arch: "amd64",
         at: Utc::now(),
         literal,
@@ -140,6 +141,7 @@ fn a_record_holds_the_closed_field_list_and_a_literal_message() {
             "location",
             "log_tail",
             "os",
+            "os_name",
             "signature",
             "version"
         ]
@@ -259,6 +261,8 @@ fn a_record_with_a_bad_field_is_not_taken() {
         ("id", json!("../../x")),
         ("version", json!("1 2")),
         ("os", json!("")),
+        ("os_name", json!("Plan9")),
+        ("os_name", Value::Null),
         ("last_at", json!("yesterday")),
     ] {
         let mut bad = base.clone();
@@ -746,7 +750,7 @@ fn everything() -> CrashRecord {
 fn the_event_carries_the_closed_field_list_and_nothing_else() {
     let record = everything();
     let machine = "0123456789abcdef0123456789abcdef";
-    let value = serde_json::to_value(event(&record, "Linux", machine)).unwrap();
+    let value = serde_json::to_value(event(&record, machine)).unwrap();
     assert_eq!(
         keys(&value),
         [
@@ -826,7 +830,7 @@ fn the_event_carries_the_closed_field_list_and_nothing_else() {
     assert_eq!(images[0]["name"], "sidevoice-core");
     assert_eq!(images[0]["id"], ID);
     // Without a formatted message there is no length.
-    let literal = serde_json::to_value(event(&record_with_literal(), "Linux", machine)).unwrap();
+    let literal = serde_json::to_value(event(&record_with_literal(), machine)).unwrap();
     assert!(literal["extra"].get("len").is_none());
 }
 
@@ -836,7 +840,7 @@ fn record_with_literal() -> CrashRecord {
 
 #[test]
 fn no_home_or_install_path_reaches_the_event() {
-    let json = serde_json::to_string(&event(&everything(), "Linux", "00")).unwrap();
+    let json = serde_json::to_string(&event(&everything(), "00")).unwrap();
     for canary in ["canary-user", "/home/", ".cargo", ".local", "registry"] {
         assert!(!json.contains(canary), "{canary} in {json}");
     }
@@ -905,6 +909,21 @@ async fn a_record_is_sent_under_its_own_id_and_deleted_once_sentry_took_it() {
 }
 
 #[tokio::test]
+async fn the_sent_os_name_is_the_one_the_record_was_made_with() {
+    let f = fixture();
+    let server = envelope_server(200).await;
+    let mut made = record(1);
+    // Not the context's own ("Linux"): the one stored at panic time must win.
+    made.os_name = "macOS".to_owned();
+    f.store.record(made).unwrap();
+    assert_eq!(drain(&context(&f), &dsn(&server)).await, 1);
+    let requests = server.received_requests().await.unwrap();
+    let body = String::from_utf8_lossy(&requests[0].body).into_owned();
+    assert!(body.contains(r#""os.name":"macOS""#), "{body}");
+    assert!(!body.contains(r#""os.name":"Linux""#), "{body}");
+}
+
+#[tokio::test]
 async fn a_failed_send_keeps_the_record_and_ends_the_pass() {
     let f = fixture();
     let server = envelope_server(500).await;
@@ -932,13 +951,7 @@ async fn nothing_leaves_a_machine_set_to_off() {
     assert_eq!(drain(&context, &dsn(&server)).await, 0);
     let client = reqwest::Client::new();
     assert!(matches!(
-        deliver(
-            &context,
-            &client,
-            &dsn(&server),
-            event(&record(2), "Linux", "00")
-        )
-        .await,
+        deliver(&context, &client, &dsn(&server), event(&record(2), "00")).await,
         Err(Undelivered::Off)
     ));
     assert!(server.received_requests().await.unwrap().is_empty());
@@ -1035,6 +1048,6 @@ fn a_frame_without_an_address_is_never_kept_or_sent() {
     ]);
     let read = CrashRecord::from_untrusted(&json, &[]).unwrap();
     assert_eq!(read.backtrace.len(), 1);
-    let sent = serde_json::to_string(&event(&read, "Linux", "00")).unwrap();
+    let sent = serde_json::to_string(&event(&read, "00")).unwrap();
     assert!(!sent.contains("\"z\"") && !sent.contains("0x0\""), "{sent}");
 }
