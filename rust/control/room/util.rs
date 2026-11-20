@@ -1,6 +1,6 @@
 //! Small helpers shared by every part of the room: clocks, identifiers, input checks and the
 //! default conversation title.
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -41,4 +41,20 @@ pub(super) fn default_title(thread: &str, language: &str) -> String {
             .with_param("id", thread.chars().take(8).collect::<String>()),
         language,
     )
+}
+
+/// How long a call whose socket went stays parked for its page to come back.
+const RESUME_SECONDS: f64 = 60.0;
+/// `VOICE_RESUME_SECONDS` as the core reads it: unreadable or negative is the default. The call's resume window and
+/// the age after which offline words are late are this one value.
+pub fn resume_window(value: Option<&str>) -> Duration {
+    let seconds = value
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .unwrap_or(RESUME_SECONDS);
+    Duration::from_secs_f64(seconds)
+}
+/// The configured resume window.
+pub fn configured_resume_window() -> Duration {
+    resume_window(std::env::var("VOICE_RESUME_SECONDS").ok().as_deref())
 }
