@@ -50,13 +50,20 @@ pub struct Cli {
 }
 
 /// What the command line can do besides serving.
-#[derive(Clone, Copy, Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Command {
     /// Whether this machine sends its crash reports to the developers: on by default; off erases the machine id and the
     /// reports not yet sent
     CrashReports {
         #[arg(value_enum)]
         action: Switch,
+    },
+    /// Called by the service manager after the core stops (systemd `ExecStopPost=`): writes the exit file when the core ended in
+    /// a crash status. Reads `$SERVICE_RESULT`, `$EXIT_CODE` and `$EXIT_STATUS`; always succeeds
+    RecordExit {
+        /// The exit file [default: the core's, under the data directory]
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
     },
 }
 

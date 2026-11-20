@@ -24,3 +24,26 @@ pub fn crash_reports(config: &Config, action: Switch) -> io::Result<&'static str
         "off"
     })
 }
+
+/// `sidevoice-core record-exit`: writes the exit file when the service manager says the core ended in a crash status, for the next
+/// start to read (`crash::exit`). `file` is where; by default the core's own, beside the data directory (`--data-dir` when given,
+/// else the standard one). Nothing else is read or kept.
+pub fn record_exit(
+    file: Option<std::path::PathBuf>,
+    data_dir: Option<std::path::PathBuf>,
+) -> io::Result<bool> {
+    use sidevoice_platform::exit;
+    let path = match file {
+        Some(path) => path,
+        None => {
+            let core = match data_dir {
+                Some(dir) => std::path::absolute(dir)?,
+                None => crate::platform::data_dir::core_dir(&crate::platform::data_dir::resolve(
+                    |name| std::env::var_os(name),
+                )?),
+            };
+            crate::crash::exit_file_of(&core).ok_or(io::ErrorKind::InvalidInput)?
+        }
+    };
+    exit::record_systemd(&path, |name| std::env::var(name).ok())
+}

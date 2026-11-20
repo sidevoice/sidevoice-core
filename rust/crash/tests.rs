@@ -95,6 +95,7 @@ fn context(f: &Fixture) -> Context {
         arch: "amd64",
         images: Vec::new(),
         in_flight: std::sync::atomic::AtomicUsize::new(0),
+        run: "ab".to_owned(),
     }
 }
 

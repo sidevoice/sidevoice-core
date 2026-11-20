@@ -103,10 +103,13 @@ pub fn event(record: &CrashRecord, machine_id: &str) -> Event<'static> {
         })
         .collect();
     let mut extra: Map<String, Value> = Map::new();
-    extra.insert(
-        "location".to_owned(),
-        Value::from(format!("{}:{}", record.location.file, record.location.line)),
-    );
+    // An exit status has no place in the source.
+    if record.location.line > 0 {
+        extra.insert(
+            "location".to_owned(),
+            Value::from(format!("{}:{}", record.location.file, record.location.line)),
+        );
+    }
     extra.insert("log_tail".to_owned(), Value::from(record.log_tail.clone()));
     if let Some(len) = record.exception.len {
         extra.insert("len".to_owned(), Value::from(len));
@@ -296,6 +299,7 @@ pub(super) fn pass(context: &Context, dsn: Option<&Dsn>) {
             return;
         }
     }
+
     let Some(dsn) = dsn else { return };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
