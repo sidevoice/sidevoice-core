@@ -98,7 +98,7 @@ impl Room {
             turn_id: None,
             offline: None,
             time: None,
-            speaking_style: speaking_style,
+            speaking_style,
         })
     }
     /// Commit a completed transcript to the same memory journal/outbox as typed input.
@@ -256,7 +256,7 @@ impl Room {
             turn_id: Some(turn_id),
             offline: Some("offline"),
             time,
-            speaking_style: speaking_style,
+            speaking_style,
         })
     }
 }
