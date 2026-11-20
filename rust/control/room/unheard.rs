@@ -39,6 +39,8 @@ pub(super) struct Note {
     pub(super) due: u64,
     /// The journal position when the person came back: replies published after it are being heard now.
     pub(super) until: u64,
+    /// A reply of the agent was refused while the person spoke and never answered: the note goes even with no block.
+    pub(super) obligation: bool,
 }
 
 #[derive(Default)]
@@ -92,15 +94,20 @@ impl Unheard {
     pub(super) fn offer_note(&mut self, thread: &str, until: u64) {
         // Every return restarts the grace: an overdue note is not sent the moment the person is back.
         let due = seconds() + NOTE_GRACE_SECONDS;
-        let note = self
-            .notes
-            .entry(thread.to_owned())
-            .or_insert(Note { due, until });
+        // The person is back: the call that ended is no longer the last word, but what it owed the agent is.
+        let owed = self
+            .ended
+            .remove(thread)
+            .is_some_and(|ended| ended.obligation);
+        let note = self.notes.entry(thread.to_owned()).or_insert(Note {
+            due,
+            until,
+            obligation: false,
+        });
+        note.obligation |= owed;
         note.due = due;
         // Back again before the note was due: what was published meanwhile was missed too.
         note.until = note.until.max(until);
-        // The person is back: the call that ended is no longer the last word.
-        self.ended.remove(thread);
     }
 
     /// The last call on `thread` ended: the agent is told after the grace, unless somebody is back by then or speaks.
@@ -133,11 +140,11 @@ impl Unheard {
     }
 
     /// The notes due at `now`, by conversation.
-    pub(super) fn due_notes(&self, now: u64) -> Vec<(String, u64)> {
+    pub(super) fn due_notes(&self, now: u64) -> Vec<(String, u64, bool)> {
         self.notes
             .iter()
             .filter(|(_, note)| note.due <= now)
-            .map(|(thread, note)| (thread.clone(), note.until))
+            .map(|(thread, note)| (thread.clone(), note.until, note.obligation))
             .collect()
     }
 
@@ -215,7 +222,7 @@ impl Inner {
     /// on, and what of it is still not heard is in the next block.
     pub(super) fn settle_empty_turn(&mut self, thread: &str, session: &str, epoch: u64) {
         if self.unheard.finish_empty(thread, epoch) {
-            self.queue_unheard_note(thread, session, "turn_empty", None, None);
+            self.queue_unheard_note(thread, session, "turn_empty", None, None, false);
         }
     }
 
@@ -263,7 +270,10 @@ impl Inner {
     /// person's return tells it) or what was untold has been confirmed heard meanwhile.
     pub(super) fn materialize_ended(&mut self) {
         for (thread, session, obligation) in self.unheard.due_ended(seconds()) {
-            if self.browsers.on_thread(&thread).next().is_some() {
+            // Somebody is back (their return tells it), or the conversation was closed: nothing lands on it.
+            if self.browsers.on_thread(&thread).next().is_some()
+                || self.closed_threads.contains(&thread)
+            {
                 self.unheard.drop_ended(&thread);
                 continue;
             }
@@ -275,7 +285,7 @@ impl Inner {
             }
             self.unheard.drop_ended(&thread);
             if obligation || self.unheard_now(&thread) {
-                self.queue_unheard_note(&thread, &session, "call_ended", None, None);
+                self.queue_unheard_note(&thread, &session, "call_ended", None, None, false);
             }
         }
     }

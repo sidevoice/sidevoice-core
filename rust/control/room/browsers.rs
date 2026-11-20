@@ -203,8 +203,14 @@ impl Browsers {
     }
     /// A call on `thread` that can hear it now: connected, with speech on.
     pub(super) fn listener_on(&self, thread: &str) -> Option<String> {
+        self.listener_on_besides(thread, "")
+    }
+    /// As [`Browsers::listener_on`], not counting call `except`.
+    pub(super) fn listener_on_besides(&self, thread: &str, except: &str) -> Option<String> {
         self.on_thread(thread)
-            .find(|(_, browser)| browser.parked.is_none() && browser.speech_on)
+            .find(|(sid, browser)| {
+                sid.as_str() != except && browser.parked.is_none() && browser.speech_on
+            })
             .map(|(sid, _)| sid.clone())
     }
     /// Tell the call that sent an input row what became of it.

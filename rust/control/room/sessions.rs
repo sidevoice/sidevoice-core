@@ -77,12 +77,9 @@ impl Room {
                 // refused meanwhile is still owed: another call on the conversation plays a resend, or else the
                 // call_ended note tells the agent.
                 if inner.unheard.finish_empty(thread, turn.epoch) {
-                    if inner
-                        .browsers
-                        .on_thread(thread)
-                        .any(|(other, _)| other != sid)
-                    {
-                        inner.queue_unheard_note(thread, sid, "turn_empty", None, None);
+                    // Only a call that can hear it now plays the resend: a parked one cannot.
+                    if inner.browsers.listener_on_besides(thread, sid).is_some() {
+                        inner.queue_unheard_note(thread, sid, "turn_empty", None, None, false);
                     } else {
                         refused.push(thread.to_owned());
                     }

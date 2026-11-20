@@ -1309,3 +1309,53 @@ fn a_late_message_read_by_pull_carries_late_and_said_at() {
     assert_eq!(message["late"], true);
     assert!(message["said_at"].is_string());
 }
+
+#[test]
+fn a_silent_return_within_the_grace_still_sends_the_owed_note() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _a) = call(&room, "t");
+    room.begin_at_focus(&sid, "turn").unwrap();
+    refused(&room, &sid, "r");
+    room.leave(&sid);
+    // The person is back inside the grace and says nothing.
+    let (_back, _b) = call(&room, "t");
+    due_now(&room);
+    let note = only(deliveries(&room, "note"));
+    assert_eq!(note["notice"]["kind"], "user_returned");
+    assert!(
+        note.get("unheard").is_none(),
+        "refused replies write no row"
+    );
+    assert!(deliveries(&room, "note").is_empty(), "owed once, told once");
+}
+
+#[test]
+fn a_reply_refused_with_only_a_parked_call_left_is_not_resent() {
+    let (_directory, room, _, _) = room_on("t");
+    let (phone, _a) = call(&room, "t");
+    let (laptop, _b) = call(&room, "t");
+    room.begin_at_focus(&phone, "turn").unwrap();
+    refused(&room, &phone, "r");
+    room.park(&laptop, true);
+    room.leave(&phone);
+    assert!(
+        deliveries(&room, "note").is_empty(),
+        "nobody is listening to a resend"
+    );
+}
+
+#[test]
+fn a_call_ended_pending_on_a_closed_conversation_is_dropped() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _a) = call(&room, "t");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.leave(&sid);
+    room.inner
+        .lock()
+        .unwrap()
+        .closed_threads
+        .insert("t".to_owned());
+    ended_due(&room);
+    assert!(deliveries(&room, "note").is_empty());
+    assert!(room.inner.lock().unwrap().unheard.ended_mut("t").is_none());
+}

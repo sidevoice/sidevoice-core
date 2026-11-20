@@ -14,6 +14,8 @@ pub(super) struct PendingNotice {
     related: Option<String>,
     /// The journal position the note's block covers up to (`user_returned`); none for now.
     until: Option<u64>,
+    /// A refused reply is owed: the note goes even with no block.
+    owed: bool,
     replacement: Option<Value>,
 }
 impl PendingNotice {
@@ -50,13 +52,14 @@ impl Inner {
         kind: &str,
         related_message_id: Option<&str>,
         until: Option<u64>,
+        owed: bool,
     ) {
         if self.room_for_bytes(BLOCK_BYTES).is_err() {
-            self.remember_pending(thread, session, kind, related_message_id, until);
+            self.remember_pending(thread, session, kind, related_message_id, until, owed);
             return;
         }
         let unheard = self.take_unheard(thread, until);
-        if unheard.is_none() && kind == "user_returned" {
+        if unheard.is_none() && kind == "user_returned" && !owed {
             return;
         }
         let message_id = format!("note:{}", id());
@@ -88,7 +91,7 @@ impl Inner {
 
     pub(super) fn materialize_due_notes(&mut self) {
         let now = seconds();
-        for (thread, until) in self.unheard.due_notes(now) {
+        for (thread, until, owed) in self.unheard.due_notes(now) {
             let Some(session) = self.browsers.listener_on(&thread) else {
                 continue;
             };
@@ -102,7 +105,7 @@ impl Inner {
                 continue;
             }
             self.unheard.drop_note(&thread);
-            self.queue_unheard_note(&thread, &session, "user_returned", None, Some(until));
+            self.queue_unheard_note(&thread, &session, "user_returned", None, Some(until), owed);
         }
         self.materialize_ended();
         let pending = self.pending_notices.len();
@@ -126,6 +129,7 @@ impl Inner {
                     &note.kind,
                     note.related.as_deref(),
                     note.until,
+                    note.owed,
                 );
             } else {
                 self.pending_notices.push_back(note);
@@ -168,6 +172,7 @@ impl Inner {
                 kind: "salvaged".into(),
                 related: Some(related),
                 until: None,
+                owed: false,
                 replacement: Some(replacement),
             });
         }
@@ -213,6 +218,7 @@ impl Inner {
         kind: &str,
         related: Option<&str>,
         until: Option<u64>,
+        owed: bool,
     ) {
         if self.pending_notices.iter().any(|pending| {
             pending.thread == thread
@@ -228,6 +234,7 @@ impl Inner {
             kind: kind.into(),
             related: related.map(str::to_owned),
             until,
+            owed,
             replacement: None,
         });
     }
