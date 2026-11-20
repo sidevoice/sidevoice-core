@@ -16,7 +16,7 @@ use crate::server::AppState;
 use super::admission::{admit, await_hello, refuse_full, Admitted};
 use super::heartbeat::{Beat, Heartbeat};
 use super::registration::CallRegistration;
-use super::resume::{missed_on_return, new_token, resume_window, Missed, Outbound, Reattach};
+use super::resume::{missed_on_return, new_token, Missed, Outbound, Reattach};
 use super::{close, UNPAIRED};
 
 mod client_frames;
@@ -192,7 +192,7 @@ impl Call {
             beats,
             outbound: Outbound::default(),
             token,
-            resume_window: resume_window(std::env::var("VOICE_RESUME_SECONDS").ok().as_deref()),
+            resume_window: crate::control::room::configured_resume_window(),
             parked_until: None,
             reattach,
         }

@@ -16,8 +16,8 @@ pub(super) const MAX_INPUT_BYTES: usize = 12_000;
 /// How many messages may wait at once to reach their agents, and how many bytes of words between them.
 const MAX_WAITING_INPUT: usize = 256;
 const MAX_WAITING_BYTES: usize = 1024 * 1024;
-/// Offline words older than this when they reach the room (the call's resume window) are late.
-const LATE_AFTER_MS: u64 = 60_000;
+/// The most age a page may claim for offline words: anything older is taken as this much.
+const MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 
 fn rfc3339(ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(i64::try_from(ms).unwrap_or(i64::MAX))
@@ -235,7 +235,7 @@ impl Room {
         };
         if closed {
             let revision = browser.next_revision();
-            return Ok(inner.not_sent(sid, row_id, revision, turn_id));
+            return Ok(inner.not_sent(sid, row_id, revision, turn_id, Some(thread)));
         }
         let language = browser.language.clone();
         let title = inner
@@ -253,8 +253,12 @@ impl Room {
         // computed here from it. Words older than the resume window are late: they open no epoch and withdraw
         // nothing, as what they answer to has moved on.
         let now = millis();
+        let age_ms = age_ms.map(|age| age.min(MAX_AGE_MS));
         let said_at = age_ms.map(|age| now.saturating_sub(age));
-        let late = age_ms.is_some_and(|age| age > LATE_AFTER_MS);
+        // Late is older than the call's resume window: the one configured value.
+        let late_after =
+            u64::try_from(super::util::configured_resume_window().as_millis()).unwrap_or(u64::MAX);
+        let late = age_ms.is_some_and(|age| age > late_after);
         let epoch = if late {
             inner.conversations.epoch(thread)
         } else {
@@ -275,7 +279,8 @@ impl Room {
             message_id: &message_id,
             turn_id: Some(turn_id),
             offline: Some("offline"),
-            time: said_at.or(time),
+            // A late message is dated by its arrival (as `arrival_time` says); when it was said is `said_at`.
+            time: if late { None } else { said_at.or(time) },
             said_at: said_at.filter(|_| late),
         })
     }
@@ -379,7 +384,13 @@ impl Inner {
         }
         let (Some(thread), Some(bid)) = (turn.thread_id.as_deref(), turn.binding_id.as_deref())
         else {
-            return Ok(self.not_sent(&turn.session_id, row_id, turn.revision, &turn.turn_id));
+            return Ok(self.not_sent(
+                &turn.session_id,
+                row_id,
+                turn.revision,
+                &turn.turn_id,
+                turn.thread_id.as_deref(),
+            ));
         };
         let message_id = id();
         self.queue_input(InputDraft {
@@ -426,7 +437,9 @@ impl Inner {
         }
         // The person's next message, spoken or typed, carries the not-heard block, and no return note is sent after it.
         self.unheard.resolve_words(thread_id);
-        if let Some(unheard) = self.take_unheard(thread_id, None) {
+        // Late words are not an answer to what is still playing: only replies already settled count as unheard.
+        let until = said_at.is_some().then(|| self.settled_through(thread_id));
+        if let Some(unheard) = self.take_unheard(thread_id, until) {
             let kind = "reply_not_heard";
             payload["notice"] =
                 json!({"kind":kind,"instruction":super::notices::instruction(kind)});
@@ -507,11 +520,18 @@ impl Inner {
         Ok(())
     }
     /// Turn `turn_id`'s words, captured without a conversation to send them to: they are never queued.
-    fn not_sent(&self, sid: &str, row_id: String, revision: u64, turn_id: &str) -> Value {
+    fn not_sent(
+        &self,
+        sid: &str,
+        row_id: String,
+        revision: u64,
+        turn_id: &str,
+        thread: Option<&str>,
+    ) -> Value {
         let input = InputRef {
             session: sid.into(),
             id: row_id,
-            thread: None,
+            thread: thread.map(str::to_owned),
             revision,
             epoch: 0,
             note: false,

@@ -803,6 +803,12 @@ fn a_reply_the_app_held_across_a_lost_session_is_confirmed_by_the_same_devices_n
         .unwrap();
     assert_eq!(room.history(Some("t"))["messages"][0]["hearing"], "heard");
     assert!(!room.inner.lock().unwrap().has_unheard("t"));
+    // The lost session is not "the call ended": nothing is told, not even once the grace is over.
+    ended_due(&room);
+    assert!(deliveries(&room, "note").is_empty());
+    room.leave(&second);
+    ended_due(&room);
+    assert!(deliveries(&room, "note").is_empty(), "heard in the end");
 }
 
 #[test]
@@ -908,6 +914,26 @@ fn offline(room: &Room, sid: &str, turn: &str, text: &str, age_ms: Option<u64>) 
         .unwrap()
 }
 
+/// The grace of an ended call is over.
+fn ended_due(room: &Room) {
+    if let Some(ended) = room.inner.lock().unwrap().unheard.ended_mut("t") {
+        ended.due = 0;
+    }
+}
+
+fn receipts(received: &mut mpsc::Receiver<Value>) -> Vec<Value> {
+    std::iter::from_fn(|| received.try_recv().ok())
+        .filter(|event| event["type"] == "voice-input-receipt")
+        .map(|event| event["data"].clone())
+        .collect()
+}
+
+/// A reply refused because the person is speaking: it writes no row and leaves an obligation.
+fn refused(room: &Room, sid: &str, uid: &str) {
+    let answer = reply(room, sid, "t", uid, "Refused.", revision(room, sid));
+    assert_eq!(answer["status"], "rejected");
+}
+
 fn due_now(room: &Room) {
     room.inner
         .lock()
@@ -943,8 +969,17 @@ fn the_last_call_ending_with_something_untold_sends_one_call_ended_note() {
     reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
     room.park(&sid, true);
     room.leave(&sid);
+    assert!(
+        deliveries(&room, "note").is_empty(),
+        "after a grace, not at once"
+    );
+    ended_due(&room);
     let note = only(deliveries(&room, "note"));
     assert_eq!(note["notice"]["kind"], "call_ended");
+    assert!(note["notice"]["instruction"]
+        .as_str()
+        .unwrap()
+        .contains("nobody is listening"));
     assert_eq!(note["unheard"]["count"], 1);
     assert!(deliveries(&room, "note").is_empty(), "told once");
 }
@@ -956,6 +991,7 @@ fn a_call_ending_mid_turn_sends_call_ended_and_no_turn_empty() {
     reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
     room.begin_at_focus(&sid, "turn").unwrap();
     room.leave(&sid);
+    ended_due(&room);
     let note = only(deliveries(&room, "note"));
     assert_eq!(note["notice"]["kind"], "call_ended");
 }
@@ -971,11 +1007,13 @@ fn a_call_ending_with_nothing_untold_or_another_call_there_sends_nothing() {
     reply(&room, &phone, "t", "p", "Done.", revision(&room, &phone));
     room.park(&phone, true);
     room.leave(&phone);
+    ended_due(&room);
     assert!(
         deliveries(&room, "note").is_empty(),
         "the laptop is still there"
     );
     room.leave(&laptop);
+    ended_due(&room);
     assert_eq!(
         only(deliveries(&room, "note"))["notice"]["kind"],
         "call_ended"
@@ -1048,7 +1086,7 @@ fn a_late_transcript_withdraws_nothing_from_the_live_exchange() {
 #[test]
 fn words_for_a_closed_conversation_are_not_sent() {
     let (_directory, room, _, _) = room_on("t");
-    let (sid, _received) = call(&room, "t");
+    let (sid, mut received) = call(&room, "t");
     let binding = binding_of(&room, &sid);
     room.inner.lock().unwrap().closed_threads.insert("t".into());
     let answer = room
@@ -1064,5 +1102,210 @@ fn words_for_a_closed_conversation_are_not_sent() {
         .unwrap();
     assert_eq!(answer["accepted"], false);
     assert_eq!(answer["status"], "not_sent");
+    let frame = receipts(&mut received)
+        .into_iter()
+        .find(|data| data["status"] == "not_sent")
+        .expect("the receipt the bubble matches on");
+    assert_eq!(frame["thread_id"], "t");
+    assert_eq!(frame["turn_id"], "late-turn");
     assert_eq!(room.inner.lock().unwrap().journal.waiting_input().0, 0);
+}
+
+#[test]
+fn a_reply_refused_when_the_last_call_ends_mid_turn_is_told_by_call_ended() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "t");
+    room.begin_at_focus(&sid, "turn").unwrap();
+    refused(&room, &sid, "r");
+    assert!(
+        !room.inner.lock().unwrap().has_unheard("t"),
+        "no row, no block"
+    );
+    room.leave(&sid);
+    ended_due(&room);
+    let note = only(deliveries(&room, "note"));
+    assert_eq!(note["notice"]["kind"], "call_ended");
+    assert!(note.get("unheard").is_none());
+    assert!(deliveries(&room, "note").is_empty(), "told once");
+}
+
+#[test]
+fn a_reply_refused_when_a_call_ends_mid_turn_is_resent_through_the_other_call() {
+    let (_directory, room, _, _) = room_on("t");
+    let (phone, _a) = call(&room, "t");
+    let (laptop, _b) = call(&room, "t");
+    room.begin_at_focus(&phone, "turn").unwrap();
+    refused(&room, &phone, "r");
+    room.leave(&phone);
+    let note = only(deliveries(&room, "note"));
+    assert_eq!(note["notice"]["kind"], "turn_empty");
+    room.leave(&laptop);
+    ended_due(&room);
+    assert!(deliveries(&room, "note").is_empty(), "owed once, told once");
+}
+
+#[test]
+fn a_call_ended_is_dropped_when_somebody_is_back_or_speaks_first() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _a) = call(&room, "t");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.leave(&sid);
+    let (back, _b) = call(&room, "t");
+    ended_due(&room);
+    assert!(deliveries(&room, "note").is_empty(), "the person is back");
+    room.leave(&back);
+    ended_due(&room);
+    let _ = deliveries(&room, "note");
+    let (again, _c) = call(&room, "t");
+    reply(&room, &again, "t", "q", "More.", revision(&room, &again));
+    room.leave(&again);
+    let (speaker, _d) = call(&room, "t");
+    say(&room, &speaker, "Hello");
+    ended_due(&room);
+    assert!(deliveries(&room, "note").is_empty(), "their words carry it");
+}
+
+#[test]
+fn a_turn_spanning_the_grace_that_ends_empty_sends_one_user_returned_with_no_new_grace() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "elsewhere");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.select(&sid, "t").unwrap();
+    confirm_not_heard(&room, &sid, "p");
+    let turn = room.begin_at_focus(&sid, "turn").unwrap();
+    due_now(&room);
+    assert!(
+        deliveries(&room, "note").is_empty(),
+        "held while the turn is open"
+    );
+    room.finish_turn(
+        &sid,
+        &turn.turn_id,
+        None,
+        &json!({}),
+        Continuation::Standalone,
+    )
+    .unwrap();
+    let note = only(deliveries(&room, "note"));
+    assert_eq!(note["notice"]["kind"], "user_returned");
+}
+
+#[test]
+fn focus_away_within_the_grace_sends_nothing_and_back_restarts_it() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _received) = call(&room, "elsewhere");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.select(&sid, "t").unwrap();
+    confirm_not_heard(&room, &sid, "p");
+    room.select(&sid, "elsewhere").unwrap();
+    due_now(&room);
+    assert!(deliveries(&room, "note").is_empty(), "nobody listens to it");
+    room.select(&sid, "t").unwrap();
+    let due = room
+        .inner
+        .lock()
+        .unwrap()
+        .unheard
+        .note_mut("t")
+        .unwrap()
+        .due;
+    assert!(due > crate::control::room::util::seconds(), "a fresh grace");
+    due_now(&room);
+    assert_eq!(
+        only(deliveries(&room, "note"))["notice"]["kind"],
+        "user_returned"
+    );
+}
+
+#[test]
+fn late_words_on_a_new_session_after_call_ended_carry_no_block() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _a) = call(&room, "t");
+    reply(&room, &sid, "t", "p", "Done.", revision(&room, &sid));
+    room.leave(&sid);
+    ended_due(&room);
+    assert_eq!(
+        only(deliveries(&room, "note"))["notice"]["kind"],
+        "call_ended"
+    );
+    let (next, _b) = call(&room, "t");
+    offline(&room, &next, "turn", "Said while it was cut", Some(300_000));
+    let inner = room.inner.lock().unwrap();
+    let payload = inner
+        .journal
+        .find_input("Said while it was cut")
+        .and_then(|row| row.payload.clone())
+        .unwrap();
+    assert_eq!(payload["late"], true);
+    assert!(payload.get("unheard").is_none(), "told once already");
+}
+
+#[test]
+fn late_words_do_not_count_a_reply_still_playing_on_another_device_as_unheard() {
+    let (_directory, room, _, _) = room_on("t");
+    let (phone, _a) = call(&room, "t");
+    let (laptop, _b) = call(&room, "t");
+    reply(
+        &room,
+        &laptop,
+        "t",
+        "sounding",
+        "Still playing.",
+        revision(&room, &laptop),
+    );
+    report(&room, &laptop, "sounding", "playing");
+    offline(&room, &phone, "late-turn", "Said long ago", Some(300_000));
+    let message = only(deliveries(&room, "voice"));
+    assert!(message.get("unheard").is_none(), "it is still being heard");
+    // Settled and never heard: the next words tell it.
+    report(&room, &laptop, "sounding", "playback_finished");
+    say(&room, &phone, "Next");
+    assert_eq!(told(&room, "Next").unwrap()["count"], 1);
+}
+
+#[test]
+fn late_words_from_a_second_device_open_no_epoch_and_withdraw_nothing() {
+    let (_directory, room, _, _) = room_on("t");
+    let (phone, _a) = call(&room, "t");
+    let (laptop, mut received) = call(&room, "t");
+    reply(
+        &room,
+        &laptop,
+        "t",
+        "live",
+        "Live",
+        revision(&room, &laptop),
+    );
+    while received.try_recv().is_ok() {}
+    let epoch = room.inner.lock().unwrap().conversations.epoch("t");
+    offline(&room, &phone, "late-turn", "From the phone", Some(120_000));
+    assert_eq!(room.inner.lock().unwrap().conversations.epoch("t"), epoch);
+    assert!(withdrawn(&mut received).is_empty());
+}
+
+#[test]
+fn an_absurd_age_is_clamped() {
+    let (_directory, room, _, _) = room_on("t");
+    let (sid, _a) = call(&room, "t");
+    offline(&room, &sid, "turn", "Ancient", Some(u64::MAX));
+    let message = only(deliveries(&room, "voice"));
+    let said = chrono::DateTime::parse_from_rfc3339(message["said_at"].as_str().unwrap()).unwrap();
+    let age = chrono::Utc::now().signed_duration_since(said).num_hours();
+    assert!((23..=24).contains(&age), "{age}");
+}
+
+#[test]
+fn a_late_message_read_by_pull_carries_late_and_said_at() {
+    let (_directory, room, bid, _) = room_on("t");
+    let (sid, _a) = call(&room, "t");
+    offline(&room, &sid, "turn", "Said long ago", Some(300_000));
+    let page = super::support::pull(
+        &room,
+        "connector",
+        json!({"binding_id":bid,"operation":"get"}),
+    )
+    .unwrap();
+    let message = &page["messages"][0];
+    assert_eq!(message["late"], true);
+    assert!(message["said_at"].is_string());
 }

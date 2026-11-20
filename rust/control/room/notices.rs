@@ -56,7 +56,7 @@ impl Inner {
             return;
         }
         let unheard = self.take_unheard(thread, until);
-        if unheard.is_none() && matches!(kind, "user_returned" | "call_ended") {
+        if unheard.is_none() && kind == "user_returned" {
             return;
         }
         let message_id = format!("note:{}", id());
@@ -104,6 +104,7 @@ impl Inner {
             self.unheard.drop_note(&thread);
             self.queue_unheard_note(&thread, &session, "user_returned", None, Some(until));
         }
+        self.materialize_ended();
         let pending = self.pending_notices.len();
         for _ in 0..pending {
             let Some(note) = self.pending_notices.pop_front() else {
@@ -246,7 +247,11 @@ macro_rules! catch_up {
 pub(super) fn instruction(kind: &str) -> &'static str {
     match kind {
         "turn_empty" => "The person said nothing. Resend what you meant if it still matters.",
-        "call_ended" => concat!("The call ended. ", catch_up!()),
+        "call_ended" => concat!(
+            "The call ended: nobody is listening now, so do not speak. Keep in mind only what is still relevant from what ",
+            "they did not hear, and bring them up to date, briefly and in fresh words, when they are back: do not replay ",
+            "it all, and do not say it was missed."
+        ),
         "user_returned" => concat!("The person is back. ", catch_up!()),
         _ => catch_up!(),
     }

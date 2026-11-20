@@ -67,16 +67,29 @@ impl Room {
             .get(sid)
             .map(|browser| browser.turns.iter().cloned().collect())
             .unwrap_or_default();
+        let mut refused: Vec<String> = Vec::new();
         for turn in turns {
             if let Some(thread) = turn.thread_id.as_deref() {
                 inner
                     .conversations
                     .finish(thread, sid, &turn.turn_id, turn.epoch);
-                // The call ended mid-turn: "said nothing" would be false, the words may still arrive late.
-                inner.unheard.finish_empty(thread, turn.epoch);
+                // The call ended mid-turn: "said nothing" would be false, the words may still arrive late. A reply
+                // refused meanwhile is still owed: another call on the conversation plays a resend, or else the
+                // call_ended note tells the agent.
+                if inner.unheard.finish_empty(thread, turn.epoch) {
+                    if inner
+                        .browsers
+                        .on_thread(thread)
+                        .any(|(other, _)| other != sid)
+                    {
+                        inner.queue_unheard_note(thread, sid, "turn_empty", None, None);
+                    } else {
+                        refused.push(thread.to_owned());
+                    }
+                }
             }
         }
-        inner.note_call_ended(sid);
+        inner.note_call_ended(sid, &refused);
         inner.browsers.leave(sid);
         inner.interrupt_client(sid, "call_ended");
         if let Some(telemetry) = super::telemetry::shared() {

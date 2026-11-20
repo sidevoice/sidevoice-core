@@ -55,6 +55,7 @@ pub use error::RoomError;
 pub use latency::{latency_now_micros, LatencyDuration, LatencyEvent, LatencyMark, LatencyReply};
 pub use peers::{ConnectorPeer, PeerError, PeerRequest};
 pub use turns::{Continuation, VoiceTurn};
+pub use util::{configured_resume_window, resume_window};
 
 use bindings::Bindings;
 use browsers::Browsers;

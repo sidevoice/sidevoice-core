@@ -58,7 +58,7 @@ impl UtteranceRecord {
         Some((best, reason, heard_chars))
     }
     /// Whether no call will still play this utterance.
-    fn finished(&self) -> bool {
+    pub(super) fn finished(&self) -> bool {
         self.clients.values().all(|(_, status)| {
             matches!(
                 status.as_str(),
