@@ -6,8 +6,8 @@ use super::error::RoomError;
 use super::journal::{InputRef, Row};
 use super::latency::{latency_now_micros, LatencyEvent};
 use super::turns::{valid_turn_id, VoiceTurn};
-use super::util::valid_thread;
 use super::util::{id, millis, seconds};
+use super::util::{valid_thread, SpeakingStyle};
 use super::{Inner, Room};
 use crate::log_safe::ClientId;
 
@@ -32,6 +32,8 @@ struct InputDraft<'a> {
     turn_id: Option<&'a str>,
     offline: Option<&'a str>,
     time: Option<u64>,
+    /// How the person wants the agent to speak; none when the client said nothing valid.
+    speaking_style: Option<SpeakingStyle>,
 }
 
 impl Room {
@@ -42,10 +44,11 @@ impl Room {
         thread: &str,
         bid: &str,
         message_id: &str,
+        speaking_style: Option<SpeakingStyle>,
     ) -> Result<Value, RoomError> {
         let span = info_span!("input", kind = "text", session = %ClientId(sid), message_id = %ClientId(message_id));
         let _in_span = span.enter();
-        let result = self.send_text_locked(text, sid, thread, bid, message_id);
+        let result = self.send_text_locked(text, sid, thread, bid, message_id, speaking_style);
         log_queued(&result, text);
         result
     }
@@ -56,6 +59,7 @@ impl Room {
         thread: &str,
         bid: &str,
         message_id: &str,
+        speaking_style: Option<SpeakingStyle>,
     ) -> Result<Value, RoomError> {
         let row_id = format!("{sid}:user-text:{message_id}");
         let mut inner = self.inner.lock().expect("room lock");
@@ -94,6 +98,7 @@ impl Room {
             turn_id: None,
             offline: None,
             time: None,
+            speaking_style,
         })
     }
     /// Commit a completed transcript to the same memory journal/outbox as typed input.
@@ -126,11 +131,20 @@ impl Room {
         let Some(target) = target else {
             return Err(RoomError::new(409, "room.focus_changed"));
         };
-        self.offline_input_captured(sid, turn_id, text, time, &target.thread, &target.binding_id)
+        self.offline_input_captured(
+            sid,
+            turn_id,
+            text,
+            time,
+            &target.thread,
+            &target.binding_id,
+            None,
+        )
     }
 
     /// Offline words carry the conversation captured when speech began, even if focus changed
     /// before the room accepted them. The epoch is assigned once at acceptance.
+    #[allow(clippy::too_many_arguments)]
     pub fn offline_input_captured(
         &self,
         sid: &str,
@@ -139,13 +153,16 @@ impl Room {
         time: Option<u64>,
         thread: &str,
         binding: &str,
+        speaking_style: Option<SpeakingStyle>,
     ) -> Result<Value, RoomError> {
         let span = info_span!("input", kind = "offline", session = %ClientId(sid), turn = %ClientId(turn_id));
         let _in_span = span.enter();
-        let result = self.offline_input_locked(sid, turn_id, text, time, thread, binding);
+        let result =
+            self.offline_input_locked(sid, turn_id, text, time, thread, binding, speaking_style);
         log_queued(&result, text);
         result
     }
+    #[allow(clippy::too_many_arguments)]
     fn offline_input_locked(
         &self,
         sid: &str,
@@ -154,6 +171,7 @@ impl Room {
         time: Option<u64>,
         thread: &str,
         binding: &str,
+        speaking_style: Option<SpeakingStyle>,
     ) -> Result<Value, RoomError> {
         if !valid_turn_id(turn_id) {
             return Err(RoomError::new(400, "room.request_invalid"));
@@ -182,6 +200,7 @@ impl Room {
                 Some(text),
                 &Value::Null,
                 super::Continuation::Standalone,
+                speaking_style,
             );
         }
         let row_id = turn_row(sid, turn_id);
@@ -237,6 +256,7 @@ impl Room {
             turn_id: Some(turn_id),
             offline: Some("offline"),
             time,
+            speaking_style,
         })
     }
 }
@@ -356,6 +376,7 @@ impl Inner {
             turn_id: Some(&turn.turn_id),
             offline: None,
             time: None,
+            speaking_style: turn.speaking_style,
         })
     }
     fn queue_input(&mut self, draft: InputDraft<'_>) -> Result<Value, RoomError> {
@@ -375,9 +396,13 @@ impl Inner {
             turn_id,
             offline,
             time,
+            speaking_style,
         } = draft;
         let mut payload = json!({"thread_id":thread_id,"text":text,"message_id":message_id,"session_id":session_id,
             "history_id":row_id,"revision":revision,"epoch":epoch,"channel":"voice","binding_id":binding_id,"title":title});
+        if let Some(style) = speaking_style {
+            payload["speaking_style"] = json!(style.as_str());
+        }
         // The person's next message, spoken or typed, carries the not-heard block, and no return note is sent after it.
         self.unheard.resolve_words(thread_id);
         if let Some(unheard) = self.take_unheard(thread_id, None) {

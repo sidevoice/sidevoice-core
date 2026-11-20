@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::control::room::{Continuation, RoomError};
+use crate::control::room::{Continuation, RoomError, SpeakingStyle};
 use crate::messages::{render, LocalizedMessage};
 use crate::server::call::admission::offered_language;
 use crate::server::call::client_msg_id;
@@ -115,6 +115,7 @@ impl Call {
                     data["started_at"].as_u64(),
                     data["thread_id"].as_str().unwrap_or(""),
                     data["binding_id"].as_str().unwrap_or(""),
+                    SpeakingStyle::parse(&data["speaking_style"]),
                 )
                 .map(|taken| {
                     if taken["accepted"] == true {
@@ -137,6 +138,7 @@ impl Call {
                     } else {
                         Continuation::Standalone
                     },
+                    SpeakingStyle::parse(&data["speaking_style"]),
                 )
                 .map(|_| Value::Null)
             }

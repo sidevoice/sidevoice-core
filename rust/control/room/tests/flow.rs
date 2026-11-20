@@ -68,7 +68,14 @@ impl Case {
     fn say(&self, id: &str, text: Option<&str>) -> u64 {
         let turn = self.room.begin_at_focus(&self.sid, id).unwrap();
         self.room
-            .finish_turn(&self.sid, id, text, &Value::Null, Continuation::Standalone)
+            .finish_turn(
+                &self.sid,
+                id,
+                text,
+                &Value::Null,
+                Continuation::Standalone,
+                None,
+            )
             .unwrap();
         turn.epoch
     }
@@ -477,6 +484,7 @@ fn t02a_accepted_before_start_is_held_then_withdrawn_by_words_and_attached_to_th
             Some("Actually"),
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert_eq!(c.frames("voice-reply-withdrawn").len(), 1);
@@ -493,7 +501,14 @@ fn t02b_accepted_before_start_with_empty_turn_tells_the_agent_nothing() {
     c.room.begin_at_focus(&c.sid, "turn").unwrap();
     c.report("r", "unplayed", Some("newer_turn"), None);
     c.room
-        .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+        .finish_turn(
+            &c.sid,
+            "turn",
+            None,
+            &Value::Null,
+            Continuation::Standalone,
+            None,
+        )
         .unwrap();
     // A turn that only cut a reply is no message: the agent is told nothing until the person's next words.
     assert!(c.notes().is_empty());
@@ -516,7 +531,14 @@ fn t02e_replies_held_by_a_turn_that_comes_to_nothing_play_on_in_order() {
                 .unwrap();
         } else {
             c.room
-                .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+                .finish_turn(
+                    &c.sid,
+                    "turn",
+                    None,
+                    &Value::Null,
+                    Continuation::Standalone,
+                    None,
+                )
                 .unwrap();
         }
         assert!(
@@ -581,6 +603,7 @@ fn t02c_refusal_with_words_is_terminal_and_does_not_create_a_reply() {
             Some("Words"),
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert_eq!(c.publish("r", turn.epoch, "Attempt"), refused);
@@ -598,7 +621,14 @@ fn t02d_refusal_with_no_words_queues_the_said_nothing_instruction() {
     let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
     c.publish("r", turn.epoch, "Attempt");
     c.room
-        .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+        .finish_turn(
+            &c.sid,
+            "turn",
+            None,
+            &Value::Null,
+            Continuation::Standalone,
+            None,
+        )
         .unwrap();
     assert_eq!(c.notes().len(), 1);
     assert!(c.notes()[0]["notice"]["instruction"]
@@ -690,6 +720,7 @@ fn t04b_new_epoch_holds_pending_replies_on_its_device_and_withdraws_them_on_the_
             Some("Words"),
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     let first = c.frames("voice-reply-withdrawn");
@@ -741,6 +772,7 @@ fn t06c_focus_switch_keeps_captured_words_in_their_original_conversation() {
             Some("Original"),
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert_eq!(turn.thread_id.as_deref(), Some("t"));
@@ -891,7 +923,7 @@ fn t08_typed_context_during_an_open_turn_keeps_the_epoch_and_takes_the_block() {
         .to_owned();
     let typed = c
         .room
-        .send_text("Aside", &c.sid, "t", &binding, "typed-1")
+        .send_text("Aside", &c.sid, "t", &binding, "typed-1", None)
         .unwrap();
     assert_eq!(typed["epoch"], turn.epoch);
     // The next message, typed or spoken, carries the block; told once.
@@ -904,6 +936,7 @@ fn t08_typed_context_during_an_open_turn_keeps_the_epoch_and_takes_the_block() {
             Some("Spoken"),
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert!(c.input("Spoken").get("unheard").is_none());
@@ -928,6 +961,7 @@ fn t13_mic_mute_terminal_silence_uses_the_ordinary_empty_outcome() {
             None,
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -955,6 +989,7 @@ fn t11_threads_sessions_and_duplicate_starts_keep_separate_epochs() {
             Some("Other thread"),
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     c.room
@@ -964,6 +999,7 @@ fn t11_threads_sessions_and_duplicate_starts_keep_separate_epochs() {
             Some("This thread"),
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert_eq!(c.input("This thread")["epoch"], 1);
@@ -1029,7 +1065,14 @@ fn t16_pull_claims_empty_notices_until_ack_and_push_uses_same_content() {
         let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
         c.publish("refused", turn.epoch, "Attempt");
         c.room
-            .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+            .finish_turn(
+                &c.sid,
+                "turn",
+                None,
+                &Value::Null,
+                Continuation::Standalone,
+                None,
+            )
             .unwrap();
         if pull {
             let first = c.pull();
@@ -1074,7 +1117,14 @@ fn t11_merged_turn_transfers_the_empty_obligation_to_its_successor() {
     c.publish("refused", first.epoch, "Attempt");
     let second = c.room.begin_at_focus(&c.sid, "second").unwrap();
     c.room
-        .finish_turn(&c.sid, "first", None, &Value::Null, Continuation::Merged)
+        .finish_turn(
+            &c.sid,
+            "first",
+            None,
+            &Value::Null,
+            Continuation::Merged,
+            None,
+        )
         .unwrap();
     assert!(c.notes().is_empty());
     c.room
@@ -1084,6 +1134,7 @@ fn t11_merged_turn_transfers_the_empty_obligation_to_its_successor() {
             None,
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert_eq!(c.notes().len(), 1);
@@ -1101,13 +1152,29 @@ fn t11_offline_input_uses_the_captured_target_after_focus_changes() {
     c.room.select(&c.sid, "other").unwrap();
     let accepted = c
         .room
-        .offline_input_captured(&c.sid, "offline", "Captured words", None, "t", &binding)
+        .offline_input_captured(
+            &c.sid,
+            "offline",
+            "Captured words",
+            None,
+            "t",
+            &binding,
+            None,
+        )
         .unwrap();
     assert_eq!(accepted["epoch"], 1);
     assert_eq!(c.input("Captured words")["thread_id"], "t");
     let again = c
         .room
-        .offline_input_captured(&c.sid, "offline", "Captured words", None, "t", &binding)
+        .offline_input_captured(
+            &c.sid,
+            "offline",
+            "Captured words",
+            None,
+            "t",
+            &binding,
+            None,
+        )
         .unwrap();
     assert_eq!(again["epoch"], 1);
 }
@@ -1131,7 +1198,14 @@ fn t16_unacked_note_survives_pull_binding_replacement_with_the_same_id() {
     let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
     c.publish("refused", turn.epoch, "Attempt");
     c.room
-        .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+        .finish_turn(
+            &c.sid,
+            "turn",
+            None,
+            &Value::Null,
+            Continuation::Standalone,
+            None,
+        )
         .unwrap();
     let original = c.pull()[0]["message_id"].clone();
     let replacement = c
@@ -1182,6 +1256,7 @@ fn t11_one_devices_finish_does_not_close_another_devices_open_turn() {
             Some("First"),
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -1195,6 +1270,7 @@ fn t11_one_devices_finish_does_not_close_another_devices_open_turn() {
             None,
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert_eq!((first.epoch, other.epoch), (1, 2));
@@ -1207,7 +1283,14 @@ fn t16_full_input_queue_backpressures_new_speech_before_evidence_can_be_owed() {
     let focus_id = focus["binding"]["binding_id"].as_str().unwrap();
     for n in 0..256 {
         c.room
-            .send_text("Queued input", &c.sid, "t", focus_id, &format!("input-{n}"))
+            .send_text(
+                "Queued input",
+                &c.sid,
+                "t",
+                focus_id,
+                &format!("input-{n}"),
+                None,
+            )
             .unwrap();
     }
     let result = c.publish("would-owe-evidence", 0, "Reply");
@@ -1244,7 +1327,14 @@ fn t16_pull_ack_cycles_release_capacity_for_more_input_and_speech() {
     let focus_id = focus["binding"]["binding_id"].as_str().unwrap();
     for n in 0..300 {
         c.room
-            .send_text("Context", &c.sid, "t", focus_id, &format!("cycle-{n}"))
+            .send_text(
+                "Context",
+                &c.sid,
+                "t",
+                focus_id,
+                &format!("cycle-{n}"),
+                None,
+            )
             .unwrap();
         let messages = c.pull();
         assert_eq!(messages.len(), 1, "cycle {n}");
@@ -1307,6 +1397,7 @@ fn review_offline_epoch_withdraws_other_devices_pending_reply() {
             None,
             "t",
             focus["binding"]["binding_id"].as_str().unwrap(),
+            None,
         )
         .unwrap();
     assert_eq!(c.frames("voice-reply-withdrawn").len(), 1);
@@ -1400,6 +1491,7 @@ fn review_refusal_while_only_older_turn_open_keeps_empty_obligation() {
             None,
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     assert_eq!(c.notes().len(), 1);
@@ -1527,7 +1619,8 @@ fn review_cancelled_turn_cannot_return_as_offline_speech() {
             "Cancelled words",
             None,
             "t",
-            focus["binding"]["binding_id"].as_str().unwrap()
+            focus["binding"]["binding_id"].as_str().unwrap(),
+            None,
         )
         .is_err());
 }
@@ -1581,6 +1674,7 @@ fn review_push_retry_does_not_allow_later_notice_to_overtake() {
                 None,
                 &Value::Null,
                 Continuation::Standalone,
+                None,
             )
             .unwrap();
     }
@@ -1617,7 +1711,14 @@ fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
             c.room.begin_at_focus(&c.sid, "turn").unwrap();
             c.report("r", "interrupted", Some("user_interrupted"), Some(2));
             c.room
-                .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+                .finish_turn(
+                    &c.sid,
+                    "turn",
+                    None,
+                    &Value::Null,
+                    Continuation::Standalone,
+                    None,
+                )
                 .unwrap();
         }
         "cut_empty_late" => {
@@ -1635,7 +1736,14 @@ fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
             c.room.begin_at_focus(&c.sid, "turn").unwrap();
             c.report("r", "unplayed", Some("newer_turn"), None);
             c.room
-                .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+                .finish_turn(
+                    &c.sid,
+                    "turn",
+                    None,
+                    &Value::Null,
+                    Continuation::Standalone,
+                    None,
+                )
                 .unwrap();
         }
         "unplayed_empty_late" => {
@@ -1647,7 +1755,14 @@ fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
             let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
             c.publish("r", turn.epoch, "Attempt");
             c.room
-                .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+                .finish_turn(
+                    &c.sid,
+                    "turn",
+                    None,
+                    &Value::Null,
+                    Continuation::Standalone,
+                    None,
+                )
                 .unwrap();
         }
         "return" => {
@@ -1790,7 +1905,14 @@ fn review_bounded_epoch_contexts_and_deferred_empty_obligations() {
     let turn = c.room.begin_at_focus(&c.sid, "held").unwrap();
     for n in 0..255 {
         c.room
-            .send_text("Context", &c.sid, "t", &focus_id, &format!("full-{n}"))
+            .send_text(
+                "Context",
+                &c.sid,
+                "t",
+                &focus_id,
+                &format!("full-{n}"),
+                None,
+            )
             .unwrap();
     }
     assert_eq!(
@@ -1798,7 +1920,14 @@ fn review_bounded_epoch_contexts_and_deferred_empty_obligations() {
         "user_speaking"
     );
     c.room
-        .finish_turn(&c.sid, "held", None, &Value::Null, Continuation::Standalone)
+        .finish_turn(
+            &c.sid,
+            "held",
+            None,
+            &Value::Null,
+            Continuation::Standalone,
+            None,
+        )
         .unwrap();
     assert_eq!(
         c.room.begin_at_focus(&c.sid, "next").unwrap_err().key,
@@ -1904,6 +2033,7 @@ fn review_finished_merged_transcript_keeps_its_words_with_another_turn_open() {
             Some("Merged words"),
             &Value::Null,
             Continuation::Merged,
+            None,
         )
         .unwrap();
     assert_eq!(c.input("Merged words")["text"], "Merged words");
@@ -1975,7 +2105,14 @@ fn t16_unacknowledged_notice_crosses_pull_push_handover_with_one_message_id() {
     let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
     c.publish("refused", turn.epoch, "Attempt");
     c.room
-        .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+        .finish_turn(
+            &c.sid,
+            "turn",
+            None,
+            &Value::Null,
+            Continuation::Standalone,
+            None,
+        )
         .unwrap();
     let claimed = c.pull();
     let id = claimed[0]["message_id"].clone();
@@ -2060,6 +2197,7 @@ fn review_replay_partial_extent_reaches_the_next_words() {
             Some("Wait"),
             &Value::Null,
             Continuation::Standalone,
+            None,
         )
         .unwrap();
     let messages = c.pull();
@@ -2161,6 +2299,7 @@ fn review_refusal_obligation_survives_both_turn_orders_and_devices() {
                             (words && index == 0).then_some("Words"),
                             &Value::Null,
                             Continuation::Standalone,
+                            None,
                         )
                         .unwrap();
                 }

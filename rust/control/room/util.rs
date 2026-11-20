@@ -27,6 +27,27 @@ pub(super) fn id() -> String {
 pub(super) fn field<'a>(value: &'a Value, name: &str) -> &'a str {
     value.get(name).and_then(Value::as_str).unwrap_or("")
 }
+/// How the person wants the agent to speak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpeakingStyle {
+    Brief,
+    Normal,
+    Detailed,
+}
+impl SpeakingStyle {
+    /// A client's `speaking_style` when it is one of the closed set; anything else is no style (the connector defaults it).
+    pub fn parse(value: &Value) -> Option<Self> {
+        serde_json::from_value(value.clone()).ok()
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Brief => "brief",
+            Self::Normal => "normal",
+            Self::Detailed => "detailed",
+        }
+    }
+}
 pub(super) fn valid_thread(thread: &str) -> bool {
     !thread.is_empty()
         && thread.len() <= 200
