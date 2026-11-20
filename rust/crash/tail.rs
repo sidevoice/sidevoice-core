@@ -632,7 +632,8 @@ mod tests {
         let _ring = testing::LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let directory = tempfile::tempdir().unwrap();
         let data = directory.path();
-        std::fs::set_permissions(data, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(data, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
         let mirror = Mirror {
             data: data.to_path_buf(),
             file: data.join(MIRROR),

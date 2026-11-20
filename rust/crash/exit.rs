@@ -338,7 +338,15 @@ mod flow_tests {
         // The next start: its `begin` makes the record (the store write is local); no sender is involved.
         let context: &'static Context = Box::leak(Box::new(context(&d)));
         begin_with(context, false);
-        let records = context.store.pending().unwrap();
+        // On macOS launchd is asked on a thread off the start's way, so the record lands a moment later.
+        let mut records = context.store.pending().unwrap();
+        for _ in 0..200 {
+            if !records.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            records = context.store.pending().unwrap();
+        }
         assert_eq!(records.len(), 1, "made before the core serves");
         assert_eq!(records[0].exception.kind, "abort.signal.SIGSEGV");
     }
