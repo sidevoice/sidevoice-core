@@ -1119,3 +1119,33 @@ async fn the_limits_are_the_same_for_both_sources() {
         StatusCode::TOO_MANY_REQUESTS
     );
 }
+
+#[tokio::test]
+async fn at_most_two_connector_reads_are_in_flight_across_devices_and_the_places_come_back() {
+    let node = Node::shaped(|logs| logs.linked(Duration::from_millis(800)));
+    // A connector that never answers keeps each read in flight until the link wait ends.
+    link(&node, |_| None);
+    let (_, first) = node.device().await;
+    let (_, second) = node.device().await;
+    let (_, third) = node.device().await;
+    let stuck: Vec<_> = [first, second]
+        .into_iter()
+        .map(|token| {
+            let app = node.tcp();
+            tokio::spawn(async move { get(&app, "/api/logs?source=connector", &token).await })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (status, _, body) = get(&node.tcp(), "/api/logs?source=connector", &third).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body, json!({"detail": refusal("request.rate_limited")}));
+    // The core's own log is not behind the connector.
+    assert_eq!(
+        get(&node.tcp(), "/api/logs", &third).await.0,
+        StatusCode::OK
+    );
+    for read in stuck {
+        assert_eq!(read.await.unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+    assert_eq!(node.state.logs.in_flight.available_permits(), 2);
+}

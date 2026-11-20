@@ -46,6 +46,9 @@ const WAITS_PER_DEVICE: usize = 4;
 /// a device that only reads can ask of the disk.
 const READS_PER_WINDOW: usize = 100;
 const READ_WINDOW: Duration = Duration::from_secs(10);
+/// The connector reads in flight at once, across all devices: the connector serves a bounded number of requests on the
+/// link at a time, and a flood of them would drop the voice link that shares it. Over this, a read is refused.
+const CONNECTOR_READS_IN_FLIGHT: usize = 2;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/logs", get(read))
@@ -57,6 +60,8 @@ pub(super) struct Logs {
     waits: Mutex<HashMap<String, usize>>,
     /// Per device: when its window began and the reads started in it.
     reads: Mutex<HashMap<String, (Instant, usize)>>,
+    /// Places for the `logs.read` requests being asked of the connector, whoever asks.
+    in_flight: tokio::sync::Semaphore,
     max_wait: Duration,
     poll: Duration,
     reads_per_window: usize,
@@ -71,6 +76,7 @@ impl Logs {
             files: files.into(),
             waits: Mutex::default(),
             reads: Mutex::default(),
+            in_flight: tokio::sync::Semaphore::new(CONNECTOR_READS_IN_FLIGHT),
             max_wait: MAX_WAIT,
             poll: POLL,
             reads_per_window: READS_PER_WINDOW,
@@ -217,7 +223,12 @@ async fn read(
                     .await
                     .unwrap_or(Err(Refused::Unreadable))
             }
-            Source::Connector => connector_page(&state, &request).await,
+            Source::Connector => {
+                let Ok(_place) = logs.in_flight.try_acquire() else {
+                    return Err(rate_limited(&headers));
+                };
+                connector_page(&state, &request).await
+            }
         };
         // Whoever was revoked while it held on gets nothing.
         if !state
