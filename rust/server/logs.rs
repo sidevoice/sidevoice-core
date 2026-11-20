@@ -1,6 +1,12 @@
-//! `GET /api/logs?limit=&after=&wait=`: the core's own log (`core.log` and the generations rotation keeps), read by a
-//! paired device in pages. Only on the bearer-protected path: not a local path, so the Unix socket needs the bearer
-//! too, and not a method of the connector link.
+//! `GET /api/logs?source=&limit=&after=&wait=`: the core's own log (`core.log` and the generations rotation keeps), or
+//! with `source=connector` the connector's, read by a paired device in pages. Only on the bearer-protected path: not a
+//! local path, so the Unix socket needs the bearer too.
+//!
+//! The connector's log is not read from disk here: the core asks the connector that is linked, with `logs.read` over
+//! the v3 link it already has (the connector opens nothing). The connector pages its own file with the same reader
+//! behaviour, so a cursor is the connector's and this side only passes it through and checks what comes back. With
+//! no connector linked, or one that does not answer, the read is unreadable (503). A held read polls the connector
+//! like it polls the file, one request per tick.
 //!
 //! A read never writes a log line, at any level: a viewer would feed itself.
 
@@ -14,6 +20,7 @@ use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
+use serde_json::{json, Value};
 
 use super::pairing::unpaired;
 use super::refusal::{refuse, require_origin, Handled, Refusal};
@@ -24,17 +31,24 @@ mod reader;
 #[cfg(test)]
 mod tests;
 
-use reader::{Refused, DEFAULT_LIMIT, MAX_LIMIT};
+use reader::{Line, Page, Refused, DEFAULT_LIMIT, MAX_LIMIT};
 
 /// The longest a read holds on for a line, whatever it asked.
 const MAX_WAIT: Duration = Duration::from_secs(25);
 /// How often a held read looks again.
 const POLL: Duration = Duration::from_millis(250);
+/// How long the connector has to answer one `logs.read`.
+const LINK_WAIT: Duration = Duration::from_secs(5);
+/// The longest cursor a page may carry (the reader's own bound).
+const MAX_CURSOR: usize = 128;
 const WAITS_PER_DEVICE: usize = 4;
 /// The reads a device may start in a window, holding or not: well above a viewer's four a second, and a bound on what
 /// a device that only reads can ask of the disk.
 const READS_PER_WINDOW: usize = 100;
 const READ_WINDOW: Duration = Duration::from_secs(10);
+/// The connector reads in flight at once, across all devices: the connector serves a bounded number of requests on the
+/// link at a time, and a flood of them would drop the voice link that shares it. Over this, a read is refused.
+const CONNECTOR_READS_IN_FLIGHT: usize = 2;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/logs", get(read))
@@ -46,10 +60,14 @@ pub(super) struct Logs {
     waits: Mutex<HashMap<String, usize>>,
     /// Per device: when its window began and the reads started in it.
     reads: Mutex<HashMap<String, (Instant, usize)>>,
+    /// Places for the `logs.read` requests being asked of the connector, whoever asks.
+    in_flight: tokio::sync::Semaphore,
     max_wait: Duration,
     poll: Duration,
     reads_per_window: usize,
     read_window: Duration,
+    /// What the connector gets to answer one `logs.read`.
+    link_wait: Duration,
 }
 
 impl Logs {
@@ -58,10 +76,12 @@ impl Logs {
             files: files.into(),
             waits: Mutex::default(),
             reads: Mutex::default(),
+            in_flight: tokio::sync::Semaphore::new(CONNECTOR_READS_IN_FLIGHT),
             max_wait: MAX_WAIT,
             poll: POLL,
             reads_per_window: READS_PER_WINDOW,
             read_window: READ_WINDOW,
+            link_wait: LINK_WAIT,
         }
     }
 
@@ -76,6 +96,12 @@ impl Logs {
     fn limited(mut self, reads_per_window: usize, read_window: Duration) -> Self {
         self.reads_per_window = reads_per_window;
         self.read_window = read_window;
+        self
+    }
+
+    #[cfg(test)]
+    fn linked(mut self, link_wait: Duration) -> Self {
+        self.link_wait = link_wait;
         self
     }
 
@@ -122,7 +148,14 @@ impl Drop for Held<'_> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Core,
+    Connector,
+}
+
 struct Request {
+    source: Source,
     after: Option<String>,
     limit: usize,
     wait: Duration,
@@ -138,8 +171,21 @@ impl Request {
             Some(wait) => Duration::from_secs(wait.parse().ok()?),
             None => Duration::ZERO,
         };
+        let source = match query(uri, "source").as_deref() {
+            None | Some("core") => Source::Core,
+            Some("connector") => Source::Connector,
+            Some(_) => return None,
+        };
+        let after = query(uri, "after");
+        // What goes over the link is bounded here, not trusted to the other side.
+        if source == Source::Connector
+            && after.as_ref().is_some_and(|after| after.len() > MAX_CURSOR)
+        {
+            return None;
+        }
         Some(Self {
-            after: query(uri, "after"),
+            source,
+            after,
             limit,
             wait: wait.min(max_wait),
         })
@@ -169,11 +215,20 @@ async fn read(
     };
     let deadline = Instant::now() + request.wait;
     loop {
-        let page = {
-            let (files, after, limit) = (logs.files.clone(), request.after.clone(), request.limit);
-            tokio::task::spawn_blocking(move || reader::read(&files, after.as_deref(), limit))
-                .await
-                .unwrap_or(Err(Refused::Unreadable))
+        let page = match request.source {
+            Source::Core => {
+                let (files, after, limit) =
+                    (logs.files.clone(), request.after.clone(), request.limit);
+                tokio::task::spawn_blocking(move || reader::read(&files, after.as_deref(), limit))
+                    .await
+                    .unwrap_or(Err(Refused::Unreadable))
+            }
+            Source::Connector => {
+                let Ok(_place) = logs.in_flight.try_acquire() else {
+                    return Err(rate_limited(&headers));
+                };
+                connector_page(&state, &request).await
+            }
         };
         // Whoever was revoked while it held on gets nothing.
         if !state
@@ -208,4 +263,53 @@ fn refused(error: Refused, headers: &HeaderMap) -> Refusal {
         Refused::Unreadable => ("logs.unreadable", StatusCode::SERVICE_UNAVAILABLE),
     };
     refuse(key, status, headers)
+}
+
+/// One page of the linked connector's log, asked over the link. Nothing the connector answers is trusted past its
+/// shape: a page that is not one is unreadable, whatever it holds.
+async fn connector_page(state: &AppState, request: &Request) -> Result<Page, Refused> {
+    let peer = state.room.connector_peer().ok_or(Refused::Unreadable)?;
+    let mut params = json!({"limit": request.limit});
+    if let Some(after) = &request.after {
+        params["after"] = json!(after);
+    }
+    let answer = peer
+        .request("logs.read", params, state.logs.link_wait)
+        .await
+        .map_err(|_| Refused::Unreadable)?;
+    if let Some(key) = answer["error"]["key"].as_str() {
+        return Err(match key {
+            "logs.request_invalid" => Refused::Invalid,
+            "logs.cursor_expired" => Refused::Expired,
+            _ => Refused::Unreadable,
+        });
+    }
+    page_of(&answer, request.limit).ok_or(Refused::Unreadable)
+}
+
+fn page_of(answer: &Value, limit: usize) -> Option<Page> {
+    let cursor = answer["cursor"]
+        .as_str()
+        .filter(|cursor| !cursor.is_empty() && cursor.len() <= MAX_CURSOR)?;
+    let more = answer["more"].as_bool()?;
+    let lines = answer["lines"]
+        .as_array()
+        .filter(|lines| lines.len() <= limit)?;
+    let lines = lines
+        .iter()
+        .map(|line| {
+            let id = line["id"]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= MAX_CURSOR)?;
+            Some(Line {
+                id: id.to_owned(),
+                text: line["text"].as_str()?.to_owned(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Page {
+        lines,
+        cursor: cursor.to_owned(),
+        more,
+    })
 }

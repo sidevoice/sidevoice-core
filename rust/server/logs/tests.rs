@@ -779,3 +779,373 @@ async fn a_device_that_only_reads_is_limited_per_window_and_the_window_ends() {
         StatusCode::OK
     );
 }
+
+// --- GET /api/logs?source=connector --------------------------------------------------------------
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{mpsc, watch};
+
+use crate::control::room::{ConnectorPeer, PeerError, PeerRequest};
+
+/// A connector linked to the node that answers each `logs.read` as `answer` says (`None`: never answers). Returns the
+/// requests it got.
+fn link(
+    node: &Node,
+    answer: impl Fn(&Value) -> Option<Value> + Send + 'static,
+) -> Arc<std::sync::Mutex<Vec<(String, Value)>>> {
+    let (sender, mut requests) = mpsc::channel::<PeerRequest>(8);
+    let (stop, _) = watch::channel(false);
+    node.state.room.attach(
+        "fixture-connector",
+        ConnectorPeer {
+            generation: "g1".into(),
+            sender,
+            stop,
+        },
+    );
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        let mut parked = Vec::new();
+        while let Some(PeerRequest {
+            method,
+            params,
+            answer: reply,
+        }) = requests.recv().await
+        {
+            log.lock().unwrap().push((method, params.clone()));
+            match (answer(&params), reply) {
+                (Some(value), Some(reply)) => {
+                    let _ = reply.send(Ok::<_, PeerError>(value));
+                }
+                (None, reply) => parked.push(reply),
+                _ => {}
+            }
+        }
+    });
+    seen
+}
+
+fn page(lines: &[&str], cursor: &str, more: bool) -> Value {
+    json!({
+        "lines": lines.iter().enumerate().map(|(n, text)| json!({"id": format!("id{n}"), "text": text})).collect::<Vec<_>>(),
+        "cursor": cursor,
+        "more": more,
+    })
+}
+
+#[tokio::test]
+async fn the_connector_log_needs_a_paired_device_on_both_listeners_and_the_socket_stays_closed() {
+    let node = Node::new();
+    let asked = link(&node, |_| Some(page(&["secret"], "c1", false)));
+    let (_, token) = node.device().await;
+    for app in [node.tcp(), node.socket()] {
+        for headers in [&[][..], &[("authorization", "Bearer not-a-token")][..]] {
+            let (status, _, body) = send(
+                &app,
+                "GET",
+                "/api/logs?source=connector",
+                None,
+                headers,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            assert!(body.get("lines").is_none());
+        }
+        let (status, _, body) = get(&app, "/api/logs?source=connector", &token).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(texts_of(&body), ["secret"]);
+    }
+    // Nothing was asked of the connector for the callers that were refused: one request per authorised read.
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    let (status, ..) = send(
+        &node.tcp(),
+        "POST",
+        "/api/logs?source=connector",
+        Some(&token),
+        &[],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn the_connector_is_asked_with_the_cursor_and_limit_and_its_page_is_passed_on_whole() {
+    let node = Node::new();
+    let asked = link(&node, |params| {
+        Some(match params["after"].as_str() {
+            None => page(&["a", "b"], "c1", true),
+            Some(_) => page(&["c"], "c2", false),
+        })
+    });
+    let (_, token) = node.device().await;
+    let (status, headers, body) =
+        get(&node.tcp(), "/api/logs?source=connector&limit=2", &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers.get("cache-control").unwrap(), "no-store");
+    assert_eq!(texts_of(&body), ["a", "b"]);
+    assert_eq!(
+        (body["cursor"].as_str(), body["more"].as_bool()),
+        (Some("c1"), Some(true))
+    );
+    let (_, _, body) = get(&node.tcp(), "/api/logs?source=connector&after=c1", &token).await;
+    assert_eq!(texts_of(&body), ["c"]);
+    {
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked[0], ("logs.read".into(), json!({"limit": 2})));
+        assert_eq!(
+            asked[1],
+            ("logs.read".into(), json!({"limit": 200, "after": "c1"}))
+        );
+        // The core's own log is a different source: it was never asked of the connector.
+    }
+    append(&node.log, "core line\n");
+    let (_, _, body) = get(&node.tcp(), "/api/logs", &token).await;
+    assert_eq!(texts_of(&body), ["core line"]);
+    let (_, _, body) = get(&node.tcp(), "/api/logs?source=core", &token).await;
+    assert_eq!(texts_of(&body), ["core line"]);
+}
+
+#[tokio::test]
+async fn the_connector_log_without_a_connector_or_with_one_that_does_not_answer_is_unavailable() {
+    let node = Node::shaped(|logs| logs.linked(Duration::from_millis(200)));
+    append(&node.log, "core line\n");
+    let (_, token) = node.device().await;
+    // No connector linked.
+    let (status, _, body) = get(&node.tcp(), "/api/logs?source=connector", &token).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body, json!({"detail": refusal("logs.unreadable")}));
+    // One that never answers.
+    link(&node, |_| None);
+    let started = Instant::now();
+    let (status, _, body) = get(&node.tcp(), "/api/logs?source=connector", &token).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body, json!({"detail": refusal("logs.unreadable")}));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    // The core's own log is unaffected.
+    assert_eq!(
+        get(&node.tcp(), "/api/logs", &token).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn what_the_connector_refuses_or_answers_badly_is_mapped_and_never_passed_on() {
+    let node = Node::new();
+    let (_, token) = node.device().await;
+    let answers = Arc::new(std::sync::Mutex::new(Value::Null));
+    let current = answers.clone();
+    link(&node, move |_| Some(current.lock().unwrap().clone()));
+    for (answer, status, key) in [
+        (
+            json!({"error": {"key": "logs.cursor_expired"}}),
+            StatusCode::GONE,
+            "logs.cursor_expired",
+        ),
+        (
+            json!({"error": {"key": "logs.request_invalid"}}),
+            StatusCode::BAD_REQUEST,
+            "logs.request_invalid",
+        ),
+        (
+            json!({"error": {"key": "logs.unreadable"}}),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "logs.unreadable",
+        ),
+        // An old connector, or any other refusal.
+        (
+            json!({"error": {"key": "connector.unknown-method"}}),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "logs.unreadable",
+        ),
+        // Not a page.
+        (
+            json!({"status": "failed"}),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "logs.unreadable",
+        ),
+        (
+            json!({"lines": [{"id": "a"}], "cursor": "c", "more": false}),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "logs.unreadable",
+        ),
+        (
+            json!({"lines": [], "cursor": "x".repeat(129), "more": false}),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "logs.unreadable",
+        ),
+        (
+            json!({"lines": [], "cursor": "c"}),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "logs.unreadable",
+        ),
+        // More lines than were asked for.
+        (
+            page(&["a", "b"], "c", false),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "logs.unreadable",
+        ),
+    ] {
+        *answers.lock().unwrap() = answer.clone();
+        let (got, _, body) = get(&node.tcp(), "/api/logs?source=connector&limit=1", &token).await;
+        assert_eq!(got, status, "{answer}: {body}");
+        assert_eq!(body, json!({"detail": refusal(key)}), "{answer}");
+    }
+}
+
+#[tokio::test]
+async fn the_source_and_the_cursor_of_a_connector_read_are_checked_here() {
+    let node = Node::new();
+    let (_, token) = node.device().await;
+    let asked = link(&node, |_| Some(page(&[], "c", false)));
+    for query in [
+        "source=",
+        "source=desktop",
+        "source=Connector",
+        &format!("source=connector&after={}", "x".repeat(129)),
+        "source=connector&limit=0",
+        "source=connector&wait=soon",
+    ] {
+        let (status, _, body) = get(&node.tcp(), &format!("/api/logs?{query}"), &token).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert_eq!(body, json!({"detail": refusal("logs.request_invalid")}));
+    }
+    assert!(
+        asked.lock().unwrap().is_empty(),
+        "nothing invalid reaches the connector"
+    );
+}
+
+#[tokio::test]
+async fn a_connector_read_waits_for_a_line_and_returns_at_the_clamp() {
+    let node = Node::timed(Duration::from_millis(500), Duration::from_millis(20));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let counted = polls.clone();
+    link(&node, move |params| {
+        // The third look finds a line, but only when one is not asked for already.
+        Some(
+            if params["after"] == "c1" && counted.fetch_add(1, Ordering::SeqCst) >= 2 {
+                page(&["late"], "c2", false)
+            } else {
+                page(&[], params["after"].as_str().unwrap_or("start"), false)
+            },
+        )
+    });
+    let (_, token) = node.device().await;
+    let started = Instant::now();
+    let (_, _, body) = get(
+        &node.tcp(),
+        "/api/logs?source=connector&after=c1&wait=3600",
+        &token,
+    )
+    .await;
+    assert_eq!(texts_of(&body), ["late"]);
+    assert!(started.elapsed() < Duration::from_millis(450));
+    // Nothing comes: it returns at the clamp, the cursor unchanged.
+    let started = Instant::now();
+    let (status, _, body) = get(
+        &node.tcp(),
+        "/api/logs?source=connector&after=c9&wait=3600",
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["lines"].as_array().unwrap().is_empty());
+    assert_eq!(body["cursor"], "c9");
+    assert!(
+        started.elapsed() >= Duration::from_millis(450)
+            && started.elapsed() < Duration::from_secs(3)
+    );
+}
+
+#[tokio::test]
+async fn a_device_revoked_while_it_waits_for_the_connector_gets_nothing() {
+    let node = Node::timed(Duration::from_secs(10), Duration::from_millis(20));
+    let (device, token) = node.device().await;
+    link(&node, |_| Some(page(&[], "c1", false)));
+    let app = node.tcp();
+    let waiting = tokio::spawn(async move {
+        get(&app, "/api/logs?source=connector&after=c1&wait=10", &token).await
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    node.revoke(&device);
+    let (status, _, body) = waiting.await.unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(body.get("lines").is_none());
+}
+
+#[tokio::test]
+async fn the_limits_are_the_same_for_both_sources() {
+    let node =
+        Node::shaped(|logs| logs.timed(Duration::from_millis(700), Duration::from_millis(20)));
+    link(&node, |_| Some(page(&[], "c1", false)));
+    let (_, token) = node.device().await;
+    // Four holds in all, whichever source they read; the fifth is refused.
+    let holding: Vec<_> = (0..4)
+        .map(|n| {
+            let (app, token) = (node.tcp(), token.clone());
+            let source = if n % 2 == 0 { "connector" } else { "core" };
+            tokio::spawn(async move {
+                get(&app, &format!("/api/logs?source={source}&wait=60"), &token).await
+            })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (status, _, body) = get(&node.tcp(), "/api/logs?source=connector&wait=60", &token).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body, json!({"detail": refusal("request.rate_limited")}));
+    for hold in holding {
+        assert_eq!(hold.await.unwrap().0, StatusCode::OK);
+    }
+    assert!(node.state.logs.waits.lock().unwrap().is_empty());
+    // And the per-window bound counts connector reads.
+    let node = Node::shaped(|logs| logs.limited(2, Duration::from_secs(5)));
+    link(&node, |_| Some(page(&[], "c1", false)));
+    let (_, token) = node.device().await;
+    for _ in 0..2 {
+        assert_eq!(
+            get(&node.tcp(), "/api/logs?source=connector", &token)
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        get(&node.tcp(), "/api/logs?source=connector", &token)
+            .await
+            .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn at_most_two_connector_reads_are_in_flight_across_devices_and_the_places_come_back() {
+    let node = Node::shaped(|logs| logs.linked(Duration::from_millis(800)));
+    // A connector that never answers keeps each read in flight until the link wait ends.
+    link(&node, |_| None);
+    let (_, first) = node.device().await;
+    let (_, second) = node.device().await;
+    let (_, third) = node.device().await;
+    let stuck: Vec<_> = [first, second]
+        .into_iter()
+        .map(|token| {
+            let app = node.tcp();
+            tokio::spawn(async move { get(&app, "/api/logs?source=connector", &token).await })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (status, _, body) = get(&node.tcp(), "/api/logs?source=connector", &third).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body, json!({"detail": refusal("request.rate_limited")}));
+    // The core's own log is not behind the connector.
+    assert_eq!(
+        get(&node.tcp(), "/api/logs", &third).await.0,
+        StatusCode::OK
+    );
+    for read in stuck {
+        assert_eq!(read.await.unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+    assert_eq!(node.state.logs.in_flight.available_permits(), 2);
+}
