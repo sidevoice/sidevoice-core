@@ -72,6 +72,15 @@ impl Case {
             .unwrap();
         turn.epoch
     }
+    /// Say reply `uid` was published `ms` before now (before the turn that started since).
+    fn publish_time_back(&self, uid: &str, ms: u64) {
+        let mut inner = self.room.inner.lock().unwrap();
+        inner
+            .journal
+            .find_mut(&format!("{}:voice:{uid}", self.sid))
+            .unwrap()
+            .time -= ms;
+    }
     /// Move turn `turn_id` and replies `uids` back in time by `ms`, as if the turn had held them that long.
     fn age_hold(&self, turn_id: &str, uids: &[&str], ms: u64) {
         let mut inner = self.room.inner.lock().unwrap();
@@ -689,13 +698,14 @@ fn t02h_reply_published_while_an_older_turn_with_words_is_between_stays_late() {
 }
 
 #[test]
-fn t02i_an_open_turn_holds_replies_at_most_the_hold_time() {
+fn t02i_an_open_turn_holds_replies_published_during_it_at_most_the_hold_time() {
     for words in [false, true] {
         let mut c = Case::new(true);
         c.publish("before", 0, "Interrupted before the turn");
         c.frames("voice-reply");
         c.report("before", "playing", None, None);
         c.room.begin_at_focus(&c.sid, "turn").unwrap();
+        c.publish_time_back("before", 10);
         c.publish("during", 0, "Published during the turn");
         c.frames("voice-reply");
         c.room.inner.lock().unwrap().expire_holds();
@@ -703,25 +713,22 @@ fn t02i_an_open_turn_holds_replies_at_most_the_hold_time() {
             c.frames("voice-reply-withdrawn").is_empty(),
             "within the hold nothing is withdrawn"
         );
-        c.age_hold("turn", &["before", "during"], 31_000);
+        c.age_hold("turn", &["during"], 31_000);
+        c.publish_time_back("before", 31_000);
         c.publish("fresh", 0, "Published just now");
         c.room.inner.lock().unwrap().expire_holds();
         let withdrawn = c.frames("voice-reply-withdrawn");
         assert_eq!(withdrawn.len(), 1, "words={words}");
-        let mut ids: Vec<_> = withdrawn[0]["data"]["utterance_ids"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|id| id.as_str().unwrap().to_owned())
-            .collect();
-        ids.sort();
-        assert_eq!(ids, ["before", "during"], "a fresh reply is not stale yet");
+        assert_eq!(
+            withdrawn[0]["data"]["utterance_ids"],
+            json!(["during"]),
+            "the interrupted reply stays held however long the turn lasts, and a fresh one is not stale yet"
+        );
         c.room.inner.lock().unwrap().expire_holds();
         assert!(
             c.frames("voice-reply-withdrawn").is_empty(),
             "withdrawn once"
         );
-        c.report("before", "interrupted", Some("newer_turn"), Some(3));
         c.report("during", "unplayed", Some("newer_turn"), None);
         c.room
             .finish_turn(
@@ -739,10 +746,61 @@ fn t02i_an_open_turn_holds_replies_at_most_the_hold_time() {
             let notes = c.notes();
             assert_eq!(notes.len(), 1, "the agent learns its replies went unheard");
             assert_eq!(notes[0]["notice"]["kind"], "turn_empty");
-            assert_eq!(notes[0]["unheard"]["count"], 3);
-            assert_eq!(notes[0]["unheard"]["heard_up_to"], "Int");
         }
     }
+}
+
+#[test]
+fn t02k_an_interrupted_reply_plays_on_after_a_long_empty_turn() {
+    let mut c = Case::new(true);
+    c.publish("before", 0, "Interrupted before the turn");
+    c.frames("voice-reply");
+    c.report("before", "playing", None, None);
+    c.room.begin_at_focus(&c.sid, "turn").unwrap();
+    c.publish_time_back("before", 10);
+    c.age_hold("turn", &[], 600_000);
+    c.room.inner.lock().unwrap().expire_holds();
+    c.room
+        .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+        .unwrap();
+    assert!(c.frames("voice-reply-withdrawn").is_empty());
+    assert!(c.notes().is_empty());
+}
+
+#[test]
+fn t02l_a_held_reply_withdrawn_by_another_calls_turn_is_told_when_both_turns_come_to_nothing() {
+    let mut c = Case::new(true);
+    let (sender, _other_events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    c.room.begin_at_focus(&c.sid, "first").unwrap();
+    assert_eq!(c.publish("r", 0, "Attempt")["status"], "queued");
+    c.room.begin_at_focus(&other, "second").unwrap();
+    assert_eq!(c.frames("voice-reply-withdrawn").len(), 1);
+    c.report("r", "unplayed", Some("newer_turn"), None);
+    c.room
+        .finish_turn(
+            &c.sid,
+            "first",
+            None,
+            &Value::Null,
+            Continuation::Standalone,
+        )
+        .unwrap();
+    assert!(c.notes().is_empty(), "another turn is still open");
+    c.room
+        .finish_turn(
+            &other,
+            "second",
+            None,
+            &Value::Null,
+            Continuation::Standalone,
+        )
+        .unwrap();
+    let notes = c.notes();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["notice"]["kind"], "turn_empty");
+    assert_eq!(notes[0]["unheard"]["count"], 1);
 }
 
 #[test]

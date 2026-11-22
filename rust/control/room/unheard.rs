@@ -110,8 +110,17 @@ impl Unheard {
         self.empty_obligations.insert((thread.to_owned(), epoch));
     }
 
-    pub(super) fn finish_empty(&mut self, thread: &str, epoch: u64) -> bool {
+    /// The turn of `epoch` came to nothing; `still_open` are the epochs of the turns still open on `thread`. Whether
+    /// the agent is to be told now: only the last turn to end tells it, so while others are open the obligation
+    /// passes to them.
+    pub(super) fn finish_empty(&mut self, thread: &str, epoch: u64, still_open: &[u64]) -> bool {
         let removed = self.empty_obligations.remove(&(thread.to_owned(), epoch));
+        if removed && !still_open.is_empty() {
+            for open in still_open {
+                self.reserve_empty(thread, *open);
+            }
+            return false;
+        }
         removed
             && !self
                 .empty_obligations
@@ -171,7 +180,8 @@ impl Inner {
     /// while it was open, tells the agent nothing: the reply plays on, and what of it is still not heard is in the next
     /// block.
     pub(super) fn settle_empty_turn(&mut self, thread: &str, session: &str, epoch: u64) {
-        if self.unheard.finish_empty(thread, epoch) {
+        let still_open = self.open_turn_epochs(thread);
+        if self.unheard.finish_empty(thread, epoch, &still_open) {
             self.queue_unheard_note(thread, session, "turn_empty", None, None);
         }
     }

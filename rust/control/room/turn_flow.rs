@@ -42,7 +42,23 @@ impl Inner {
             // The call the person speaks into holds what it has of older replies while the turn is open: they end
             // only if it brings words, and play on if it comes to nothing. Other calls on the conversation are not
             // holding them, so they are withdrawn there.
-            self.withdraw_older_epoch_replies(thread, turn.epoch, Some(sid));
+            let held_since = self
+                .browsers
+                .iter()
+                .flat_map(|(_, browser)| browser.turns.iter())
+                .filter(|open| open.thread_id.as_deref() == Some(thread))
+                .map(|open| open.started_ms)
+                .min();
+            let withdrawn = self.withdraw_older_epoch_replies(thread, turn.epoch, Some(sid));
+            // A reply another turn was holding for its call is withdrawn there by this one: if every turn then comes
+            // to nothing, nothing plays it, so the agent is told it was not heard.
+            if held_since.is_some_and(|since| {
+                withdrawn
+                    .iter()
+                    .any(|row| self.journal.find(row).is_some_and(|row| row.time >= since))
+            }) {
+                self.unheard.reserve_empty(thread, turn.epoch);
+            }
         }
         self.retain_started(turn.clone());
         Ok(turn)
@@ -156,10 +172,13 @@ impl Inner {
     }
 }
 
-/// The longest an open turn holds a reply, by default: a reply held longer is stale even if the turn comes to nothing.
+/// The longest an open turn holds a reply published during it, by default: a reply held longer is stale even if the
+/// turn comes to nothing. A reply the turn interrupted is not subject to it.
 const HOLD_MAX_SECONDS: f64 = 30.0;
 
-/// `VOICE_HOLD_MAX_SECONDS` as the core reads it, in milliseconds: unreadable or negative is the default.
+/// `VOICE_HOLD_MAX_SECONDS` as the core reads it, in milliseconds, once per call like `VOICE_RESUME_SECONDS`:
+/// unreadable or negative is the default; 0 withdraws a reply published during a turn at the next pass and leaves the
+/// ones the turn interrupted alone.
 pub(super) fn hold_max_ms(value: Option<&str>) -> u64 {
     let seconds = value
         .and_then(|value| value.trim().parse::<f64>().ok())
@@ -179,28 +198,22 @@ impl Inner {
             .collect()
     }
 
-    /// Withdraw what an open turn has held for longer than the hold allows: interrupted before the turn, or published
-    /// during it. It no longer plays if the turn comes to nothing; the agent is told then that it was not heard (or with
-    /// the turn's words, as for any reply they withdraw).
+    /// Withdraw what an open turn has held for longer than the hold allows: replies published during that turn. A reply
+    /// the turn interrupted (published before it started) is held for as long as the turn lasts. A withdrawn reply no
+    /// longer plays if the turn comes to nothing; the agent is told then that it was not heard (or with the turn's
+    /// words, as for any reply they withdraw).
     pub(super) fn expire_holds(&mut self) {
         let now = millis();
-        let mut open: Vec<(String, VoiceTurn)> = Vec::new();
+        let mut open: Vec<(String, VoiceTurn, u64)> = Vec::new();
         for (sid, browser) in self.browsers.iter() {
             for turn in &browser.turns {
-                open.push((sid.clone(), turn.clone()));
+                open.push((sid.clone(), turn.clone(), browser.hold_max_ms));
             }
         }
-        if open.is_empty() {
-            return;
-        }
-        let max = hold_max_ms(std::env::var("VOICE_HOLD_MAX_SECONDS").ok().as_deref());
-        for (sid, turn) in open {
+        for (sid, turn, max) in open {
             let Some(thread) = turn.thread_id.as_deref() else {
                 continue;
             };
-            if now.saturating_sub(turn.started_ms) < max {
-                continue;
-            }
             let stale: std::collections::HashSet<String> = self
                 .utterances
                 .iter()
@@ -213,7 +226,8 @@ impl Inner {
                         })
                         && self.journal.find(&record.row_id).is_some_and(|row| {
                             row.thread == thread
-                                && now.saturating_sub(row.time.max(turn.started_ms)) >= max
+                                && row.time >= turn.started_ms
+                                && now.saturating_sub(row.time) >= max
                         })
                 })
                 .map(|(_, record)| record.row_id.clone())

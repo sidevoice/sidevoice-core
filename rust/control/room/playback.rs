@@ -185,7 +185,7 @@ impl Inner {
         thread: &str,
         epoch: u64,
         except: Option<&str>,
-    ) {
+    ) -> HashSet<String> {
         let rows: HashSet<String> = self
             .utterances
             .iter()
@@ -206,11 +206,25 @@ impl Inner {
             .flat_map(|(_, record)| record.clients.keys().cloned())
             .filter(|listener| except != Some(listener.as_str()))
             .collect();
+        let mut withdrawn = HashSet::new();
         for listener in sessions {
+            withdrawn.extend(
+                self.utterances
+                    .iter()
+                    .filter(|(_, record)| {
+                        rows.contains(&record.row_id)
+                            && record
+                                .clients
+                                .get(&listener)
+                                .is_some_and(|entry| entry.1 == "queued")
+                    })
+                    .map(|(_, record)| record.row_id.clone()),
+            );
             self.withdraw(&listener, "newer_turn", |record, (_, status)| {
                 status == "queued" && !record.requested && rows.contains(&record.row_id)
             });
         }
+        withdrawn
     }
 
     /// Show physical playback state in history without inferring semantic hearing from it.

@@ -56,6 +56,9 @@ pub(super) struct Browser {
     pub(super) parked: Option<Instant>,
     pub(super) speech_on: bool,
     pub(super) speech_reason: Option<String>,
+    /// The longest a turn of this call holds a reply published during it, in milliseconds: read once, when the call
+    /// joins, from `VOICE_HOLD_MAX_SECONDS`.
+    pub(super) hold_max_ms: u64,
 }
 impl Browser {
     pub(super) fn new(device: String, language: String, sender: mpsc::Sender<Value>) -> Self {
@@ -74,6 +77,9 @@ impl Browser {
             parked: None,
             speech_on: true,
             speech_reason: None,
+            hold_max_ms: super::turn_flow::hold_max_ms(
+                std::env::var("VOICE_HOLD_MAX_SECONDS").ok().as_deref(),
+            ),
         }
     }
     /// Send an event to the browser if its channel has room; false if it was dropped.
