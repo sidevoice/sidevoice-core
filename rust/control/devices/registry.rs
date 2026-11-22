@@ -12,10 +12,14 @@ use super::{digest, now, secret, NodeIdentity};
 use crate::storage::PrivateDir;
 
 const DEVICES_FILE: &str = "devices.json";
+/// How many removed devices are remembered, oldest forgotten first.
+const TOMBSTONES: usize = 64;
 
 pub struct DeviceRegistry {
     dir: PrivateDir,
     devices: Map<String, Value>,
+    /// Token hashes of removed devices, oldest first: what tells a removed device from one never paired.
+    removed: Vec<String>,
     secrets: PairingSecrets,
 }
 
@@ -27,6 +31,17 @@ impl DeviceRegistry {
             Err(error) if error.kind() == io::ErrorKind::InvalidData => None,
             read => read?,
         };
+        let removed = saved
+            .as_ref()
+            .and_then(|v| v.get("removed").and_then(Value::as_array))
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|hash| hash.len() == 64)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         let devices = saved
             .and_then(|v| v.get("devices").and_then(Value::as_object).cloned())
             .unwrap_or_default()
@@ -41,6 +56,7 @@ impl DeviceRegistry {
         Ok(Self {
             dir,
             devices,
+            removed,
             secrets: PairingSecrets::default(),
         })
     }
@@ -109,9 +125,14 @@ impl DeviceRegistry {
             next.get_mut(&id)?
                 .as_object_mut()?
                 .insert("last_seen".to_owned(), json!(at));
-            let _ = self.save(next);
+            let _ = self.save(next, self.removed.clone());
         }
         Some(id)
+    }
+
+    /// Whether `token` belonged to a device that was removed (and not merely never paired).
+    pub fn was_removed(&self, token: &str) -> bool {
+        self.removed.contains(&digest(token))
     }
 
     pub fn listing(&self, current: &str) -> Value {
@@ -151,7 +172,7 @@ impl DeviceRegistry {
         if !self.devices.contains_key(id) {
             return Ok(false);
         }
-        self.save(self.without(&[id.to_owned()]))?;
+        self.remove(&[id.to_owned()])?;
         Ok(true)
     }
 
@@ -162,14 +183,14 @@ impl DeviceRegistry {
             return Ok(false);
         };
         row.insert("name".to_owned(), json!(name));
-        self.save(next)?;
+        self.save(next, self.removed.clone())?;
         Ok(true)
     }
 
     pub fn revoke_local(&mut self) -> io::Result<Vec<String>> {
         let removed = self.local_ids();
         if !removed.is_empty() {
-            self.save(self.without(&removed))?;
+            self.remove(&removed)?;
         }
         Ok(removed)
     }
@@ -183,7 +204,7 @@ impl DeviceRegistry {
         let id = Uuid::new_v4().to_string();
         let token = SecretString::from(secret(32));
         let at = now();
-        let mut next = self.without(removed);
+        let (mut next, tombstones) = self.without(removed);
         #[allow(
             clippy::disallowed_methods,
             reason = "only the hash of the token is stored"
@@ -193,7 +214,7 @@ impl DeviceRegistry {
             json!({"token_hash": digest(token.expose_secret()), "name": clean_name(name),
             "kind": kind, "created": at, "last_seen": at}),
         );
-        self.save(next)?;
+        self.save(next, tombstones)?;
         Ok((id, token))
     }
 
@@ -205,19 +226,33 @@ impl DeviceRegistry {
             .collect()
     }
 
-    fn without(&self, ids: &[String]) -> Map<String, Value> {
-        let mut next = self.devices.clone();
-        for id in ids {
-            next.remove(id);
-        }
-        next
+    fn remove(&mut self, ids: &[String]) -> io::Result<()> {
+        let (next, tombstones) = self.without(ids);
+        self.save(next, tombstones)
     }
 
-    /// Persist `next` first; memory changes only once the file is written.
-    fn save(&mut self, next: Map<String, Value>) -> io::Result<()> {
+    /// The devices left once `ids` go, and the tombstones that then stand (bounded, oldest dropped).
+    fn without(&self, ids: &[String]) -> (Map<String, Value>, Vec<String>) {
+        let mut next = self.devices.clone();
+        let mut tombstones = self.removed.clone();
+        for id in ids {
+            if let Some(row) = next.remove(id) {
+                if let Some(hash) = row.get("token_hash").and_then(Value::as_str) {
+                    tombstones.push(hash.to_owned());
+                }
+            }
+        }
+        let extra = tombstones.len().saturating_sub(TOMBSTONES);
+        tombstones.drain(..extra);
+        (next, tombstones)
+    }
+
+    /// Persist first; memory changes only once the file is written.
+    fn save(&mut self, next: Map<String, Value>, removed: Vec<String>) -> io::Result<()> {
         self.dir
-            .write_json(DEVICES_FILE, &json!({"devices": next}))?;
+            .write_json(DEVICES_FILE, &json!({"devices": next, "removed": removed}))?;
         self.devices = next;
+        self.removed = removed;
         Ok(())
     }
 }

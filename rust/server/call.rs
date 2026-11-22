@@ -13,7 +13,7 @@ use tracing::{info_span, Instrument};
 
 use crate::messages::{render, LocalizedMessage};
 
-use super::refusal::{require_origin, Handled};
+use super::refusal::{require_origin, Handled, DEVICE_REMOVED};
 use super::request::accept_language;
 use super::AppState;
 
@@ -30,7 +30,7 @@ pub(super) use resume::{client_msg_id, ResumableCalls, SeenMessages};
 
 const SUBPROTOCOL: &str = "sidevoice";
 const TOKEN_PREFIX: &str = "sidevoice.token.";
-/// The close code a device reads as "pair again".
+/// The close code of an unpaired call. Its reason is [`DEVICE_REMOVED`] when the device was removed, prose otherwise.
 const UNPAIRED: u16 = 4401;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -50,12 +50,18 @@ async fn call_socket(
         .split(',')
         .map(str::trim)
         .collect();
-    let device = protocols
+    let token = protocols
         .iter()
-        .find_map(|value| value.strip_prefix(TOKEN_PREFIX))
-        .and_then(|token| state.authenticate_token(token));
+        .find_map(|value| value.strip_prefix(TOKEN_PREFIX));
+    let device = token.and_then(|token| state.authenticate_token(token));
     let language = accept_language(&headers).to_owned();
-    let close_reason = render(&LocalizedMessage::new("device.unpaired"), &language);
+    // A device that is paired can only be closed on because it was removed; a token that never was gets the prose.
+    let close_reason = if device.is_some() || token.is_some_and(|token| state.token_removed(token))
+    {
+        DEVICE_REMOVED.to_owned()
+    } else {
+        render(&LocalizedMessage::new("device.unpaired"), &language)
+    };
     let ws = if protocols.contains(&SUBPROTOCOL) {
         ws.protocols([SUBPROTOCOL])
     } else {
