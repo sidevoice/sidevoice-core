@@ -42,21 +42,23 @@ impl Inner {
             // The call the person speaks into holds what it has of older replies while the turn is open: they end
             // only if it brings words, and play on if it comes to nothing. Other calls on the conversation are not
             // holding them, so they are withdrawn there.
-            let held_since = self
-                .browsers
+            // Rows this call itself has queued stay held here, and play on if its turn comes to nothing.
+            let held_here: std::collections::HashSet<String> = self
+                .utterances
                 .iter()
-                .flat_map(|(_, browser)| browser.turns.iter())
-                .filter(|open| open.thread_id.as_deref() == Some(thread))
-                .map(|open| open.started_ms)
-                .min();
+                .filter(|(_, record)| {
+                    record
+                        .clients
+                        .get(sid)
+                        .is_some_and(|entry| entry.1 == "queued")
+                        && !record.withdrawn_from.contains(sid)
+                })
+                .map(|(_, record)| record.row_id.clone())
+                .collect();
             let withdrawn = self.withdraw_older_epoch_replies(thread, turn.epoch, Some(sid));
-            // A reply another turn was holding for its call is withdrawn there by this one: if every turn then comes
-            // to nothing, nothing plays it, so the agent is told it was not heard.
-            if held_since.is_some_and(|since| {
-                withdrawn
-                    .iter()
-                    .any(|row| self.journal.find(row).is_some_and(|row| row.time >= since))
-            }) {
+            // A reply withdrawn from another call, which this call is not holding, is played by no one if every turn
+            // then comes to nothing, however long ago it was published: the agent is told it was not heard.
+            if withdrawn.iter().any(|row| !held_here.contains(row)) {
                 self.unheard.reserve_empty(thread, turn.epoch);
             }
         }

@@ -355,7 +355,13 @@ impl Inner {
                 browser.offer(json!({"type":"voice-reply-withdrawn","data":{
                     "session_id":sid,"utterance_ids":sent,"reason":reason}}))
             });
-            if !told {
+            if told {
+                for uid in &sent {
+                    if let Some(record) = self.utterances.get_mut(uid) {
+                        record.withdrawn_from.insert(sid.to_owned());
+                    }
+                }
+            } else {
                 ended.extend(sent);
             }
         }

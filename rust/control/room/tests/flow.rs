@@ -804,6 +804,48 @@ fn t02l_a_held_reply_withdrawn_by_another_calls_turn_is_told_when_both_turns_com
 }
 
 #[test]
+fn t02m_a_reply_queued_in_two_calls_is_told_when_each_turn_withdraws_it_from_the_other_and_both_come_to_nothing(
+) {
+    let c = Case::new(true);
+    let (sender, _other_events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    assert_eq!(c.publish("r", 0, "Before any turn")["status"], "queued");
+    c.room.begin_at_focus(&c.sid, "first").unwrap();
+    c.room.begin_at_focus(&other, "second").unwrap();
+    c.report("r", "unplayed", Some("newer_turn"), None);
+    for (sid, turn) in [(c.sid.clone(), "first"), (other.clone(), "second")] {
+        c.room
+            .finish_turn(&sid, turn, None, &Value::Null, Continuation::Standalone)
+            .unwrap();
+    }
+    let notes = c.notes();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["notice"]["kind"], "turn_empty");
+    assert_eq!(notes[0]["unheard"]["count"], 1);
+}
+
+#[test]
+fn t02n_a_reply_published_before_any_turn_is_told_when_another_calls_turn_withdraws_it() {
+    let mut c = Case::new(true);
+    assert_eq!(c.publish("r", 0, "Before any turn")["status"], "queued");
+    // No turn was open: the first turn to start is in a call that joined after the reply, which is not holding it.
+    let (sender, _other_events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    c.room.begin_at_focus(&other, "only").unwrap();
+    assert_eq!(c.frames("voice-reply-withdrawn").len(), 1);
+    c.report("r", "unplayed", Some("newer_turn"), None);
+    c.room
+        .finish_turn(&other, "only", None, &Value::Null, Continuation::Standalone)
+        .unwrap();
+    let notes = c.notes();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["notice"]["kind"], "turn_empty");
+    assert_eq!(notes[0]["unheard"]["count"], 1);
+}
+
+#[test]
 fn t02j_hold_time_reads_its_setting() {
     use crate::control::room::turn_flow::hold_max_ms;
     assert_eq!(hold_max_ms(None), 30_000);
