@@ -72,6 +72,33 @@ impl Case {
             .unwrap();
         turn.epoch
     }
+    /// Move turn `turn_id` and replies `uids` back in time by `ms`, as if the turn had held them that long.
+    fn age_hold(&self, turn_id: &str, uids: &[&str], ms: u64) {
+        let mut inner = self.room.inner.lock().unwrap();
+        for turn in inner
+            .browsers
+            .get_mut(&self.sid)
+            .unwrap()
+            .turns
+            .iter_mut()
+            .filter(|turn| turn.turn_id == turn_id)
+        {
+            turn.started_ms -= ms;
+        }
+        for uid in uids {
+            inner
+                .journal
+                .find_mut(&format!("{}:voice:{uid}", self.sid))
+                .unwrap()
+                .time -= ms;
+        }
+    }
+    /// Publish reply `uid` while turn `turn_id` is open, and let that turn hold it past the hold time.
+    fn publish_past_hold(&self, uid: &str, turn_id: &str) {
+        assert_eq!(self.publish(uid, 0, "Attempt")["status"], "queued");
+        self.age_hold(turn_id, &[uid], 31_000);
+        self.room.inner.lock().unwrap().expire_holds();
+    }
     fn input(&self, text: &str) -> Value {
         let inner = self.room.inner.lock().unwrap();
         inner
@@ -383,7 +410,7 @@ fn f1_uncertain_publication_recovers_without_late_first_audio_and_fresh_reply_pl
 }
 
 #[test]
-fn f1_recovery_returns_original_saved_or_refused_disposition() {
+fn f1_recovery_returns_original_saved_or_held_disposition() {
     let c = Case::new(true);
     let mut saved_request = json!({"event_id":"event-saved","utterance_id":"saved",
         "binding_id":c.bid,"session_id":c.sid,"revision":c.revision(),"epoch":0,
@@ -392,16 +419,13 @@ fn f1_recovery_returns_original_saved_or_refused_disposition() {
     saved_request["recovery_binding_id"] = json!(c.bid);
     assert_eq!(c.room.recover_speech("connector", &saved_request), admitted);
     let turn = c.room.begin_at_focus(&c.sid, "open").unwrap();
-    let mut refused_request = json!({"event_id":"event-refused","utterance_id":"refused",
+    let mut held_request = json!({"event_id":"event-held","utterance_id":"held",
         "binding_id":c.bid,"session_id":c.sid,"revision":c.revision(),"epoch":turn.epoch,
         "text":"During speech","history_only":false});
-    let refused = c.room.connector_speech("connector", &refused_request);
-    assert_eq!(refused["error"], "room.user_speaking");
-    refused_request["recovery_binding_id"] = json!(c.bid);
-    assert_eq!(
-        c.room.recover_speech("connector", &refused_request),
-        refused
-    );
+    let held = c.room.connector_speech("connector", &held_request);
+    assert_eq!(held["status"], "queued");
+    held_request["recovery_binding_id"] = json!(c.bid);
+    assert_eq!(c.room.recover_speech("connector", &held_request), held);
 }
 
 #[test]
@@ -569,43 +593,166 @@ fn t02f_a_turn_that_came_to_nothing_does_not_make_a_reply_late_and_one_with_word
 }
 
 #[test]
-fn t02c_refusal_with_words_is_terminal_and_does_not_create_a_reply() {
-    let c = Case::new(false);
-    let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
-    let refused = c.publish("r", turn.epoch, "Attempt");
-    assert_eq!(refused["reason"], "user_speaking");
-    c.room
-        .finish_turn(
-            &c.sid,
-            "turn",
-            Some("Words"),
-            &Value::Null,
-            Continuation::Standalone,
-        )
-        .unwrap();
-    assert_eq!(c.publish("r", turn.epoch, "Attempt"), refused);
-    assert_eq!(c.input("Words")["text"], "Words");
-    assert!(c.room.history(Some("t"))["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|row| row["role"] != "assistant"));
+fn t02c_reply_published_during_an_open_turn_is_held_and_withdrawn_by_its_words() {
+    // The agent publishes in the epoch of the last message it got, or in the open turn's own (a typed message).
+    for agent_epoch in [0, 1] {
+        let mut c = Case::new(false);
+        let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
+        assert_eq!(turn.epoch, 1);
+        let held = c.publish("r", agent_epoch, "Attempt made");
+        assert_eq!(
+            (held["status"].as_str(), held["epoch"].as_u64()),
+            (Some("queued"), Some(1)),
+            "agent_epoch={agent_epoch}: the normal published result"
+        );
+        assert!(held.get("reason").is_none() && held.get("instruction").is_none());
+        assert_eq!(
+            c.frames("voice-reply").len(),
+            1,
+            "the app gets it to show while the turn is open"
+        );
+        c.room
+            .finish_turn(
+                &c.sid,
+                "turn",
+                Some("Words"),
+                &Value::Null,
+                Continuation::Standalone,
+            )
+            .unwrap();
+        let withdrawn = c.frames("voice-reply-withdrawn");
+        assert_eq!(withdrawn.len(), 1, "agent_epoch={agent_epoch}");
+        assert_eq!(withdrawn[0]["data"]["utterance_ids"], json!(["r"]));
+        c.report("r", "unplayed", Some("newer_turn"), None);
+        let words = c.input("Words");
+        assert_eq!(words["unheard"]["count"], 1);
+        assert_eq!(words["unheard"]["from"], opening_words("Attempt made"));
+        assert_eq!(c.publish("r", agent_epoch, "Attempt made"), held);
+        assert!(c.notes().is_empty());
+    }
 }
 
 #[test]
-fn t02d_refusal_with_no_words_queues_the_said_nothing_instruction() {
+fn t02d_reply_published_during_an_open_turn_plays_when_it_comes_to_nothing() {
+    for ending in ["no words", "cancelled"] {
+        let mut c = Case::new(true);
+        let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
+        assert_eq!(c.publish("r", 0, "Attempt")["status"], "queued");
+        assert_eq!(c.frames("voice-reply").len(), 1);
+        if ending == "cancelled" {
+            c.room
+                .cancel_turn(&c.sid, "turn", Continuation::Standalone)
+                .unwrap();
+        } else {
+            c.room
+                .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
+                .unwrap();
+        }
+        assert!(
+            c.frames("voice-reply-withdrawn").is_empty(),
+            "{ending}: it plays on"
+        );
+        assert!(c.notes().is_empty(), "{ending}: no resend instruction");
+        c.report("r", "heard", None, None);
+        // The agent's next reply, still in the epoch it knows, is current.
+        assert_eq!(c.publish("next", 0, "Next")["epoch"], turn.epoch);
+        c.report("next", "heard", None, None);
+        c.say("words", Some("Thanks"));
+        assert!(c.input("Thanks")["unheard"].is_null(), "{ending}");
+    }
+}
+
+#[test]
+fn t02g_reply_published_during_an_open_turn_goes_only_to_the_call_spoken_into() {
+    let mut c = Case::new(false);
+    let (sender, mut other_events) = mpsc::channel(64);
+    let other = c.room.join("other".into(), "en".into(), sender).unwrap();
+    c.room.select(&other, "t").unwrap();
+    while other_events.try_recv().is_ok() {}
+    c.room.begin_at_focus(&c.sid, "turn").unwrap();
+    assert_eq!(c.publish("r", 0, "Attempt")["status"], "queued");
+    assert_eq!(c.frames("voice-reply").len(), 1);
+    assert!(std::iter::from_fn(|| other_events.try_recv().ok())
+        .all(|frame| frame["type"] != "voice-reply"));
+}
+
+#[test]
+fn t02h_reply_published_while_an_older_turn_with_words_is_between_stays_late() {
     let c = Case::new(true);
-    let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
-    c.publish("r", turn.epoch, "Attempt");
-    c.room
-        .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
-        .unwrap();
-    assert_eq!(c.notes().len(), 1);
-    assert!(c.notes()[0]["notice"]["instruction"]
-        .as_str()
-        .unwrap()
-        .contains("said nothing"));
-    assert_eq!(c.pull()[0]["channel"], "note");
+    assert_eq!(c.say("words", Some("Question")), 1);
+    c.room.begin_at_focus(&c.sid, "open").unwrap();
+    assert_eq!(c.publish("old", 0, "For before")["status"], "text_only");
+    assert_eq!(
+        c.publish("current", 1, "For the question")["status"],
+        "queued"
+    );
+}
+
+#[test]
+fn t02i_an_open_turn_holds_replies_at_most_the_hold_time() {
+    for words in [false, true] {
+        let mut c = Case::new(true);
+        c.publish("before", 0, "Interrupted before the turn");
+        c.frames("voice-reply");
+        c.report("before", "playing", None, None);
+        c.room.begin_at_focus(&c.sid, "turn").unwrap();
+        c.publish("during", 0, "Published during the turn");
+        c.frames("voice-reply");
+        c.room.inner.lock().unwrap().expire_holds();
+        assert!(
+            c.frames("voice-reply-withdrawn").is_empty(),
+            "within the hold nothing is withdrawn"
+        );
+        c.age_hold("turn", &["before", "during"], 31_000);
+        c.publish("fresh", 0, "Published just now");
+        c.room.inner.lock().unwrap().expire_holds();
+        let withdrawn = c.frames("voice-reply-withdrawn");
+        assert_eq!(withdrawn.len(), 1, "words={words}");
+        let mut ids: Vec<_> = withdrawn[0]["data"]["utterance_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["before", "during"], "a fresh reply is not stale yet");
+        c.room.inner.lock().unwrap().expire_holds();
+        assert!(
+            c.frames("voice-reply-withdrawn").is_empty(),
+            "withdrawn once"
+        );
+        c.report("before", "interrupted", Some("newer_turn"), Some(3));
+        c.report("during", "unplayed", Some("newer_turn"), None);
+        c.room
+            .finish_turn(
+                &c.sid,
+                "turn",
+                words.then_some("Words"),
+                &Value::Null,
+                Continuation::Standalone,
+            )
+            .unwrap();
+        if words {
+            assert!(c.notes().is_empty());
+            assert_eq!(c.input("Words")["unheard"]["count"], 3);
+        } else {
+            let notes = c.notes();
+            assert_eq!(notes.len(), 1, "the agent learns its replies went unheard");
+            assert_eq!(notes[0]["notice"]["kind"], "turn_empty");
+            assert_eq!(notes[0]["unheard"]["count"], 3);
+            assert_eq!(notes[0]["unheard"]["heard_up_to"], "Int");
+        }
+    }
+}
+
+#[test]
+fn t02j_hold_time_reads_its_setting() {
+    use crate::control::room::turn_flow::hold_max_ms;
+    assert_eq!(hold_max_ms(None), 30_000);
+    assert_eq!(hold_max_ms(Some("2.5")), 2_500);
+    assert_eq!(hold_max_ms(Some("0")), 0);
+    assert_eq!(hold_max_ms(Some("-1")), 30_000);
+    assert_eq!(hold_max_ms(Some("soon")), 30_000);
 }
 
 #[test]
@@ -1026,8 +1173,8 @@ fn t14_global_full_hearing_wins_and_partial_extents_take_the_maximum() {
 fn t16_pull_claims_empty_notices_until_ack_and_push_uses_same_content() {
     for pull in [false, true] {
         let c = Case::new(pull);
-        let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
-        c.publish("refused", turn.epoch, "Attempt");
+        c.room.begin_at_focus(&c.sid, "turn").unwrap();
+        c.publish_past_hold("refused", "turn");
         c.room
             .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
             .unwrap();
@@ -1070,8 +1217,8 @@ fn t07_connector_held_publication_is_explicit_history_only_after_reconnect() {
 #[test]
 fn t11_merged_turn_transfers_the_empty_obligation_to_its_successor() {
     let c = Case::new(true);
-    let first = c.room.begin_at_focus(&c.sid, "first").unwrap();
-    c.publish("refused", first.epoch, "Attempt");
+    c.room.begin_at_focus(&c.sid, "first").unwrap();
+    c.publish_past_hold("refused", "first");
     let second = c.room.begin_at_focus(&c.sid, "second").unwrap();
     c.room
         .finish_turn(&c.sid, "first", None, &Value::Null, Continuation::Merged)
@@ -1128,8 +1275,8 @@ fn t15_core_exposes_working_facts_without_changing_epoch() {
 #[test]
 fn t16_unacked_note_survives_pull_binding_replacement_with_the_same_id() {
     let c = Case::new(true);
-    let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
-    c.publish("refused", turn.epoch, "Attempt");
+    c.room.begin_at_focus(&c.sid, "turn").unwrap();
+    c.publish_past_hold("refused", "turn");
     c.room
         .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
         .unwrap();
@@ -1185,9 +1332,11 @@ fn t11_one_devices_finish_does_not_close_another_devices_open_turn() {
         )
         .unwrap();
     assert_eq!(
-        c.publish("attempt", other.epoch, "Still open")["reason"],
-        "user_speaking"
+        c.publish("attempt", other.epoch, "Still open")["status"],
+        "queued",
+        "held by the turn still open on the other device"
     );
+    assert!(c.room.inner.lock().unwrap().conversations.is_open("t"));
     c.room
         .finish_turn(
             &second,
@@ -1385,13 +1534,13 @@ fn review_full_hearing_after_core_disconnect_settlement_still_counts() {
 }
 
 #[test]
-fn review_refusal_while_only_older_turn_open_keeps_empty_obligation() {
-    let c = Case::new(true);
+fn review_reply_held_while_only_older_turn_open_plays_when_it_ends_empty() {
+    let mut c = Case::new(true);
     c.room.begin_at_focus(&c.sid, "older").unwrap();
     c.say("newer", Some("Newer words"));
     assert_eq!(
-        c.publish("refused", 2, "Wait for older turn")["reason"],
-        "user_speaking"
+        c.publish("held", 2, "Wait for older turn")["status"],
+        "queued"
     );
     c.room
         .finish_turn(
@@ -1402,7 +1551,8 @@ fn review_refusal_while_only_older_turn_open_keeps_empty_obligation() {
             Continuation::Standalone,
         )
         .unwrap();
-    assert_eq!(c.notes().len(), 1);
+    assert!(c.frames("voice-reply-withdrawn").is_empty());
+    assert!(c.notes().is_empty());
 }
 
 #[test]
@@ -1572,8 +1722,8 @@ fn review_held_publication_arriving_after_reconnect_still_notifies() {
 fn review_push_retry_does_not_allow_later_notice_to_overtake() {
     let c = Case::new(false);
     for n in 0..2 {
-        let turn = c.room.begin_at_focus(&c.sid, &format!("turn-{n}")).unwrap();
-        c.publish(&format!("refused-{n}"), turn.epoch, "Attempt");
+        c.room.begin_at_focus(&c.sid, &format!("turn-{n}")).unwrap();
+        c.publish_past_hold(&format!("held-{n}"), &format!("turn-{n}"));
         c.room
             .finish_turn(
                 &c.sid,
@@ -1643,9 +1793,9 @@ fn matrix_messages(pull: bool, scenario: &str) -> Vec<Value> {
             c.say("turn", None);
             c.report("r", "unplayed", Some("newer_turn"), None);
         }
-        "refused_empty" => {
-            let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
-            c.publish("r", turn.epoch, "Attempt");
+        "expired_empty" => {
+            c.room.begin_at_focus(&c.sid, "turn").unwrap();
+            c.publish_past_hold("r", "turn");
             c.room
                 .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
                 .unwrap();
@@ -1750,7 +1900,7 @@ fn t16_push_pull_notice_parity_matrix() {
     for scenario in [
         "cut_words",
         "unplayed_words",
-        "refused_empty",
+        "expired_empty",
         "return",
         "full_evidence",
     ] {
@@ -1787,16 +1937,15 @@ fn review_bounded_epoch_contexts_and_deferred_empty_obligations() {
     c.room.select(&c.sid, "t").unwrap();
     let focus = c.room.select(&c.sid, "t").unwrap();
     let focus_id = focus["binding"]["binding_id"].as_str().unwrap().to_owned();
-    let turn = c.room.begin_at_focus(&c.sid, "held").unwrap();
+    c.room.begin_at_focus(&c.sid, "held").unwrap();
+    assert_eq!(c.publish("refused", 0, "Attempt")["status"], "queued");
     for n in 0..255 {
         c.room
             .send_text("Context", &c.sid, "t", &focus_id, &format!("full-{n}"))
             .unwrap();
     }
-    assert_eq!(
-        c.publish("refused", turn.epoch, "Attempt")["reason"],
-        "user_speaking"
-    );
+    c.age_hold("held", &["refused"], 31_000);
+    c.room.inner.lock().unwrap().expire_holds();
     c.room
         .finish_turn(&c.sid, "held", None, &Value::Null, Continuation::Standalone)
         .unwrap();
@@ -1972,8 +2121,8 @@ fn t16_shared_voice_to_core_protocol_fixtures_have_the_documented_fates() {
 #[test]
 fn t16_unacknowledged_notice_crosses_pull_push_handover_with_one_message_id() {
     let c = Case::new(true);
-    let turn = c.room.begin_at_focus(&c.sid, "turn").unwrap();
-    c.publish("refused", turn.epoch, "Attempt");
+    c.room.begin_at_focus(&c.sid, "turn").unwrap();
+    c.publish_past_hold("refused", "turn");
     c.room
         .finish_turn(&c.sid, "turn", None, &Value::Null, Continuation::Standalone)
         .unwrap();
@@ -2129,11 +2278,11 @@ fn review_duplicate_cut_receipt_has_no_second_note_in_push_or_pull() {
 }
 
 #[test]
-fn review_refusal_obligation_survives_both_turn_orders_and_devices() {
+fn review_held_reply_ends_with_the_first_words_of_any_open_turn() {
     for two_devices in [false, true] {
         for reverse in [false, true] {
             for words in [false, true] {
-                let c = Case::new(true);
+                let mut c = Case::new(true);
                 let second = if two_devices {
                     let (sender, _events) = mpsc::channel(64);
                     let sid = c.room.join("other".into(), "en".into(), sender).unwrap();
@@ -2145,9 +2294,10 @@ fn review_refusal_obligation_survives_both_turn_orders_and_devices() {
                 c.room.begin_at_focus(&c.sid, "first").unwrap();
                 let latest = c.room.begin_at_focus(&second, "second").unwrap();
                 assert_eq!(
-                    c.publish("refused", latest.epoch, "Attempt")["reason"],
-                    "user_speaking"
+                    c.publish("held", latest.epoch, "Attempt")["status"],
+                    "queued"
                 );
+                c.frames("voice-reply");
                 let turns = if reverse {
                     [(&second, "second"), (&c.sid, "first")]
                 } else {
@@ -2164,10 +2314,12 @@ fn review_refusal_obligation_survives_both_turn_orders_and_devices() {
                         )
                         .unwrap();
                 }
+                let case = format!("two_devices={two_devices} reverse={reverse} words={words}");
+                assert!(c.notes().is_empty(), "{case}");
                 assert_eq!(
-                    c.notes().len(),
-                    usize::from(!words),
-                    "two_devices={two_devices} reverse={reverse} words={words}"
+                    !c.frames("voice-reply-withdrawn").is_empty(),
+                    words,
+                    "{case}"
                 );
             }
         }

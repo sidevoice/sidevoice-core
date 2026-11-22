@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 
 use super::browsers::Browser;
 use super::error::RoomError;
+use super::turn_flow::Closed;
 use super::util::id;
 use super::Room;
 
@@ -67,7 +68,7 @@ impl Room {
             .get(sid)
             .map(|browser| browser.turns.iter().cloned().collect())
             .unwrap_or_default();
-        for turn in turns {
+        for turn in &turns {
             if let Some(thread) = turn.thread_id.as_deref() {
                 inner
                     .conversations
@@ -82,6 +83,10 @@ impl Room {
         }
         inner.utterances.forget_replays_of(sid);
         inner.latency.close(sid);
+        drop(inner);
+        for turn in &turns {
+            super::turns::log_closed(&turn.turn_id, Closed::of(turn, "call_ended"));
+        }
     }
     /// A call whose socket went keeps its seat, and nothing new is sent to it until its page is back.
     pub fn park(&self, sid: &str, parked: bool) {

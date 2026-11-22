@@ -100,25 +100,24 @@ fn current_epoch_replies_are_all_accepted_in_order() {
 }
 
 #[test]
-fn an_open_turn_refuses_immediately_and_retry_keeps_the_refusal() {
+fn an_open_turn_holds_a_reply_and_retry_keeps_its_result() {
     let mut f = Fixture::new();
     let (sid, _) = f.listener("thread-a");
     let turn = f.room.begin_at_focus(&sid, "turn").unwrap();
-    let first = f.publish("refused", &sid, "thread-a", turn.revision, turn.epoch);
-    assert_eq!(first["status"], "rejected");
-    assert_eq!(first["reason"], "user_speaking");
+    let first = f.publish("held", &sid, "thread-a", turn.revision, turn.epoch);
+    assert_eq!(first["status"], "queued");
     f.room
         .finish_turn(&sid, "turn", None, &Value::Null, Continuation::Standalone)
         .unwrap();
     assert_eq!(
-        f.publish("refused", &sid, "thread-a", turn.revision, turn.epoch),
+        f.publish("held", &sid, "thread-a", turn.revision, turn.epoch),
         first
     );
     assert!(f.room.history(Some("thread-a"))["messages"]
         .as_array()
         .unwrap()
         .iter()
-        .all(|row| row["role"] != "assistant"));
+        .any(|row| row["role"] == "assistant"));
 }
 
 #[test]
