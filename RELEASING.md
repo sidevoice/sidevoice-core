@@ -1,6 +1,6 @@
 # Releasing
 
-The release rules (nightlies during development, the release-please PR, release day, pins) are the organisation's, in the [releasing guideline](https://github.com/sidevoice/.github-private/blob/main/docs/releasing.md). This file is only this repository's own steps.
+This file is self-sufficient: it holds what anyone needs to build, release and download this repository. The maintainers also follow an internal release guideline shared by all Sidevoice repositories ([releasing guideline](https://github.com/sidevoice/.github-private/blob/main/docs/releasing.md), maintainers only; nothing here depends on it).
 
 One version for the core, tagged `vX.Y.Z`. It lives in `Cargo.toml` (and the root package entry of `Cargo.lock`);
 release-please moves it (`release-please-config.json`). Never edit it by hand. The core is distributed as GitHub
@@ -101,6 +101,28 @@ gh attestation verify sidevoice-core-0.2.0-linux-x86_64.tar.zst \
   --deny-self-hosted-runners
 ```
 
+The changelog is written from the squashed PR titles. To change it, edit `CHANGELOG.md` in the release PR right
+before merging it: any later merge into `main` regenerates the PR. After the release, fix the notes on the
+Release itself.
+
+## Which version comes next
+
+`fix:` → patch, `feat:` → minor. While the version is 0.x a breaking change (`feat!:` or a `BREAKING CHANGE:`
+footer) bumps the minor, not the major. `docs:`, `chore:`, `ci:`, `test:`, `refactor:` alone make no release.
+
+## A release candidate, or any explicit version
+
+Put the footer as the **last line of a PR's description** (the squash commit takes the description as its body):
+
+```
+Release-As: 0.3.0-rc.1
+```
+
+The release PR then proposes exactly that version. A version with a `-` suffix is published as a **pre-release and
+never as latest**. The next candidate is `Release-As: 0.3.0-rc.2`; the final one is `Release-As: 0.3.0` (say it:
+after a candidate, do not leave the next version to the computation). With nothing else to merge, a PR with one
+empty commit (`git commit --allow-empty`) carries the footer.
+
 ## Nightly
 
 Every green `release` run on `main` moves the tag `nightly` to that commit and replaces every asset of the one `nightly`
@@ -132,4 +154,10 @@ tag instead (a candidate, or `nightly`).
 
 ## What this needs from the repository settings
 
-- The settings every repository needs (squash merging, "Allow GitHub Actions to create and approve pull requests", `ci` and the PR title check as required checks in a ruleset) are in the guideline, section 7.
+Set by the maintainers in the repository; nothing for anyone else to do.
+
+- Settings → Actions → General → **Allow GitHub Actions to create and approve pull requests**: without it
+  release-please cannot open its PR.
+- Squash merging, with the PR title as the commit message.
+- `ci` and **PR title is a conventional commit** run on every PR; release-please's own PR gets both through a
+  dispatched run (its pushes start no workflow by themselves). Make both required in a ruleset to enforce them.
