@@ -130,3 +130,6 @@ one. A repository with no published release is skipped and said so in the log: t
 check waits for each one's first release. `SIDEVOICE_COMPAT_CONNECTOR_TAG` / `SIDEVOICE_COMPAT_WEB_TAG` check another
 tag instead (a candidate, or `nightly`).
 
+## What this needs from the repository settings
+
+- The settings every repository needs (squash merging, "Allow GitHub Actions to create and approve pull requests", `ci` and the PR title check as required checks in a ruleset) are in the guideline, section 7.
