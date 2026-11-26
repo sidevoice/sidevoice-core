@@ -119,6 +119,59 @@ fn stamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// What an abnormal exit is, as the next start knows it: a crash status the OS manager saw (`sidevoice_platform::exit`).
+pub struct Abnormal<'a> {
+    /// The version of the run that ended, from its marker.
+    pub version: &'a str,
+    pub os: &'a str,
+    pub os_name: &'a str,
+    pub arch: &'a str,
+    pub at: DateTime<Utc>,
+    /// One of the closed list (`sidevoice_platform::exit::is_crash_type`).
+    pub kind: &'a str,
+    /// Already rendered (`tail::render_previous`).
+    pub tail: Vec<String>,
+}
+
+/// The fixed message of a record made from an exit status.
+pub const ABNORMAL_MESSAGE: &str = "the process ended abnormally";
+
+impl CrashRecord {
+    /// A record from an exit status: no location, no frames, no images, a fixed message; only the type says what happened.
+    pub fn from_abnormal(exit: Abnormal<'_>, homes: &[String]) -> Self {
+        let at = stamp(exit.at);
+        let mut record = Self {
+            id: Uuid::new_v4().to_string(),
+            version: exit.version.to_owned(),
+            os: exit.os.to_owned(),
+            os_name: exit.os_name.to_owned(),
+            arch: exit.arch.to_owned(),
+            first_at: at.clone(),
+            last_at: at,
+            count: 1,
+            signature: String::new(),
+            exception: Exception {
+                kind: exit.kind.to_owned(),
+                message: ABNORMAL_MESSAGE.to_owned(),
+                len: None,
+            },
+            location: Location {
+                file: "unknown".to_owned(),
+                line: 0,
+            },
+            backtrace: Vec::new(),
+            images: Vec::new(),
+            log_tail: exit
+                .tail
+                .iter()
+                .map(|line| mask_homes(line, homes))
+                .collect(),
+        };
+        record.normalize();
+        record
+    }
+}
+
 impl CrashRecord {
     pub fn from_panic(panic: Panic<'_>, homes: &[String]) -> Self {
         let message = panic.literal.unwrap_or(FORMATTED_MARKER);
@@ -275,6 +328,11 @@ impl CrashRecord {
     /// Not the addresses: they change with every run.
     fn make_signature(&self) -> String {
         let mut hash = Sha256::new();
+        // A panic's signature is its place; an exit status has none, so its type tells one from another.
+        if self.exception.kind != "panic" {
+            hash.update(self.exception.kind.as_bytes());
+            hash.update([0]);
+        }
         for part in [
             &self.version,
             &self.location.file,

@@ -1,4 +1,5 @@
-//! The last warnings and errors of our own targets, kept in memory for the record of a crash.
+//! The last warnings and errors of our own targets, kept in memory for the record of a crash and mirrored to a small file
+//! so that a crash nothing could record (a signal, an out-of-memory kill) still carries them (`persist`).
 //!
 //! A layer of the process's subscriber keeps each such event as it is: its time, level and target, the spans it was in,
 //! its message and its fields, each field apart. Nothing is read back from a log file (a process that logs to stderr only has
@@ -9,11 +10,21 @@
 //! The ring is bounded (`TAIL_LINES` events, fields and texts cut), written with a lock that is only tried while the panic
 //! hook runs (a panic may come from inside a write), and read with a lock that is only ever tried. The `panic` and
 //! `crash_backtrace` targets are not in it: the record itself says what the panic was.
+//!
+//! The mirror (`persist`, `previous`): one writer thread of its own rewrites one private file of the core's own directory with
+//! the tail already prepared (ids re-keyed by the name of their field, offsets from the last event, home directory hidden) and the
+//! id of the run it belongs to; changes are coalesced (a few writes a second at most), never from inside the panic hook, and only
+//! while the switch is on (read at every write; off, the file is deleted). The next start takes the file only for the marker of
+//! that run, before this run's mirror removes it. A torn, foreign or other run's file is no tail.
 
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::sync::{Mutex, PoisonError, TryLockError};
-use std::time::SystemTime;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, OnceLock, PoisonError, TryLockError};
+use std::time::{Duration, SystemTime};
+
+use serde::{Deserialize, Serialize};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -23,13 +34,14 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 use super::{OWN_TARGETS, TAIL_LINES};
+use crate::platform::fs::{Create, Files, Fs};
 
 const MAX_FIELDS: usize = 16;
 const MAX_SPANS: usize = 8;
 const MAX_TEXT: usize = 200;
 
 /// An event of ours at `warn` or `error`, as it was logged.
-struct Entry {
+pub(super) struct Entry {
     at: SystemTime,
     level: Level,
     target: String,
@@ -38,8 +50,8 @@ struct Entry {
     fields: Vec<(String, String)>,
 }
 
-struct Span {
-    name: &'static str,
+pub(super) struct Span {
+    name: String,
     fields: Vec<(String, String)>,
 }
 
@@ -88,14 +100,17 @@ where
     Tail { in_hook }.with_filter(filter_fn(ours as fn(&Metadata<'_>) -> bool))
 }
 
-fn ours(meta: &Metadata<'_>) -> bool {
-    let target = meta.target();
+fn own_target(target: &str) -> bool {
     OWN_TARGETS.iter().any(|own| {
         target == *own
             || target
                 .strip_prefix(own)
                 .is_some_and(|rest| rest.starts_with("::"))
-    }) && (meta.is_span() || *meta.level() <= Level::WARN)
+    })
+}
+
+fn ours(meta: &Metadata<'_>) -> bool {
+    own_target(meta.target()) && (meta.is_span() || *meta.level() <= Level::WARN)
 }
 
 struct Tail {
@@ -140,7 +155,7 @@ where
                     .from_root()
                     .take(MAX_SPANS)
                     .map(|span| Span {
-                        name: span.name(),
+                        name: span.name().to_owned(),
                         fields: span
                             .extensions()
                             .get::<SpanFields>()
@@ -160,7 +175,8 @@ where
             fields: visitor.fields,
         };
         // Inside the panic hook a lock somebody holds is never waited for: this thread may be the one that panicked in it.
-        let mut ring = if (self.in_hook)() {
+        let in_hook = (self.in_hook)();
+        let mut ring = if in_hook {
             match RING.try_lock() {
                 Ok(ring) => ring,
                 Err(TryLockError::Poisoned(ring)) => ring.into_inner(),
@@ -173,9 +189,16 @@ where
             ring.pop_front();
         }
         ring.push_back(entry);
+        drop(ring);
+        // Never from inside the hook (it may be the thread that panicked in a write). The writer thread does the work: this
+        // only tells it, so a slow disk never holds up a log line.
+        if !in_hook {
+            if let Some(mirror) = MIRROR_OF.get() {
+                mirror.touch();
+            }
+        }
     }
 }
-
 /// The tail as lines for a record whose crash is at `crashed`: empty when the ring is busy (a record without a tail is still
 /// a record).
 pub(super) fn snapshot(crashed: SystemTime) -> Vec<String> {
@@ -282,7 +305,7 @@ fn render<'a>(entries: impl Iterator<Item = &'a Entry>, crashed: SystemTime) -> 
             );
             for span in &entry.spans {
                 line.push(' ');
-                line.push_str(span.name);
+                line.push_str(&span.name);
                 if !span.fields.is_empty() {
                     let fields: Vec<String> = span
                         .fields
@@ -303,9 +326,159 @@ fn render<'a>(entries: impl Iterator<Item = &'a Entry>, crashed: SystemTime) -> 
         .collect()
 }
 
+// ---- The mirror -----------------------------------------------------------------------------------------------------------
+
+/// The writer rests this long after each write: a burst of warnings is one write, a few a second at most.
+const WRITE_EVERY: Duration = Duration::from_millis(250);
+/// The file of the mirror, in the core's private directory.
+const MIRROR: &str = "crash-tail.json";
+/// The most bytes of the mirror read back: 20 lines, each cut, with room.
+const MIRROR_LIMIT: u64 = 256 * 1024;
+/// The longest line read back.
+const MAX_LINE: usize = 8 * 1024;
+
+struct Mirror {
+    data: PathBuf,
+    file: PathBuf,
+    /// The run whose tail the file holds: the next start takes it only for the marker of that run.
+    run: String,
+    /// The spellings of the home directory, hidden in the lines as they are written.
+    homes: Vec<String>,
+    /// Whether the ring changed since the writer last looked: the writer sleeps on it.
+    dirty: Mutex<bool>,
+    wake: Condvar,
+}
+
+static MIRROR_OF: OnceLock<Mirror> = OnceLock::new();
+
+/// The tail as the file holds it: already prepared, so that the next start renders nothing. Offsets are from the last event
+/// (nothing says when the run ended), ids re-keyed by the name of their field, home directory hidden.
+#[derive(Serialize, Deserialize)]
+struct File {
+    run: String,
+    lines: Vec<String>,
+}
+
+/// From now on the ring is mirrored to a file of `data`, the core's private directory, by one thread of its own, for run `run`.
+/// The previous run's file is gone from here on: read it first (`previous`).
+pub(super) fn persist(data: &Path, run: &str, homes: Vec<String>) {
+    let _ = std::fs::remove_file(data.join(MIRROR));
+    let fresh = Mirror {
+        data: data.to_path_buf(),
+        file: data.join(MIRROR),
+        run: run.to_owned(),
+        homes,
+        dirty: Mutex::new(false),
+        wake: Condvar::new(),
+    };
+    if MIRROR_OF.set(fresh).is_ok() {
+        let _ = std::thread::Builder::new()
+            .name("crash-tail".into())
+            .spawn(|| {
+                if let Some(mirror) = MIRROR_OF.get() {
+                    mirror.writer();
+                }
+            });
+    }
+}
+
+/// Deletes the mirror.
+pub(super) fn remove_mirror(data: &Path) -> io::Result<()> {
+    match std::fs::remove_file(data.join(MIRROR)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+impl Mirror {
+    /// The ring changed: the writer is told, and nothing is waited for.
+    fn touch(&self) {
+        *self.dirty.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.wake.notify_one();
+    }
+
+    /// The one writer: waits for a change, writes the whole tail, rests, and so on. Changes during the rest are one write.
+    fn writer(&self) {
+        loop {
+            {
+                let mut dirty = self.dirty.lock().unwrap_or_else(PoisonError::into_inner);
+                while !*dirty {
+                    dirty = self
+                        .wake
+                        .wait(dirty)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+                *dirty = false;
+            }
+            self.write();
+            std::thread::sleep(WRITE_EVERY);
+        }
+    }
+
+    /// Rewrites the file. Not atomic and not synced, to keep it cheap: a torn file is read as no tail.
+    fn write(&self) {
+        // The switch is read at every write (a few small reads a second at most): an `off` from another process holds at
+        // once, and the file of a run that is off is not left behind.
+        if !super::settings::enabled(&self.data) {
+            let _ = remove_mirror(&self.data);
+            return;
+        }
+        let lines = {
+            let ring = RING.lock().unwrap_or_else(PoisonError::into_inner);
+            prepared(ring.iter(), &self.homes)
+        };
+        let bytes = serde_json::to_vec(&File {
+            run: self.run.clone(),
+            lines,
+        })
+        .unwrap_or_default();
+        let _ = (|| -> io::Result<()> {
+            let mut file = Files::open_private(&self.file, Create::ReadWrite)?;
+            file.set_len(0)?;
+            file.write_all(&bytes)
+        })();
+    }
+}
+
+/// The lines a file holds: offsets from the last event, ids re-keyed, the home directory hidden.
+fn prepared<'a>(entries: impl Iterator<Item = &'a Entry>, homes: &[String]) -> Vec<String> {
+    let entries: Vec<&Entry> = entries.collect();
+    let Some(last) = entries.last().map(|entry| entry.at) else {
+        return Vec::new();
+    };
+    render(entries.into_iter(), last)
+        .into_iter()
+        .map(|line| super::record::mask_homes(&line, homes))
+        .collect()
+}
+
+/// What run `run` mirrored (its lines), read before this run writes its own: nothing when the file is not run `run`'s, torn or
+/// foreign. Read as untrusted: only lines of our grammar, bounded.
+pub(super) fn previous(data: &Path, run: &str) -> Vec<String> {
+    let Some(file) = Files::read_private(&data.join(MIRROR), MIRROR_LIMIT)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<File>(&bytes).ok())
+        .filter(|file| file.run == run)
+    else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = file
+        .lines
+        .into_iter()
+        .filter(|line| line.len() <= MAX_LINE && super::record::is_ours(line))
+        .collect();
+    let skip = lines.len().saturating_sub(TAIL_LINES);
+    lines.drain(..skip);
+    lines
+}
+
 #[cfg(test)]
 pub(super) mod testing {
     use super::*;
+
+    /// The ring is the process's: a test that reads it back holds this.
+    pub(crate) static LOCK: Mutex<()> = Mutex::new(());
 
     pub(crate) fn clear() {
         RING.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -340,7 +513,7 @@ mod tests {
                 crashed - Duration::from_millis(12_345),
                 Level::ERROR,
                 vec![Span {
-                    name: "call",
+                    name: "call".into(),
                     fields: vec![("session".into(), "\"abc\"".into())],
                 }],
                 &[
@@ -382,7 +555,7 @@ mod tests {
                 crashed,
                 Level::WARN,
                 vec![Span {
-                    name: "call",
+                    name: "call".into(),
                     fields: vec![(
                         "trace".into(),
                         "\"550e8400-e29b-41d4-a716-446655440000\"".into(),
@@ -411,6 +584,7 @@ mod tests {
     #[test]
     fn the_layer_keeps_the_last_events_of_ours_with_their_spans_and_nothing_else() {
         use tracing_subscriber::layer::SubscriberExt;
+        let _ring = testing::LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         testing::clear();
         let subscriber = tracing_subscriber::registry().with(layer(|| false));
         tracing::subscriber::with_default(subscriber, || {
@@ -451,5 +625,34 @@ mod tests {
             lines[0]
         );
         testing::clear();
+    }
+
+    #[test]
+    fn the_switch_is_read_at_every_write_and_off_deletes_the_file() {
+        let _ring = testing::LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path();
+        #[cfg(unix)]
+        std::fs::set_permissions(data, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let mirror = Mirror {
+            data: data.to_path_buf(),
+            file: data.join(MIRROR),
+            run: "r".to_owned(),
+            homes: Vec::new(),
+            dirty: Mutex::new(false),
+            wake: Condvar::new(),
+        };
+        mirror.write();
+        assert!(data.join(MIRROR).exists(), "on by default: written");
+        super::super::settings::write(data, false).unwrap();
+        mirror.write();
+        assert!(
+            !data.join(MIRROR).exists(),
+            "off at once, no 5 s cache: the file is deleted"
+        );
+        super::super::settings::write(data, true).unwrap();
+        mirror.write();
+        assert!(data.join(MIRROR).exists(), "on again at once");
     }
 }

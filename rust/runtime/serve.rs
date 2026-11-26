@@ -28,6 +28,8 @@ pub(super) async fn serve(config: &Config) -> Result<(), StartFailure> {
     let directories = Directories::lock(config)?;
     let dir = &directories.data;
     let _ = dir.remove("core-failure.json");
+    // This run holds the lock: only now are the previous run's exit read and this run's marker put.
+    crate::crash::begin_run();
     let stored = Stored::load(dir)?;
     let tcp = TcpListener::bind((config.host.as_str(), config.port))
         .await

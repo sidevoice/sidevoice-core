@@ -11,6 +11,7 @@
 #![cfg_attr(test, allow(clippy::disallowed_macros, reason = "a test's own output"))]
 
 pub mod data_dir;
+pub mod exit;
 pub mod fs;
 pub mod ipc;
 pub mod process;

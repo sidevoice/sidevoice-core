@@ -10,7 +10,12 @@ use sidevoice_core::runtime::{self, Cli, Command, Config};
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let command = cli.command;
+    let command = cli.command.clone();
+    // A hook of the service manager: no configuration, no log, and it never fails the unit.
+    if let Some(Command::RecordExit { file }) = command.clone() {
+        let _ = runtime::record_exit(file, cli.data_dir.clone());
+        return;
+    }
     let config = match Config::from_cli(cli) {
         Ok(config) => config,
         Err(error) => {
@@ -31,5 +36,8 @@ async fn main() {
     if let Err(status) = runtime::init_logging(&config) {
         std::process::exit(status);
     }
-    std::process::exit(runtime::run(config).await);
+    let status = runtime::run(config).await;
+    // `run` returned by itself: this run did not crash.
+    sidevoice_core::crash::finish();
+    std::process::exit(status);
 }

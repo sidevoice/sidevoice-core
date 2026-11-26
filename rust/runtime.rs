@@ -19,7 +19,7 @@ mod tests;
 
 pub use command::{Cli, Command, Switch};
 pub use config::Config;
-pub use crash_reports::crash_reports;
+pub use crash_reports::{crash_reports, record_exit};
 pub use language::system_language;
 
 use failure::StartFailure;
