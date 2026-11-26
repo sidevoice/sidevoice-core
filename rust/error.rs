@@ -148,7 +148,6 @@ const REFUSALS: &[(&str, &str)] = &[
     ("room.text_too_long", "core.text-too-long"),
     ("room.thread_invalid", "core.thread-invalid"),
     ("room.turns_full", "core.turns-full"),
-    ("room.user_speaking", "core.user-speaking"),
 ];
 
 /// What a refusal whose key is not in [`REFUSALS`] is called.

@@ -68,7 +68,7 @@ async fn uncertain_speech_recovery_over_rpc_saves_without_audio_and_recovers_pri
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn open_turn_refusal_keeps_rpc_identity_and_empty_notice_reaches_pull() {
+async fn open_turn_holds_a_reply_and_an_empty_turn_owes_no_notice() {
     let root = support::private_tempdir();
     let core = Launch::new(root.path().join("core")).start();
     let token = core.pair_local("Browser").await;
@@ -86,14 +86,14 @@ async fn open_turn_refusal_keeps_rpc_identity_and_empty_notice_reaches_pull() {
     core.select(&token, &session, "turn-thread").await;
     let revision = core.revision(&token, &session).await;
     browser.start_turn("confirmed-turn").await;
-    let speech = json!({"event_id":"event-refused","utterance_id":"refused",
+    let speech = json!({"event_id":"event-held","utterance_id":"held",
         "binding_id":binding,"session_id":session,"revision":revision,"epoch":1,
-        "text":"Attempted while the person speaks"});
-    let refused = peer.call("speech.publish", speech.clone()).await;
-    assert_eq!(refused["status"], "rejected", "{refused}");
-    assert_eq!(refused["reason"], "user_speaking");
-    assert_eq!(refused["event_id"], "event-refused");
-    assert_eq!(refused["utterance_id"], "refused");
+        "text":"Published while the person speaks"});
+    let held = peer.call("speech.publish", speech.clone()).await;
+    assert_eq!(held["status"], "queued", "{held}");
+    assert_eq!(held["event_id"], "event-held");
+    assert_eq!(held["utterance_id"], "held");
+    assert_eq!(browser.frame("voice-reply").await["utterance_id"], "held");
 
     browser
         .report(
@@ -102,38 +102,19 @@ async fn open_turn_refusal_keeps_rpc_identity_and_empty_notice_reaches_pull() {
         )
         .await;
     let retry = peer.call("speech.publish", speech).await;
-    assert_eq!(retry, refused);
-    let first = peer
+    assert_eq!(retry, held);
+    let pulled = peer
         .call(
             "input.pull",
             json!({"binding_id":binding,"operation":"get"}),
         )
         .await;
-    assert_eq!(first["messages"][0]["channel"], "note", "{first}");
-    assert_eq!(first["messages"][0]["text"], "");
-    assert_eq!(first["messages"][0]["notice"]["kind"], "turn_empty");
-    let message_id = first["messages"][0]["message_id"].clone();
-    let again = peer
-        .call(
-            "input.pull",
-            json!({"binding_id":binding,"operation":"get"}),
-        )
-        .await;
-    assert_eq!(again["messages"][0]["message_id"], message_id);
-    let acked = peer
-        .call(
-            "input.pull",
-            json!({"binding_id":binding,"operation":"get",
-            "ack_ids":[message_id]}),
-        )
-        .await;
-    assert_eq!(acked["acknowledged"], 1);
-    assert_eq!(acked["count"], 0);
+    assert_eq!(pulled["messages"], json!([]), "{pulled}");
     assert!(core
         .history(&token, "turn-thread")
         .await
         .iter()
-        .all(|row| row["role"] != "assistant"));
+        .any(|row| row["role"] == "assistant"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

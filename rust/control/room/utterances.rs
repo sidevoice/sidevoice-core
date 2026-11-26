@@ -29,6 +29,8 @@ pub(super) struct UtteranceRecord {
     pub(super) replay_of: Option<String>,
     /// Calls it was sent to. A call that was away when it was published never got it.
     pub(super) sent: HashSet<String>,
+    /// Calls told to stop it, whose report of how it ended may not have come yet: they no longer hold it.
+    pub(super) withdrawn_from: HashSet<String>,
     /// A repetition the person asked for from the bubble, not a catch-up.
     pub(super) requested: bool,
 }

@@ -27,19 +27,6 @@ impl PendingNotice {
 }
 
 impl Inner {
-    pub(super) fn empty_obligation(&mut self, thread: &str) {
-        let epochs: Vec<u64> = self
-            .browsers
-            .iter()
-            .flat_map(|(_, browser)| browser.turns.iter())
-            .filter(|turn| turn.thread_id.as_deref() == Some(thread))
-            .map(|turn| turn.epoch)
-            .collect();
-        for epoch in epochs {
-            self.unheard.reserve_empty(thread, epoch);
-        }
-    }
-
     /// Queue a note of `kind` for `thread`, with the not-heard block of the replies published until `until` (now when
     /// none) if there is one. A `user_returned` note with nothing missed is not sent. When the room's backlog is full,
     /// the note waits and the pump tries again.
@@ -87,6 +74,7 @@ impl Inner {
     }
 
     pub(super) fn materialize_due_notes(&mut self) {
+        self.expire_holds();
         let now = seconds();
         for (thread, until) in self.unheard.due_notes(now) {
             let Some(session) = self.browsers.listener_on(&thread) else {
@@ -245,7 +233,7 @@ macro_rules! catch_up {
 
 pub(super) fn instruction(kind: &str) -> &'static str {
     match kind {
-        "turn_empty" => "The person said nothing. Resend what you meant if it still matters.",
+        "turn_empty" => concat!("The person said nothing. ", catch_up!()),
         "user_returned" => concat!("The person is back. ", catch_up!()),
         _ => catch_up!(),
     }

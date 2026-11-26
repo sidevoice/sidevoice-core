@@ -62,7 +62,7 @@ impl Room {
             Some("rejected") => {
                 let key = disposition["error"]
                     .as_str()
-                    .unwrap_or("room.user_speaking");
+                    .unwrap_or("room.speech_invalid");
                 warn!(
                     error.type = refusal_code(key),
                     len,
@@ -148,18 +148,21 @@ impl Room {
             inner.remember_refusal(uid, fingerprint, disposition.clone());
             return disposition;
         }
-        // An open turn is a terminal refusal. Remember it through retries after that turn closes.
-        if !no_late_first_admission && inner.conversations.is_open(thread) {
-            let disposition = json!({"status":"rejected","terminal":true,"reason":"user_speaking",
-                "error":"room.user_speaking","instruction":"The person is speaking; this will not play. Wait for their message."});
-            inner.remember_refusal(uid, fingerprint, disposition.clone());
-            inner.empty_obligation(thread);
-            return disposition;
-        }
+        // A reply published while the person's turn is open is held by the calls they speak into, as one they
+        // interrupted: it plays if the turn comes to nothing, and the turn's words withdraw it.
+        let open = if no_late_first_admission {
+            Vec::new()
+        } else {
+            inner.open_turn_epochs(thread)
+        };
+        let holding = open.iter().copied().min();
         let current = inner.conversations.epoch(thread);
-        // Turns the agent never saw (no words, cancelled, or a message never sent) do not make its reply late: it
-        // plays as current.
-        let epoch = if epoch < current && inner.unseen_turns_since(thread, epoch, current) {
+        // Turns the agent never saw (no words, cancelled, a message never sent, or still open) do not make its reply
+        // late: it plays as current.
+        let epoch = if epoch < current
+            && (epoch + 1..=current).all(|turn| {
+                open.contains(&turn) || inner.unseen_turns_since(thread, turn - 1, turn)
+            }) {
             current
         } else {
             epoch
@@ -182,6 +185,19 @@ impl Room {
                 .get(listener)
                 .is_some_and(|browser| browser.parked.is_none() && browser.speech_on)
         });
+        // Only the calls the person speaks into hold a reply for their turn; the others withdrew what they had when
+        // it started, so this one is not theirs to play either.
+        let listening = !audience.is_empty();
+        if holding.is_some() {
+            audience.retain(|listener| {
+                inner.browsers.get(listener).is_some_and(|browser| {
+                    browser
+                        .turns
+                        .iter()
+                        .any(|turn| turn.thread_id.as_deref() == Some(thread))
+                })
+            });
+        }
         let capacity = inner.utterances.original_count() >= MAX_UTTERANCES;
         let history_only = p.get("history_only").and_then(Value::as_bool) == Some(true);
         let text_only = no_late_first_admission
@@ -197,6 +213,8 @@ impl Room {
             Some("connector_disconnected".to_owned())
         } else if capacity {
             Some("queue_full".to_owned())
+        } else if audience.is_empty() && listening {
+            Some("newer_turn".to_owned())
         } else if audience.is_empty() {
             let on_thread: Vec<_> = inner
                 .browsers
@@ -268,7 +286,9 @@ impl Room {
             ..Row::default()
         });
         if !text_only {
-            inner.speak(uid, row_id, &audience, thread, revision, epoch);
+            // Held for an open turn, it counts as older than that turn, so the turn's words withdraw it.
+            let held_epoch = holding.map_or(epoch, |first| epoch.min(first.saturating_sub(1)));
+            inner.speak(uid, row_id, &audience, thread, revision, held_epoch);
         } else {
             if !capacity {
                 inner.utterances.insert(

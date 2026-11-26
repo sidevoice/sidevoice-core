@@ -5,6 +5,7 @@ use tracing::info;
 
 use super::browsers::MAX_OPEN_TURNS;
 use super::error::RoomError;
+use super::turn_flow::Closed;
 use super::{Inner, Room};
 use crate::log_safe::{ClientId, IdHash};
 
@@ -25,6 +26,10 @@ pub struct VoiceTurn {
     pub(super) language: String,
     /// The person cancelled it: its words, when they come, are dropped.
     pub(super) cancelled: bool,
+    /// When the room took its start, in Unix milliseconds: how long it lasted, and how long it has held replies.
+    pub(super) started_ms: u64,
+    /// The rows of the replies it held too long and withdrew, so they are withdrawn once.
+    pub(super) expired: std::collections::HashSet<String>,
 }
 
 /// Ids and sizes only: the title and the conversation id are the person's.
@@ -96,19 +101,14 @@ impl Room {
         timings: &Value,
         continuation: Continuation,
     ) -> Result<Value, RoomError> {
-        let finished = self.inner.lock().expect("room lock").finish_spoken_turn(
+        let (finished, closed) = self.inner.lock().expect("room lock").finish_spoken_turn(
             sid,
             turn_id,
             text,
             timings,
             continuation,
         )?;
-        let result = if finished["accepted"] == Value::Bool(true) {
-            "accepted"
-        } else {
-            "nothing"
-        };
-        info!(turn = %ClientId(turn_id), result, "a spoken turn finished");
+        log_closed(turn_id, closed);
         Ok(finished)
     }
 
@@ -119,14 +119,24 @@ impl Room {
         turn_id: &str,
         continuation: Continuation,
     ) -> Result<Value, RoomError> {
-        let cancelled =
+        let (cancelled, closed) =
             self.inner
                 .lock()
                 .expect("room lock")
                 .cancel_spoken_turn(sid, turn_id, continuation)?;
-        info!(turn = %ClientId(turn_id), session = %ClientId(sid), "a spoken turn was cancelled; its words are dropped");
+        log_closed(turn_id, closed);
         Ok(cancelled)
     }
+}
+
+/// One line per closed turn: why it closed and how long it was open, never what was said.
+pub(super) fn log_closed(turn_id: &str, closed: Closed) {
+    info!(
+        turn = %ClientId(turn_id),
+        reason = closed.reason,
+        duration_ms = closed.duration_ms,
+        "a spoken turn closed"
+    );
 }
 
 impl Inner {
@@ -207,6 +217,8 @@ impl Inner {
             title: bound.as_ref().and_then(|target| target.title.clone()),
             language: browser.language.clone(),
             cancelled: false,
+            started_ms: super::util::millis(),
+            expired: std::collections::HashSet::new(),
         }))
     }
 
