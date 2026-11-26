@@ -7,7 +7,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
-use std::time::Duration;
 
 use axum::extract::ws::WebSocket;
 use secrecy::{ExposeSecret, SecretString};
@@ -15,22 +14,14 @@ use serde_json::Value;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 
-/// How long a call whose socket went stays parked for its page to come back.
-const RESUME_SECONDS: f64 = 60.0;
 /// What a call keeps of what it sent, by frames and by bytes, for a page that comes back.
 const RING_FRAMES: usize = 512;
 const RING_BYTES: usize = 16 * 1024 * 1024;
 /// How many client message ids are remembered per device.
 const SEEN_PER_DEVICE: usize = 256;
 
-/// `VOICE_RESUME_SECONDS` as the core reads it: unreadable or negative is the default.
-pub(super) fn resume_window(value: Option<&str>) -> Duration {
-    let seconds = value
-        .and_then(|value| value.trim().parse::<f64>().ok())
-        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-        .unwrap_or(RESUME_SECONDS);
-    Duration::from_secs_f64(seconds)
-}
+#[cfg(test)]
+pub(super) use crate::control::room::resume_window;
 
 pub(super) fn new_token() -> SecretString {
     use rand::RngCore;

@@ -14,6 +14,8 @@ pub(super) struct PendingNotice {
     related: Option<String>,
     /// The journal position the note's block covers up to (`user_returned`); none for now.
     until: Option<u64>,
+    /// A refused reply is owed: the note goes even with no block.
+    owed: bool,
     replacement: Option<Value>,
 }
 impl PendingNotice {
@@ -50,13 +52,14 @@ impl Inner {
         kind: &str,
         related_message_id: Option<&str>,
         until: Option<u64>,
+        owed: bool,
     ) {
         if self.room_for_bytes(BLOCK_BYTES).is_err() {
-            self.remember_pending(thread, session, kind, related_message_id, until);
+            self.remember_pending(thread, session, kind, related_message_id, until, owed);
             return;
         }
         let unheard = self.take_unheard(thread, until);
-        if unheard.is_none() && kind == "user_returned" {
+        if unheard.is_none() && kind == "user_returned" && !owed {
             return;
         }
         let message_id = format!("note:{}", id());
@@ -88,7 +91,7 @@ impl Inner {
 
     pub(super) fn materialize_due_notes(&mut self) {
         let now = seconds();
-        for (thread, until) in self.unheard.due_notes(now) {
+        for (thread, until, owed) in self.unheard.due_notes(now) {
             let Some(session) = self.browsers.listener_on(&thread) else {
                 continue;
             };
@@ -102,8 +105,9 @@ impl Inner {
                 continue;
             }
             self.unheard.drop_note(&thread);
-            self.queue_unheard_note(&thread, &session, "user_returned", None, Some(until));
+            self.queue_unheard_note(&thread, &session, "user_returned", None, Some(until), owed);
         }
+        self.materialize_ended();
         let pending = self.pending_notices.len();
         for _ in 0..pending {
             let Some(note) = self.pending_notices.pop_front() else {
@@ -125,6 +129,7 @@ impl Inner {
                     &note.kind,
                     note.related.as_deref(),
                     note.until,
+                    note.owed,
                 );
             } else {
                 self.pending_notices.push_back(note);
@@ -167,6 +172,7 @@ impl Inner {
                 kind: "salvaged".into(),
                 related: Some(related),
                 until: None,
+                owed: false,
                 replacement: Some(replacement),
             });
         }
@@ -212,6 +218,7 @@ impl Inner {
         kind: &str,
         related: Option<&str>,
         until: Option<u64>,
+        owed: bool,
     ) {
         if self.pending_notices.iter().any(|pending| {
             pending.thread == thread
@@ -227,6 +234,7 @@ impl Inner {
             kind: kind.into(),
             related: related.map(str::to_owned),
             until,
+            owed,
             replacement: None,
         });
     }
@@ -246,6 +254,11 @@ macro_rules! catch_up {
 pub(super) fn instruction(kind: &str) -> &'static str {
     match kind {
         "turn_empty" => "The person said nothing. Resend what you meant if it still matters.",
+        "call_ended" => concat!(
+            "The call ended: nobody is listening now, so do not speak. Keep in mind only what is still relevant from what ",
+            "they did not hear, and bring them up to date, briefly and in fresh words, when they are back: do not replay ",
+            "it all, and do not say it was missed."
+        ),
         "user_returned" => concat!("The person is back. ", catch_up!()),
         _ => catch_up!(),
     }
