@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.20.0](https://github.com/sidevoice/sidevoice-core/compare/v0.19.0...v0.20.0) (2026-11-26)
+
+
+### Features
+
+* **logs:** serve the connector's log to paired devices ([#260](https://github.com/sidevoice/sidevoice-core/issues/260)) ([b591fe7](https://github.com/sidevoice/sidevoice-core/commit/b591fe75155467ddf0b73cc19052c89bb8c692a0))
+* **server:** answer a distinct error when a device was removed ([#268](https://github.com/sidevoice/sidevoice-core/issues/268)) ([0fd3da2](https://github.com/sidevoice/sidevoice-core/commit/0fd3da22574709f80272e0741e0a652290e12f27))
+
+
+### Bug Fixes
+
+* **crash-reports:** send os.name with crash reports ([#258](https://github.com/sidevoice/sidevoice-core/issues/258)) ([3c70c6d](https://github.com/sidevoice/sidevoice-core/commit/3c70c6dfb588f3327c8548a3c25aed25e1bb9a15))
+
 ## [0.19.0](https://github.com/sidevoice/sidevoice-core/compare/v0.18.0...v0.19.0) (2026-11-18)
 
 
