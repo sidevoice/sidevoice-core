@@ -1,5 +1,7 @@
 # Releasing
 
+This file is self-sufficient: it holds what anyone needs to build, release and download this repository. The maintainers also follow an internal release guideline shared by all Sidevoice repositories ([releasing guideline](https://github.com/sidevoice/.github-private/blob/main/docs/releasing.md), maintainers only; nothing here depends on it).
+
 One version for the core, tagged `vX.Y.Z`. It lives in `Cargo.toml` (and the root package entry of `Cargo.lock`);
 release-please moves it (`release-please-config.json`). Never edit it by hand. The core is distributed as GitHub
 Releases of this repository.
@@ -151,6 +153,8 @@ check waits for each one's first release. `SIDEVOICE_COMPAT_CONNECTOR_TAG` / `SI
 tag instead (a candidate, or `nightly`).
 
 ## What this needs from the repository settings
+
+Set by the maintainers in the repository; nothing for anyone else to do.
 
 - Settings → Actions → General → **Allow GitHub Actions to create and approve pull requests**: without it
   release-please cannot open its PR.
