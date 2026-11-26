@@ -168,6 +168,9 @@ impl Inner {
                         "session_id":payload["session_id"], "revision":payload["revision"],
                         "epoch":payload["epoch"], "channel":payload["channel"], "text":row.text, "arrival_time":row.time,
                         "cursor":row.seq});
+                    if let Some(style) = payload.get("speaking_style") {
+                        message["speaking_style"] = style.clone();
+                    }
                     if let Some(unheard) = payload.get("unheard") {
                         message["unheard"] = unheard.clone();
                     }
