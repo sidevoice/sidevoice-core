@@ -137,6 +137,14 @@ impl AppState {
             .authenticate(token)
     }
 
+    /// Whether `token` was a device's that has since been removed.
+    pub fn token_removed(&self, token: &str) -> bool {
+        self.registry
+            .lock()
+            .expect("registry lock")
+            .was_removed(token)
+    }
+
     /// The paired devices seen in the last 30 days: the ones whose conversations stay open (an unpaired device is gone).
     pub fn recent_devices(&self) -> std::collections::HashSet<String> {
         self.registry

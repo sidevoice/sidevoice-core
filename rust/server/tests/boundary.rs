@@ -1064,6 +1064,102 @@ async fn revoking_a_device_ends_the_call_it_has_open_and_the_list_marks_the_aske
     assert_eq!(status, StatusCode::UNAUTHORIZED, "revoking is immediate");
 }
 
+async fn close_code_and_reason(socket: &mut Client) -> (u16, String) {
+    let deadline = std::time::Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout(deadline, socket.next())
+            .await
+            .expect("closed in time")
+        {
+            Some(Ok(tungstenite::Message::Close(Some(frame)))) => {
+                return (frame.code.into(), frame.reason.to_string())
+            }
+            Some(Ok(tungstenite::Message::Close(None))) | None => return (1005, String::new()),
+            Some(Ok(_)) => continue,
+            Some(Err(error)) => panic!("{error}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_removed_device_is_told_apart_from_a_token_that_was_never_paired() {
+    let node = Node::new();
+    let (phone, phone_token) = node.paired().await;
+    let (_, laptop_token) = node.paired().await;
+    let address = serve(node.tcp()).await;
+    let offered = format!("sidevoice, sidevoice.token.{phone_token}");
+    let (mut socket, _) = call(address, Some(&offered), None).await;
+    until(|| node.state.open_calls() == 1).await;
+    let (status, _, _) = send(
+        &node.tcp(),
+        "DELETE",
+        &format!("/api/device/devices/{phone}"),
+        &[("authorization", &bearer(&laptop_token))],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        close_code_and_reason(&mut socket).await,
+        (4401, "device.removed".to_owned())
+    );
+
+    let (status, headers, body) = send(
+        &node.tcp(),
+        "GET",
+        "/api/device/devices",
+        &[("authorization", &bearer(&phone_token))],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "device.removed", "{headers:?}");
+    for unknown in ["never-paired", ""] {
+        let (status, _, body) = send(
+            &node.tcp(),
+            "GET",
+            "/api/device/devices",
+            &[("authorization", &bearer(unknown))],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.get("error").is_none(), "{body}");
+    }
+    let (status, _, body) = send(&node.tcp(), "GET", "/api/device/devices", &[], None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body.get("error").is_none(), "{body}");
+
+    let (mut again, _) = call(address, Some(&offered), None).await;
+    assert_eq!(
+        close_code_and_reason(&mut again).await,
+        (4401, "device.removed".to_owned())
+    );
+    let garbled = "sidevoice, sidevoice.token.never-paired";
+    let (mut socket, _) = call(address, Some(garbled), None).await;
+    let (code, reason) = close_code_and_reason(&mut socket).await;
+    assert_eq!(code, 4401);
+    assert_ne!(reason, "device.removed");
+}
+
+#[tokio::test]
+async fn a_call_ended_by_removal_says_so_in_its_close_reason() {
+    let node = Node::new();
+    let address = serve(node.socket()).await;
+    let first = node.paired_app("first").await;
+    let offered = format!(
+        "sidevoice, sidevoice.token.{}",
+        first["token"].as_str().unwrap()
+    );
+    let (mut socket, _) = call(address, Some(&offered), None).await;
+    until(|| node.state.open_calls() == 1).await;
+    node.paired_app("second").await;
+    assert_eq!(
+        close_code_and_reason(&mut socket).await,
+        (4401, "device.removed".to_owned())
+    );
+}
+
 #[tokio::test]
 async fn a_paired_device_renames_any_device_and_the_list_keeps_the_name() {
     let node = Node::new();

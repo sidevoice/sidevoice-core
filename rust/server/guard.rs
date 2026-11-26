@@ -9,7 +9,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use super::refusal::failure;
+use super::refusal::{device_removed, failure};
 use super::trust::{host_allowed, local_only, origin_allowed};
 use super::{AppState, AuthenticatedDevice};
 
@@ -33,7 +33,12 @@ pub(super) async fn guard(
     } else {
         None
     };
+    // A removed device's token proves nothing to guess, so it spends no attempts: its refusal must stay readable.
+    let removed = protected
+        && device.is_none()
+        && bearer_token(&headers).is_some_and(|token| state.token_removed(token));
     let auth_failed = !local
+        && !removed
         && (!host_allowed(&headers)
             || !origin_allowed(&headers)
             || (protected && device.is_none())
@@ -71,7 +76,11 @@ pub(super) async fn guard(
     }
     if protected {
         let Some(device) = device else {
-            let mut response = failure("device.unpaired", StatusCode::UNAUTHORIZED, &headers);
+            let mut response = if removed {
+                device_removed(&headers)
+            } else {
+                failure("device.unpaired", StatusCode::UNAUTHORIZED, &headers)
+            };
             cors(&mut response, &headers);
             return response;
         };

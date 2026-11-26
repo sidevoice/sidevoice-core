@@ -46,6 +46,26 @@ pub(super) fn failure(key: &str, status: StatusCode, headers: &HeaderMap) -> Res
     response
 }
 
+/// The machine-readable key a client tells "this device was removed" by, in a refusal body and as a close reason.
+pub(super) const DEVICE_REMOVED: &str = "device.removed";
+
+/// The 401 for the token of a device that was removed: the usual refusal plus the stable `error` key.
+pub(super) fn device_removed(headers: &HeaderMap) -> Response {
+    let detail = render(
+        &LocalizedMessage::new("device.unpaired"),
+        accept_language(headers),
+    );
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"detail": detail, "error": DEVICE_REMOVED})),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    response
+}
+
 pub(super) fn refuse(key: &str, status: StatusCode, headers: &HeaderMap) -> Refusal {
     failure(key, status, headers).into()
 }

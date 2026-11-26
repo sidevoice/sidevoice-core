@@ -77,3 +77,34 @@ fn a_rename_persists_and_an_unknown_device_is_not_renamed() {
 }
 
 mod parity;
+
+#[test]
+fn a_removed_device_is_remembered_across_a_restart_but_only_so_many() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = PrivateDir::open(root.path().join("core")).unwrap();
+    let mut registry = DeviceRegistry::load(dir.clone()).unwrap();
+    let mut tokens = Vec::new();
+    for _ in 0..70 {
+        let (id, token, _) = registry.pair_local(None).unwrap();
+        tokens.push(token.expose_secret().to_owned());
+        assert!(registry.authenticate(&tokens[tokens.len() - 1]).is_some());
+        assert!(registry.revoke(&id).unwrap());
+    }
+    assert!(!registry.was_removed("never-paired"));
+    assert!(registry.was_removed(&tokens[69]));
+    assert!(registry.was_removed(&tokens[6]));
+    assert!(
+        !registry.was_removed(&tokens[5]),
+        "the oldest are forgotten"
+    );
+    let reloaded = DeviceRegistry::load(dir).unwrap();
+    assert!(reloaded.was_removed(&tokens[69]));
+    assert!(!reloaded.was_removed(&tokens[5]));
+}
+
+#[test]
+fn a_device_still_paired_is_not_a_removed_one() {
+    let (_root, mut registry) = registry();
+    let (_, token, _) = registry.pair_local(None).unwrap();
+    assert!(!registry.was_removed(token.expose_secret()));
+}
