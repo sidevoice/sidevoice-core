@@ -1,5 +1,5 @@
 //! `GET /api/logs` on the real binary: who may read the core's own log, that reading it writes nothing, that it goes on
-//! across the rotation the real writer performs, and that the connector link has no such method.
+//! across the rotation the real writer performs, and that the connector link has no such method (the core asks the connector for its log; the connector cannot ask the core for the core's).
 
 mod support;
 
